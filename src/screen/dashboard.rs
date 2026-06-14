@@ -1293,6 +1293,24 @@ impl Dashboard {
         Subscription::batch(unique_streams)
     }
 
+    /// WealthSpring 回测行情入图（docs/08 F1.2b）：对每个活动 trade ticker 建一条回测 replay 订阅。
+    /// 各订阅内部仅在回测态（ws:active_run mode=backtest）产数据，复用现有 ingest_trades 喂图。
+    pub fn ws_replay_subscriptions(&self, redis_url: String) -> Subscription<exchange::Event> {
+        let subs = self
+            .streams
+            .combined_used()
+            .flat_map(|(_exchange, specs)| {
+                specs
+                    .trade
+                    .iter()
+                    .map(|ticker| crate::ws::replay::subscription(redis_url.clone(), *ticker))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<Subscription<exchange::Event>>>();
+
+        Subscription::batch(subs)
+    }
+
     pub fn theme_updated(&mut self, main_window: window::Id, theme: &iced_core::Theme) {
         self.iter_all_panes_mut(main_window)
             .for_each(|(_, _, state)| {

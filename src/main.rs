@@ -766,6 +766,14 @@ impl Flowsurface {
             .market_subscriptions(&self.handles)
             .map(Message::MarketWsEvent);
 
+        // WealthSpring 回测行情入图（docs/08 F1.2b）：回测态把 ws:bt:{run}:trades 喂进 FS 图。
+        let ws_redis_url = std::env::var("WS_REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let ws_replay_streams = self
+            .active_dashboard()
+            .ws_replay_subscriptions(ws_redis_url)
+            .map(Message::MarketWsEvent);
+
         let tick = iced::window::frames().map(Message::Tick);
 
         let hotkeys = keyboard::listen().filter_map(|event| {
@@ -780,6 +788,7 @@ impl Flowsurface {
 
         Subscription::batch(vec![
             exchange_streams,
+            ws_replay_streams,
             sidebar,
             window_events,
             tick,
