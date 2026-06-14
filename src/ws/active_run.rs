@@ -30,3 +30,36 @@ impl ActiveRunWatcher {
         Ok(v.and_then(|s| serde_json::from_str(&s).ok()))
     }
 }
+
+/// 轮询 `ws:active_run`（500ms）→ 变化时发出当前活动 run（驱动 P2 三态切换）。
+pub fn subscription(redis_url: String) -> iced::Subscription<Option<ActiveRun>> {
+    use iced::futures::SinkExt;
+    iced::Subscription::run_with(("ws-active-run", redis_url), |(_, redis_url): &(&str, String)| {
+        let redis_url = redis_url.clone();
+        iced::stream::channel(
+            8,
+            move |mut output: iced::futures::channel::mpsc::Sender<Option<ActiveRun>>| async move {
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<ActiveRun>>(8);
+                std::thread::spawn(move || {
+                    let mut watcher = ActiveRunWatcher::connect(&redis_url).ok();
+                    let mut last: Option<ActiveRun> = None;
+                    loop {
+                        let cur = watcher.as_mut().and_then(|w| w.poll().ok().flatten());
+                        if cur != last {
+                            last = cur.clone();
+                            if tx.blocking_send(cur).is_err() {
+                                break;
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                });
+                while let Some(ar) = rx.recv().await {
+                    if output.send(ar).await.is_err() {
+                        break;
+                    }
+                }
+            },
+        )
+    })
+}

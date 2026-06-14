@@ -85,12 +85,14 @@ struct Flowsurface {
     timezone: data::UserTimezone,
     theme: data::Theme,
     notifications: Notifications,
+    ws_active: Option<ws::active_run::ActiveRun>, // WealthSpring 三态：当前活动 run（None=实时看盘）
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     Sidebar(dashboard::sidebar::Message),
     MarketWsEvent(exchange::Event),
+    WsActiveRun(Option<ws::active_run::ActiveRun>), // WealthSpring 三态切换
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -155,6 +157,7 @@ impl Flowsurface {
             theme: saved_state.theme,
             notifications: Notifications::new(),
             network: NetworkManager::new(saved_state.proxy_cfg),
+            ws_active: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -198,6 +201,11 @@ impl Flowsurface {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::WsActiveRun(ar) => {
+                // WealthSpring 三态：记录活动 run（subscription() 据此切 live/回测 流）。
+                self.ws_active = ar;
+                return Task::none();
+            }
             Message::MarketWsEvent(event) => {
                 let main_window_id = self.main_window.id;
                 let dashboard = self.active_dashboard_mut();
@@ -761,18 +769,26 @@ impl Flowsurface {
         let window_events = window::events().map(Message::WindowEvent);
         let sidebar = self.sidebar.subscription().map(Message::Sidebar);
 
-        let exchange_streams = self
-            .active_dashboard()
-            .market_subscriptions(&self.handles)
-            .map(Message::MarketWsEvent);
-
-        // WealthSpring 回测行情入图（docs/08 F1.2b）：回测态把 ws:bt:{run}:trades 喂进 FS 图。
+        // WealthSpring 三态（docs/08 F2）：回测态只走回测 replay（抑制 live，不混流）；
+        // 其余态（实时看盘/实盘）走 FS 原生实时，replay 关闭。
+        let backtest = self.ws_active.as_ref().map(|a| a.mode == "backtest").unwrap_or(false);
         let ws_redis_url = std::env::var("WS_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-        let ws_replay_streams = self
-            .active_dashboard()
-            .ws_replay_subscriptions(ws_redis_url)
-            .map(Message::MarketWsEvent);
+
+        let exchange_streams = if backtest {
+            Subscription::none()
+        } else {
+            self.active_dashboard().market_subscriptions(&self.handles).map(Message::MarketWsEvent)
+        };
+        let ws_replay_streams = if backtest {
+            self.active_dashboard()
+                .ws_replay_subscriptions(ws_redis_url.clone())
+                .map(Message::MarketWsEvent)
+        } else {
+            Subscription::none()
+        };
+        // 始终轮询活动 run → 驱动三态切换（接 P3 跑回测/实盘）。
+        let ws_active_run = ws::active_run::subscription(ws_redis_url).map(Message::WsActiveRun);
 
         let tick = iced::window::frames().map(Message::Tick);
 
@@ -789,6 +805,7 @@ impl Flowsurface {
         Subscription::batch(vec![
             exchange_streams,
             ws_replay_streams,
+            ws_active_run,
             sidebar,
             window_events,
             tick,
