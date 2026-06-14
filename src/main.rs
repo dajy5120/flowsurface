@@ -87,6 +87,7 @@ struct Flowsurface {
     notifications: Notifications,
     ws_active: Option<ws::active_run::ActiveRun>, // WealthSpring 三态：当前活动 run（None=实时看盘）
     ws_orders: ws::orders::OrderState,            // WealthSpring 订单/PnL（events.* 聚合，F3）
+    ws_flow: ws::flow::FlowState,                 // WealthSpring 订单流：CVD/不平衡/背离（F4a）
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +162,7 @@ impl Flowsurface {
             network: NetworkManager::new(saved_state.proxy_cfg),
             ws_active: None,
             ws_orders: ws::orders::OrderState::default(),
+            ws_flow: ws::flow::FlowState::default(),
         };
 
         if let Some(err) = audio_init_err {
@@ -206,6 +208,10 @@ impl Flowsurface {
         match message {
             Message::WsActiveRun(ar) => {
                 // WealthSpring 三态：记录活动 run（subscription() 据此切 live/回测 流）。
+                // run 变更则重置订单流累计（CVD 等按 run/会话重新计）。
+                if self.ws_active.as_ref().map(|a| &a.run_id) != ar.as_ref().map(|a| &a.run_id) {
+                    self.ws_flow = ws::flow::FlowState::default();
+                }
                 self.ws_active = ar;
                 return Task::none();
             }
@@ -214,6 +220,12 @@ impl Flowsurface {
                 return Task::none();
             }
             Message::MarketWsEvent(event) => {
+                // F4a：从逐笔成交累计 CVD/不平衡/背离（喂图前先 tap，避免与 dashboard 借用冲突）。
+                if let exchange::Event::TradesReceived(_, _, buffer) = &event {
+                    for t in buffer.iter() {
+                        self.ws_flow.apply(t.price.to_f32() as f64, f32::from(t.qty) as f64, t.is_sell);
+                    }
+                }
                 let main_window_id = self.main_window.id;
                 let dashboard = self.active_dashboard_mut();
 
@@ -744,15 +756,22 @@ impl Flowsurface {
             .into()
         };
 
-        // WealthSpring 订单/PnL 悬浮读数（F3a）：回测/实盘态有数据时，右上角叠一小框。
-        let content = if id == self.main_window.id
-            && (self.ws_orders.has_summary || !self.ws_orders.fills.is_empty())
-        {
+        // WealthSpring 悬浮读数（F3a 订单/PnL + F4a 订单流）：有数据时右上角叠一小框。
+        let has_data = self.ws_orders.has_summary
+            || !self.ws_orders.fills.is_empty()
+            || self.ws_flow.last_price > 0.0;
+        let content = if id == self.main_window.id && has_data {
             let o = &self.ws_orders;
+            let f = &self.ws_flow;
             let mode = self.ws_active.as_ref().map(|a| a.mode.as_str()).unwrap_or("watch");
             let pnl = match o.unrealized {
                 Some(u) => format!("已实现 {:+.2}  浮动 {:+.2}", o.realized, u),
                 None => format!("已实现 {:+.2}", o.realized),
+            };
+            let div = match f.divergence {
+                1 => "↑看涨",
+                -1 => "↓看跌",
+                _ => "-",
             };
             let panel = container(
                 column![
@@ -760,6 +779,8 @@ impl Flowsurface {
                     text(format!("持仓 {} {:.3} @ {:.2}", o.pos_side, o.net_qty, o.avg_px)).size(12),
                     text(pnl).size(12),
                     text(format!("成交 {} 买{}/卖{}", o.fills.len(), o.n_buy, o.n_sell)).size(12),
+                    text(format!("流 CVD {:+.3}  imb {:+.2}  背离 {}", f.cvd, f.imbalance, div))
+                        .size(12),
                 ]
                 .spacing(2),
             )
