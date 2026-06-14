@@ -88,6 +88,7 @@ struct Flowsurface {
     ws_active: Option<ws::active_run::ActiveRun>, // WealthSpring 三态：当前活动 run（None=实时看盘）
     ws_orders: ws::orders::OrderState,            // WealthSpring 订单/PnL（events.* 聚合，F3）
     ws_flow: ws::flow::FlowState,                 // WealthSpring 订单流：CVD/不平衡/背离（F4a）
+    ws_factory: ws::factory::FactoryPool,         // WealthSpring Factory 现役池（F4c）
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +97,7 @@ enum Message {
     MarketWsEvent(exchange::Event),
     WsActiveRun(Option<ws::active_run::ActiveRun>), // WealthSpring 三态切换
     WsOrders(ws::orders::OrderState),               // WealthSpring 订单/PnL 更新（F3）
+    WsFactory(ws::factory::FactoryPool),            // WealthSpring Factory 现役池更新（F4c）
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -163,6 +165,7 @@ impl Flowsurface {
             ws_active: None,
             ws_orders: ws::orders::OrderState::default(),
             ws_flow: ws::flow::FlowState::default(),
+            ws_factory: ws::factory::FactoryPool::default(),
         };
 
         if let Some(err) = audio_init_err {
@@ -217,6 +220,10 @@ impl Flowsurface {
             }
             Message::WsOrders(st) => {
                 self.ws_orders = st; // 订单/PnL 聚合（view() 叠加显示）
+                return Task::none();
+            }
+            Message::WsFactory(p) => {
+                self.ws_factory = p; // Factory 现役池（view() 叠加显示）
                 return Task::none();
             }
             Message::MarketWsEvent(event) => {
@@ -763,10 +770,17 @@ impl Flowsurface {
         // WealthSpring 悬浮读数（F3a 订单/PnL + F4a 订单流）：有数据时右上角叠一小框。
         let has_data = self.ws_orders.has_summary
             || !self.ws_orders.fills.is_empty()
-            || self.ws_flow.last_price > 0.0;
+            || self.ws_flow.last_price > 0.0
+            || !self.ws_factory.pool.is_empty();
         let content = if id == self.main_window.id && has_data {
             let o = &self.ws_orders;
             let f = &self.ws_flow;
+            let fac = &self.ws_factory;
+            let fac_top = fac
+                .pool
+                .first()
+                .map(|m| format!("顶 w{:+.3} ic{:.1}", m.weight, m.ic_t))
+                .unwrap_or_default();
             let mode = self.ws_active.as_ref().map(|a| a.mode.as_str()).unwrap_or("watch");
             let pnl = match o.unrealized {
                 Some(u) => format!("已实现 {:+.2}  浮动 {:+.2}", o.realized, u),
@@ -791,6 +805,7 @@ impl Flowsurface {
                         f.absorbed_bid, f.absorbed_ask, f.pulled_bid, f.pulled_ask
                     ))
                     .size(12),
+                    text(format!("工厂 池{}/{}  {}", fac.n_pool, fac.alphas, fac_top)).size(12),
                 ]
                 .spacing(2),
             )
@@ -861,7 +876,9 @@ impl Flowsurface {
         let ws_active_run =
             ws::active_run::subscription(ws_redis_url.clone()).map(Message::WsActiveRun);
         // 始终读 events.* → 订单/PnL（回测/实盘态有 run 才有数据）。
-        let ws_orders = ws::orders::subscription(ws_redis_url).map(Message::WsOrders);
+        let ws_orders = ws::orders::subscription(ws_redis_url.clone()).map(Message::WsOrders);
+        // 始终读 ws:factory:pool → Factory 现役池（factory_pool_bridge.py 发布）。
+        let ws_factory = ws::factory::subscription(ws_redis_url).map(Message::WsFactory);
 
         let tick = iced::window::frames().map(Message::Tick);
 
@@ -880,6 +897,7 @@ impl Flowsurface {
             ws_replay_streams,
             ws_active_run,
             ws_orders,
+            ws_factory,
             sidebar,
             window_events,
             tick,
