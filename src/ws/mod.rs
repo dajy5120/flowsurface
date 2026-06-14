@@ -12,3 +12,4 @@ pub mod factory;
 pub mod flow;
 pub mod orders;
 pub mod replay;
+pub mod signals;

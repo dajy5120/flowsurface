@@ -89,6 +89,7 @@ struct Flowsurface {
     ws_orders: ws::orders::OrderState,            // WealthSpring 订单/PnL（events.* 聚合，F3）
     ws_flow: ws::flow::FlowState,                 // WealthSpring 订单流：CVD/不平衡/背离（F4a）
     ws_factory: ws::factory::FactoryPool,         // WealthSpring Factory 现役池（F4c）
+    ws_signals: Option<ws::signals::Signals>,     // WealthSpring 引擎信号：吸收/撤补/冰山（F4b–d 精确版）
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +99,7 @@ enum Message {
     WsActiveRun(Option<ws::active_run::ActiveRun>), // WealthSpring 三态切换
     WsOrders(ws::orders::OrderState),               // WealthSpring 订单/PnL 更新（F3）
     WsFactory(ws::factory::FactoryPool),            // WealthSpring Factory 现役池更新（F4c）
+    WsSignals(ws::signals::Signals),                // WealthSpring 引擎信号更新（F4b–d 精确版）
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -166,6 +168,7 @@ impl Flowsurface {
             ws_orders: ws::orders::OrderState::default(),
             ws_flow: ws::flow::FlowState::default(),
             ws_factory: ws::factory::FactoryPool::default(),
+            ws_signals: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -225,6 +228,10 @@ impl Flowsurface {
             }
             Message::WsFactory(p) => {
                 self.ws_factory = p; // Factory 现役池（view() 叠加显示）
+                return Task::none();
+            }
+            Message::WsSignals(s) => {
+                self.ws_signals = Some(s); // 引擎信号：吸收/撤补/冰山（view() 叠加显示）
                 return Task::none();
             }
             Message::MarketWsEvent(event) => {
@@ -772,7 +779,8 @@ impl Flowsurface {
         let has_data = self.ws_orders.has_summary
             || !self.ws_orders.fills.is_empty()
             || self.ws_flow.last_price > 0.0
-            || !self.ws_factory.pool.is_empty();
+            || !self.ws_factory.pool.is_empty()
+            || self.ws_signals.is_some();
         let content = if id == self.main_window.id && has_data {
             let o = &self.ws_orders;
             let f = &self.ws_flow;
@@ -792,26 +800,38 @@ impl Flowsurface {
                 -1 => "↓看跌",
                 _ => "-",
             };
-            let panel = container(
-                column![
-                    text(format!("WS {mode} [{}]", o.run_id)).size(12),
-                    text(format!("持仓 {} {:.3} @ {:.2}", o.pos_side, o.net_qty, o.avg_px)).size(12),
-                    text(pnl).size(12),
-                    text(format!("成交 {} 买{}/卖{}", o.fills.len(), o.n_buy, o.n_sell)).size(12),
-                    text(format!("流 CVD {:+.3}  imb {:+.2}  背离 {}", f.cvd, f.imbalance, div))
-                        .size(12),
-                    text(format!("盘口 {:+.2}  spr {:.1}", f.book_imb, f.spread)).size(12),
+            let mut col = column![
+                text(format!("WS {mode} [{}]", o.run_id)).size(12),
+                text(format!("持仓 {} {:.3} @ {:.2}", o.pos_side, o.net_qty, o.avg_px)).size(12),
+                text(pnl).size(12),
+                text(format!("成交 {} 买{}/卖{}", o.fills.len(), o.n_buy, o.n_sell)).size(12),
+                text(format!("流 CVD {:+.3}  imb {:+.2}  背离 {}", f.cvd, f.imbalance, div))
+                    .size(12),
+                text(format!("盘口 {:+.2}  spr {:.1}", f.book_imb, f.spread)).size(12),
+                text(format!(
+                    "吸收 b{:.2}/a{:.2}  撤 b{:.2}/a{:.2}",
+                    f.absorbed_bid, f.absorbed_ask, f.pulled_bid, f.pulled_ask
+                ))
+                .size(12),
+                text(format!("工厂 池{}/{}  {}", fac.n_pool, fac.alphas, fac_top)).size(12),
+            ]
+            .spacing(2);
+            // F4b–d 精确版：引擎信号（全档 L2 重建 + 成交归因）—— 吸收/撤补/冰山本场累计。
+            if let Some(s) = &self.ws_signals {
+                col = col.push(
                     text(format!(
-                        "吸收 b{:.2}/a{:.2}  撤 b{:.2}/a{:.2}",
-                        f.absorbed_bid, f.absorbed_ask, f.pulled_bid, f.pulled_ask
+                        "引擎 吸收 b{:.2}/a{:.2}  撤补 b{:.2}/a{:.2}  冰山 b{:.2}/a{:.2}",
+                        s.sess_traded_bid,
+                        s.sess_traded_ask,
+                        s.sess_pulled_bid,
+                        s.sess_pulled_ask,
+                        s.iceberg_bid,
+                        s.iceberg_ask
                     ))
                     .size(12),
-                    text(format!("工厂 池{}/{}  {}", fac.n_pool, fac.alphas, fac_top)).size(12),
-                ]
-                .spacing(2),
-            )
-            .padding(8)
-            .style(style::modal_container);
+                );
+            }
+            let panel = container(col).padding(8).style(style::modal_container);
             let floating = container(panel)
                 .width(iced::Length::Fill)
                 .height(iced::Length::Fill)
@@ -879,7 +899,10 @@ impl Flowsurface {
         // 始终读 events.* → 订单/PnL（回测/实盘态有 run 才有数据）。
         let ws_orders = ws::orders::subscription(ws_redis_url.clone()).map(Message::WsOrders);
         // 始终读 ws:factory:pool → Factory 现役池（factory_pool_bridge.py 发布）。
-        let ws_factory = ws::factory::subscription(ws_redis_url).map(Message::WsFactory);
+        let ws_factory = ws::factory::subscription(ws_redis_url.clone()).map(Message::WsFactory);
+        // 始终读 ws:signals:{symbol} → 引擎吸收/撤补/冰山（ws_signals 发布器，F4b–d 精确版）。
+        let ws_signals =
+            ws::signals::subscription(ws_redis_url, "BTCUSDT".to_string()).map(Message::WsSignals);
 
         let tick = iced::window::frames().map(Message::Tick);
 
@@ -899,6 +922,7 @@ impl Flowsurface {
             ws_active_run,
             ws_orders,
             ws_factory,
+            ws_signals,
             sidebar,
             window_events,
             tick,
