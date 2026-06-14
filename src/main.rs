@@ -12,6 +12,7 @@ mod style;
 mod version;
 mod widget;
 mod window;
+mod ws; // WealthSpring 集成（docs/08）：Redis 控制面 + 回测行情流
 
 use data::config::theme::default_theme;
 use data::{layout::WindowSpec, sidebar};

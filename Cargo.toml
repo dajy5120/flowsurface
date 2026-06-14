@@ -68,5 +68,9 @@ iced_wgpu = "0.14.0"
 exchange.workspace = true
 data.workspace = true
 
+# WealthSpring 集成（docs/08）：自包含读 Redis（活动 run + 回测成交流），见 src/ws/。
+# 不走 git 依赖主仓（私有 + 含本 fork 子模块 → 循环）；wire 契约简单稳定，内联读取（docs/03/07/08）。
+redis = { version = "1", features = ["streams"] }
+
 [features]
 debug = ["iced/hot"]
