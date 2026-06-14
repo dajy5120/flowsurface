@@ -786,6 +786,11 @@ impl Flowsurface {
                     text(format!("流 CVD {:+.3}  imb {:+.2}  背离 {}", f.cvd, f.imbalance, div))
                         .size(12),
                     text(format!("盘口 {:+.2}  spr {:.1}", f.book_imb, f.spread)).size(12),
+                    text(format!(
+                        "吸收 b{:.2}/a{:.2}  撤 b{:.2}/a{:.2}",
+                        f.absorbed_bid, f.absorbed_ask, f.pulled_bid, f.pulled_ask
+                    ))
+                    .size(12),
                 ]
                 .spacing(2),
             )
