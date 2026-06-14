@@ -5,6 +5,7 @@
 //! 跟随 `ws:active_run` 的 run（回测/实盘态有 run_id），run 变更则重置。
 
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use redis::streams::{StreamReadOptions, StreamReadReply};
@@ -37,6 +38,28 @@ pub struct OrderState {
 }
 
 const FILL_CAP: usize = 500;
+
+/// 进程级图上成交标记缓存（docs/08 F3b）：main.rs 的 `WsOrders` 处理写入，
+/// kline.rs 的 canvas draw 读取，在蜡烛图上画 ▲（买）/▼（卖）。
+/// GPUI/iced 不共享进程，这里只在 cockpit 进程内做 App↔图表的轻量旁路（不改 FS 的 71 处 ContentKind）。
+static CHART_FILLS: OnceLock<Mutex<Vec<Fill>>> = OnceLock::new();
+
+/// 覆盖图上成交标记（run 切换时 `fills` 会被上游重置 → 这里整体替换即可）。
+pub fn publish_chart_fills(fills: &[Fill]) {
+    let lock = CHART_FILLS.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(mut g) = lock.lock() {
+        g.clear();
+        g.extend_from_slice(fills);
+    }
+}
+
+/// 读当前图上成交标记快照（每帧调用，≤500 条，clone 成本可忽略）。
+pub fn chart_fills_snapshot() -> Vec<Fill> {
+    CHART_FILLS
+        .get()
+        .and_then(|m| m.lock().ok().map(|g| g.clone()))
+        .unwrap_or_default()
+}
 
 // ── rmpv 取字段助手 ──
 fn map_get<'a>(m: &'a [(rmpv::Value, rmpv::Value)], key: &str) -> Option<&'a rmpv::Value> {

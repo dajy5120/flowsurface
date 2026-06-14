@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use exchange::adapter::{Event, StreamKind};
 use exchange::unit::{Price, Qty, UnixMs};
-use exchange::{TickerInfo, Trade};
+use exchange::{Kline, TickerInfo, Timeframe, Trade, Volume};
 use iced::Subscription;
 use iced::futures::SinkExt;
 
@@ -18,6 +18,35 @@ use super::bt_trades::BtTradeConsumer;
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// M1 桶大小（毫秒）——回测逐笔聚合成「时间轴蜡烛图」用（docs/08 F3b）。
+const TF_MS: u64 = 60_000;
+
+/// 跨批次维护的 M1 K 线聚合：回测只发逐笔（无 K 线源），时间基蜡烛/足迹无法建桶。
+/// 这里把逐笔聚合成 M1 K 线并发 `KlineReceived`，使回测数据进入标准蜡烛图，
+/// 同时让时间基的图上成交标记 ▲▼（F3b）能正确对齐 x 轴。
+struct KlineAgg {
+    bucket: u64,
+    open: f32,
+    high: f32,
+    low: f32,
+    close: f32,
+    buy: f32,
+    sell: f32,
+}
+
+impl KlineAgg {
+    fn to_kline(&self) -> Kline {
+        Kline {
+            time: UnixMs(self.bucket),
+            open: Price::from_f32(self.open),
+            high: Price::from_f32(self.high),
+            low: Price::from_f32(self.low),
+            close: Price::from_f32(self.close),
+            volume: Volume::BuySell(Qty::from_f32(self.buy), Qty::from_f32(self.sell)),
+        }
+    }
 }
 
 /// 订阅身份 + 参数载体（`run_with` 的 builder 必须是非捕获 fn，故所有状态经此传入）。
@@ -91,7 +120,51 @@ pub fn subscription(redis_url: String, ticker_info: TickerInfo) -> Subscription<
                 }
             });
 
+            let mut agg: Option<KlineAgg> = None;
             while let Some(trades) = rx.recv().await {
+                // ① 聚合 M1 K 线并发 KlineReceived（回测入标准蜡烛图 + 让 ▲▼ 对齐 x 轴）。
+                for t in trades.iter() {
+                    let b = (t.time.as_u64() / TF_MS) * TF_MS;
+                    let px = t.price.to_f32();
+                    let q = f32::from(t.qty);
+                    let (buy, sell) = if t.is_sell { (0.0, q) } else { (q, 0.0) };
+                    match agg.as_mut() {
+                        Some(a) if a.bucket == b => {
+                            a.high = a.high.max(px);
+                            a.low = a.low.min(px);
+                            a.close = px;
+                            a.buy += buy;
+                            a.sell += sell;
+                        }
+                        _ => {
+                            // 新桶：先把上一桶定型发出，再开新桶。
+                            if let Some(a) = agg.as_ref() {
+                                let kl = StreamKind::Kline { ticker_info, timeframe: Timeframe::M1 };
+                                if output.send(Event::KlineReceived(kl, a.to_kline())).await.is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            agg = Some(KlineAgg {
+                                bucket: b,
+                                open: px,
+                                high: px,
+                                low: px,
+                                close: px,
+                                buy,
+                                sell,
+                            });
+                        }
+                    }
+                }
+                // 当前进行中的桶也发出（latest）。
+                if let Some(a) = agg.as_ref() {
+                    let kl = StreamKind::Kline { ticker_info, timeframe: Timeframe::M1 };
+                    if output.send(Event::KlineReceived(kl, a.to_kline())).await.is_err() {
+                        return;
+                    }
+                }
+                // ② 逐笔照发（喂 CVD/flow tap 与足迹簇）。
                 let stream = StreamKind::Trades { ticker_info };
                 if output.send(Event::TradesReceived(stream, UnixMs(now_ms()), trades)).await.is_err()
                 {

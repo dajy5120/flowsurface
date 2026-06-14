@@ -1059,6 +1059,18 @@ impl canvas::Program<Message> for KlineChart {
                 }
             }
 
+            // F3b：在蜡烛/足迹图上叠加成交标记 ▲（买）/▼（卖）——读进程级旁路缓存（来自 ws::orders）。
+            draw_ws_fill_markers(
+                frame,
+                price_to_y,
+                interval_to_x,
+                chart.scaling,
+                palette,
+                earliest,
+                latest,
+                matches!(chart.basis, Basis::Time(_)),
+            );
+
             chart.draw_last_price_line(frame, palette, region);
         });
 
@@ -1194,6 +1206,70 @@ fn draw_candle_dp(
         Size::new(candle_width / 4.0, (y_high - y_low).abs()),
         wick_color,
     );
+}
+
+/// F3b：图上成交标记。买=绿 ▲（成交价下方、指向上），卖=红 ▼（成交价上方、指向下）。
+/// 标记尺寸用 像素/scaling 抵消 `frame.scale`，保证屏幕上恒定大小；带描边以在红绿蜡烛上保持可见。
+/// 数据来自进程级旁路缓存 `ws::orders::chart_fills_snapshot()`（不侵入 FS 的 ContentKind/数据源）。
+#[allow(clippy::too_many_arguments)]
+fn draw_ws_fill_markers(
+    frame: &mut canvas::Frame,
+    price_to_y: impl Fn(Price) -> f32,
+    interval_to_x: impl Fn(u64) -> f32,
+    scaling: f32,
+    palette: &Extended,
+    earliest: u64,
+    latest: u64,
+    time_basis: bool,
+) {
+    let fills = crate::ws::orders::chart_fills_snapshot();
+    if fills.is_empty() || scaling <= f32::EPSILON {
+        return;
+    }
+    let hw = 4.0 / scaling; // 半宽
+    let h = 7.0 / scaling; // 高
+    let gap = 3.0 / scaling; // 与成交价的间隙
+    let outline = Stroke::with_color(
+        Stroke {
+            width: 1.0,
+            ..Default::default()
+        },
+        palette.background.base.text.scale_alpha(0.7),
+    );
+    for f in &fills {
+        if f.ts == 0 || f.px <= 0.0 {
+            continue;
+        }
+        // 时间基：跳过可视区外的标记（fill.ts 与 interval 同为 ms）。
+        if time_basis && (f.ts < earliest || f.ts > latest) {
+            continue;
+        }
+        let x = interval_to_x(f.ts);
+        let y = price_to_y(Price::from_f32(f.px as f32));
+        let (color, p0, p1, p2) = if f.side == 1 {
+            (
+                palette.success.strong.color,
+                Point::new(x, y + gap),
+                Point::new(x - hw, y + gap + h),
+                Point::new(x + hw, y + gap + h),
+            )
+        } else {
+            (
+                palette.danger.strong.color,
+                Point::new(x, y - gap),
+                Point::new(x - hw, y - gap - h),
+                Point::new(x + hw, y - gap - h),
+            )
+        };
+        let tri = Path::new(|b| {
+            b.move_to(p0);
+            b.line_to(p1);
+            b.line_to(p2);
+            b.close();
+        });
+        frame.fill(&tri, color);
+        frame.stroke(&tri, outline);
+    }
 }
 
 fn render_data_source<F>(
