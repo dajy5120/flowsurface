@@ -3,12 +3,19 @@
 
 use std::collections::VecDeque;
 
+use exchange::depth::Depth;
+
 #[derive(Clone, Debug, Default)]
 pub struct FlowState {
     pub cvd: f64,        // 累计主动买 − 卖 量
     pub imbalance: f64,  // 滚动窗(≤100)成交不平衡 ∈[-1,1]
     pub last_price: f64,
     pub divergence: i8,  // 0 无 / 1 看涨背离 / -1 看跌背离
+    // F4b：盘口侧（从 Depth 精确算，非近似）
+    pub best_bid: f64,
+    pub best_ask: f64,
+    pub spread: f64,
+    pub book_imb: f64, // 盘口前 N 档量不平衡 ∈[-1,1]
     roll: VecDeque<(f64, bool)>,  // (qty, is_sell)
     hist: VecDeque<(f64, f64)>,   // (price, cvd) 背离检测
 }
@@ -37,6 +44,28 @@ impl FlowState {
             self.hist.pop_front();
         }
         self.divergence = detect_divergence(&self.hist);
+    }
+
+    /// F4b：从盘口快照算 best bid/ask + spread + 前 N 档量不平衡（精确，非近似）。
+    pub fn apply_depth(&mut self, depth: &Depth) {
+        const N: usize = 10;
+        // BTreeMap 按价升序：最高买 = 末，最低卖 = 首。
+        if let Some((bp, _)) = depth.bids.iter().next_back() {
+            self.best_bid = bp.to_f32() as f64;
+        }
+        if let Some((ap, _)) = depth.asks.iter().next() {
+            self.best_ask = ap.to_f32() as f64;
+        }
+        if self.best_ask > 0.0 && self.best_bid > 0.0 {
+            self.spread = (self.best_ask - self.best_bid).max(0.0);
+        }
+        let bid_vol: f64 = depth.bids.iter().rev().take(N).map(|(_, q)| f32::from(*q) as f64).sum();
+        let ask_vol: f64 = depth.asks.iter().take(N).map(|(_, q)| f32::from(*q) as f64).sum();
+        self.book_imb = if bid_vol + ask_vol > 0.0 {
+            (bid_vol - ask_vol) / (bid_vol + ask_vol)
+        } else {
+            0.0
+        };
     }
 }
 

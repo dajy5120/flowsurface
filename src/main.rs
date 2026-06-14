@@ -226,6 +226,10 @@ impl Flowsurface {
                         self.ws_flow.apply(t.price.to_f32() as f64, f32::from(t.qty) as f64, t.is_sell);
                     }
                 }
+                // F4b：从盘口快照算 spread + 盘口不平衡。
+                if let exchange::Event::DepthReceived(_, _, depth) = &event {
+                    self.ws_flow.apply_depth(depth);
+                }
                 let main_window_id = self.main_window.id;
                 let dashboard = self.active_dashboard_mut();
 
@@ -781,6 +785,7 @@ impl Flowsurface {
                     text(format!("成交 {} 买{}/卖{}", o.fills.len(), o.n_buy, o.n_sell)).size(12),
                     text(format!("流 CVD {:+.3}  imb {:+.2}  背离 {}", f.cvd, f.imbalance, div))
                         .size(12),
+                    text(format!("盘口 {:+.2}  spr {:.1}", f.book_imb, f.spread)).size(12),
                 ]
                 .spacing(2),
             )
