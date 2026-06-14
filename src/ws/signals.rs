@@ -47,6 +47,13 @@ pub struct Signals {
     pub depth_bid: u64,
     #[serde(default)]
     pub depth_ask: u64,
+    // F4c combo：现役池实时加权值 Σ wᵢ·alphaᵢ + 覆盖数（已就绪/池总数）。
+    #[serde(default)]
+    pub combo: f64,
+    #[serde(default)]
+    pub n_combo: u64,
+    #[serde(default)]
+    pub n_pool: u64,
 }
 
 /// 轮询 `ws:signals:{symbol}`（250ms）→ 变化时发出引擎信号快照。

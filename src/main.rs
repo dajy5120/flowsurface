@@ -830,6 +830,16 @@ impl Flowsurface {
                     ))
                     .size(12),
                 );
+                // F4c：现役池 combo 实时加权值 + 覆盖数（已就绪 alpha / 池总数）。
+                if s.n_pool > 0 {
+                    col = col.push(
+                        text(format!(
+                            "combo {:+.4}  覆盖 {}/{}",
+                            s.combo, s.n_combo, s.n_pool
+                        ))
+                        .size(12),
+                    );
+                }
             }
             let panel = container(col).padding(8).style(style::modal_container);
             let floating = container(panel)
