@@ -86,6 +86,7 @@ struct Flowsurface {
     theme: data::Theme,
     notifications: Notifications,
     ws_active: Option<ws::active_run::ActiveRun>, // WealthSpring 三态：当前活动 run（None=实时看盘）
+    ws_orders: ws::orders::OrderState,            // WealthSpring 订单/PnL（events.* 聚合，F3）
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +94,7 @@ enum Message {
     Sidebar(dashboard::sidebar::Message),
     MarketWsEvent(exchange::Event),
     WsActiveRun(Option<ws::active_run::ActiveRun>), // WealthSpring 三态切换
+    WsOrders(ws::orders::OrderState),               // WealthSpring 订单/PnL 更新（F3）
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -158,6 +160,7 @@ impl Flowsurface {
             notifications: Notifications::new(),
             network: NetworkManager::new(saved_state.proxy_cfg),
             ws_active: None,
+            ws_orders: ws::orders::OrderState::default(),
         };
 
         if let Some(err) = audio_init_err {
@@ -204,6 +207,10 @@ impl Flowsurface {
             Message::WsActiveRun(ar) => {
                 // WealthSpring 三态：记录活动 run（subscription() 据此切 live/回测 流）。
                 self.ws_active = ar;
+                return Task::none();
+            }
+            Message::WsOrders(st) => {
+                self.ws_orders = st; // 订单/PnL 聚合（view() 叠加显示）
                 return Task::none();
             }
             Message::MarketWsEvent(event) => {
@@ -737,6 +744,38 @@ impl Flowsurface {
             .into()
         };
 
+        // WealthSpring 订单/PnL 悬浮读数（F3a）：回测/实盘态有数据时，右上角叠一小框。
+        let content = if id == self.main_window.id
+            && (self.ws_orders.has_summary || !self.ws_orders.fills.is_empty())
+        {
+            let o = &self.ws_orders;
+            let mode = self.ws_active.as_ref().map(|a| a.mode.as_str()).unwrap_or("watch");
+            let pnl = match o.unrealized {
+                Some(u) => format!("已实现 {:+.2}  浮动 {:+.2}", o.realized, u),
+                None => format!("已实现 {:+.2}", o.realized),
+            };
+            let panel = container(
+                column![
+                    text(format!("WS {mode} [{}]", o.run_id)).size(12),
+                    text(format!("持仓 {} {:.3} @ {:.2}", o.pos_side, o.net_qty, o.avg_px)).size(12),
+                    text(pnl).size(12),
+                    text(format!("成交 {} 买{}/卖{}", o.fills.len(), o.n_buy, o.n_sell)).size(12),
+                ]
+                .spacing(2),
+            )
+            .padding(8)
+            .style(style::modal_container);
+            let floating = container(panel)
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(12);
+            iced::widget::stack![content, floating].into()
+        } else {
+            content
+        };
+
         toast::Manager::new(
             content,
             self.notifications.toasts(),
@@ -788,7 +827,10 @@ impl Flowsurface {
             Subscription::none()
         };
         // 始终轮询活动 run → 驱动三态切换（接 P3 跑回测/实盘）。
-        let ws_active_run = ws::active_run::subscription(ws_redis_url).map(Message::WsActiveRun);
+        let ws_active_run =
+            ws::active_run::subscription(ws_redis_url.clone()).map(Message::WsActiveRun);
+        // 始终读 events.* → 订单/PnL（回测/实盘态有 run 才有数据）。
+        let ws_orders = ws::orders::subscription(ws_redis_url).map(Message::WsOrders);
 
         let tick = iced::window::frames().map(Message::Tick);
 
@@ -806,6 +848,7 @@ impl Flowsurface {
             exchange_streams,
             ws_replay_streams,
             ws_active_run,
+            ws_orders,
             sidebar,
             window_events,
             tick,

@@ -72,6 +72,7 @@ data.workspace = true
 # 不走 git 依赖主仓（私有 + 含本 fork 子模块 → 循环）；wire 契约简单稳定，内联读取（docs/03/07/08）。
 redis = { version = "1", features = ["streams"] }
 tokio = { version = "1", features = ["sync"] } # replay：阻塞 redis 线程 → async 订阅的桥
+rmpv = "1" # 解码通道① events.* msgpack（OrderFilled/Position），F3 订单/PnL
 
 [features]
 debug = ["iced/hot"]

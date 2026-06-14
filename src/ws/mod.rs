@@ -8,4 +8,5 @@
 
 pub mod active_run;
 pub mod bt_trades;
+pub mod orders;
 pub mod replay;
