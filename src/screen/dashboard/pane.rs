@@ -398,7 +398,9 @@ impl State {
                 }
                 // WealthSpring 面板无行情流（数据走 Redis/shmem 旁路）；
                 // 正常经 ContentSelected → placeholder 创建，这里仅为穷举完整性兜底。
-                ContentKind::WealthSpring => (Content::WealthSpring, vec![]),
+                ContentKind::WealthSpring => {
+                    (Content::WealthSpring(data::layout::pane::WsPaneMode::Any), vec![])
+                }
                 ContentKind::Starter => unreachable!(),
             }
         };
@@ -564,7 +566,7 @@ impl State {
                 .height(widget::PANE_CONTROL_BTN_HEIGHT);
 
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
-        } else if !matches!(self.content, Content::Starter | Content::WealthSpring)
+        } else if !matches!(self.content, Content::Starter | Content::WealthSpring(_))
             && !self.has_stream()
         {
             let content = row![
@@ -658,9 +660,10 @@ impl State {
                     tickers_table,
                 )
             }
-            Content::WealthSpring => {
+            Content::WealthSpring(mode) => {
                 // WealthSpring 读数面板（docs/08）：渲染走 ws::readout 旁路快照，无行情流。
-                let base = crate::ws::view::pane_body();
+                // 方案 2：按 pane 的三态过滤（Live/Backtest 仅在对应态显读数）。
+                let base = crate::ws::view::pane_body(*mode);
                 self.compose_stack_view(
                     base,
                     id,
@@ -1752,7 +1755,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring => None,
+            Content::WealthSpring(_) => None,
         }
     }
 
@@ -1776,7 +1779,7 @@ impl State {
             Content::Ladder(_) | Content::TimeAndSales(_) => Some(100),
             Content::ShaderHeatmap { .. } => None,
             Content::Starter => None,
-            Content::WealthSpring => None,
+            Content::WealthSpring(_) => None,
         }
     }
 
@@ -1863,7 +1866,8 @@ pub enum Content {
     Ladder(Option<Ladder>),
     Comparison(Option<ComparisonChart>),
     /// WealthSpring 读数面板（docs/08）：无图表/无行情流，渲染走 `ws::readout` 旁路快照。
-    WealthSpring,
+    /// 携带三态过滤（docs/08 F6 方案 2）：Live/Backtest pane 仅在对应态渲染读数。
+    WealthSpring(data::layout::pane::WsPaneMode),
 }
 
 impl Content {
@@ -2071,7 +2075,7 @@ impl Content {
             ContentKind::ComparisonChart => Content::Comparison(None),
             ContentKind::TimeAndSales => Content::TimeAndSales(None),
             ContentKind::Ladder => Content::Ladder(None),
-            ContentKind::WealthSpring => Content::WealthSpring,
+            ContentKind::WealthSpring => Content::WealthSpring(data::layout::pane::WsPaneMode::Any),
         }
     }
 
@@ -2084,7 +2088,7 @@ impl Content {
             Content::Comparison(chart) => Some(chart.as_ref()?.last_update()),
             Content::Starter => None,
             Content::ShaderHeatmap { chart, .. } => Some(chart.as_ref()?.last_tick?),
-            Content::WealthSpring => None,
+            Content::WealthSpring(_) => None,
         }
     }
 
@@ -2160,7 +2164,7 @@ impl Content {
             | Content::Ladder(_)
             | Content::Starter
             | Content::Comparison(_)
-            | Content::WealthSpring
+            | Content::WealthSpring(_)
             | Content::ShaderHeatmap { .. } => {
                 panic!("indicator reorder on {} pane", self)
             }
@@ -2207,7 +2211,7 @@ impl Content {
             Content::TimeAndSales(_)
             | Content::Ladder(_)
             | Content::Starter
-            | Content::WealthSpring
+            | Content::WealthSpring(_)
             | Content::Comparison(_) => None,
         }
     }
@@ -2270,7 +2274,7 @@ impl Content {
             Content::Comparison(_) => ContentKind::ComparisonChart,
             Content::Starter => ContentKind::Starter,
             Content::ShaderHeatmap { .. } => ContentKind::ShaderHeatmap,
-            Content::WealthSpring => ContentKind::WealthSpring,
+            Content::WealthSpring(_) => ContentKind::WealthSpring,
         }
     }
 
@@ -2289,7 +2293,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring => true,
+            Content::WealthSpring(_) => true,
         }
     }
 }

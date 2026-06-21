@@ -7,15 +7,49 @@
 //! 沿用 `orders::CHART_FILLS` 的旁路模式）。本模块只渲染、不发消息，故对 pane 的消息类型
 //! `M` 完全泛型，可直接塞进 FS 的 `compose_stack_view`。
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{center, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length};
+
+use data::layout::pane::WsPaneMode;
 
 use super::readout::Readout;
 use crate::style;
 
 /// 渲染 WealthSpring 读数面板（订单/PnL · 订单流 · 引擎信号 · 现役池）。
-pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
+///
+/// `mode`（docs/08 F6 方案 2）：`Live`/`Backtest` pane 仅在 `ws:active_run` 对应态渲染读数，
+/// 否则显占位——让「实盘」「回测」工作区各自只显属于自己的数据。
+pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
     let r = super::readout::snapshot();
+
+    // 三态过滤：pane 限定态 ≠ 当前活动态 → 显占位，不串数据。
+    let want = match mode {
+        WsPaneMode::Any => None,
+        WsPaneMode::Live => Some("live"),
+        WsPaneMode::Backtest => Some("backtest"),
+    };
+    if let Some(want) = want
+        && r.mode != want
+    {
+        let label = if want == "live" { "实盘" } else { "回测" };
+        let cur = if r.mode.is_empty() { "实时看盘".to_string() } else { r.mode.clone() };
+        return container(center(
+            column![
+                text(format!("WealthSpring · {label}工作区"))
+                    .size(style::text_size::SECTION)
+                    .font(style::AZERET_MONO),
+                text(format!("当前非{label}态（active_run = {cur}）"))
+                    .size(style::text_size::BODY),
+                text(format!("切到{label}时此面板自动显示对应读数")).size(style::text_size::SMALL),
+            ]
+            .spacing(8)
+            .align_x(Alignment::Center),
+        ))
+        .padding(12)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+    }
 
     let header = text(format!(
         "WealthSpring · {} {}",

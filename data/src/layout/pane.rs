@@ -89,6 +89,8 @@ pub enum Pane {
     },
     WealthSpring {
         #[serde(deserialize_with = "ok_or_default", default)]
+        mode: WsPaneMode,
+        #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
@@ -213,6 +215,20 @@ pub enum ContentKind {
     /// WealthSpring 读数面板（docs/08）：订单/PnL · 订单流 · 引擎信号 · Factory 现役池。
     /// 无行情数据源——数据走 Redis/shmem 旁路快照，不需要选 ticker。
     WealthSpring,
+}
+
+/// WealthSpring pane 的三态过滤（docs/08 F6 方案 2「真隔离」）：
+/// `Live`/`Backtest` 的 pane 只在 `ws:active_run` 对应态时渲染读数，否则显占位——
+/// 让「实盘」「回测」两个工作区即使共享同一份全局三态也各自只显属于自己的数据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Default)]
+pub enum WsPaneMode {
+    /// 任意态都渲染（默认；从内容选择器手建的 pane 即此态）。
+    #[default]
+    Any,
+    /// 仅实盘态（active_run.mode == "live"）。
+    Live,
+    /// 仅回测态（active_run.mode == "backtest"）。
+    Backtest,
 }
 
 impl ContentKind {

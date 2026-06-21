@@ -19,6 +19,8 @@ pub enum Message {
     ToggleSidebarMenu(Option<sidebar::Menu>),
     SetSidebarPosition(sidebar::Position),
     TickersTable(super::tickers_table::Message),
+    /// WealthSpring 工作区切换（docs/08 F6 — P1）：合并进侧边栏的工作区图标按钮。
+    SelectWorkspace(uuid::Uuid),
 }
 
 pub struct Sidebar {
@@ -32,6 +34,8 @@ pub enum Action {
         Option<data::layout::pane::ContentKind>,
     ),
     ErrorOccurred(data::InternalError),
+    /// 工作区切换 → main.rs 复用 LayoutManager 的 SelectActive 流程（docs/08 F6 — P1）。
+    SelectWorkspace(uuid::Uuid),
 }
 
 impl Sidebar {
@@ -63,6 +67,9 @@ impl Sidebar {
             Message::SetSidebarPosition(position) => {
                 self.state.position = position;
             }
+            Message::SelectWorkspace(id) => {
+                return (Task::none(), Some(Action::SelectWorkspace(id)));
+            }
             Message::TickersTable(msg) => {
                 let action = self.tickers_table.update(msg);
 
@@ -90,7 +97,11 @@ impl Sidebar {
         (Task::none(), None)
     }
 
-    pub fn view(&self, audio_volume: Option<f32>) -> Element<'_, Message> {
+    pub fn view<'a>(
+        &'a self,
+        audio_volume: Option<f32>,
+        workspaces: &[(uuid::Uuid, &'static str, bool)],
+    ) -> Element<'a, Message> {
         let state = &self.state;
 
         let tooltip_position = if state.position == sidebar::Position::Left {
@@ -101,7 +112,8 @@ impl Sidebar {
 
         let is_table_open = self.tickers_table.is_shown;
 
-        let nav_buttons = self.nav_buttons(is_table_open, audio_volume, tooltip_position);
+        let nav_buttons =
+            self.nav_buttons(is_table_open, audio_volume, tooltip_position, workspaces);
 
         let tickers_table = if is_table_open {
             column![responsive(move |size| self
@@ -125,12 +137,13 @@ impl Sidebar {
         self.tickers_table.subscription().map(Message::TickersTable)
     }
 
-    fn nav_buttons(
-        &self,
+    fn nav_buttons<'a>(
+        &'a self,
         is_table_open: bool,
         audio_volume: Option<f32>,
         tooltip_position: TooltipPosition,
-    ) -> iced::widget::Column<'_, Message> {
+        workspaces: &[(uuid::Uuid, &'static str, bool)],
+    ) -> iced::widget::Column<'a, Message> {
         let settings_modal_button = {
             let is_active = self.is_menu_active(sidebar::Menu::Settings)
                 || self.is_menu_active(sidebar::Menu::ThemeEditor)
@@ -193,15 +206,29 @@ impl Sidebar {
             )
         };
 
-        column![
-            ticker_search_button,
-            layout_modal_button,
-            audio_btn,
-            space::vertical(),
-            settings_modal_button,
-        ]
-        .width(32)
-        .spacing(8)
+        // WealthSpring 工作区切换（docs/08 F6 — P1）：合并进侧边栏顶部的图标按钮组。
+        let mut col = column![].width(32).spacing(8);
+        for &(uid, name, is_active) in workspaces {
+            col = col.push(button_with_tooltip(
+                icon_text(crate::ws::workspace::icon(name), 14)
+                    .width(24)
+                    .align_x(Alignment::Center),
+                Message::SelectWorkspace(uid),
+                Some(name),
+                tooltip_position,
+                move |theme, status| crate::style::button::transparent(theme, status, is_active),
+            ));
+        }
+        if !workspaces.is_empty() {
+            // 工作区组 与 工具组 之间的分隔间距。
+            col = col.push(space::vertical().height(12));
+        }
+
+        col.push(ticker_search_button)
+            .push(layout_modal_button)
+            .push(audio_btn)
+            .push(space::vertical())
+            .push(settings_modal_button)
     }
 
     pub fn hide_tickers_table(&mut self) -> bool {

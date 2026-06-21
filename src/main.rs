@@ -182,6 +182,10 @@ impl Flowsurface {
             state.layout_manager = LayoutManager::new();
         }
 
+        // WealthSpring 工作区（docs/08 F6 — P1）：幂等播种 5 个固定工作区
+        // （官方原生 / 实盘 / 回测 / 数据录制 / Alpha Factory），不动用户已有 layout。
+        ws::workspace::ensure_seeded(&mut state.layout_manager);
+
         let active_layout_id = state
             .layout_manager
             .active_layout_id()
@@ -685,6 +689,12 @@ impl Flowsurface {
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
                         self.notifications.push(Toast::error(err.to_string()));
                     }
+                    Some(dashboard::sidebar::Action::SelectWorkspace(uid)) => {
+                        // 工作区切换：复用 LayoutManager 的 SelectActive 全流程（存 popout/切 layout）。
+                        return self.update(Message::Layouts(
+                            modal::layout_manager::Message::SelectActive(uid),
+                        ));
+                    }
                     None => {}
                 }
 
@@ -763,9 +773,23 @@ impl Flowsurface {
         let tickers_table = &self.sidebar.tickers_table;
 
         let content = if id == self.main_window.id {
+            // WealthSpring 工作区（docs/08 F6 — P1）：按固定顺序取 5 个工作区的 (uuid, 名, 是否活动)，
+            // 合并进 FS 原生侧边栏顶部（单一侧边栏，图标切换不同窗口）。
+            let active_layout = self.layout_manager.active_layout_id().map(|l| l.unique);
+            let workspaces: Vec<(uuid::Uuid, &'static str, bool)> = ws::workspace::WORKSPACES
+                .iter()
+                .filter_map(|&name| {
+                    self.layout_manager
+                        .layouts
+                        .iter()
+                        .find(|l| l.id.name == name)
+                        .map(|l| (l.id.unique, name, active_layout == Some(l.id.unique)))
+                })
+                .collect();
+
             let sidebar_view = self
                 .sidebar
-                .view(self.audio_stream.volume())
+                .view(self.audio_stream.volume(), &workspaces)
                 .map(Message::Sidebar);
 
             let dashboard_view = dashboard

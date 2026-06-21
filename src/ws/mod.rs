@@ -15,3 +15,4 @@ pub mod readout;
 pub mod replay;
 pub mod signals;
 pub mod view;
+pub mod workspace;
