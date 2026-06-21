@@ -104,6 +104,8 @@ pub enum Event {
     ComparisonChartInteraction(super::chart::comparison::Message),
     HeatmapShaderInteraction(crate::widget::chart::heatmap::Message),
     MiniTickersListInteraction(modal::pane::mini_tickers_list::Message),
+    /// 录制驾驶舱交互（docs/08 F6-P3）：服务启停 / 配置编辑。
+    RecorderInteraction(crate::ws::recorder::RecorderMsg),
 }
 
 pub struct State {
@@ -402,6 +404,9 @@ impl State {
                     (Content::WealthSpring(data::layout::pane::WsPaneMode::Any), vec![])
                 }
                 ContentKind::Factory => (Content::Factory, vec![]),
+                ContentKind::Recorder => {
+                    (Content::Recorder(crate::ws::recorder::RecorderPaneState::load()), vec![])
+                }
                 ContentKind::Starter => unreachable!(),
             }
         };
@@ -569,7 +574,7 @@ impl State {
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
         } else if !matches!(
             self.content,
-            Content::Starter | Content::WealthSpring(_) | Content::Factory
+            Content::Starter | Content::WealthSpring(_) | Content::Factory | Content::Recorder(_)
         ) && !self.has_stream()
         {
             let content = row![
@@ -680,6 +685,20 @@ impl State {
             Content::Factory => {
                 // Alpha Factory 仪表盘（docs/08 F6-P2）：渲染走 ws::factory_readout 旁路快照。
                 let base = crate::ws::factory_view::pane_body();
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::Recorder(rec) => {
+                // 录制驾驶舱（docs/08 F6-P3）：交互视图发 RecorderMsg → 包成 pane 事件。
+                let base = crate::ws::recorder_view::pane_body(rec)
+                    .map(move |m| Message::PaneEvent(id, Event::RecorderInteraction(m)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1179,7 +1198,10 @@ impl State {
                 // placeholder 即成品。
                 if !matches!(
                     kind,
-                    ContentKind::Starter | ContentKind::WealthSpring | ContentKind::Factory
+                    ContentKind::Starter
+                        | ContentKind::WealthSpring
+                        | ContentKind::Factory
+                        | ContentKind::Recorder
                 ) {
                     self.streams = ResolvedStream::waiting(vec![]);
                     let modal = Modal::MiniTickersList(MiniPanel::new());
@@ -1203,6 +1225,12 @@ impl State {
                 Content::TimeAndSales(Some(p)) => super::panel::update(p, msg),
                 _ => {}
             },
+            Event::RecorderInteraction(m) => {
+                // 录制驾驶舱（docs/08 F6-P3）：改可编辑状态 + 副作用（systemctl / 写 toml）。
+                if let Content::Recorder(rec) = &mut self.content {
+                    crate::ws::recorder::handle(rec, m);
+                }
+            }
             Event::ToggleIndicator(ind) => {
                 self.content.toggle_indicator(ind);
             }
@@ -1774,7 +1802,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory => None,
+            Content::WealthSpring(_) | Content::Factory | Content::Recorder(_) => None,
         }
     }
 
@@ -1798,7 +1826,7 @@ impl State {
             Content::Ladder(_) | Content::TimeAndSales(_) => Some(100),
             Content::ShaderHeatmap { .. } => None,
             Content::Starter => None,
-            Content::WealthSpring(_) | Content::Factory => None,
+            Content::WealthSpring(_) | Content::Factory | Content::Recorder(_) => None,
         }
     }
 
@@ -1889,6 +1917,8 @@ pub enum Content {
     WealthSpring(data::layout::pane::WsPaneMode),
     /// Alpha Factory 仪表盘（docs/08 F6-P2）：无行情流，渲染走 `ws::factory_readout` 旁路快照。
     Factory,
+    /// 录制驾驶舱（docs/08 F6-P3）：交互式控制中心，携带可编辑配置状态。
+    Recorder(crate::ws::recorder::RecorderPaneState),
 }
 
 impl Content {
@@ -2098,6 +2128,9 @@ impl Content {
             ContentKind::Ladder => Content::Ladder(None),
             ContentKind::WealthSpring => Content::WealthSpring(data::layout::pane::WsPaneMode::Any),
             ContentKind::Factory => Content::Factory,
+            ContentKind::Recorder => {
+                Content::Recorder(crate::ws::recorder::RecorderPaneState::load())
+            }
         }
     }
 
@@ -2110,7 +2143,7 @@ impl Content {
             Content::Comparison(chart) => Some(chart.as_ref()?.last_update()),
             Content::Starter => None,
             Content::ShaderHeatmap { chart, .. } => Some(chart.as_ref()?.last_tick?),
-            Content::WealthSpring(_) | Content::Factory => None,
+            Content::WealthSpring(_) | Content::Factory | Content::Recorder(_) => None,
         }
     }
 
@@ -2188,6 +2221,7 @@ impl Content {
             | Content::Comparison(_)
             | Content::WealthSpring(_)
             | Content::Factory
+            | Content::Recorder(_)
             | Content::ShaderHeatmap { .. } => {
                 panic!("indicator reorder on {} pane", self)
             }
@@ -2236,6 +2270,7 @@ impl Content {
             | Content::Starter
             | Content::WealthSpring(_)
             | Content::Factory
+            | Content::Recorder(_)
             | Content::Comparison(_) => None,
         }
     }
@@ -2300,6 +2335,7 @@ impl Content {
             Content::ShaderHeatmap { .. } => ContentKind::ShaderHeatmap,
             Content::WealthSpring(_) => ContentKind::WealthSpring,
             Content::Factory => ContentKind::Factory,
+            Content::Recorder(_) => ContentKind::Recorder,
         }
     }
 
@@ -2318,7 +2354,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory => true,
+            Content::WealthSpring(_) | Content::Factory | Content::Recorder(_) => true,
         }
     }
 }

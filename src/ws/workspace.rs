@@ -51,7 +51,8 @@ fn pane_template(name: &str) -> &'static str {
         }
         // Alpha Factory 仪表盘（docs/08 F6-P2）。
         "Alpha Factory" => r#"{"Factory":{"settings":{},"link_group":null}}"#,
-        // 占位（pane 见后续阶段：数据录制 → P3）。
+        // 录制驾驶舱（docs/08 F6-P3）。
+        "数据录制" => r#"{"Recorder":{"settings":{},"link_group":null}}"#,
         _ => r#"{"Starter":{"link_group":null}}"#,
     }
 }

@@ -101,6 +101,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    Recorder {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
 }
 
 impl Default for Pane {
@@ -223,6 +229,8 @@ pub enum ContentKind {
     WealthSpring,
     /// Alpha Factory 仪表盘（docs/08 F6-P2）：F0–F7 全流程状态，只读轮询 registry.sqlite。
     Factory,
+    /// 录制驾驶舱（docs/08 F6-P3）：24/7 守护录制控制中心（服务启停 + 配置 + 实况 + 总览）。
+    Recorder,
 }
 
 /// WealthSpring pane 的三态过滤（docs/08 F6 方案 2「真隔离」）：
@@ -240,7 +248,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 10] = [
+    pub const ALL: [ContentKind; 11] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -251,6 +259,7 @@ impl ContentKind {
         ContentKind::Ladder,
         ContentKind::WealthSpring,
         ContentKind::Factory,
+        ContentKind::Recorder,
     ];
 }
 
@@ -267,6 +276,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::Ladder => "DOM/Ladder",
             ContentKind::WealthSpring => "WealthSpring",
             ContentKind::Factory => "Alpha Factory",
+            ContentKind::Recorder => "数据录制",
         };
         write!(f, "{s}")
     }
@@ -337,7 +347,8 @@ impl PaneSetup {
                 ContentKind::Starter
                 | ContentKind::TimeAndSales
                 | ContentKind::WealthSpring
-                | ContentKind::Factory => None,
+                | ContentKind::Factory
+                | ContentKind::Recorder => None,
             };
 
         let tick_multiplier = match content_kind {
@@ -361,6 +372,7 @@ impl PaneSetup {
             | ContentKind::TimeAndSales
             | ContentKind::WealthSpring
             | ContentKind::Factory
+            | ContentKind::Recorder
             | ContentKind::Starter => current_tick_multiplier,
         };
 
