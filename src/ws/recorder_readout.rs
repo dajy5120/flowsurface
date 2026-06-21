@@ -4,8 +4,8 @@
 //! 数据湖扫描(跨全部日期:时间跨度/总大小/每币种 天数/大小)。发布到进程级快照,供
 //! `Content::Recorder` pane 渲染(`recorder_view`)。惰性起:打开过 数据录制 工作区才轮询。
 //!
-//! 注:不引入 parquet/arrow 重依赖,故省略 recorder-gui 的「今日行数」(parquet 行计数);
-//! 已录天数/大小/30 天进度等核心总览不受影响。
+//! 「今日行数」读 parquet 页脚 `num_rows`,用 `parquet` crate 的 `default-features=false`
+//! (不引入 arrow/压缩——行数在 Thrift 元数据里,无需解压列数据,依赖很轻)。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -30,6 +30,7 @@ pub struct SymLive {
 pub struct LakeSym {
     pub days: i64,
     pub bytes: u64,
+    pub today_rows: u64,
 }
 
 #[derive(Default, Clone)]
@@ -152,9 +153,10 @@ fn poll_journal(st: &mut SvcState, prev: &BTreeMap<String, SymLive>) {
 
 const STREAMS: [&str; 4] = ["l2", "trades", "mark", "snap100ms"];
 
-/// 跨全部日期扫数据湖:时间跨度 + 总大小 + 每币种天数/大小。
+/// 跨全部日期扫数据湖:时间跨度 + 总大小 + 每币种天数/大小/今日行数。
 fn scan_lake(st: &mut SvcState, data_dir: &Path) {
     let raw = data_dir.join("raw");
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let mut all_dates: BTreeSet<String> = Default::default();
     for sym in PRESETS {
         let mut ls = LakeSym::default();
@@ -176,6 +178,9 @@ fn scan_lake(st: &mut SvcState, data_dir: &Path) {
                         let p = f.path();
                         if p.extension().is_some_and(|e| e == "parquet") {
                             ls.bytes += std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                            if date == today {
+                                ls.today_rows += parquet_rows(&p).unwrap_or(0);
+                            }
                         }
                     }
                 }
@@ -194,4 +199,11 @@ fn scan_lake(st: &mut SvcState, data_dir: &Path) {
     if let Some(l) = all_dates.iter().next_back() {
         st.span_last = l.clone();
     }
+}
+
+/// 只读 parquet 页脚元数据取行数（不解压列数据，故无需 arrow/压缩特性）。
+fn parquet_rows(path: &Path) -> Option<u64> {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    let f = std::fs::File::open(path).ok()?;
+    Some(SerializedFileReader::new(f).ok()?.metadata().file_metadata().num_rows() as u64)
 }

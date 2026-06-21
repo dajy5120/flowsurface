@@ -208,7 +208,13 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     ]
     .spacing(5);
     overview = overview.push(
-        row![cell("币种", 90.0), cell("录制天数", 80.0), cell("大小", 120.0)].spacing(6),
+        row![
+            cell("币种", 90.0),
+            cell("录制天数", 80.0),
+            cell("大小", 120.0),
+            cell("今日行数", 120.0)
+        ]
+        .spacing(6),
     );
     for (sym, l) in &st.lake {
         overview = overview.push(
@@ -216,6 +222,7 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
                 cell(sym, 90.0),
                 cell(&l.days.to_string(), 80.0),
                 cell(&fmt_size(l.bytes), 120.0),
+                cell(&group(l.today_rows), 120.0),
             ]
             .spacing(6),
         );

@@ -74,6 +74,9 @@ redis = { version = "1", features = ["streams"] }
 tokio = { version = "1", features = ["sync"] } # replay：阻塞 redis 线程 → async 订阅的桥
 rmpv = "1" # 解码通道① events.* msgpack（OrderFilled/Position），F3 订单/PnL
 rusqlite = { version = "0.32", features = ["bundled"] } # F6-P2 Factory pane：只读轮询 registry.sqlite
+# F6-P3 Recorder pane「今日行数」：只读 parquet footer 取 num_rows（default-features=false：
+# 不引入 arrow/压缩重依赖——num_rows 在 Thrift 页脚元数据里，无需解压列数据）。
+parquet = { version = "55", default-features = false }
 
 [features]
 debug = ["iced/hot"]
