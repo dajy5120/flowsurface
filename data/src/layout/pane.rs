@@ -95,6 +95,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    Factory {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
 }
 
 impl Default for Pane {
@@ -215,6 +221,8 @@ pub enum ContentKind {
     /// WealthSpring 读数面板（docs/08）：订单/PnL · 订单流 · 引擎信号 · Factory 现役池。
     /// 无行情数据源——数据走 Redis/shmem 旁路快照，不需要选 ticker。
     WealthSpring,
+    /// Alpha Factory 仪表盘（docs/08 F6-P2）：F0–F7 全流程状态，只读轮询 registry.sqlite。
+    Factory,
 }
 
 /// WealthSpring pane 的三态过滤（docs/08 F6 方案 2「真隔离」）：
@@ -232,7 +240,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 9] = [
+    pub const ALL: [ContentKind; 10] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -242,6 +250,7 @@ impl ContentKind {
         ContentKind::TimeAndSales,
         ContentKind::Ladder,
         ContentKind::WealthSpring,
+        ContentKind::Factory,
     ];
 }
 
@@ -257,6 +266,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::TimeAndSales => "Time&Sales",
             ContentKind::Ladder => "DOM/Ladder",
             ContentKind::WealthSpring => "WealthSpring",
+            ContentKind::Factory => "Alpha Factory",
         };
         write!(f, "{s}")
     }
@@ -326,7 +336,8 @@ impl PaneSetup {
                 }
                 ContentKind::Starter
                 | ContentKind::TimeAndSales
-                | ContentKind::WealthSpring => None,
+                | ContentKind::WealthSpring
+                | ContentKind::Factory => None,
             };
 
         let tick_multiplier = match content_kind {
@@ -349,6 +360,7 @@ impl PaneSetup {
             | ContentKind::ComparisonChart
             | ContentKind::TimeAndSales
             | ContentKind::WealthSpring
+            | ContentKind::Factory
             | ContentKind::Starter => current_tick_multiplier,
         };
 

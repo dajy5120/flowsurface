@@ -401,6 +401,7 @@ impl State {
                 ContentKind::WealthSpring => {
                     (Content::WealthSpring(data::layout::pane::WsPaneMode::Any), vec![])
                 }
+                ContentKind::Factory => (Content::Factory, vec![]),
                 ContentKind::Starter => unreachable!(),
             }
         };
@@ -566,8 +567,10 @@ impl State {
                 .height(widget::PANE_CONTROL_BTN_HEIGHT);
 
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
-        } else if !matches!(self.content, Content::Starter | Content::WealthSpring(_))
-            && !self.has_stream()
+        } else if !matches!(
+            self.content,
+            Content::Starter | Content::WealthSpring(_) | Content::Factory
+        ) && !self.has_stream()
         {
             let content = row![
                 text("Choose a ticker")
@@ -664,6 +667,19 @@ impl State {
                 // WealthSpring 读数面板（docs/08）：渲染走 ws::readout 旁路快照，无行情流。
                 // 方案 2：按 pane 的三态过滤（Live/Backtest 仅在对应态显读数）。
                 let base = crate::ws::view::pane_body(*mode);
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::Factory => {
+                // Alpha Factory 仪表盘（docs/08 F6-P2）：渲染走 ws::factory_readout 旁路快照。
+                let base = crate::ws::factory_view::pane_body();
                 self.compose_stack_view(
                     base,
                     id,
@@ -1161,7 +1177,10 @@ impl State {
 
                 // WealthSpring 面板无行情数据源（数据走 Redis/shmem 旁路）→ 不弹选 ticker 弹窗，
                 // placeholder 即成品。
-                if !matches!(kind, ContentKind::Starter | ContentKind::WealthSpring) {
+                if !matches!(
+                    kind,
+                    ContentKind::Starter | ContentKind::WealthSpring | ContentKind::Factory
+                ) {
                     self.streams = ResolvedStream::waiting(vec![]);
                     let modal = Modal::MiniTickersList(MiniPanel::new());
 
@@ -1755,7 +1774,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) => None,
+            Content::WealthSpring(_) | Content::Factory => None,
         }
     }
 
@@ -1779,7 +1798,7 @@ impl State {
             Content::Ladder(_) | Content::TimeAndSales(_) => Some(100),
             Content::ShaderHeatmap { .. } => None,
             Content::Starter => None,
-            Content::WealthSpring(_) => None,
+            Content::WealthSpring(_) | Content::Factory => None,
         }
     }
 
@@ -1868,6 +1887,8 @@ pub enum Content {
     /// WealthSpring 读数面板（docs/08）：无图表/无行情流，渲染走 `ws::readout` 旁路快照。
     /// 携带三态过滤（docs/08 F6 方案 2）：Live/Backtest pane 仅在对应态渲染读数。
     WealthSpring(data::layout::pane::WsPaneMode),
+    /// Alpha Factory 仪表盘（docs/08 F6-P2）：无行情流，渲染走 `ws::factory_readout` 旁路快照。
+    Factory,
 }
 
 impl Content {
@@ -2076,6 +2097,7 @@ impl Content {
             ContentKind::TimeAndSales => Content::TimeAndSales(None),
             ContentKind::Ladder => Content::Ladder(None),
             ContentKind::WealthSpring => Content::WealthSpring(data::layout::pane::WsPaneMode::Any),
+            ContentKind::Factory => Content::Factory,
         }
     }
 
@@ -2088,7 +2110,7 @@ impl Content {
             Content::Comparison(chart) => Some(chart.as_ref()?.last_update()),
             Content::Starter => None,
             Content::ShaderHeatmap { chart, .. } => Some(chart.as_ref()?.last_tick?),
-            Content::WealthSpring(_) => None,
+            Content::WealthSpring(_) | Content::Factory => None,
         }
     }
 
@@ -2165,6 +2187,7 @@ impl Content {
             | Content::Starter
             | Content::Comparison(_)
             | Content::WealthSpring(_)
+            | Content::Factory
             | Content::ShaderHeatmap { .. } => {
                 panic!("indicator reorder on {} pane", self)
             }
@@ -2212,6 +2235,7 @@ impl Content {
             | Content::Ladder(_)
             | Content::Starter
             | Content::WealthSpring(_)
+            | Content::Factory
             | Content::Comparison(_) => None,
         }
     }
@@ -2275,6 +2299,7 @@ impl Content {
             Content::Starter => ContentKind::Starter,
             Content::ShaderHeatmap { .. } => ContentKind::ShaderHeatmap,
             Content::WealthSpring(_) => ContentKind::WealthSpring,
+            Content::Factory => ContentKind::Factory,
         }
     }
 
@@ -2293,7 +2318,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) => true,
+            Content::WealthSpring(_) | Content::Factory => true,
         }
     }
 }

@@ -9,6 +9,8 @@
 pub mod active_run;
 pub mod bt_trades;
 pub mod factory;
+pub mod factory_readout;
+pub mod factory_view;
 pub mod flow;
 pub mod orders;
 pub mod readout;

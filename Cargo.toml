@@ -73,6 +73,7 @@ data.workspace = true
 redis = { version = "1", features = ["streams"] }
 tokio = { version = "1", features = ["sync"] } # replay：阻塞 redis 线程 → async 订阅的桥
 rmpv = "1" # 解码通道① events.* msgpack（OrderFilled/Position），F3 订单/PnL
+rusqlite = { version = "0.32", features = ["bundled"] } # F6-P2 Factory pane：只读轮询 registry.sqlite
 
 [features]
 debug = ["iced/hot"]

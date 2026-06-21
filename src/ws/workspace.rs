@@ -49,7 +49,9 @@ fn pane_template(name: &str) -> &'static str {
         "回测" => {
             r#"{"Split":{"axis":"Vertical","ratio":0.62,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"WealthSpring":{"mode":"Backtest","settings":{},"link_group":null}}}}"#
         }
-        // 占位（pane 见后续阶段）。
+        // Alpha Factory 仪表盘（docs/08 F6-P2）。
+        "Alpha Factory" => r#"{"Factory":{"settings":{},"link_group":null}}"#,
+        // 占位（pane 见后续阶段：数据录制 → P3）。
         _ => r#"{"Starter":{"link_group":null}}"#,
     }
 }

@@ -185,6 +185,10 @@ impl From<&pane::State> for data::Pane {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
             },
+            pane::Content::Factory => data::Pane::Factory {
+                settings: pane.settings.clone(),
+                link_group: pane.link_group,
+            },
         }
     }
 }
@@ -318,6 +322,15 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             link_group,
         } => Configuration::Pane(pane::State::from_config(
             pane::Content::WealthSpring(mode),
+            vec![],
+            settings,
+            link_group,
+        )),
+        data::Pane::Factory {
+            settings,
+            link_group,
+        } => Configuration::Pane(pane::State::from_config(
+            pane::Content::Factory,
             vec![],
             settings,
             link_group,
