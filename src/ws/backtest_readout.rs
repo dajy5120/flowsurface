@@ -36,6 +36,33 @@ pub struct Series {
 }
 
 #[derive(Deserialize, Default, Clone)]
+pub struct Monthly {
+    #[serde(default)]
+    pub months: Vec<String>,
+    #[serde(default)]
+    pub years: Vec<String>,
+    /// 年×月 收益矩阵（%），缺失为 null。
+    #[serde(default)]
+    pub z: Vec<Vec<Option<f64>>>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct Yearly {
+    #[serde(default)]
+    pub years: Vec<String>,
+    #[serde(default)]
+    pub v: Vec<Option<f64>>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct Distribution {
+    #[serde(default)]
+    pub centers: Vec<f64>,
+    #[serde(default)]
+    pub counts: Vec<i64>,
+}
+
+#[derive(Deserialize, Default, Clone)]
 pub struct BacktestResult {
     #[serde(default)]
     pub meta: Meta,
@@ -46,6 +73,20 @@ pub struct BacktestResult {
     /// 各维度统计：[[标签, 值], …]。
     #[serde(default)]
     pub stats: Vec<Vec<String>>,
+    #[serde(default)]
+    pub monthly: Monthly,
+    #[serde(default)]
+    pub yearly: Yearly,
+    #[serde(default)]
+    pub rolling_sharpe: Series,
+    #[serde(default)]
+    pub distribution: Distribution,
+    /// 收盘价线（降采样）。
+    #[serde(default)]
+    pub price: Series,
+    /// 成交点：[ts_ms, side(1买/2卖), px]。
+    #[serde(default)]
+    pub fills: Vec<[f64; 3]>,
     /// 运行期标志（非 JSON 字段）：poller 是否已起 / 是否读到文件。
     #[serde(skip)]
     pub loaded: bool,
