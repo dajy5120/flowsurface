@@ -11,5 +11,7 @@ pub mod bt_trades;
 pub mod factory;
 pub mod flow;
 pub mod orders;
+pub mod readout;
 pub mod replay;
 pub mod signals;
+pub mod view;

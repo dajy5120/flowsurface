@@ -707,6 +707,56 @@ impl Flowsurface {
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
+        // WealthSpring 原生 dockable pane（docs/08）：每帧把 ws_* 状态旁路给 readout 快照，
+        // 供 `Content::WealthSpring` 面板渲染（pane 视图拿不到 &App，沿用旁路模式）。
+        {
+            let o = &self.ws_orders;
+            let f = &self.ws_flow;
+            let fac = &self.ws_factory;
+            let mut r = ws::readout::Readout {
+                mode: self.ws_active.as_ref().map(|a| a.mode.clone()).unwrap_or_default(),
+                run_id: o.run_id.clone(),
+                has_orders: o.has_summary,
+                pos_side: o.pos_side.clone(),
+                net_qty: o.net_qty,
+                avg_px: o.avg_px,
+                realized: o.realized,
+                unrealized: o.unrealized,
+                n_fills: o.fills.len(),
+                n_buy: o.n_buy,
+                n_sell: o.n_sell,
+                cvd: f.cvd,
+                imbalance: f.imbalance,
+                divergence: f.divergence,
+                book_imb: f.book_imb,
+                spread: f.spread,
+                absorbed_bid: f.absorbed_bid,
+                absorbed_ask: f.absorbed_ask,
+                pulled_bid: f.pulled_bid,
+                pulled_ask: f.pulled_ask,
+                fac_alphas: fac.alphas,
+                fac_n_pool: fac.n_pool,
+                fac_evals: fac.evals,
+                pool: fac.pool.clone(),
+                ..Default::default()
+            };
+            if let Some(s) = &self.ws_signals {
+                r.has_signals = true;
+                r.sess_traded_bid = s.sess_traded_bid;
+                r.sess_traded_ask = s.sess_traded_ask;
+                r.sess_pulled_bid = s.sess_pulled_bid;
+                r.sess_pulled_ask = s.sess_pulled_ask;
+                r.iceberg_bid = s.iceberg_bid;
+                r.iceberg_ask = s.iceberg_ask;
+                r.depth_bid = s.depth_bid;
+                r.depth_ask = s.depth_ask;
+                r.sig_combo = s.combo;
+                r.sig_n_combo = s.n_combo;
+                r.sig_n_pool = s.n_pool;
+            }
+            ws::readout::publish(r);
+        }
+
         let dashboard = self.active_dashboard();
         let sidebar_pos = self.sidebar.position();
 
@@ -775,83 +825,9 @@ impl Flowsurface {
             .into()
         };
 
-        // WealthSpring 悬浮读数（F3a 订单/PnL + F4a 订单流）：有数据时右上角叠一小框。
-        let has_data = self.ws_orders.has_summary
-            || !self.ws_orders.fills.is_empty()
-            || self.ws_flow.last_price > 0.0
-            || !self.ws_factory.pool.is_empty()
-            || self.ws_signals.is_some();
-        let content = if id == self.main_window.id && has_data {
-            let o = &self.ws_orders;
-            let f = &self.ws_flow;
-            let fac = &self.ws_factory;
-            let fac_top = fac
-                .pool
-                .first()
-                .map(|m| format!("顶 w{:+.3} ic{:.1}", m.weight, m.ic_t))
-                .unwrap_or_default();
-            let mode = self.ws_active.as_ref().map(|a| a.mode.as_str()).unwrap_or("watch");
-            let pnl = match o.unrealized {
-                Some(u) => format!("已实现 {:+.2}  浮动 {:+.2}", o.realized, u),
-                None => format!("已实现 {:+.2}", o.realized),
-            };
-            let div = match f.divergence {
-                1 => "↑看涨",
-                -1 => "↓看跌",
-                _ => "-",
-            };
-            let mut col = column![
-                text(format!("WS {mode} [{}]", o.run_id)).size(12),
-                text(format!("持仓 {} {:.3} @ {:.2}", o.pos_side, o.net_qty, o.avg_px)).size(12),
-                text(pnl).size(12),
-                text(format!("成交 {} 买{}/卖{}", o.fills.len(), o.n_buy, o.n_sell)).size(12),
-                text(format!("流 CVD {:+.3}  imb {:+.2}  背离 {}", f.cvd, f.imbalance, div))
-                    .size(12),
-                text(format!("盘口 {:+.2}  spr {:.1}", f.book_imb, f.spread)).size(12),
-                text(format!(
-                    "吸收 b{:.2}/a{:.2}  撤 b{:.2}/a{:.2}",
-                    f.absorbed_bid, f.absorbed_ask, f.pulled_bid, f.pulled_ask
-                ))
-                .size(12),
-                text(format!("工厂 池{}/{}  {}", fac.n_pool, fac.alphas, fac_top)).size(12),
-            ]
-            .spacing(2);
-            // F4b–d 精确版：引擎信号（全档 L2 重建 + 成交归因）—— 吸收/撤补/冰山本场累计。
-            if let Some(s) = &self.ws_signals {
-                col = col.push(
-                    text(format!(
-                        "引擎 吸收 b{:.2}/a{:.2}  撤补 b{:.2}/a{:.2}  冰山 b{:.2}/a{:.2}",
-                        s.sess_traded_bid,
-                        s.sess_traded_ask,
-                        s.sess_pulled_bid,
-                        s.sess_pulled_ask,
-                        s.iceberg_bid,
-                        s.iceberg_ask
-                    ))
-                    .size(12),
-                );
-                // F4c：现役池 combo 实时加权值 + 覆盖数（已就绪 alpha / 池总数）。
-                if s.n_pool > 0 {
-                    col = col.push(
-                        text(format!(
-                            "combo {:+.4}  覆盖 {}/{}",
-                            s.combo, s.n_combo, s.n_pool
-                        ))
-                        .size(12),
-                    );
-                }
-            }
-            let panel = container(col).padding(8).style(style::modal_container);
-            let floating = container(panel)
-                .width(iced::Length::Fill)
-                .height(iced::Length::Fill)
-                .align_x(iced::alignment::Horizontal::Right)
-                .align_y(iced::alignment::Vertical::Top)
-                .padding(12);
-            iced::widget::stack![content, floating].into()
-        } else {
-            content
-        };
+        // WealthSpring 读数已迁为原生 dockable pane（`Content::WealthSpring`，docs/08 F6）：
+        // 数据每帧由本函数顶部 `ws::readout::publish` 旁路给 pane 渲染（ws/view.rs）。
+        // 旧的 App 级右上角悬浮框已移除——同等信息在停靠面板里，排版更专业、可拆分/持久化。
 
         toast::Manager::new(
             content,
