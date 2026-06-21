@@ -193,6 +193,10 @@ impl From<&pane::State> for data::Pane {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
             },
+            pane::Content::BacktestResult => data::Pane::BacktestResult {
+                settings: pane.settings.clone(),
+                link_group: pane.link_group,
+            },
         }
     }
 }
@@ -344,6 +348,15 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             link_group,
         } => Configuration::Pane(pane::State::from_config(
             pane::Content::Recorder(crate::ws::recorder::RecorderPaneState::load()),
+            vec![],
+            settings,
+            link_group,
+        )),
+        data::Pane::BacktestResult {
+            settings,
+            link_group,
+        } => Configuration::Pane(pane::State::from_config(
+            pane::Content::BacktestResult,
             vec![],
             settings,
             link_group,

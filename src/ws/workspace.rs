@@ -50,9 +50,9 @@ fn pane_template(name: &str) -> &'static str {
         "实盘" => {
             r#"{"Split":{"axis":"Vertical","ratio":0.62,"a":{"ShaderHeatmap":{"studies":[{"VolumeProfile":"VisibleRange"}],"stream_type":[{"Depth":{"ticker":"BinanceLinear:BTCUSDT","depth_aggr":"Client","push_freq":"ServerDefault"}},{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":5,"visual_config":null,"selected_basis":{"Time":"MS100"}},"indicators":["Volume"],"link_group":null}},"b":{"WealthSpring":{"mode":"Live","settings":{},"link_group":null}}}}"#
         }
-        // 回测：M1 K 线（回测态由 replay 喂）∣ WealthSpring(Backtest)。
+        // 回测：M1 K 线（回测态由 replay 喂）∣ 回测结果（收益曲线/回撤/统计）。
         "回测" => {
-            r#"{"Split":{"axis":"Vertical","ratio":0.62,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"WealthSpring":{"mode":"Backtest","settings":{},"link_group":null}}}}"#
+            r#"{"Split":{"axis":"Vertical","ratio":0.58,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}"#
         }
         // Alpha Factory 仪表盘（docs/08 F6-P2）。
         "Alpha Factory" => r#"{"Factory":{"settings":{},"link_group":null}}"#,

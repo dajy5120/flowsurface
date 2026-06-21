@@ -107,6 +107,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    BacktestResult {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
 }
 
 impl Default for Pane {
@@ -231,6 +237,8 @@ pub enum ContentKind {
     Factory,
     /// 录制驾驶舱（docs/08 F6-P3）：24/7 守护录制控制中心（服务启停 + 配置 + 实况 + 总览）。
     Recorder,
+    /// 回测结果（docs/08 F6-P7）：收益曲线 / 回撤 / 各维度统计（读回测导出的 result.json）。
+    BacktestResult,
 }
 
 /// WealthSpring pane 的三态过滤（docs/08 F6 方案 2「真隔离」）：
@@ -248,7 +256,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 11] = [
+    pub const ALL: [ContentKind; 12] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -260,6 +268,7 @@ impl ContentKind {
         ContentKind::WealthSpring,
         ContentKind::Factory,
         ContentKind::Recorder,
+        ContentKind::BacktestResult,
     ];
 }
 
@@ -277,6 +286,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::WealthSpring => "WealthSpring",
             ContentKind::Factory => "Alpha Factory",
             ContentKind::Recorder => "数据录制",
+            ContentKind::BacktestResult => "回测结果",
         };
         write!(f, "{s}")
     }
@@ -348,7 +358,8 @@ impl PaneSetup {
                 | ContentKind::TimeAndSales
                 | ContentKind::WealthSpring
                 | ContentKind::Factory
-                | ContentKind::Recorder => None,
+                | ContentKind::Recorder
+                | ContentKind::BacktestResult => None,
             };
 
         let tick_multiplier = match content_kind {
@@ -373,6 +384,7 @@ impl PaneSetup {
             | ContentKind::WealthSpring
             | ContentKind::Factory
             | ContentKind::Recorder
+            | ContentKind::BacktestResult
             | ContentKind::Starter => current_tick_multiplier,
         };
 

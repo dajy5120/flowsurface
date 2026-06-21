@@ -407,6 +407,7 @@ impl State {
                 ContentKind::Recorder => {
                     (Content::Recorder(crate::ws::recorder::RecorderPaneState::load()), vec![])
                 }
+                ContentKind::BacktestResult => (Content::BacktestResult, vec![]),
                 ContentKind::Starter => unreachable!(),
             }
         };
@@ -574,7 +575,11 @@ impl State {
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
         } else if !matches!(
             self.content,
-            Content::Starter | Content::WealthSpring(_) | Content::Factory | Content::Recorder(_)
+            Content::Starter
+                | Content::WealthSpring(_)
+                | Content::Factory
+                | Content::Recorder(_)
+                | Content::BacktestResult
         ) && !self.has_stream()
         {
             let content = row![
@@ -699,6 +704,19 @@ impl State {
                 // 录制驾驶舱（docs/08 F6-P3）：交互视图发 RecorderMsg → 包成 pane 事件。
                 let base = crate::ws::recorder_view::pane_body(rec)
                     .map(move |m| Message::PaneEvent(id, Event::RecorderInteraction(m)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::BacktestResult => {
+                // 回测结果（docs/08 F6-P7）：渲染走 ws::backtest_readout 旁路快照。
+                let base = crate::ws::backtest_view::pane_body();
                 self.compose_stack_view(
                     base,
                     id,
@@ -1802,7 +1820,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::Recorder(_) => None,
+            Content::WealthSpring(_) | Content::Factory | Content::Recorder(_) | Content::BacktestResult => None,
         }
     }
 
@@ -1826,7 +1844,10 @@ impl State {
             Content::Ladder(_) | Content::TimeAndSales(_) => Some(100),
             Content::ShaderHeatmap { .. } => None,
             Content::Starter => None,
-            Content::WealthSpring(_) | Content::Factory | Content::Recorder(_) => None,
+            Content::WealthSpring(_)
+            | Content::Factory
+            | Content::Recorder(_)
+            | Content::BacktestResult => None,
         }
     }
 
@@ -1919,6 +1940,8 @@ pub enum Content {
     Factory,
     /// 录制驾驶舱（docs/08 F6-P3）：交互式控制中心，携带可编辑配置状态。
     Recorder(crate::ws::recorder::RecorderPaneState),
+    /// 回测结果（docs/08 F6-P7）：收益曲线/回撤/统计，渲染走 `ws::backtest_readout` 旁路快照。
+    BacktestResult,
 }
 
 impl Content {
@@ -2131,6 +2154,7 @@ impl Content {
             ContentKind::Recorder => {
                 Content::Recorder(crate::ws::recorder::RecorderPaneState::load())
             }
+            ContentKind::BacktestResult => Content::BacktestResult,
         }
     }
 
@@ -2143,7 +2167,10 @@ impl Content {
             Content::Comparison(chart) => Some(chart.as_ref()?.last_update()),
             Content::Starter => None,
             Content::ShaderHeatmap { chart, .. } => Some(chart.as_ref()?.last_tick?),
-            Content::WealthSpring(_) | Content::Factory | Content::Recorder(_) => None,
+            Content::WealthSpring(_)
+            | Content::Factory
+            | Content::Recorder(_)
+            | Content::BacktestResult => None,
         }
     }
 
@@ -2222,6 +2249,7 @@ impl Content {
             | Content::WealthSpring(_)
             | Content::Factory
             | Content::Recorder(_)
+            | Content::BacktestResult
             | Content::ShaderHeatmap { .. } => {
                 panic!("indicator reorder on {} pane", self)
             }
@@ -2271,6 +2299,7 @@ impl Content {
             | Content::WealthSpring(_)
             | Content::Factory
             | Content::Recorder(_)
+            | Content::BacktestResult
             | Content::Comparison(_) => None,
         }
     }
@@ -2336,6 +2365,7 @@ impl Content {
             Content::WealthSpring(_) => ContentKind::WealthSpring,
             Content::Factory => ContentKind::Factory,
             Content::Recorder(_) => ContentKind::Recorder,
+            Content::BacktestResult => ContentKind::BacktestResult,
         }
     }
 
@@ -2354,7 +2384,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::Recorder(_) => true,
+            Content::WealthSpring(_) | Content::Factory | Content::Recorder(_) | Content::BacktestResult => true,
         }
     }
 }

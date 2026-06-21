@@ -7,6 +7,8 @@
 #![allow(dead_code)] // F1 先落读取层；replay 订阅 / 三态接线见后续阶段
 
 pub mod active_run;
+pub mod backtest_readout;
+pub mod backtest_view;
 pub mod bt_trades;
 pub mod factory;
 pub mod factory_readout;
