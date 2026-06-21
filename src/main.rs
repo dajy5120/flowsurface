@@ -885,18 +885,24 @@ impl Flowsurface {
         let window_events = window::events().map(Message::WindowEvent);
         let sidebar = self.sidebar.subscription().map(Message::Sidebar);
 
-        // WealthSpring 三态（docs/08 F2）：回测态只走回测 replay（抑制 live，不混流）；
-        // 其余态（实时看盘/实盘）走 FS 原生实时，replay 关闭。
-        let backtest = self.ws_active.as_ref().map(|a| a.mode == "backtest").unwrap_or(false);
+        // WealthSpring 工作区级数据隔离（docs/08 F6-P4）：图表数据源跟随**活动工作区**，
+        // 不再跟全局三态——「回测」工作区只走回测 replay（replay 自身已按 active_run mode=backtest
+        // 自门控：无回测运行时空闲，绝不混入实时），其余工作区（官方/实盘…）只走 FS 原生实时。
+        // 故即便后台正跑回测，「实盘」工作区图表仍是实时；切到「回测」才看回测行情。
+        let active_ws_backtest = self
+            .layout_manager
+            .active_layout_id()
+            .map(|l| l.name == ws::workspace::WS_BACKTEST)
+            .unwrap_or(false);
         let ws_redis_url = std::env::var("WS_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
-        let exchange_streams = if backtest {
+        let exchange_streams = if active_ws_backtest {
             Subscription::none()
         } else {
             self.active_dashboard().market_subscriptions(&self.handles).map(Message::MarketWsEvent)
         };
-        let ws_replay_streams = if backtest {
+        let ws_replay_streams = if active_ws_backtest {
             self.active_dashboard()
                 .ws_replay_subscriptions(ws_redis_url.clone())
                 .map(Message::MarketWsEvent)

@@ -18,7 +18,12 @@ use crate::modal::layout_manager::LayoutManager;
 use crate::screen::dashboard::Dashboard;
 
 /// 5 个工作区的固定名字（侧边栏顺序）。
-pub const WORKSPACES: [&str; 5] = ["官方原生", "实盘", "回测", "数据录制", "Alpha Factory"];
+pub const WS_OFFICIAL: &str = "官方原生";
+pub const WS_LIVE: &str = "实盘";
+pub const WS_BACKTEST: &str = "回测";
+pub const WS_RECORDER: &str = "数据录制";
+pub const WS_FACTORY: &str = "Alpha Factory";
+pub const WORKSPACES: [&str; 5] = [WS_OFFICIAL, WS_LIVE, WS_BACKTEST, WS_RECORDER, WS_FACTORY];
 
 /// 工作区在侧边栏的图标（合并进 FS 原生侧边栏，docs/08 F6 — P1）。
 pub fn icon(name: &str) -> crate::style::Icon {
