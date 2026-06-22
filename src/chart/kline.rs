@@ -1084,6 +1084,9 @@ impl canvas::Program<Message> for KlineChart {
                 );
             }
 
+            // §11.1：当前仓位线（avg_px 处）+ 费后 PnL 读数（读 ws::orders 旁路）。
+            draw_ws_position_line(frame, price_to_y, region, chart.scaling, palette);
+
             chart.draw_last_price_line(frame, palette, region);
         });
 
@@ -1365,6 +1368,72 @@ fn draw_ws_combo_overlay(
         position: Point::new(region.x + 4.0 / scaling, top - 2.0 / scaling),
         size: iced::Pixels(11.0 / scaling),
         color: lc,
+        font: style::AZERET_MONO,
+        ..canvas::Text::default()
+    });
+}
+
+/// §11.1：当前仓位/费后 PnL 叠加主图。在 avg_px 处画持仓线（多绿空红），左上贴两行读数：
+/// ①「SIDE qty @ avg」②「u±未实现 r±已实现」（按总 PnL 符号着色，均为费后值）。
+/// 数据来自进程级旁路 `ws::orders::chart_position_snapshot()`；FLAT/空仓不画。
+fn draw_ws_position_line(
+    frame: &mut canvas::Frame,
+    price_to_y: impl Fn(Price) -> f32,
+    region: Rectangle,
+    scaling: f32,
+    palette: &Extended,
+) {
+    if scaling <= f32::EPSILON {
+        return;
+    }
+    let pos = crate::ws::orders::chart_position_snapshot();
+    if pos.side == "FLAT" || pos.net_qty.abs() < 1e-12 || pos.avg_px <= 0.0 {
+        return;
+    }
+    let long = pos.net_qty > 0.0;
+    let col = if long {
+        palette.success.strong.color
+    } else {
+        palette.danger.strong.color
+    };
+    let y = price_to_y(Price::from_f32(pos.avg_px as f32));
+    // 持仓线（avg_px 处，整宽）
+    frame.stroke(
+        &Path::line(
+            Point::new(region.x, y),
+            Point::new(region.x + region.width, y),
+        ),
+        Stroke::default()
+            .with_width(1.2 / scaling)
+            .with_color(col.scale_alpha(0.85)),
+    );
+    // 读数行 1：方向 + 数量 + 均价
+    let x0 = region.x + 4.0 / scaling;
+    frame.fill_text(canvas::Text {
+        content: format!("{} {:.4} @ {:.1}", pos.side, pos.net_qty.abs(), pos.avg_px),
+        position: Point::new(x0, y - 24.0 / scaling),
+        size: iced::Pixels(11.0 / scaling),
+        color: col,
+        font: style::AZERET_MONO,
+        ..canvas::Text::default()
+    });
+    // 读数行 2：费后 PnL（未实现盯市 + 已实现），按总额符号着色
+    let upnl = pos.unrealized.unwrap_or(0.0);
+    let total = upnl + pos.realized;
+    let pcol = if total >= 0.0 {
+        palette.success.strong.color
+    } else {
+        palette.danger.strong.color
+    };
+    let utxt = match pos.unrealized {
+        Some(v) => format!("u{v:+.2}"),
+        None => "u—".to_string(),
+    };
+    frame.fill_text(canvas::Text {
+        content: format!("{utxt}  r{:+.2}", pos.realized),
+        position: Point::new(x0, y - 12.0 / scaling),
+        size: iced::Pixels(11.0 / scaling),
+        color: pcol,
         font: style::AZERET_MONO,
         ..canvas::Text::default()
     });

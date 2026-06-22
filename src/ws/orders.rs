@@ -61,6 +61,40 @@ pub fn chart_fills_snapshot() -> Vec<Fill> {
         .unwrap_or_default()
 }
 
+/// 图上当前仓位/费后 PnL（§11.1）：在主图 avg_px 处画持仓线 + 读数。
+#[derive(Clone, Debug, Default)]
+pub struct ChartPosition {
+    pub side: String, // LONG/SHORT/FLAT
+    pub net_qty: f64,
+    pub avg_px: f64,
+    pub realized: f64,           // 费后已实现 PnL（引擎含手续费）
+    pub unrealized: Option<f64>, // 费后未实现 PnL（盯市）
+}
+
+static CHART_POSITION: OnceLock<Mutex<ChartPosition>> = OnceLock::new();
+
+/// 覆盖图上仓位读数（每次 `WsOrders` 聚合后调用）。
+pub fn publish_chart_position(st: &OrderState) {
+    let lock = CHART_POSITION.get_or_init(|| Mutex::new(ChartPosition::default()));
+    if let Ok(mut g) = lock.lock() {
+        *g = ChartPosition {
+            side: st.pos_side.clone(),
+            net_qty: st.net_qty,
+            avg_px: st.avg_px,
+            realized: st.realized,
+            unrealized: st.unrealized,
+        };
+    }
+}
+
+/// 读图上仓位快照（每帧调用）。
+pub fn chart_position_snapshot() -> ChartPosition {
+    CHART_POSITION
+        .get()
+        .and_then(|m| m.lock().ok().map(|g| g.clone()))
+        .unwrap_or_default()
+}
+
 // ── rmpv 取字段助手 ──
 fn map_get<'a>(m: &'a [(rmpv::Value, rmpv::Value)], key: &str) -> Option<&'a rmpv::Value> {
     m.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v)
