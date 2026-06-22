@@ -743,6 +743,14 @@ impl Flowsurface {
                 n_fills: o.fills.len(),
                 n_buy: o.n_buy,
                 n_sell: o.n_sell,
+                capital: if o.capital > 0.0 { o.capital } else { 10_000.0 },
+                equity: (if o.capital > 0.0 { o.capital } else { 10_000.0 }) + o.realized_net,
+                return_pct: o.realized_net
+                    / (if o.capital > 0.0 { o.capital } else { 10_000.0 })
+                    * 100.0,
+                realized_net: o.realized_net,
+                fee_total: o.fee_total,
+                trades: o.trades.clone(),
                 cvd: f.cvd,
                 imbalance: f.imbalance,
                 divergence: f.divergence,

@@ -7,6 +7,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use super::factory::PoolMember;
+use super::orders::Trade;
 
 /// 给 pane 渲染用的合并快照（镜像原悬浮框的全部字段）。
 #[derive(Clone, Default)]
@@ -24,6 +25,14 @@ pub struct Readout {
     pub n_fills: usize,
     pub n_buy: usize,
     pub n_sell: usize,
+
+    // 本金 / 权益 / 收益（F3a 扩展）
+    pub capital: f64,
+    pub equity: f64,
+    pub return_pct: f64,
+    pub realized_net: f64,
+    pub fee_total: f64,
+    pub trades: Vec<Trade>, // 逐笔订单明细（新→旧由 view 取尾部）
 
     // 订单流（F4a，flow）
     pub cvd: f64,

@@ -22,6 +22,18 @@ pub struct Fill {
     pub ts: u64,
 }
 
+/// 一笔订单明细（成交回报）：右侧面板「订单明细」表用（时间/方向/类型/金额/收益/手续费/净收益）。
+#[derive(Clone, Debug)]
+pub struct Trade {
+    pub ts: u64,
+    pub side: u8,            // 1=买 2=卖
+    pub order_type: String,  // LIMIT / MARKET …
+    pub amount: f64,         // 成交额 = px*qty（USDT）
+    pub gross: f64,          // 本笔毛收益（开仓=0）
+    pub fee: f64,            // 手续费
+    pub net: f64,            // 净收益 = gross - fee
+}
+
 /// 一笔活动挂单（resting limit order）：在主图挂单价位画线标注（§11.1）。
 #[derive(Clone, Debug)]
 pub struct WorkingOrder {
@@ -41,13 +53,18 @@ pub struct OrderState {
     pub pos_side: String, // LONG/SHORT/FLAT
     pub net_qty: f64,
     pub avg_px: f64,
-    pub realized: f64,
+    pub realized: f64,    // 累计毛收益（策略发）
     pub unrealized: Option<f64>,
     pub working: HashMap<String, WorkingOrder>, // 活动挂单（OrderAccepted 入，成交/撤单出）
     pub has_summary: bool,
+    pub trades: Vec<Trade>, // 逐笔订单明细（近窗裁剪，供面板表）
+    pub capital: f64,       // 本金（策略 capital 字段）
+    pub realized_net: f64,  // 累计净收益 = Σ(本笔毛 - 手续费)
+    pub fee_total: f64,     // 累计手续费
 }
 
 const FILL_CAP: usize = 500;
+const TRADE_CAP: usize = 200;
 
 /// 进程级图上成交标记缓存（docs/08 F3b）：main.rs 的 `WsOrders` 处理写入，
 /// kline.rs 的 canvas draw 读取，在蜡烛图上画 ▲（买）/▼（卖）。
@@ -184,6 +201,19 @@ impl OrderState {
                     let drain = self.fills.len() - FILL_CAP;
                     self.fills.drain(0..drain);
                 }
+                // 逐笔订单明细：金额/收益/手续费/净收益。
+                let fee = map_get(&m, "commission").and_then(as_f64).unwrap_or(0.0);
+                let gross = map_get(&m, "trade_pnl").and_then(as_f64).unwrap_or(0.0);
+                let order_type =
+                    map_get(&m, "order_type").and_then(as_str).unwrap_or_else(|| "—".into());
+                let net = gross - fee;
+                self.fee_total += fee;
+                self.realized_net += net;
+                self.trades.push(Trade { ts, side, order_type, amount: px * qty, gross, fee, net });
+                if self.trades.len() > TRADE_CAP {
+                    let drain = self.trades.len() - TRADE_CAP;
+                    self.trades.drain(0..drain);
+                }
             }
             // 活动挂单生命周期（§11.1 实盘订单标注）。
             "OrderAccepted" | "OrderUpdated" | "OrderInitialized" => {
@@ -206,6 +236,9 @@ impl OrderState {
             }
             "PositionOpened" | "PositionChanged" | "PositionClosed" => {
                 self.has_summary = true;
+                if let Some(c) = map_get(&m, "capital").and_then(as_f64) {
+                    self.capital = c;
+                }
                 self.pos_side = map_get(&m, "side").and_then(as_str).unwrap_or_else(|| "FLAT".into());
                 self.net_qty = map_get(&m, "signed_qty").and_then(as_f64).unwrap_or(0.0);
                 self.avg_px = map_get(&m, "avg_px_open").and_then(as_f64).unwrap_or(0.0);

@@ -8,7 +8,7 @@
 //! `M` 完全泛型，可直接塞进 FS 的 `compose_stack_view`。
 
 use iced::widget::{center, column, container, row, scrollable, text};
-use iced::{Alignment, Element, Length};
+use iced::{Alignment, Color, Element, Length};
 
 use data::layout::pane::WsPaneMode;
 
@@ -65,24 +65,43 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
 
     let mut body = column![header].spacing(10).padding(4);
 
-    // ── 持仓 / PnL（F3a）──
+    // ── 持仓 / PnL（F3a，含本金/权益/收益率）──
     {
-        let pnl = match r.unrealized {
-            Some(u) => format!("已实现 {:+.2}   浮动 {:+.2}", r.realized, u),
-            None => format!("已实现 {:+.2}", r.realized),
-        };
-        body = body.push(section(
-            "持仓 / PnL",
-            column![
-                kv("方向", format!("{} {:.3} @ {:.2}", r.pos_side, r.net_qty, r.avg_px)),
-                kv("盈亏", pnl),
-                kv(
-                    "成交",
-                    format!("{} 笔  买 {} / 卖 {}", r.n_fills, r.n_buy, r.n_sell),
-                ),
-            ]
-            .spacing(3),
-        ));
+        let mut col = column![
+            kv("方向", format!("{} {:.3} @ {:.2}", r.pos_side, r.net_qty, r.avg_px)),
+            kv("本金", format!("{:.2} USDT", r.capital)),
+            kv("权益", format!("{:.2} USDT", r.equity)),
+            kv("收益率", format!("{:+.3} %", r.return_pct)),
+            kv("累计收益", format!("毛 {:+.2}   净 {:+.2}", r.realized, r.realized_net)),
+            kv("累计手续费", format!("{:.4}", r.fee_total)),
+            kv("成交", format!("{} 笔  买 {} / 卖 {}", r.n_fills, r.n_buy, r.n_sell)),
+        ]
+        .spacing(3);
+        if let Some(u) = r.unrealized {
+            col = col.push(kv("浮动盈亏", format!("{:+.2}", u)));
+        }
+        body = body.push(section("持仓 / PnL", col));
+    }
+
+    // ── 订单明细（每笔：时间/方向/类型/金额/收益/手续费/净收益）──
+    if !r.trades.is_empty() {
+        let head = |s: &'static str, w: f32| cell(text(s).size(style::text_size::TINY), Length::Fixed(w));
+        let mut col = column![row![
+            head("时间", 62.0),
+            head("方向", 34.0),
+            head("类型", 46.0),
+            head("金额", 78.0),
+            head("收益", 64.0),
+            head("手续费", 56.0),
+            head("净收益", 64.0),
+        ]
+        .spacing(6)]
+        .spacing(2);
+        // 最新在上，取最近 18 笔。
+        for t in r.trades.iter().rev().take(18) {
+            col = col.push(trade_row(t));
+        }
+        body = body.push(section("订单明细", col));
     }
 
     // ── 订单流（F4a：cockpit 侧从逐笔/盘口算）──
@@ -238,6 +257,52 @@ fn kv<'a, M: 'a>(key: &'a str, value: String) -> Element<'a, M> {
 /// 表格单元格（固定/自适应宽）。
 fn cell<'a, M: 'a>(content: impl Into<Element<'a, M>>, width: Length) -> Element<'a, M> {
     container(content).width(width).into()
+}
+
+/// 盈亏配色：正绿、负红、零灰。
+fn pnl_color(v: f64) -> Color {
+    if v > 0.0 {
+        Color::from_rgb(0.30, 0.72, 0.47)
+    } else if v < 0.0 {
+        Color::from_rgb(0.86, 0.32, 0.34)
+    } else {
+        Color::from_rgb(0.6, 0.6, 0.6)
+    }
+}
+
+/// ms 时间戳 → 本地 HH:MM:SS。
+fn fmt_ts(ms: u64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms as i64)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
+/// 「订单明细」一行：时间/方向/类型/金额/收益/手续费/净收益。开仓行收益显「—」。
+fn trade_row<'a, M: 'a>(t: &super::orders::Trade) -> Element<'a, M> {
+    let sz = style::text_size::SMALL;
+    let mono = |s: String| text(s).size(sz).font(style::AZERET_MONO);
+    let (dir, dir_c) =
+        if t.side == 1 { ("买", pnl_color(1.0)) } else { ("卖", pnl_color(-1.0)) };
+    // 开仓（买）本笔无毛收益 → 显「—」；平仓显带符号毛收益。
+    let gross = if t.side == 1 {
+        text("—".to_string()).size(sz).font(style::AZERET_MONO)
+    } else {
+        text(format!("{:+.2}", t.gross)).size(sz).font(style::AZERET_MONO).color(pnl_color(t.gross))
+    };
+    row![
+        cell(mono(fmt_ts(t.ts)), Length::Fixed(62.0)),
+        cell(text(dir.to_string()).size(sz).color(dir_c), Length::Fixed(34.0)),
+        cell(mono(t.order_type.clone()), Length::Fixed(46.0)),
+        cell(mono(format!("{:.2}", t.amount)), Length::Fixed(78.0)),
+        cell(gross, Length::Fixed(64.0)),
+        cell(mono(format!("{:.4}", t.fee)), Length::Fixed(56.0)),
+        cell(
+            text(format!("{:+.2}", t.net)).size(sz).font(style::AZERET_MONO).color(pnl_color(t.net)),
+            Length::Fixed(64.0),
+        ),
+    ]
+    .spacing(6)
+    .into()
 }
 
 fn has_any(r: &Readout) -> bool {
