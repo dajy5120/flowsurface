@@ -22,6 +22,15 @@ pub struct Fill {
     pub ts: u64,
 }
 
+/// 一笔活动挂单（resting limit order）：在主图挂单价位画线标注（§11.1）。
+#[derive(Clone, Debug)]
+pub struct WorkingOrder {
+    pub order_id: String,
+    pub side: u8, // 1=买 2=卖
+    pub price: f64,
+    pub qty: f64,
+}
+
 /// 订单/PnL 聚合状态（cockpit 角标读数 + ▲▼ 列表）。
 #[derive(Clone, Debug, Default)]
 pub struct OrderState {
@@ -34,6 +43,7 @@ pub struct OrderState {
     pub avg_px: f64,
     pub realized: f64,
     pub unrealized: Option<f64>,
+    pub working: HashMap<String, WorkingOrder>, // 活动挂单（OrderAccepted 入，成交/撤单出）
     pub has_summary: bool,
 }
 
@@ -95,6 +105,26 @@ pub fn chart_position_snapshot() -> ChartPosition {
         .unwrap_or_default()
 }
 
+/// 图上活动挂单（§11.1）：kline 画布在挂单价位画虚线 + 标注。
+static CHART_WORKING: OnceLock<Mutex<Vec<WorkingOrder>>> = OnceLock::new();
+
+/// 覆盖图上活动挂单（每次 `WsOrders` 聚合后调用）。
+pub fn publish_chart_working(working: &HashMap<String, WorkingOrder>) {
+    let lock = CHART_WORKING.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(mut g) = lock.lock() {
+        g.clear();
+        g.extend(working.values().cloned());
+    }
+}
+
+/// 读图上活动挂单快照（每帧调用，挂单数极少）。
+pub fn chart_working_snapshot() -> Vec<WorkingOrder> {
+    CHART_WORKING
+        .get()
+        .and_then(|m| m.lock().ok().map(|g| g.clone()))
+        .unwrap_or_default()
+}
+
 // ── rmpv 取字段助手 ──
 fn map_get<'a>(m: &'a [(rmpv::Value, rmpv::Value)], key: &str) -> Option<&'a rmpv::Value> {
     m.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v)
@@ -108,6 +138,25 @@ fn as_f64(v: &rmpv::Value) -> Option<f64> {
 fn as_str(v: &rmpv::Value) -> Option<String> {
     v.as_str().map(|s| s.to_string())
 }
+/// 买卖方向码：1=买 2=卖 0=未知（兼容 order_side / side 两种字段名）。
+fn side_code(m: &[(rmpv::Value, rmpv::Value)]) -> u8 {
+    match map_get(m, "order_side")
+        .or_else(|| map_get(m, "side"))
+        .and_then(as_str)
+        .as_deref()
+    {
+        Some("BUY") => 1,
+        Some("SELL") => 2,
+        _ => 0,
+    }
+}
+/// 订单标识（兼容 order_id / client_order_id）。
+fn order_id(m: &[(rmpv::Value, rmpv::Value)]) -> Option<String> {
+    map_get(m, "order_id")
+        .or_else(|| map_get(m, "client_order_id"))
+        .and_then(as_str)
+        .filter(|s| !s.is_empty())
+}
 
 impl OrderState {
     /// 把一条解码后的 msgpack 事件并入状态。
@@ -117,11 +166,7 @@ impl OrderState {
         let typ = map_get(&m, "type").and_then(as_str).unwrap_or_default();
         match typ.as_str() {
             "OrderFilled" => {
-                let side = match map_get(&m, "order_side").and_then(as_str).as_deref() {
-                    Some("BUY") => 1,
-                    Some("SELL") => 2,
-                    _ => 0,
-                };
+                let side = side_code(&m);
                 let px = map_get(&m, "last_px").and_then(as_f64).unwrap_or(0.0);
                 let qty = map_get(&m, "last_qty").and_then(as_f64).unwrap_or(0.0);
                 let ts = map_get(&m, "ts_event").and_then(as_f64).unwrap_or(0.0) as u64 / 1_000_000;
@@ -130,10 +175,33 @@ impl OrderState {
                 } else if side == 2 {
                     self.n_sell += 1;
                 }
+                // 成交即离场：清掉对应活动挂单（若带 order_id）。
+                if let Some(oid) = order_id(&m) {
+                    self.working.remove(&oid);
+                }
                 self.fills.push(Fill { side, px, qty, ts });
                 if self.fills.len() > FILL_CAP {
                     let drain = self.fills.len() - FILL_CAP;
                     self.fills.drain(0..drain);
+                }
+            }
+            // 活动挂单生命周期（§11.1 实盘订单标注）。
+            "OrderAccepted" | "OrderUpdated" | "OrderInitialized" => {
+                let price = map_get(&m, "price").and_then(as_f64).unwrap_or(0.0);
+                let qty = map_get(&m, "quantity")
+                    .or_else(|| map_get(&m, "qty"))
+                    .and_then(as_f64)
+                    .unwrap_or(0.0);
+                if let (Some(oid), true) = (order_id(&m), price > 0.0) {
+                    self.working.insert(
+                        oid.clone(),
+                        WorkingOrder { order_id: oid, side: side_code(&m), price, qty },
+                    );
+                }
+            }
+            "OrderCanceled" | "OrderRejected" | "OrderExpired" | "OrderDenied" => {
+                if let Some(oid) = order_id(&m) {
+                    self.working.remove(&oid);
                 }
             }
             "PositionOpened" | "PositionChanged" | "PositionClosed" => {
@@ -256,4 +324,72 @@ pub fn subscription(redis_url: String) -> iced::Subscription<OrderState> {
             },
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 把 (key,val) 串编码成 apply() 所需的 msgpack payload。
+    fn ev(pairs: &[(&str, &str)]) -> Vec<u8> {
+        let m = rmpv::Value::Map(
+            pairs
+                .iter()
+                .map(|(k, v)| (rmpv::Value::from(*k), rmpv::Value::from(*v)))
+                .collect(),
+        );
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &m).unwrap();
+        buf
+    }
+
+    #[test]
+    fn working_order_accept_then_fill_clears() {
+        let mut st = OrderState::default();
+        st.apply(&ev(&[
+            ("type", "OrderAccepted"), ("order_id", "o1"),
+            ("order_side", "BUY"), ("price", "64000.0"), ("quantity", "0.010"),
+        ]));
+        assert_eq!(st.working.len(), 1);
+        let w = &st.working["o1"];
+        assert_eq!(w.side, 1);
+        assert_eq!(w.price, 64000.0);
+        // 成交（带 order_id）→ 挂单清除 + 成交入列
+        st.apply(&ev(&[
+            ("type", "OrderFilled"), ("order_id", "o1"),
+            ("order_side", "BUY"), ("last_px", "64000.0"), ("last_qty", "0.010"),
+        ]));
+        assert!(st.working.is_empty(), "成交后挂单应清除");
+        assert_eq!(st.fills.len(), 1);
+    }
+
+    #[test]
+    fn working_order_cancel_clears() {
+        let mut st = OrderState::default();
+        st.apply(&ev(&[
+            ("type", "OrderAccepted"), ("order_id", "o2"),
+            ("order_side", "SELL"), ("price", "65000.0"), ("quantity", "0.010"),
+        ]));
+        assert_eq!(st.working["o2"].side, 2);
+        st.apply(&ev(&[("type", "OrderCanceled"), ("order_id", "o2")]));
+        assert!(st.working.is_empty(), "撤单后挂单应清除");
+    }
+
+    #[test]
+    fn working_order_chase_replaces() {
+        // limit-chase：撤旧挂新（不同 oid）→ 只剩新挂单
+        let mut st = OrderState::default();
+        st.apply(&ev(&[
+            ("type", "OrderAccepted"), ("order_id", "old"),
+            ("order_side", "BUY"), ("price", "63990.0"), ("quantity", "0.010"),
+        ]));
+        st.apply(&ev(&[("type", "OrderCanceled"), ("order_id", "old")]));
+        st.apply(&ev(&[
+            ("type", "OrderAccepted"), ("order_id", "new"),
+            ("order_side", "BUY"), ("price", "63999.0"), ("quantity", "0.010"),
+        ]));
+        assert_eq!(st.working.len(), 1);
+        assert!(st.working.contains_key("new"));
+        assert_eq!(st.working["new"].price, 63999.0);
+    }
 }

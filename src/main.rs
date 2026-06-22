@@ -228,6 +228,7 @@ impl Flowsurface {
             Message::WsOrders(st) => {
                 ws::orders::publish_chart_fills(&st.fills); // F3b：图上 ▲▼ 标记旁路给 kline 画布
                 ws::orders::publish_chart_position(&st); // §11.1：图上持仓线 + 费后 PnL 读数
+                ws::orders::publish_chart_working(&st.working); // §11.1：图上活动挂单线标注
                 self.ws_orders = st; // 订单/PnL 聚合（view() 叠加显示）
                 return Task::none();
             }

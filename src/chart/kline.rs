@@ -20,7 +20,7 @@ use exchange::{Kline, OpenInterest as OIData, TickerInfo, Trade, UnixMs};
 
 use iced::task::Handle;
 use iced::theme::palette::Extended;
-use iced::widget::canvas::{self, Event, Geometry, Path, Stroke};
+use iced::widget::canvas::{self, Event, Geometry, LineDash, Path, Stroke};
 use iced::{Alignment, Element, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
 
 use enum_map::EnumMap;
@@ -1087,6 +1087,9 @@ impl canvas::Program<Message> for KlineChart {
             // §11.1：当前仓位线（avg_px 处）+ 费后 PnL 读数（读 ws::orders 旁路）。
             draw_ws_position_line(frame, price_to_y, region, chart.scaling, palette);
 
+            // §11.1：活动挂单（resting limit）虚线标注（读 ws::orders 旁路）。
+            draw_ws_working_orders(frame, price_to_y, region, chart.scaling, palette);
+
             chart.draw_last_price_line(frame, palette, region);
         });
 
@@ -1437,6 +1440,61 @@ fn draw_ws_position_line(
         font: style::AZERET_MONO,
         ..canvas::Text::default()
     });
+}
+
+/// §11.1：活动挂单（resting limit order）标注。在挂单价处画**虚线**（买绿卖红、半透，
+/// 以区别于实线持仓线/last-price 线）+ 右端「LMT SIDE qty」小标。空挂单不画。
+/// 数据来自进程级旁路 `ws::orders::chart_working_snapshot()`。
+fn draw_ws_working_orders(
+    frame: &mut canvas::Frame,
+    price_to_y: impl Fn(Price) -> f32,
+    region: Rectangle,
+    scaling: f32,
+    palette: &Extended,
+) {
+    if scaling <= f32::EPSILON {
+        return;
+    }
+    let orders = crate::ws::orders::chart_working_snapshot();
+    for o in &orders {
+        if o.price <= 0.0 {
+            continue;
+        }
+        let y = price_to_y(Price::from_f32(o.price as f32));
+        let buy = o.side == 1;
+        let col = if buy {
+            palette.success.base.color
+        } else {
+            palette.danger.base.color
+        };
+        let dashed = Stroke::with_color(
+            Stroke {
+                width: 1.0 / scaling,
+                line_dash: LineDash {
+                    segments: &[4.0, 4.0],
+                    offset: 0,
+                },
+                ..Default::default()
+            },
+            col.scale_alpha(0.7),
+        );
+        frame.stroke(
+            &Path::line(
+                Point::new(region.x, y),
+                Point::new(region.x + region.width, y),
+            ),
+            dashed,
+        );
+        let side = if buy { "BUY" } else { "SELL" };
+        frame.fill_text(canvas::Text {
+            content: format!("LMT {side} {:.4} @ {:.1}", o.qty, o.price),
+            position: Point::new(region.x + 4.0 / scaling, y - 12.0 / scaling),
+            size: iced::Pixels(10.0 / scaling),
+            color: col,
+            font: style::AZERET_MONO,
+            ..canvas::Text::default()
+        });
+    }
 }
 
 fn render_data_source<F>(
