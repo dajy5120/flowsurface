@@ -66,6 +66,17 @@ pub struct LakeRow {
     pub sig_frames: i64,
 }
 
+/// nightly 实时进度（读 Redis 流 `factory:progress`，nightly.py 发布）。
+/// 报告 md 只在 run **结束后**落盘；本结构给出运行**中**的逐步进度。
+#[derive(Default, Clone)]
+pub struct NightlyLive {
+    pub seen: bool,        // 流里有任何数据
+    pub running: bool,     // 已 start、未 finish
+    pub date: String,      // 最新一轮 run 的日期
+    pub header: String,    // 人读汇总行（运行中 / ✅ 完成 / ❌ 停机于 X）
+    pub steps: Vec<(String, i64, f64)>, // 最近若干步 (step, rc, secs)，oldest→newest
+}
+
 #[derive(Default, Clone)]
 pub struct FactoryReadout {
     pub db_ok: bool,
@@ -83,6 +94,7 @@ pub struct FactoryReadout {
     pub lake: Vec<LakeRow>,
     pub nightly_title: String,
     pub nightly_lines: Vec<String>,
+    pub nightly_live: NightlyLive,
     pub refreshed: String,
     pub started: bool,
 }
@@ -135,6 +147,7 @@ fn poll_once() -> FactoryReadout {
         Err(_) => {
             scan_lake(&mut st);
             read_nightly(&mut st);
+            read_progress(&mut st);
             return st;
         }
     };
@@ -265,8 +278,104 @@ fn poll_once() -> FactoryReadout {
 
     scan_lake(&mut st);
     read_nightly(&mut st);
+    read_progress(&mut st);
     st
 }
+
+fn redis_url() -> String {
+    std::env::var("WS_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+}
+
+/// 读 Redis 流 `factory:progress` 末尾若干条 → 重建最新一轮 nightly 的实时进度。
+/// Redis 不可用/流为空时静默跳过（保持 `seen=false`，面板回落到 md 报告）。
+fn read_progress(st: &mut FactoryReadout) {
+    use redis::Commands;
+    use redis::streams::StreamRangeReply;
+
+    let Ok(client) = redis::Client::open(redis_url()) else {
+        return;
+    };
+    let Ok(mut conn) = client.get_connection() else {
+        return;
+    };
+    // newest→oldest 取末尾 80 条（够覆盖单轮 13~40 步 + start/finish）
+    let reply: StreamRangeReply =
+        match conn.xrevrange_count("factory:progress", "+", "-", 80) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+    // 把 reply 摊平成 newest→oldest 的 (字段→值) 列表，再交给纯函数解析（可单测）。
+    let events: Vec<std::collections::HashMap<String, String>> = reply
+        .ids
+        .iter()
+        .map(|id| {
+            id.map
+                .keys()
+                .filter_map(|k| id.get::<String>(k).map(|v| (k.clone(), v)))
+                .collect()
+        })
+        .collect();
+    if let Some(live) = build_live(&events) {
+        st.nightly_live = live;
+    }
+}
+
+/// 从 `factory:progress` 事件（newest→oldest）重建最新一轮 nightly 进度。无数据返回 None。
+fn build_live(events: &[std::collections::HashMap<String, String>]) -> Option<NightlyLive> {
+    let g = |e: &std::collections::HashMap<String, String>, k: &str| -> String {
+        e.get(k).cloned().unwrap_or_default()
+    };
+    // 最新一轮的日期 = 最新一条带 date 字段的事件
+    let date = events.iter().find_map(|e| {
+        let d = g(e, "date");
+        (!d.is_empty()).then_some(d)
+    })?;
+
+    let mut live = NightlyLive { seen: true, date: date.clone(), ..Default::default() };
+    let mut finish: Option<(i64, i64, String, f64)> = None; // done,total,failed_at,secs
+    let mut started = false;
+    for e in events {
+        if g(e, "date") != date {
+            continue; // 只看最新一轮
+        }
+        match g(e, "kind").as_str() {
+            "finish" if finish.is_none() => {
+                finish = Some((
+                    g(e, "done").parse().unwrap_or(0),
+                    g(e, "total").parse().unwrap_or(0),
+                    g(e, "failed_at"),
+                    g(e, "secs").parse().unwrap_or(0.0),
+                ));
+            }
+            "start" => started = true,
+            "step" if live.steps.len() < 14 => {
+                live.steps.push((
+                    g(e, "step"),
+                    g(e, "rc").parse().unwrap_or(0),
+                    g(e, "secs").parse().unwrap_or(0.0),
+                ));
+            }
+            _ => {}
+        }
+    }
+    live.steps.reverse(); // newest-first 收集 → 翻回 oldest→newest 顺读
+
+    if let Some((done, total, failed_at, secs)) = finish {
+        live.running = false;
+        live.header = if failed_at.is_empty() {
+            format!("✅ 完成 {done}/{total} · {secs:.0}s")
+        } else {
+            format!("❌ 停机于 {failed_at}（{done}/{total} · {secs:.0}s）")
+        };
+    } else {
+        live.running = started || !live.steps.is_empty();
+        let n = live.steps.len();
+        let tot: f64 = live.steps.iter().map(|s| s.2).sum();
+        live.header = format!("🟢 运行中 · 已 {n} 步 · {tot:.0}s");
+    }
+    Some(live)
+}
+
 
 fn q_i64(c: &rusqlite::Connection, sql: &str) -> i64 {
     c.query_row(sql, [], |r| r.get(0)).unwrap_or(0)
@@ -363,4 +472,89 @@ fn read_nightly(st: &mut FactoryReadout) {
 
 pub fn db_path_display() -> String {
     db_path().display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn ev(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn empty_stream_yields_none() {
+        assert!(build_live(&[]).is_none());
+    }
+
+    #[test]
+    fn running_run_reports_progress() {
+        // newest→oldest：labels, features, record-check, start
+        let events = vec![
+            ev(&[("kind", "step"), ("date", "2026-06-22"), ("step", "labels:BTCUSDT"), ("rc", "0"), ("secs", "1.2")]),
+            ev(&[("kind", "step"), ("date", "2026-06-22"), ("step", "features:BTCUSDT"), ("rc", "0"), ("secs", "5.4")]),
+            ev(&[("kind", "step"), ("date", "2026-06-22"), ("step", "record-check"), ("rc", "0"), ("secs", "2.1")]),
+            ev(&[("kind", "start"), ("date", "2026-06-22")]),
+        ];
+        let live = build_live(&events).unwrap();
+        assert!(live.running);
+        assert_eq!(live.date, "2026-06-22");
+        assert_eq!(live.steps.len(), 3);
+        assert_eq!(live.steps[0].0, "record-check"); // oldest→newest
+        assert_eq!(live.steps[2].0, "labels:BTCUSDT");
+        assert!(live.header.contains("运行中"));
+    }
+
+    #[test]
+    fn finished_run_reports_done() {
+        let events = vec![
+            ev(&[("kind", "finish"), ("date", "2026-06-22"), ("done", "13"), ("total", "13"), ("failed_at", ""), ("secs", "240")]),
+            ev(&[("kind", "step"), ("date", "2026-06-22"), ("step", "stage-b:BTCUSDT"), ("rc", "0"), ("secs", "30")]),
+            ev(&[("kind", "start"), ("date", "2026-06-22")]),
+        ];
+        let live = build_live(&events).unwrap();
+        assert!(!live.running);
+        assert!(live.header.starts_with("✅ 完成 13/13"));
+    }
+
+    #[test]
+    fn failed_run_reports_halt() {
+        let events = vec![
+            ev(&[("kind", "finish"), ("date", "2026-06-22"), ("done", "2"), ("total", "3"), ("failed_at", "labels:BTCUSDT"), ("secs", "9")]),
+            ev(&[("kind", "step"), ("date", "2026-06-22"), ("step", "labels:BTCUSDT"), ("rc", "1"), ("secs", "0.3")]),
+        ];
+        let live = build_live(&events).unwrap();
+        assert!(!live.running);
+        assert!(live.header.starts_with("❌ 停机于 labels:BTCUSDT"));
+    }
+
+    /// 真机集成（需 WS_REDIS_URL 指向活的 redis，流里已有 nightly.py 发的事件）：
+    /// `cargo test --bin flowsurface reads_live_stream -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn reads_live_stream() {
+        let mut st = FactoryReadout::default();
+        read_progress(&mut st);
+        let lv = &st.nightly_live;
+        eprintln!("seen={} running={} date={} header={}", lv.seen, lv.running, lv.date, lv.header);
+        for s in &lv.steps {
+            eprintln!("  {} rc={} {}s", s.0, s.1, s.2);
+        }
+        assert!(lv.seen, "应从 factory:progress 流读到事件");
+    }
+
+    #[test]
+    fn only_latest_run_is_shown() {
+        // 流里同时有 06-21（旧、已完成）与 06-22（新、运行中）→ 只取 06-22
+        let events = vec![
+            ev(&[("kind", "step"), ("date", "2026-06-22"), ("step", "record-check"), ("rc", "0"), ("secs", "2")]),
+            ev(&[("kind", "start"), ("date", "2026-06-22")]),
+            ev(&[("kind", "finish"), ("date", "2026-06-21"), ("done", "13"), ("total", "13"), ("failed_at", ""), ("secs", "200")]),
+        ];
+        let live = build_live(&events).unwrap();
+        assert_eq!(live.date, "2026-06-22");
+        assert!(live.running);
+        assert_eq!(live.steps.len(), 1);
+    }
 }

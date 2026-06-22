@@ -264,6 +264,27 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         );
     }
     let mut nightly = column![sec("⑦ Nightly 流水线（F7）", C_PURPLE)].spacing(2);
+    // 实时进度（Redis `factory:progress`）：run 进行中即可见，先于 md 报告落盘。
+    let lv = &st.nightly_live;
+    if lv.seen {
+        let hc = if lv.running {
+            Color::from_rgb(0.45, 0.85, 0.5)
+        } else if lv.header.starts_with('❌') {
+            Color::from_rgb(0.9, 0.45, 0.4)
+        } else {
+            Color::from_rgb(0.6, 0.75, 0.95)
+        };
+        nightly = nightly.push(text(format!("{} · {}", lv.date, lv.header)).size(11).color(hc));
+        let start = lv.steps.len().saturating_sub(10);
+        for (step, rc, secs) in &lv.steps[start..] {
+            let mark = if *rc == 0 { "✅" } else { "❌" };
+            let c = if *rc == 0 { C_DIM } else { Color::from_rgb(0.9, 0.45, 0.4) };
+            nightly = nightly.push(
+                text(format!("{mark} {} · {secs:.0}s", trunc(step, 38))).size(10).color(c),
+            );
+        }
+        nightly = nightly.push(vgap(6.0));
+    }
     nightly = nightly.push(
         text(trunc(&st.nightly_title, 60))
             .size(12)
