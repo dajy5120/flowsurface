@@ -6,10 +6,11 @@
 //!
 //! 本模块只渲染、不发消息,对 pane 的消息类型 `M` 泛型。
 
+use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::{column, container, row, scrollable, text};
-use iced::{Color, Element, Length};
+use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
 
-use super::factory_readout::FactoryReadout;
+use super::factory_readout::{FactoryReadout, HORIZONS, IcDecay};
 
 const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
 const C_GREEN: Color = Color::from_rgb(0.45, 0.85, 0.5);
@@ -66,6 +67,141 @@ fn fmt_bp(v: f64) -> String {
         format!("{v:+.2}")
     } else {
         "—".into()
+    }
+}
+
+/// Stage-A 表达式格：有机理假设的（seed/llm）前缀「ⓘ」并悬浮显示假设；gp 子代多无假设。
+fn expr_cell<'a, M: 'a>(expr: &str, hypothesis: &str, leak: &str, w: f32) -> Element<'a, M> {
+    let has = !hypothesis.trim().is_empty();
+    let label = if has {
+        format!("ⓘ {}{leak}", trunc(expr, 37))
+    } else {
+        format!("{}{leak}", trunc(expr, 40))
+    };
+    let base = container(text(label).size(11)).width(Length::Fixed(w));
+    if has {
+        iced::widget::tooltip(
+            base,
+            container(text(format!("假设：{hypothesis}")).size(11))
+                .style(crate::style::tooltip)
+                .padding(8)
+                .max_width(360.0),
+            iced::widget::tooltip::Position::Top,
+        )
+        .into()
+    } else {
+        base.into()
+    }
+}
+
+/// IC 衰减曲线的 6 条线配色（与 stage-a top 强度序一致）。
+const DECAY_PALETTE: [Color; 6] = [
+    Color::from_rgb(0.45, 0.85, 0.55),
+    Color::from_rgb(0.5, 0.7, 0.95),
+    Color::from_rgb(0.9, 0.75, 0.4),
+    Color::from_rgb(0.85, 0.5, 0.85),
+    Color::from_rgb(0.5, 0.85, 0.85),
+    Color::from_rgb(0.9, 0.55, 0.5),
+];
+
+/// IC 衰减曲线：x=视界（500ms→5m 等距），y=ic_mean（含 0 基线），每 alpha 一条线。
+struct DecayChart {
+    lines: Vec<IcDecay>,
+    cache: Cache,
+}
+
+impl<M> canvas::Program<M> for DecayChart {
+    type State = ();
+    fn draw(&self, _s: &(), r: &Renderer, _t: &Theme, b: Rectangle, _c: mouse::Cursor) -> Vec<Geometry> {
+        const ML: f32 = 44.0;
+        const MB: f32 = 16.0;
+        const MT: f32 = 6.0;
+        const MR: f32 = 8.0;
+        let axis = Color::from_rgb(0.5, 0.5, 0.55);
+        let grid = Color::from_rgba(0.6, 0.6, 0.65, 0.2);
+        let geo = self.cache.draw(r, b.size(), |frame: &mut Frame| {
+            let (w, h) = (frame.width(), frame.height());
+            if self.lines.is_empty() {
+                frame.fill_text(Text {
+                    content: "数据不足（尚无 Stage-A 评估）".into(),
+                    position: Point::new(ML + 4.0, h / 2.0 - 6.0),
+                    color: C_DIM,
+                    size: iced::Pixels(11.0),
+                    ..Default::default()
+                });
+                return;
+            }
+            // y 轴范围：所有点 + 0 基线
+            let mut lo = 0.0_f64;
+            let mut hi = 0.0_f64;
+            for l in &self.lines {
+                for (_, v) in &l.pts {
+                    lo = lo.min(*v);
+                    hi = hi.max(*v);
+                }
+            }
+            if (hi - lo).abs() < 1e-9 {
+                hi = lo + 0.01;
+            }
+            let pw = (w - ML - MR).max(1.0);
+            let ph = (h - MT - MB).max(1.0);
+            let nx = HORIZONS.len() as f32;
+            let mx = |i: usize| ML + (i as f32) / ((nx - 1.0).max(1.0)) * pw;
+            let my = |v: f64| MT + ((hi - v) / (hi - lo)) as f32 * ph;
+
+            // 网格 + y 刻度
+            for k in 0..=4 {
+                let v = lo + (hi - lo) * (k as f64) / 4.0;
+                let y = my(v);
+                frame.stroke(
+                    &Path::line(Point::new(ML, y), Point::new(ML + pw, y)),
+                    Stroke::default().with_width(1.0).with_color(grid),
+                );
+                frame.fill_text(Text {
+                    content: format!("{v:+.2}"),
+                    position: Point::new(2.0, y - 5.0),
+                    color: axis,
+                    size: iced::Pixels(9.0),
+                    ..Default::default()
+                });
+            }
+            // 0 基线加重
+            let zy = my(0.0);
+            frame.stroke(
+                &Path::line(Point::new(ML, zy), Point::new(ML + pw, zy)),
+                Stroke::default().with_width(1.2).with_color(axis),
+            );
+            // x 轴视界标签
+            for (i, hl) in HORIZONS.iter().enumerate() {
+                frame.fill_text(Text {
+                    content: (*hl).to_string(),
+                    position: Point::new((mx(i) - 10.0).max(0.0), h - MB + 2.0),
+                    color: axis,
+                    size: iced::Pixels(9.0),
+                    ..Default::default()
+                });
+            }
+            // 每 alpha 一条折线 + 顶点圆点
+            for (li, l) in self.lines.iter().enumerate() {
+                let col = DECAY_PALETTE[li % DECAY_PALETTE.len()];
+                if l.pts.len() >= 2 {
+                    let path = Path::new(|p| {
+                        p.move_to(Point::new(mx(l.pts[0].0), my(l.pts[0].1)));
+                        for (i, v) in l.pts.iter().skip(1) {
+                            p.line_to(Point::new(mx(*i), my(*v)));
+                        }
+                    });
+                    frame.stroke(&path, Stroke::default().with_width(1.6).with_color(col));
+                }
+                for (i, v) in &l.pts {
+                    frame.fill(
+                        &Path::circle(Point::new(mx(*i), my(*v)), 2.0),
+                        col,
+                    );
+                }
+            }
+        });
+        vec![geo]
     }
 }
 
@@ -147,11 +283,29 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
                 cell(&format!("{:+.1}", a.ic_t), 56.0),
                 cell(&format!("{}/{}", a.folds_same, a.n_folds), 44.0),
                 cell(&fmt_bp(a.net_bp), 60.0),
-                cell(&format!("{}{leak}", trunc(&a.expr, 40)), 300.0),
+                expr_cell(&a.expr, &a.hypothesis, leak, 300.0),
             ]
             .spacing(4),
         );
     }
+    // IC 衰减曲线（top6 alpha 的跨视界 IC 廓线）+ 配色图例
+    let mut decay_legend = column![].spacing(1);
+    for (i, l) in st.ic_decay.iter().enumerate() {
+        let col = DECAY_PALETTE[i % DECAY_PALETTE.len()];
+        decay_legend = decay_legend.push(
+            text(format!("● [{}] {}", l.gen_src, trunc(&l.expr, 44))).size(9).color(col),
+        );
+    }
+    let decay = column![
+        sec("IC 衰减曲线（top6 · 视界 500ms→5m，F2）", C_GREEN),
+        container(
+            Canvas::new(DecayChart { lines: st.ic_decay.clone(), cache: Cache::new() })
+                .width(Length::Fill)
+                .height(Length::Fixed(150.0))
+        ),
+        decay_legend,
+    ]
+    .spacing(3);
     let mut sb = column![sec("⑤ Stage-B 事件回测（Nautilus，F5）", C_GREEN)].spacing(2);
     for b in &st.stage_b {
         sb = sb.push(
@@ -166,7 +320,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     if st.stage_b.is_empty() {
         sb = sb.push(text("（暂无 Stage-B 记录）").size(11).color(C_DIM));
     }
-    let left = column![sa, vgap(10.0), sb]
+    let left = column![sa, vgap(8.0), decay, vgap(10.0), sb]
         .spacing(4)
         .width(Length::FillPortion(5));
 

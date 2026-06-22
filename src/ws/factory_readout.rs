@@ -13,6 +13,7 @@ use std::time::Duration;
 
 #[derive(Default, Clone)]
 pub struct AlphaRow {
+    pub id: i64,
     pub gen_src: String,
     pub expr: String,
     pub horizon: String,
@@ -22,6 +23,18 @@ pub struct AlphaRow {
     pub n_folds: i64,
     pub net_bp: f64,
     pub leakage: bool,
+    pub hypothesis: String, // 机理假设（seed/llm 有；gp 子代多为空）→ 悬浮显示
+}
+
+/// 预测视界（由短到长）——IC 衰减曲线的 x 轴顺序。与 factory 评估口径一致。
+pub const HORIZONS: [&str; 6] = ["500ms", "1s", "5s", "30s", "2m", "5m"];
+
+/// 一条 alpha 的 IC 跨视界廓线（IC 衰减曲线的一条线）。
+#[derive(Default, Clone)]
+pub struct IcDecay {
+    pub gen_src: String,
+    pub expr: String,
+    pub pts: Vec<(usize, f64)>, // (HORIZONS 下标, ic_mean)，按视界升序
 }
 
 #[derive(Default, Clone)]
@@ -87,6 +100,7 @@ pub struct FactoryReadout {
     pub n_combos: i64,
     pub thresholds: Vec<(String, String)>,
     pub stage_a: Vec<AlphaRow>,
+    pub ic_decay: Vec<IcDecay>,
     pub stage_b: Vec<StageBRow>,
     pub pool: Vec<PoolRow>,
     pub combos: Vec<ComboRow>,
@@ -167,8 +181,8 @@ fn poll_once() -> FactoryReadout {
     st.thresholds = q_pairs_s(&conn, "SELECT key, value FROM config ORDER BY key");
 
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT a.gen_src, a.expr, e.horizon, e.ic_mean, e.ic_t, e.folds_same_sign, e.n_folds,
-                e.net_bp, e.leakage
+        "SELECT a.id, a.gen_src, a.expr, e.horizon, e.ic_mean, e.ic_t, e.folds_same_sign, e.n_folds,
+                e.net_bp, e.leakage, COALESCE(a.hypothesis,'')
          FROM evals e JOIN alphas a ON a.id=e.alpha_id
          WHERE e.stage='A' AND e.ic_t IS NOT NULL
          ORDER BY ABS(e.ic_t) DESC LIMIT 16",
@@ -176,20 +190,24 @@ fn poll_once() -> FactoryReadout {
         st.stage_a = stmt
             .query_map([], |r| {
                 Ok(AlphaRow {
-                    gen_src: r.get(0)?,
-                    expr: r.get(1)?,
-                    horizon: r.get(2)?,
-                    ic_mean: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-                    ic_t: r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
-                    folds_same: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
-                    n_folds: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                    net_bp: r.get::<_, Option<f64>>(7)?.unwrap_or(f64::NAN),
-                    leakage: r.get::<_, Option<i64>>(8)?.unwrap_or(0) != 0,
+                    id: r.get(0)?,
+                    gen_src: r.get(1)?,
+                    expr: r.get(2)?,
+                    horizon: r.get(3)?,
+                    ic_mean: r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+                    ic_t: r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+                    folds_same: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                    n_folds: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                    net_bp: r.get::<_, Option<f64>>(8)?.unwrap_or(f64::NAN),
+                    leakage: r.get::<_, Option<i64>>(9)?.unwrap_or(0) != 0,
+                    hypothesis: r.get(10)?,
                 })
             })
             .map(|it| it.flatten().collect())
             .unwrap_or_default();
     }
+
+    read_ic_decay(&conn, &mut st);
 
     if let Ok(mut stmt) = conn.prepare(
         "SELECT a.expr, json_extract(e.detail_json,'$.n_entries'),
@@ -376,6 +394,54 @@ fn build_live(events: &[std::collections::HashMap<String, String>]) -> Option<Ni
     Some(live)
 }
 
+
+/// IC 衰减曲线：取 |IC t| 最强的前 6 个 alpha，各取其跨视界 ic_mean 廓线。
+/// 健康的微观结构 alpha 应短视界 IC 高、随视界拉长衰减；平/反增即可疑（人工抽查排雷）。
+fn read_ic_decay(conn: &rusqlite::Connection, st: &mut FactoryReadout) {
+    // 强度排序的 top alpha_id（去重）
+    let top_ids: Vec<i64> = conn
+        .prepare(
+            "SELECT alpha_id FROM evals WHERE stage='A' AND ic_t IS NOT NULL
+             GROUP BY alpha_id ORDER BY MAX(ABS(ic_t)) DESC LIMIT 6",
+        )
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get::<_, i64>(0)).map(|it| it.flatten().collect())
+        })
+        .unwrap_or_default();
+    if top_ids.is_empty() {
+        return;
+    }
+    let hidx = |h: &str| HORIZONS.iter().position(|x| *x == h);
+    for id in top_ids {
+        let mut row = IcDecay::default();
+        if let Ok((src, expr)) = conn.query_row(
+            "SELECT gen_src, expr FROM alphas WHERE id=?",
+            [id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        ) {
+            row.gen_src = src;
+            row.expr = expr;
+        }
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT horizon, ic_mean FROM evals
+             WHERE stage='A' AND alpha_id=? AND ic_mean IS NOT NULL",
+        ) {
+            let pairs: Vec<(String, f64)> = stmt
+                .query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))
+                .map(|it| it.flatten().collect())
+                .unwrap_or_default();
+            for (h, ic) in pairs {
+                if let Some(i) = hidx(&h) {
+                    row.pts.push((i, ic));
+                }
+            }
+            row.pts.sort_by_key(|p| p.0);
+        }
+        if !row.pts.is_empty() {
+            st.ic_decay.push(row);
+        }
+    }
+}
 
 fn q_i64(c: &rusqlite::Connection, sql: &str) -> i64 {
     c.query_row(sql, [], |r| r.get(0)).unwrap_or(0)
