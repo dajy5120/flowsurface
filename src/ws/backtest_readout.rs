@@ -63,6 +63,14 @@ pub struct Distribution {
 }
 
 #[derive(Deserialize, Default, Clone)]
+pub struct StatsSection {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub rows: Vec<Vec<String>>,
+}
+
+#[derive(Deserialize, Default, Clone)]
 pub struct BacktestResult {
     #[serde(default)]
     pub meta: Meta,
@@ -70,9 +78,18 @@ pub struct BacktestResult {
     pub equity: Series,
     #[serde(default)]
     pub drawdown: Series,
-    /// 各维度统计：[[标签, 值], …]。
+    /// 各维度统计（旧扁平表，保留兼容）：[[标签, 值], …]。
     #[serde(default)]
     pub stats: Vec<Vec<String>>,
+    /// Run Information（与报告同字段顺序）。
+    #[serde(default)]
+    pub run_info: Vec<Vec<String>>,
+    /// Account Summary（起始/结束余额）。
+    #[serde(default)]
+    pub account: Vec<Vec<String>>,
+    /// Performance Statistics 分节（PnL / Returns / General）。
+    #[serde(default)]
+    pub stats_sections: Vec<StatsSection>,
     #[serde(default)]
     pub monthly: Monthly,
     #[serde(default)]
