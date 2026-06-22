@@ -1288,6 +1288,20 @@ fn draw_ws_fill_markers(
         });
         frame.fill(&tri, color);
         frame.stroke(&tri, outline);
+        // 订单序号：标在三角上方（短小字号，÷scaling 屏幕恒定，居中+底对齐贴三角顶）。
+        if f.seq > 0 {
+            let top_y = if f.side == 1 { y + gap } else { y - gap - h };
+            frame.fill_text(canvas::Text {
+                content: format!("{}", f.seq),
+                position: Point::new(x, top_y - 1.0 / scaling),
+                size: iced::Pixels(7.0 / scaling),
+                color,
+                font: style::AZERET_MONO,
+                align_x: Alignment::Center.into(),
+                align_y: Alignment::End.into(),
+                ..canvas::Text::default()
+            });
+        }
     }
 }
 

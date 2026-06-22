@@ -83,25 +83,29 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
         body = body.push(section("持仓 / PnL", col));
     }
 
-    // ── 订单明细（每笔：时间/方向/类型/金额/收益/手续费/净收益）──
+    // ── 订单明细（每笔：序号/时间/交易对/方向/类型/委托价/委托量/合计/收益/手续费/净收益/完成度）──
+    // 列多 → 横向可滚动（固定列宽，与 trade_row 共用 COLW）。
     if !r.trades.is_empty() {
-        let head = |s: &'static str, w: f32| cell(text(s).size(style::text_size::TINY), Length::Fixed(w));
-        let mut col = column![row![
-            head("时间", 62.0),
-            head("方向", 34.0),
-            head("类型", 46.0),
-            head("金额", 78.0),
-            head("收益", 64.0),
-            head("手续费", 56.0),
-            head("净收益", 64.0),
-        ]
-        .spacing(6)]
-        .spacing(2);
-        // 最新在上，取最近 18 笔。
-        for t in r.trades.iter().rev().take(18) {
-            col = col.push(trade_row(t));
+        let head = |s: &'static str, w: f32| {
+            cell(text(s).size(style::text_size::TINY), Length::Fixed(w))
+        };
+        let titles = [
+            "序号", "时间", "交易对", "方向", "类型", "委托价", "委托量", "合计金额", "收益",
+            "手续费", "净收益", "完成度",
+        ];
+        let header = row(titles.into_iter().zip(COLW).map(|(s, w)| head(s, w))).spacing(6);
+        let mut tbl = column![header].spacing(2);
+        // 最新在上，取最近 30 笔。
+        for t in r.trades.iter().rev().take(30) {
+            tbl = tbl.push(trade_row(t));
         }
-        body = body.push(section("订单明细", col));
+        let total_w: f32 = COLW.iter().sum::<f32>() + 6.0 * (COLW.len() as f32 - 1.0);
+        let scroller = scrollable(container(tbl).width(Length::Fixed(total_w))).direction(
+            scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new().width(4).scroller_width(4),
+            ),
+        );
+        body = body.push(section("订单明细", scroller));
     }
 
     // ── 订单流（F4a：cockpit 侧从逐笔/盘口算）──
@@ -270,36 +274,49 @@ fn pnl_color(v: f64) -> Color {
     }
 }
 
-/// ms 时间戳 → 本地 HH:MM:SS。
+/// 「订单明细」列宽（与表头一一对应）：序号/时间/交易对/方向/类型/委托价/委托量/合计/收益/手续费/净收益/完成度。
+const COLW: [f32; 12] =
+    [34.0, 108.0, 96.0, 30.0, 44.0, 70.0, 54.0, 78.0, 60.0, 54.0, 60.0, 48.0];
+
+/// ms 时间戳 → 本地 MM-DD HH:MM:SS（含日期）。
 fn fmt_ts(ms: u64) -> String {
     chrono::DateTime::from_timestamp_millis(ms as i64)
-        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%m-%d %H:%M:%S").to_string())
         .unwrap_or_default()
 }
 
-/// 「订单明细」一行：时间/方向/类型/金额/收益/手续费/净收益。开仓行收益显「—」。
+/// 交易对短名：去掉交易所后缀（"BTCUSDT-PERP.BINANCE" → "BTCUSDT-PERP"）。
+fn short_inst(s: &str) -> String {
+    s.split('.').next().unwrap_or(s).to_string()
+}
+
+/// 「订单明细」一行（12 列）。开仓（买）本笔无毛收益 → 收益显「—」；盈亏绿/红。
 fn trade_row<'a, M: 'a>(t: &super::orders::Trade) -> Element<'a, M> {
-    let sz = style::text_size::SMALL;
+    let sz = style::text_size::TINY;
     let mono = |s: String| text(s).size(sz).font(style::AZERET_MONO);
     let (dir, dir_c) =
         if t.side == 1 { ("买", pnl_color(1.0)) } else { ("卖", pnl_color(-1.0)) };
-    // 开仓（买）本笔无毛收益 → 显「—」；平仓显带符号毛收益。
     let gross = if t.side == 1 {
-        text("—".to_string()).size(sz).font(style::AZERET_MONO)
+        mono("—".to_string())
     } else {
         text(format!("{:+.2}", t.gross)).size(sz).font(style::AZERET_MONO).color(pnl_color(t.gross))
     };
     row![
-        cell(mono(fmt_ts(t.ts)), Length::Fixed(62.0)),
-        cell(text(dir.to_string()).size(sz).color(dir_c), Length::Fixed(34.0)),
-        cell(mono(t.order_type.clone()), Length::Fixed(46.0)),
-        cell(mono(format!("{:.2}", t.amount)), Length::Fixed(78.0)),
-        cell(gross, Length::Fixed(64.0)),
-        cell(mono(format!("{:.4}", t.fee)), Length::Fixed(56.0)),
+        cell(mono(format!("#{}", t.seq)), Length::Fixed(COLW[0])),
+        cell(mono(fmt_ts(t.ts)), Length::Fixed(COLW[1])),
+        cell(mono(short_inst(&t.instrument)), Length::Fixed(COLW[2])),
+        cell(text(dir.to_string()).size(sz).color(dir_c), Length::Fixed(COLW[3])),
+        cell(mono(t.order_type.clone()), Length::Fixed(COLW[4])),
+        cell(mono(format!("{:.2}", t.price)), Length::Fixed(COLW[5])),
+        cell(mono(format!("{:.3}", t.qty)), Length::Fixed(COLW[6])),
+        cell(mono(format!("{:.2}", t.amount)), Length::Fixed(COLW[7])),
+        cell(gross, Length::Fixed(COLW[8])),
+        cell(mono(format!("{:.4}", t.fee)), Length::Fixed(COLW[9])),
         cell(
             text(format!("{:+.2}", t.net)).size(sz).font(style::AZERET_MONO).color(pnl_color(t.net)),
-            Length::Fixed(64.0),
+            Length::Fixed(COLW[10]),
         ),
+        cell(mono(format!("{:.0}%", t.filled_pct)), Length::Fixed(COLW[11])),
     ]
     .spacing(6)
     .into()

@@ -20,18 +20,24 @@ pub struct Fill {
     pub px: f64,
     pub qty: f64,
     pub ts: u64,
+    pub seq: u64, // 本 run 内订单序号（图上三角顶标注 + 明细表对应）
 }
 
 /// 一笔订单明细（成交回报）：右侧面板「订单明细」表用（时间/方向/类型/金额/收益/手续费/净收益）。
 #[derive(Clone, Debug)]
 pub struct Trade {
-    pub ts: u64,
+    pub seq: u64,            // 订单序号（本 run 内 1 基）
+    pub ts: u64,             // 时间（含日期由 view 格式化）
+    pub instrument: String,  // 交易对
     pub side: u8,            // 1=买 2=卖
     pub order_type: String,  // LIMIT / MARKET …
-    pub amount: f64,         // 成交额 = px*qty（USDT）
+    pub price: f64,          // 委托价格
+    pub qty: f64,            // 委托数量
+    pub amount: f64,         // 合计金额 = price*qty（USDT）
     pub gross: f64,          // 本笔毛收益（开仓=0）
     pub fee: f64,            // 手续费
     pub net: f64,            // 净收益 = gross - fee
+    pub filled_pct: f64,     // 完成度（%）
 }
 
 /// 一笔活动挂单（resting limit order）：在主图挂单价位画线标注（§11.1）。
@@ -61,6 +67,7 @@ pub struct OrderState {
     pub capital: f64,       // 本金（策略 capital 字段）
     pub realized_net: f64,  // 累计净收益 = Σ(本笔毛 - 手续费)
     pub fee_total: f64,     // 累计手续费
+    pub fill_seq: u64,      // 订单序号计数（本 run 内自增；run 切换随 default 归零）
 }
 
 const FILL_CAP: usize = 500;
@@ -196,20 +203,38 @@ impl OrderState {
                 if let Some(oid) = order_id(&m) {
                     self.working.remove(&oid);
                 }
-                self.fills.push(Fill { side, px, qty, ts });
+                self.fill_seq += 1;
+                let seq = self.fill_seq;
+                self.fills.push(Fill { side, px, qty, ts, seq });
                 if self.fills.len() > FILL_CAP {
                     let drain = self.fills.len() - FILL_CAP;
                     self.fills.drain(0..drain);
                 }
-                // 逐笔订单明细：金额/收益/手续费/净收益。
+                // 逐笔订单明细：序号/交易对/委托价量/合计/收益/手续费/净收益/完成度。
                 let fee = map_get(&m, "commission").and_then(as_f64).unwrap_or(0.0);
                 let gross = map_get(&m, "trade_pnl").and_then(as_f64).unwrap_or(0.0);
                 let order_type =
                     map_get(&m, "order_type").and_then(as_str).unwrap_or_else(|| "—".into());
+                let instrument =
+                    map_get(&m, "instrument_id").and_then(as_str).unwrap_or_default();
+                let filled_pct = map_get(&m, "filled_pct").and_then(as_f64).unwrap_or(100.0);
                 let net = gross - fee;
                 self.fee_total += fee;
                 self.realized_net += net;
-                self.trades.push(Trade { ts, side, order_type, amount: px * qty, gross, fee, net });
+                self.trades.push(Trade {
+                    seq,
+                    ts,
+                    instrument,
+                    side,
+                    order_type,
+                    price: px,
+                    qty,
+                    amount: px * qty,
+                    gross,
+                    fee,
+                    net,
+                    filled_pct,
+                });
                 if self.trades.len() > TRADE_CAP {
                     let drain = self.trades.len() - TRADE_CAP;
                     self.trades.drain(0..drain);
