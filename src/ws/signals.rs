@@ -4,6 +4,9 @@
 //! 盘口不平衡 / 最优档吸收 / 撤补（pull）/ 冰山补单 —— cockpit 只读渲染（进程隔离、rebase 友好）。
 //! 与 `ws/flow.rs`（cockpit 自算的最优档 proxy）互补：本模块是「引擎精确版」。
 
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
+
 use redis::{Client, Commands};
 use serde::Deserialize;
 
@@ -54,6 +57,34 @@ pub struct Signals {
     pub n_combo: u64,
     #[serde(default)]
     pub n_pool: u64,
+}
+
+// ── F4c combo 实时曲线：进程级旁路（main.rs 的 WsSignals 写入，kline.rs canvas 读取叠加主图）──
+// 同 ws::orders::CHART_FILLS 模式：不侵入 FS 的 ContentKind/数据源，App↔图表轻量旁路。
+const COMBO_CAP: usize = 4096; // ~4Hz × ≈17 分钟滚动窗
+static CHART_COMBO: OnceLock<Mutex<VecDeque<(u64, f64)>>> = OnceLock::new();
+
+/// 追加一笔 combo 采样 `(ts_ms, combo)`（接收时本机时戳，与实时主图时间轴对齐）。
+pub fn push_combo(ts_ms: u64, combo: f64) {
+    let lock = CHART_COMBO.get_or_init(|| Mutex::new(VecDeque::new()));
+    if let Ok(mut g) = lock.lock() {
+        // 单调时戳去重（同毫秒/回拨时覆盖末点，避免横线堆叠）
+        if g.back().map(|(t, _)| *t >= ts_ms).unwrap_or(false) {
+            g.pop_back();
+        }
+        g.push_back((ts_ms, combo));
+        while g.len() > COMBO_CAP {
+            g.pop_front();
+        }
+    }
+}
+
+/// 读 combo 曲线快照（每帧调用，≤COMBO_CAP，clone 成本可忽略）。
+pub fn combo_snapshot() -> Vec<(u64, f64)> {
+    CHART_COMBO
+        .get()
+        .and_then(|m| m.lock().ok().map(|g| g.iter().copied().collect()))
+        .unwrap_or_default()
 }
 
 /// 轮询 `ws:signals:{symbol}`（250ms）→ 变化时发出引擎信号快照。

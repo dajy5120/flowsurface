@@ -235,6 +235,12 @@ impl Flowsurface {
                 return Task::none();
             }
             Message::WsSignals(s) => {
+                // F4c：combo 总分进进程级旁路曲线（kline 画布叠加主图）。接收时戳与实时主图时间轴对齐。
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                ws::signals::push_combo(now_ms, s.combo);
                 self.ws_signals = Some(s); // 引擎信号：吸收/撤补/冰山（view() 叠加显示）
                 return Task::none();
             }

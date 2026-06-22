@@ -1071,6 +1071,19 @@ impl canvas::Program<Message> for KlineChart {
                 matches!(chart.basis, Basis::Time(_)),
             );
 
+            // F4c：combo 实时总分曲线叠加主图底带（读 ws::signals 旁路），仅时间基。
+            if matches!(chart.basis, Basis::Time(_)) {
+                draw_ws_combo_overlay(
+                    frame,
+                    interval_to_x,
+                    region,
+                    chart.scaling,
+                    palette,
+                    earliest,
+                    latest,
+                );
+            }
+
             chart.draw_last_price_line(frame, palette, region);
         });
 
@@ -1270,6 +1283,91 @@ fn draw_ws_fill_markers(
         frame.fill(&tri, color);
         frame.stroke(&tri, outline);
     }
+}
+
+/// F4c：combo 现役池实时总分曲线，叠加在主图底部 ~22% 带内（自适应值域 + 0 基线）。
+/// 数据来自进程级旁路 `ws::signals::combo_snapshot()`（接收时本机时戳，仅时间基有意义）。
+/// 线宽/字号 ÷scaling 保持屏幕恒定；末点圆点 + 当前值标签按符号着色。
+#[allow(clippy::too_many_arguments)]
+fn draw_ws_combo_overlay(
+    frame: &mut canvas::Frame,
+    interval_to_x: impl Fn(u64) -> f32,
+    region: Rectangle,
+    scaling: f32,
+    palette: &Extended,
+    earliest: u64,
+    latest: u64,
+) {
+    if scaling <= f32::EPSILON {
+        return;
+    }
+    let vis: Vec<(u64, f64)> = crate::ws::signals::combo_snapshot()
+        .into_iter()
+        .filter(|(t, _)| *t >= earliest && *t <= latest)
+        .collect();
+    if vis.len() < 2 {
+        return;
+    }
+    // 底带几何：region 下方 22% 带、底留 4% 边距
+    let band_h = (region.height * 0.22).max(1.0);
+    let bottom = region.y + region.height * 0.96;
+    let top = bottom - band_h;
+    // combo 值域（含 0 基线）
+    let mut lo = 0.0_f64;
+    let mut hi = 0.0_f64;
+    for (_, v) in &vis {
+        lo = lo.min(*v);
+        hi = hi.max(*v);
+    }
+    if (hi - lo).abs() < 1e-9 {
+        hi = lo + 1.0;
+    }
+    let y_of = |v: f64| -> f32 { bottom - ((v - lo) / (hi - lo)) as f32 * band_h };
+
+    // 0 基线
+    let zy = y_of(0.0);
+    frame.stroke(
+        &Path::line(
+            Point::new(region.x, zy),
+            Point::new(region.x + region.width, zy),
+        ),
+        Stroke::default()
+            .with_width(1.0 / scaling)
+            .with_color(palette.background.base.text.scale_alpha(0.3)),
+    );
+    // combo 折线
+    let line = Path::new(|b| {
+        let (t0, v0) = vis[0];
+        b.move_to(Point::new(interval_to_x(t0), y_of(v0)));
+        for (t, v) in vis.iter().skip(1) {
+            b.line_to(Point::new(interval_to_x(*t), y_of(*v)));
+        }
+    });
+    frame.stroke(
+        &line,
+        Stroke::default()
+            .with_width(1.5 / scaling)
+            .with_color(palette.primary.strong.color),
+    );
+    // 末点 + 当前值标签（按符号着色）
+    let (lt, lv) = *vis.last().unwrap();
+    let lc = if lv >= 0.0 {
+        palette.success.strong.color
+    } else {
+        palette.danger.strong.color
+    };
+    frame.fill(
+        &Path::circle(Point::new(interval_to_x(lt), y_of(lv)), 2.5 / scaling),
+        lc,
+    );
+    frame.fill_text(canvas::Text {
+        content: format!("combo {lv:+.3}"),
+        position: Point::new(region.x + 4.0 / scaling, top - 2.0 / scaling),
+        size: iced::Pixels(11.0 / scaling),
+        color: lc,
+        font: style::AZERET_MONO,
+        ..canvas::Text::default()
+    });
 }
 
 fn render_data_source<F>(
