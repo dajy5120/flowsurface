@@ -100,11 +100,13 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
             tbl = tbl.push(trade_row(t));
         }
         let total_w: f32 = COLW.iter().sum::<f32>() + 6.0 * (COLW.len() as f32 - 1.0);
-        let scroller = scrollable(container(tbl).width(Length::Fixed(total_w))).direction(
-            scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::new().width(4).scroller_width(4),
-            ),
-        );
+        // 底部留白：横向滚动条在视口底覆盖内容，留白让它落在空白区、不压住最底一行。
+        let scroller = scrollable(
+            container(tbl).width(Length::Fixed(total_w)).padding(iced::padding::bottom(10)),
+        )
+        .direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::new().width(4).scroller_width(4),
+        ));
         body = body.push(section("订单明细", scroller));
     }
 
