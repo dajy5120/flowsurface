@@ -78,14 +78,14 @@ pub fn subscription(redis_url: String, symbol: String) -> iced::Subscription<Sig
                         let mut last = String::new();
                         loop {
                             let v: Option<String> = conn.get(&key).ok().flatten();
-                            if let Some(s) = v {
-                                if s != last {
-                                    last = s.clone();
-                                    if let Ok(sig) = serde_json::from_str::<Signals>(&s) {
-                                        if tx.blocking_send(sig).is_err() {
-                                            break;
-                                        }
-                                    }
+                            if let Some(s) = v
+                                && s != last
+                            {
+                                last = s.clone();
+                                if let Ok(sig) = serde_json::from_str::<Signals>(&s)
+                                    && tx.blocking_send(sig).is_err()
+                                {
+                                    break;
                                 }
                             }
                             std::thread::sleep(std::time::Duration::from_millis(250));

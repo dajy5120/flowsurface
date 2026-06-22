@@ -44,14 +44,14 @@ pub fn subscription(redis_url: String) -> iced::Subscription<FactoryPool> {
                     let mut last = String::new();
                     loop {
                         let v: Option<String> = conn.get(FACTORY_POOL_KEY).ok().flatten();
-                        if let Some(s) = v {
-                            if s != last {
-                                last = s.clone();
-                                if let Ok(p) = serde_json::from_str::<FactoryPool>(&s) {
-                                    if tx.blocking_send(p).is_err() {
-                                        break;
-                                    }
-                                }
+                        if let Some(s) = v
+                            && s != last
+                        {
+                            last = s.clone();
+                            if let Ok(p) = serde_json::from_str::<FactoryPool>(&s)
+                                && tx.blocking_send(p).is_err()
+                            {
+                                break;
                             }
                         }
                         std::thread::sleep(std::time::Duration::from_millis(2000));
