@@ -71,7 +71,6 @@ pub struct OrderState {
 }
 
 const FILL_CAP: usize = 500;
-const TRADE_CAP: usize = 200;
 
 /// 进程级图上成交标记缓存（docs/08 F3b）：main.rs 的 `WsOrders` 处理写入，
 /// kline.rs 的 canvas draw 读取，在蜡烛图上画 ▲（买）/▼（卖）。
@@ -221,6 +220,7 @@ impl OrderState {
                 let net = gross - fee;
                 self.fee_total += fee;
                 self.realized_net += net;
+                // 订单明细不设上限：本 run 内全留（run 切换时 OrderState::default 自然重置）。
                 self.trades.push(Trade {
                     seq,
                     ts,
@@ -235,10 +235,6 @@ impl OrderState {
                     net,
                     filled_pct,
                 });
-                if self.trades.len() > TRADE_CAP {
-                    let drain = self.trades.len() - TRADE_CAP;
-                    self.trades.drain(0..drain);
-                }
             }
             // 活动挂单生命周期（§11.1 实盘订单标注）。
             "OrderAccepted" | "OrderUpdated" | "OrderInitialized" => {

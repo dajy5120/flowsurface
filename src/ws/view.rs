@@ -95,18 +95,21 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
         ];
         let header = row(titles.into_iter().zip(COLW).map(|(s, w)| head(s, w))).spacing(6);
         let mut tbl = column![header].spacing(2);
-        // 最新在上，取最近 30 笔。
-        for t in r.trades.iter().rev().take(30) {
+        // 最新在上，全部展示（本 run 内不设上限），竖向可滚动。
+        for t in r.trades.iter().rev() {
             tbl = tbl.push(trade_row(t));
         }
         let total_w: f32 = COLW.iter().sum::<f32>() + 6.0 * (COLW.len() as f32 - 1.0);
-        // 底部留白：横向滚动条在视口底覆盖内容，留白让它落在空白区、不压住最底一行。
+        // 双向滚动：横向看全 12 列、竖向翻多笔订单；固定高度使其成为独立可滚动区。
+        // 底部留白让横向滚动条落在空白区、不压住最底一行。
         let scroller = scrollable(
             container(tbl).width(Length::Fixed(total_w)).padding(iced::padding::bottom(10)),
         )
-        .direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::new().width(4).scroller_width(4),
-        ));
+        .direction(scrollable::Direction::Both {
+            vertical: scrollable::Scrollbar::new().width(5).scroller_width(5),
+            horizontal: scrollable::Scrollbar::new().width(4).scroller_width(4),
+        })
+        .height(Length::Fixed(300.0));
         body = body.push(section("订单明细", scroller));
     }
 
