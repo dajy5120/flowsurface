@@ -20,6 +20,7 @@ pub mod recorder;
 pub mod recorder_readout;
 pub mod recorder_view;
 pub mod replay;
+pub mod selfdata;
 pub mod signals;
 pub mod view;
 pub mod workspace;

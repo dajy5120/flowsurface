@@ -226,9 +226,18 @@ impl Flowsurface {
                 return Task::none();
             }
             Message::WsOrders(st) => {
-                ws::orders::publish_chart_fills(&st.fills); // F3b：图上 ▲▼ 标记旁路给 kline 画布
-                ws::orders::publish_chart_position(&st); // §11.1：图上持仓线 + 费后 PnL 读数
-                ws::orders::publish_chart_working(&st.working); // §11.1：图上活动挂单线标注
+                // 自有数据回测工作区：图上 ▲▼/持仓/挂单由 selfdata 桥（result.json）喂，
+                // 不让 events.* 旁路覆盖（否则两源相争）。其余工作区照常。
+                let is_selfdata = self
+                    .layout_manager
+                    .active_layout_id()
+                    .map(|l| l.name == ws::workspace::WS_SELFDATA)
+                    .unwrap_or(false);
+                if !is_selfdata {
+                    ws::orders::publish_chart_fills(&st.fills); // F3b：图上 ▲▼ 标记旁路给 kline 画布
+                    ws::orders::publish_chart_position(&st); // §11.1：图上持仓线 + 费后 PnL 读数
+                    ws::orders::publish_chart_working(&st.working); // §11.1：图上活动挂单线标注
+                }
                 self.ws_orders = st; // 订单/PnL 聚合（view() 叠加显示）
                 return Task::none();
             }
@@ -905,23 +914,27 @@ impl Flowsurface {
         // 不再跟全局三态——「回测」工作区只走回测 replay（replay 自身已按 active_run mode=backtest
         // 自门控：无回测运行时空闲，绝不混入实时），其余工作区（官方/实盘…）只走 FS 原生实时。
         // 故即便后台正跑回测，「实盘」工作区图表仍是实时；切到「回测」才看回测行情。
-        let active_ws_backtest = self
-            .layout_manager
-            .active_layout_id()
-            .map(|l| l.name == ws::workspace::WS_BACKTEST)
-            .unwrap_or(false);
+        // 数据源跟随活动工作区：录制数据回测→replay；自有数据回测→result.json 桥；其余→实时。
+        let active_ws = self.layout_manager.active_layout_id().map(|l| l.name.clone());
+        let is_recorded = active_ws.as_deref() == Some(ws::workspace::WS_RECORDED);
+        let is_selfdata = active_ws.as_deref() == Some(ws::workspace::WS_SELFDATA);
         let ws_redis_url = std::env::var("WS_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
-        let exchange_streams = if active_ws_backtest {
+        let exchange_streams = if is_recorded || is_selfdata {
             Subscription::none()
         } else {
             self.active_dashboard().market_subscriptions(&self.handles).map(Message::MarketWsEvent)
         };
-        let ws_replay_streams = if active_ws_backtest {
+        let ws_replay_streams = if is_recorded {
             self.active_dashboard()
                 .ws_replay_subscriptions(ws_redis_url.clone())
                 .map(Message::MarketWsEvent)
+        } else {
+            Subscription::none()
+        };
+        let ws_selfdata_streams = if is_selfdata {
+            self.active_dashboard().ws_selfdata_subscriptions().map(Message::MarketWsEvent)
         } else {
             Subscription::none()
         };
@@ -951,6 +964,7 @@ impl Flowsurface {
         Subscription::batch(vec![
             exchange_streams,
             ws_replay_streams,
+            ws_selfdata_streams,
             ws_active_run,
             ws_orders,
             ws_factory,

@@ -17,23 +17,29 @@ use crate::layout::{LayoutId, configuration};
 use crate::modal::layout_manager::LayoutManager;
 use crate::screen::dashboard::Dashboard;
 
-/// 5 个工作区的固定名字（侧边栏顺序）。
+/// 工作区固定名字（侧边栏顺序）。三种「回测」按数据来源区分：自有 / 录制 / 实时。
 pub const WS_OFFICIAL: &str = "官方原生";
-pub const WS_LIVE: &str = "实盘";
-pub const WS_BACKTEST: &str = "回测";
+pub const WS_LIVE: &str = "实时数据回测"; // 实时 Binance 行情 + Sandbox/live
+pub const WS_SELFDATA: &str = "自有数据回测"; // 脚本自带数据（result.json）
+pub const WS_RECORDED: &str = "录制数据回测"; // 录制历史 ~/ws-data（replay）
 pub const WS_RECORDER: &str = "数据录制";
 pub const WS_FACTORY: &str = "Alpha Factory";
-pub const WORKSPACES: [&str; 5] = [WS_OFFICIAL, WS_LIVE, WS_BACKTEST, WS_RECORDER, WS_FACTORY];
+pub const WORKSPACES: [&str; 6] =
+    [WS_OFFICIAL, WS_LIVE, WS_RECORDED, WS_SELFDATA, WS_RECORDER, WS_FACTORY];
+
+/// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
+const RENAMES: [(&str, &str); 2] = [("实盘", WS_LIVE), ("回测", WS_SELFDATA)];
 
 /// 工作区在侧边栏的图标（合并进 FS 原生侧边栏，docs/08 F6 — P1）。
 pub fn icon(name: &str) -> crate::style::Icon {
     use crate::style::Icon;
     match name {
-        "官方原生" => Icon::BinanceLogo, // 官方直连 Binance
-        "实盘" => Icon::ChartOutline,    // 实时图表 + 交易
-        "回测" => Icon::Return,          // 回放/回测
-        "数据录制" => Icon::Folder,      // 数据湖
-        "Alpha Factory" => Icon::Star,   // alpha 因子
+        WS_OFFICIAL => Icon::BinanceLogo, // 官方直连 Binance
+        WS_LIVE => Icon::ChartOutline,    // 实时图表 + 交易
+        WS_RECORDED => Icon::Return,      // 回放/重放
+        WS_SELFDATA => Icon::Layout,      // 自有数据回测
+        WS_RECORDER => Icon::Folder,      // 数据湖
+        WS_FACTORY => Icon::Star,         // alpha 因子
         _ => Icon::Layout,
     }
 }
@@ -43,21 +49,25 @@ pub fn icon(name: &str) -> crate::style::Icon {
 fn pane_template(name: &str) -> &'static str {
     match name {
         // 干净官方热图（无 WS 叠加）。
-        "官方原生" => {
+        WS_OFFICIAL => {
             r#"{"ShaderHeatmap":{"studies":[{"VolumeProfile":"VisibleRange"}],"stream_type":[{"Depth":{"ticker":"BinanceLinear:BTCUSDT","depth_aggr":"Client","push_freq":"ServerDefault"}},{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":5,"visual_config":null,"selected_basis":{"Time":"MS100"}},"indicators":["Volume"],"link_group":null}}"#
         }
-        // 实盘：实时热图 ∣ WealthSpring(Live)。
-        "实盘" => {
+        // 实时数据回测：实时热图 ∣ WealthSpring(Live)。
+        WS_LIVE => {
             r#"{"Split":{"axis":"Vertical","ratio":0.62,"a":{"ShaderHeatmap":{"studies":[{"VolumeProfile":"VisibleRange"}],"stream_type":[{"Depth":{"ticker":"BinanceLinear:BTCUSDT","depth_aggr":"Client","push_freq":"ServerDefault"}},{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":5,"visual_config":null,"selected_basis":{"Time":"MS100"}},"indicators":["Volume"],"link_group":null}},"b":{"WealthSpring":{"mode":"Live","settings":{},"link_group":null}}}}"#
         }
-        // 回测：M1 K 线（回测态由 replay 喂）∣ 回测结果（收益曲线/回撤/统计）。
-        "回测" => {
+        // 录制数据回测：M1 K 线（录制 replay 喂，含成交 ▲▼）∣ 右侧上下：订单明细(Backtest) + 回测结果 tearsheet。
+        WS_RECORDED => {
+            r#"{"Split":{"axis":"Vertical","ratio":0.58,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"Split":{"axis":"Horizontal","ratio":0.5,"a":{"WealthSpring":{"mode":"Backtest","settings":{},"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}}}"#
+        }
+        // 自有数据回测：M1 K 线（result.json 自有数据桥喂，含成交 ▲▼）∣ 回测结果 tearsheet。
+        WS_SELFDATA => {
             r#"{"Split":{"axis":"Vertical","ratio":0.58,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}"#
         }
         // Alpha Factory 仪表盘（docs/08 F6-P2）。
-        "Alpha Factory" => r#"{"Factory":{"settings":{},"link_group":null}}"#,
+        WS_FACTORY => r#"{"Factory":{"settings":{},"link_group":null}}"#,
         // 录制驾驶舱（docs/08 F6-P3）。
-        "数据录制" => r#"{"Recorder":{"settings":{},"link_group":null}}"#,
+        WS_RECORDER => r#"{"Recorder":{"settings":{},"link_group":null}}"#,
         _ => r#"{"Starter":{"link_group":null}}"#,
     }
 }
@@ -77,6 +87,17 @@ fn dashboard_from_template(name: &str) -> Option<Dashboard> {
 
 /// 幂等播种：缺失的工作区按名补建（不动用户已有 layout）。返回新建数量。
 pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
+    // 迁移：把旧名工作区就地改名到新名（保留用户在内的布局），避免新旧并存。
+    for (old, new) in RENAMES {
+        let has_new = manager.layouts.iter().any(|l| l.id.name == new);
+        if has_new {
+            continue; // 新名已存在 → 不动旧的（让下方播种/用户自行处理）
+        }
+        if let Some(l) = manager.layouts.iter_mut().find(|l| l.id.name == old) {
+            l.id.name = new.to_string();
+            log::info!("WS workspaces: 迁移 `{old}` → `{new}`");
+        }
+    }
     let mut added = 0;
     for name in WORKSPACES {
         let exists = manager.layouts.iter().any(|l| l.id.name == name);
