@@ -20,6 +20,11 @@ use crate::style;
 /// `mode`（docs/08 F6 方案 2）：`Live`/`Backtest` pane 仅在 `ws:active_run` 对应态渲染读数，
 /// 否则显占位——让「实盘」「回测」工作区各自只显属于自己的数据。
 pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
+    // 自有数据自适应图：不显读数面板，渲染 CSV/JSON 数据文件（自有数据回测左侧）。
+    if mode == WsPaneMode::SelfChart {
+        return super::customchart::pane_body();
+    }
+
     let r = super::readout::snapshot();
 
     // 三态过滤：pane 限定态 ≠ 当前活动态 → 显占位，不串数据。
@@ -27,6 +32,7 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
         WsPaneMode::Any => None,
         WsPaneMode::Live => Some("live"),
         WsPaneMode::Backtest => Some("backtest"),
+        WsPaneMode::SelfChart => None, // 已在上方提前返回
     };
     if let Some(want) = want
         && r.mode != want

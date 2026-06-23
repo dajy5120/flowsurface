@@ -60,9 +60,10 @@ fn pane_template(name: &str) -> &'static str {
         WS_RECORDED => {
             r#"{"Split":{"axis":"Vertical","ratio":0.58,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"Split":{"axis":"Horizontal","ratio":0.5,"a":{"WealthSpring":{"mode":"Backtest","settings":{},"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}}}"#
         }
-        // 自有数据回测：M1 K 线（result.json 自有数据桥喂，含成交 ▲▼）∣ 回测结果 tearsheet。
+        // 自有数据回测：左侧上下两面板——上 自有数据自适应图（CSV/JSON）+ 下 result.json→K 线
+        // （selfdata 桥，含成交 ▲▼），两种测试方式并存；右侧 回测结果 tearsheet。
         WS_SELFDATA => {
-            r#"{"Split":{"axis":"Vertical","ratio":0.58,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}"#
+            r#"{"Split":{"axis":"Vertical","ratio":0.58,"a":{"Split":{"axis":"Horizontal","ratio":0.5,"a":{"WealthSpring":{"mode":"SelfChart","settings":{},"link_group":null}},"b":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}}}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}"#
         }
         // Alpha Factory 仪表盘（docs/08 F6-P2）。
         WS_FACTORY => r#"{"Factory":{"settings":{},"link_group":null}}"#,
@@ -85,13 +86,15 @@ fn dashboard_from_template(name: &str) -> Option<Dashboard> {
     ))
 }
 
-/// 幂等播种：缺失的工作区按名补建（不动用户已有 layout）。返回新建数量。
+/// 播种 + 刷新管理工作区：这 6 个是固定用途工作区（其 pane 树由模板定义），每次启动按当前
+/// 模板**就地刷新内容**（保留 LayoutId.unique，激活态不丢），使模板更新重启即生效。
+/// 缺失则新建；非管理的用户 layout 一律不动。返回新建数量。
 pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
-    // 迁移：把旧名工作区就地改名到新名（保留用户在内的布局），避免新旧并存。
+    // 迁移：把旧名工作区改名到新名（避免新旧并存）。
     for (old, new) in RENAMES {
         let has_new = manager.layouts.iter().any(|l| l.id.name == new);
         if has_new {
-            continue; // 新名已存在 → 不动旧的（让下方播种/用户自行处理）
+            continue;
         }
         if let Some(l) = manager.layouts.iter_mut().find(|l| l.id.name == old) {
             l.id.name = new.to_string();
@@ -100,22 +103,17 @@ pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
     }
     let mut added = 0;
     for name in WORKSPACES {
-        let exists = manager.layouts.iter().any(|l| l.id.name == name);
-        if exists {
-            continue;
-        }
         let Some(dashboard) = dashboard_from_template(name) else {
             continue;
         };
-        let id = LayoutId {
-            unique: Uuid::new_v4(),
-            name: name.to_string(),
-        };
-        manager.insert_layout(id, dashboard);
-        added += 1;
+        if let Some(l) = manager.layouts.iter_mut().find(|l| l.id.name == name) {
+            l.dashboard = dashboard; // 刷新到当前模板（覆盖旧内容）
+        } else {
+            let id = LayoutId { unique: Uuid::new_v4(), name: name.to_string() };
+            manager.insert_layout(id, dashboard);
+            added += 1;
+        }
     }
-    if added > 0 {
-        log::info!("WS workspaces: seeded {added} workspace(s)");
-    }
+    log::info!("WS workspaces: 已刷新模板（新建 {added}）");
     added
 }

@@ -9,6 +9,7 @@
 pub mod active_run;
 pub mod backtest_readout;
 pub mod backtest_view;
+pub mod customchart;
 pub mod bt_trades;
 pub mod factory;
 pub mod factory_readout;

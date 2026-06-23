@@ -239,6 +239,9 @@ pub enum ContentKind {
     Recorder,
     /// 回测结果（docs/08 F6-P7）：收益曲线 / 回撤 / 各维度统计（读回测导出的 result.json）。
     BacktestResult,
+    /// 自有数据图（docs/08）：读 CSV/JSON 数据文件的通用自适应图（多列折线/散点）。
+    /// 实为 Content::WealthSpring(SelfChart)；列入内容选择器便于自由摆放。无行情数据源。
+    SelfChart,
 }
 
 /// WealthSpring pane 的三态过滤（docs/08 F6 方案 2「真隔离」）：
@@ -253,10 +256,12 @@ pub enum WsPaneMode {
     Live,
     /// 仅回测态（active_run.mode == "backtest"）。
     Backtest,
+    /// 自有数据自适应图（读 CSV/JSON 数据文件，不显读数；自有数据回测左侧）。
+    SelfChart,
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 12] = [
+    pub const ALL: [ContentKind; 13] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -266,6 +271,7 @@ impl ContentKind {
         ContentKind::TimeAndSales,
         ContentKind::Ladder,
         ContentKind::WealthSpring,
+        ContentKind::SelfChart,
         ContentKind::Factory,
         ContentKind::Recorder,
         ContentKind::BacktestResult,
@@ -284,6 +290,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::TimeAndSales => "Time&Sales",
             ContentKind::Ladder => "DOM/Ladder",
             ContentKind::WealthSpring => "WealthSpring",
+            ContentKind::SelfChart => "自有数据图",
             ContentKind::Factory => "Alpha Factory",
             ContentKind::Recorder => "数据录制",
             ContentKind::BacktestResult => "回测结果",
@@ -357,6 +364,7 @@ impl PaneSetup {
                 ContentKind::Starter
                 | ContentKind::TimeAndSales
                 | ContentKind::WealthSpring
+                | ContentKind::SelfChart
                 | ContentKind::Factory
                 | ContentKind::Recorder
                 | ContentKind::BacktestResult => None,
@@ -382,6 +390,7 @@ impl PaneSetup {
             | ContentKind::ComparisonChart
             | ContentKind::TimeAndSales
             | ContentKind::WealthSpring
+            | ContentKind::SelfChart
             | ContentKind::Factory
             | ContentKind::Recorder
             | ContentKind::BacktestResult

@@ -403,6 +403,9 @@ impl State {
                 ContentKind::WealthSpring => {
                     (Content::WealthSpring(data::layout::pane::WsPaneMode::Any), vec![])
                 }
+                ContentKind::SelfChart => {
+                    (Content::WealthSpring(data::layout::pane::WsPaneMode::SelfChart), vec![])
+                }
                 ContentKind::Factory => (Content::Factory, vec![]),
                 ContentKind::Recorder => {
                     (Content::Recorder(crate::ws::recorder::RecorderPaneState::load()), vec![])
@@ -1218,6 +1221,7 @@ impl State {
                     kind,
                     ContentKind::Starter
                         | ContentKind::WealthSpring
+                        | ContentKind::SelfChart
                         | ContentKind::Factory
                         | ContentKind::Recorder
                 ) {
@@ -2150,6 +2154,9 @@ impl Content {
             ContentKind::TimeAndSales => Content::TimeAndSales(None),
             ContentKind::Ladder => Content::Ladder(None),
             ContentKind::WealthSpring => Content::WealthSpring(data::layout::pane::WsPaneMode::Any),
+            ContentKind::SelfChart => {
+                Content::WealthSpring(data::layout::pane::WsPaneMode::SelfChart)
+            }
             ContentKind::Factory => Content::Factory,
             ContentKind::Recorder => {
                 Content::Recorder(crate::ws::recorder::RecorderPaneState::load())
@@ -2362,6 +2369,9 @@ impl Content {
             Content::Comparison(_) => ContentKind::ComparisonChart,
             Content::Starter => ContentKind::Starter,
             Content::ShaderHeatmap { .. } => ContentKind::ShaderHeatmap,
+            Content::WealthSpring(data::layout::pane::WsPaneMode::SelfChart) => {
+                ContentKind::SelfChart
+            }
             Content::WealthSpring(_) => ContentKind::WealthSpring,
             Content::Factory => ContentKind::Factory,
             Content::Recorder(_) => ContentKind::Recorder,
