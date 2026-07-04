@@ -24,8 +24,9 @@ pub const WS_SELFDATA: &str = "自有数据回测"; // 脚本自带数据（resu
 pub const WS_RECORDED: &str = "录制数据回测"; // 录制历史 ~/ws-data（replay）
 pub const WS_RECORDER: &str = "数据录制";
 pub const WS_FACTORY: &str = "Alpha Factory";
-pub const WORKSPACES: [&str; 6] =
-    [WS_OFFICIAL, WS_LIVE, WS_RECORDED, WS_SELFDATA, WS_RECORDER, WS_FACTORY];
+pub const WS_C4: &str = "C4 影子"; // maker 影子守护实时/影子日/活体vs重放（docs/14 §2）
+pub const WORKSPACES: [&str; 7] =
+    [WS_OFFICIAL, WS_LIVE, WS_RECORDED, WS_SELFDATA, WS_RECORDER, WS_FACTORY, WS_C4];
 
 /// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
 const RENAMES: [(&str, &str); 2] = [("实盘", WS_LIVE), ("回测", WS_SELFDATA)];
@@ -40,6 +41,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
         WS_SELFDATA => Icon::Layout,      // 自有数据回测
         WS_RECORDER => Icon::Folder,      // 数据湖
         WS_FACTORY => Icon::Star,         // alpha 因子
+        WS_C4 => Icon::Checkmark,         // C4 判定进度（合格影子日）
         _ => Icon::Layout,
     }
 }
@@ -67,6 +69,8 @@ fn pane_template(name: &str) -> &'static str {
         }
         // Alpha Factory 仪表盘（docs/08 F6-P2）。
         WS_FACTORY => r#"{"Factory":{"settings":{},"link_group":null}}"#,
+        // C4 活体影子（docs/14 §2）：守护实时 + 影子日 + 活体vs重放 + 判定进度。
+        WS_C4 => r#"{"C4Shadow":{"settings":{},"link_group":null}}"#,
         // 录制驾驶舱（docs/08 F6-P3）。
         WS_RECORDER => r#"{"Recorder":{"settings":{},"link_group":null}}"#,
         _ => r#"{"Starter":{"link_group":null}}"#,

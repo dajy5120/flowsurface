@@ -101,6 +101,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    C4Shadow {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     Recorder {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -235,6 +241,9 @@ pub enum ContentKind {
     WealthSpring,
     /// Alpha Factory 仪表盘（docs/08 F6-P2）：F0–F7 全流程状态，只读轮询 registry.sqlite。
     Factory,
+    /// C4 活体影子（docs/14 §2）：maker 影子守护实时/影子日/活体vs重放。只读 checkpoint
+    /// + registry.sqlite 旁路，无行情数据源。
+    C4Shadow,
     /// 录制驾驶舱（docs/08 F6-P3）：24/7 守护录制控制中心（服务启停 + 配置 + 实况 + 总览）。
     Recorder,
     /// 回测结果（docs/08 F6-P7）：收益曲线 / 回撤 / 各维度统计（读回测导出的 result.json）。
@@ -261,7 +270,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 13] = [
+    pub const ALL: [ContentKind; 14] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -273,6 +282,7 @@ impl ContentKind {
         ContentKind::WealthSpring,
         ContentKind::SelfChart,
         ContentKind::Factory,
+        ContentKind::C4Shadow,
         ContentKind::Recorder,
         ContentKind::BacktestResult,
     ];
@@ -292,6 +302,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::WealthSpring => "WealthSpring",
             ContentKind::SelfChart => "自有数据图",
             ContentKind::Factory => "Alpha Factory",
+            ContentKind::C4Shadow => "C4 影子(SOL)",
             ContentKind::Recorder => "数据录制",
             ContentKind::BacktestResult => "回测结果",
         };
@@ -366,6 +377,7 @@ impl PaneSetup {
                 | ContentKind::WealthSpring
                 | ContentKind::SelfChart
                 | ContentKind::Factory
+                | ContentKind::C4Shadow
                 | ContentKind::Recorder
                 | ContentKind::BacktestResult => None,
             };
@@ -392,6 +404,7 @@ impl PaneSetup {
             | ContentKind::WealthSpring
             | ContentKind::SelfChart
             | ContentKind::Factory
+            | ContentKind::C4Shadow
             | ContentKind::Recorder
             | ContentKind::BacktestResult
             | ContentKind::Starter => current_tick_multiplier,
