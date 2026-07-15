@@ -11,6 +11,8 @@ pub mod backtest_readout;
 pub mod backtest_view;
 pub mod c4_readout;
 pub mod c4_view;
+pub mod options_readout;
+pub mod options_view;
 pub mod customchart;
 pub mod bt_trades;
 pub mod factory;

@@ -25,8 +25,10 @@ pub const WS_RECORDED: &str = "录制数据回测"; // 录制历史 ~/ws-data（
 pub const WS_RECORDER: &str = "数据录制";
 pub const WS_FACTORY: &str = "Alpha Factory";
 pub const WS_C4: &str = "C4 影子"; // maker 影子守护实时/影子日/活体vs重放（docs/14 §2）
-pub const WORKSPACES: [&str; 7] =
-    [WS_OFFICIAL, WS_LIVE, WS_RECORDED, WS_SELFDATA, WS_RECORDER, WS_FACTORY, WS_C4];
+pub const WS_OPTIONS: &str = "期权/0DTE"; // 期权回测·探针面板（docs/18）
+pub const WORKSPACES: [&str; 8] = [
+    WS_OFFICIAL, WS_LIVE, WS_RECORDED, WS_SELFDATA, WS_RECORDER, WS_FACTORY, WS_C4, WS_OPTIONS,
+];
 
 /// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
 const RENAMES: [(&str, &str); 2] = [("实盘", WS_LIVE), ("回测", WS_SELFDATA)];
@@ -42,6 +44,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
         WS_RECORDER => Icon::Folder,      // 数据湖
         WS_FACTORY => Icon::Star,         // alpha 因子
         WS_C4 => Icon::Checkmark,         // C4 判定进度（合格影子日）
+        WS_OPTIONS => Icon::Layout,       // 期权/0DTE 回测面板
         _ => Icon::Layout,
     }
 }

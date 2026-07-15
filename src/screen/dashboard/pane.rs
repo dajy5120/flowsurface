@@ -408,6 +408,7 @@ impl State {
                 }
                 ContentKind::Factory => (Content::Factory, vec![]),
                 ContentKind::C4Shadow => (Content::C4Shadow, vec![]),
+                ContentKind::OptionsBoard => (Content::OptionsBoard, vec![]),
                 ContentKind::Recorder => {
                     (Content::Recorder(crate::ws::recorder::RecorderPaneState::load()), vec![])
                 }
@@ -583,6 +584,7 @@ impl State {
                 | Content::WealthSpring(_)
                 | Content::Factory
                 | Content::C4Shadow
+                | Content::OptionsBoard
                 | Content::Recorder(_)
                 | Content::BacktestResult
         ) && !self.has_stream()
@@ -708,6 +710,19 @@ impl State {
             Content::C4Shadow => {
                 // C4 活体影子（docs/14 §2）：渲染走 ws::c4_readout 旁路快照（checkpoint+Registry）。
                 let base = crate::ws::c4_view::pane_body();
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::OptionsBoard => {
+                // 期权/0DTE 回测（docs/18）：渲染走 ws::options_readout 旁路快照（options_board.json）。
+                let base = crate::ws::options_view::pane_body();
                 self.compose_stack_view(
                     base,
                     id,
@@ -1239,6 +1254,7 @@ impl State {
                         | ContentKind::SelfChart
                         | ContentKind::Factory
                         | ContentKind::C4Shadow
+                        | ContentKind::OptionsBoard
                         | ContentKind::Recorder
                 ) {
                     self.streams = ResolvedStream::waiting(vec![]);
@@ -1840,7 +1856,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Recorder(_) | Content::BacktestResult => None,
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::OptionsBoard | Content::Recorder(_) | Content::BacktestResult => None,
         }
     }
 
@@ -1867,6 +1883,7 @@ impl State {
             Content::WealthSpring(_)
             | Content::Factory
             | Content::C4Shadow
+            | Content::OptionsBoard
             | Content::Recorder(_)
             | Content::BacktestResult => None,
         }
@@ -1961,6 +1978,8 @@ pub enum Content {
     Factory,
     /// C4 活体影子（docs/14 §2）：无行情流，渲染走 `ws::c4_readout` 旁路快照。
     C4Shadow,
+    /// 期权/0DTE 回测·探针（docs/18）：无行情流，渲染走 `ws::options_readout` 旁路快照。
+    OptionsBoard,
     /// 录制驾驶舱（docs/08 F6-P3）：交互式控制中心，携带可编辑配置状态。
     Recorder(crate::ws::recorder::RecorderPaneState),
     /// 回测结果（docs/08 F6-P7）：收益曲线/回撤/统计，渲染走 `ws::backtest_readout` 旁路快照。
@@ -2178,6 +2197,7 @@ impl Content {
             }
             ContentKind::Factory => Content::Factory,
             ContentKind::C4Shadow => Content::C4Shadow,
+            ContentKind::OptionsBoard => Content::OptionsBoard,
             ContentKind::Recorder => {
                 Content::Recorder(crate::ws::recorder::RecorderPaneState::load())
             }
@@ -2197,6 +2217,7 @@ impl Content {
             Content::WealthSpring(_)
             | Content::Factory
             | Content::C4Shadow
+            | Content::OptionsBoard
             | Content::Recorder(_)
             | Content::BacktestResult => None,
         }
@@ -2277,6 +2298,7 @@ impl Content {
             | Content::WealthSpring(_)
             | Content::Factory
             | Content::C4Shadow
+            | Content::OptionsBoard
             | Content::Recorder(_)
             | Content::BacktestResult
             | Content::ShaderHeatmap { .. } => {
@@ -2328,6 +2350,7 @@ impl Content {
             | Content::WealthSpring(_)
             | Content::Factory
             | Content::C4Shadow
+            | Content::OptionsBoard
             | Content::Recorder(_)
             | Content::BacktestResult
             | Content::Comparison(_) => None,
@@ -2398,6 +2421,7 @@ impl Content {
             Content::WealthSpring(_) => ContentKind::WealthSpring,
             Content::Factory => ContentKind::Factory,
             Content::C4Shadow => ContentKind::C4Shadow,
+            Content::OptionsBoard => ContentKind::OptionsBoard,
             Content::Recorder(_) => ContentKind::Recorder,
             Content::BacktestResult => ContentKind::BacktestResult,
         }
@@ -2418,7 +2442,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Recorder(_) | Content::BacktestResult => true,
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::OptionsBoard | Content::Recorder(_) | Content::BacktestResult => true,
         }
     }
 }

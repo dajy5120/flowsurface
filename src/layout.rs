@@ -193,6 +193,10 @@ impl From<&pane::State> for data::Pane {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
             },
+            pane::Content::OptionsBoard => data::Pane::OptionsBoard {
+                settings: pane.settings.clone(),
+                link_group: pane.link_group,
+            },
             pane::Content::Recorder(_) => data::Pane::Recorder {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
@@ -343,6 +347,15 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             link_group,
         } => Configuration::Pane(pane::State::from_config(
             pane::Content::Factory,
+            vec![],
+            settings,
+            link_group,
+        )),
+        data::Pane::OptionsBoard {
+            settings,
+            link_group,
+        } => Configuration::Pane(pane::State::from_config(
+            pane::Content::OptionsBoard,
             vec![],
             settings,
             link_group,
