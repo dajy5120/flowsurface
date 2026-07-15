@@ -101,6 +101,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    PredictionBoard {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     OptionsBoard {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -252,6 +258,8 @@ pub enum ContentKind {
     C4Shadow,
     /// 期权/0DTE 回测·探针（docs/18）：逐策略净 PnL + 摩擦分解 + 探针。只读 options_board.json 旁路。
     OptionsBoard,
+    /// 预测市场 Polymarket（docs/19）：市场列表 + 基线关注 + AI 决策支持。只读 prediction_board.json 旁路。
+    PredictionBoard,
     /// 录制驾驶舱（docs/08 F6-P3）：24/7 守护录制控制中心（服务启停 + 配置 + 实况 + 总览）。
     Recorder,
     /// 回测结果（docs/08 F6-P7）：收益曲线 / 回撤 / 各维度统计（读回测导出的 result.json）。
@@ -278,7 +286,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 15] = [
+    pub const ALL: [ContentKind; 16] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -292,6 +300,7 @@ impl ContentKind {
         ContentKind::Factory,
         ContentKind::C4Shadow,
         ContentKind::OptionsBoard,
+        ContentKind::PredictionBoard,
         ContentKind::Recorder,
         ContentKind::BacktestResult,
     ];
@@ -313,6 +322,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::Factory => "Alpha Factory",
             ContentKind::C4Shadow => "C4 影子(SOL)",
             ContentKind::OptionsBoard => "期权/0DTE",
+            ContentKind::PredictionBoard => "预测市场",
             ContentKind::Recorder => "数据录制",
             ContentKind::BacktestResult => "回测结果",
         };
@@ -389,6 +399,7 @@ impl PaneSetup {
                 | ContentKind::Factory
                 | ContentKind::C4Shadow
                 | ContentKind::OptionsBoard
+                | ContentKind::PredictionBoard
                 | ContentKind::Recorder
                 | ContentKind::BacktestResult => None,
             };
@@ -417,6 +428,7 @@ impl PaneSetup {
             | ContentKind::Factory
             | ContentKind::C4Shadow
             | ContentKind::OptionsBoard
+            | ContentKind::PredictionBoard
             | ContentKind::Recorder
             | ContentKind::BacktestResult
             | ContentKind::Starter => current_tick_multiplier,

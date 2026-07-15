@@ -26,8 +26,10 @@ pub const WS_RECORDER: &str = "数据录制";
 pub const WS_FACTORY: &str = "Alpha Factory";
 pub const WS_C4: &str = "C4 影子"; // maker 影子守护实时/影子日/活体vs重放（docs/14 §2）
 pub const WS_OPTIONS: &str = "期权/0DTE"; // 期权回测·探针面板（docs/18）
-pub const WORKSPACES: [&str; 8] = [
+pub const WS_PREDICTION: &str = "预测市场"; // Polymarket 决策支持面板（docs/19）
+pub const WORKSPACES: [&str; 9] = [
     WS_OFFICIAL, WS_LIVE, WS_RECORDED, WS_SELFDATA, WS_RECORDER, WS_FACTORY, WS_C4, WS_OPTIONS,
+    WS_PREDICTION,
 ];
 
 /// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
@@ -45,6 +47,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
         WS_FACTORY => Icon::Star,         // alpha 因子
         WS_C4 => Icon::Checkmark,         // C4 判定进度（合格影子日）
         WS_OPTIONS => Icon::Layout,       // 期权/0DTE 回测面板
+        WS_PREDICTION => Icon::Layout,    // 预测市场 Polymarket 面板
         _ => Icon::Layout,
     }
 }
@@ -76,6 +79,10 @@ fn pane_template(name: &str) -> &'static str {
         WS_C4 => r#"{"C4Shadow":{"settings":{},"link_group":null}}"#,
         // 录制驾驶舱（docs/08 F6-P3）。
         WS_RECORDER => r#"{"Recorder":{"settings":{},"link_group":null}}"#,
+        // 期权/0DTE 回测·探针（docs/18）。
+        WS_OPTIONS => r#"{"OptionsBoard":{"settings":{},"link_group":null}}"#,
+        // 预测市场 Polymarket（docs/19）。
+        WS_PREDICTION => r#"{"PredictionBoard":{"settings":{},"link_group":null}}"#,
         _ => r#"{"Starter":{"link_group":null}}"#,
     }
 }
