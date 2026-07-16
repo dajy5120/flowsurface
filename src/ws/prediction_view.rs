@@ -8,7 +8,7 @@
 use iced::widget::{column, container, row, scrollable, text};
 use iced::{Color, Element, Length};
 
-use super::prediction_readout::{MarketRow, PredictionReadout};
+use super::prediction_readout::{CalibrationView, MarketRow, PredictionReadout};
 
 const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
 const C_GREEN: Color = Color::from_rgb(0.45, 0.85, 0.5);
@@ -41,6 +41,61 @@ fn usd(v: f64) -> String {
     } else {
         format!("${v:.0}")
     }
+}
+
+fn brier(b: Option<f64>) -> String {
+    b.map(|x| format!("{x:.3}")).unwrap_or_else(|| "—".into())
+}
+
+/// AI 校准追踪摘要区（docs/19 §5）：AI Brier vs 市场 Brier + 校准曲线（越低越好）。
+fn calib_block<'a, M: 'a>(c: &CalibrationView) -> Element<'a, M> {
+    let mut col = column![sec("AI 校准追踪 · Brier 越低越准（唯有 AI<市场 才可能有边际）")].spacing(3);
+
+    if c.n_resolved == 0 {
+        col = col.push(
+            text(format!(
+                "已记录 {} 条估计 · 待市场结算积累样本（现 0 已结算）——夜跑 --resolve 自动回填",
+                c.n_total
+            ))
+            .size(11)
+            .color(C_DIM),
+        );
+        return col.into();
+    }
+
+    let verdict = if c.ai_beats_market {
+        ("✅ AI 胜过市场", C_GREEN)
+    } else {
+        ("❌ AI 未胜市场（分歧=噪声·勿据以下注）", C_RED)
+    };
+    col = col.push(
+        row![
+            cell(format!("已结算 {}/{}", c.n_resolved, c.n_total), 100.0, C_TXT),
+            cell(format!("AI Brier {}", brier(c.ai_brier)), 110.0, C_TXT),
+            cell(format!("市场 {}", brier(c.market_brier)), 100.0, C_DIM),
+            cell(verdict.0.into(), 240.0, verdict.1),
+        ]
+        .spacing(4),
+    );
+
+    // 校准曲线：预测区间 vs 实际发生率（完美=对角线）
+    if !c.bins.is_empty() {
+        col = col.push(text("校准曲线（区间 · 样本 · 均预测 → 实际）").size(10).color(C_HEAD));
+        for b in &c.bins {
+            let gap = (b.mean_pred - b.actual).abs();
+            let cc = if gap <= 0.1 { C_GREEN } else { C_GOLD };
+            col = col.push(
+                row![
+                    cell(format!("[{:.1},{:.1})", b.lo, b.hi), 80.0, C_DIM),
+                    cell(format!("n={}", b.n), 46.0, C_DIM),
+                    cell(format!("预{:.0}%", b.mean_pred * 100.0), 60.0, C_DIM),
+                    cell(format!("实{:.0}%", b.actual * 100.0), 60.0, cc),
+                ]
+                .spacing(4),
+            );
+        }
+    }
+    col.into()
 }
 
 fn market_block<'a, M: 'a>(m: &MarketRow) -> Element<'a, M> {
@@ -109,6 +164,10 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
                 .size(10)
                 .color(C_DIM),
         );
+    }
+
+    if let Some(c) = &st.calib {
+        body = body.push(calib_block(c));
     }
 
     let watch_n = st.rows.iter().filter(|r| r.watch).count();
