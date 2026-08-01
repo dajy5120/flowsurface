@@ -148,6 +148,13 @@ pub struct Chart {
     pub bid_amount: Vec<f64>,
     pub ask_price: Vec<f64>,
     pub ask_amount: Vec<f64>,
+    // heatmap：y 轴为等距价格格（y_lo + k*y_step），z_* 为 [时间桶][价格格] 的挂单量
+    pub y_lo: f64,
+    pub y_step: f64,
+    pub n_lv: usize,
+    pub z_bid: Vec<Vec<f64>>,
+    pub z_ask: Vec<Vec<f64>>,
+    pub mid: Vec<f64>,
 }
 
 #[derive(Clone, Default)]
@@ -242,6 +249,18 @@ fn parse_panel(text: &str) -> Panel {
             ask_amount: nums(c.get("ask_amount")),
             ..Default::default()
         };
+        ch.y_lo = c.get("y_lo").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        ch.y_step = c.get("y_step").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        ch.n_lv = c.get("n_lv").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+        ch.mid = nums(c.get("mid"));
+        let mat = |k: &str| -> Vec<Vec<f64>> {
+            c.get(k)
+                .and_then(|x| x.as_array())
+                .map(|rows| rows.iter().map(|r| nums(Some(r))).collect())
+                .unwrap_or_default()
+        };
+        ch.z_bid = mat("z_bid");
+        ch.z_ask = mat("z_ask");
         ch.cls = c
             .get("cls")
             .and_then(|x| x.as_array())
@@ -410,6 +429,26 @@ mod tests {
         assert_eq!(p.rows, 0);
         assert!(p.charts.is_empty());
         assert!(p.error.unwrap().contains("不提供"));
+    }
+
+    #[test]
+    fn parses_heatmap_matrices() {
+        let p = parse_panel(
+            r#"{"source":"s","source_label":"S","symbol":"BTCUSDT","date":"2026-06-01",
+                "start":"09:00","minutes":5,"type":"incremental_book_L2","type_label":"L2",
+                "rows":10,"charts":[{"id":"heatmap","title":"热图","kind":"heatmap",
+                "x_is_time":true,"x":[1,2],"y_lo":72835.3,"y_step":1.758,"n_lv":3,
+                "z_bid":[[0,1.5,0],[2.0,0,0]],"z_ask":[[0,0,3.0],[0,0,4.0]],
+                "mid":[72900.0,72901.0]}]}"#,
+        );
+        let c = &p.charts[0];
+        assert_eq!(c.kind, "heatmap");
+        assert_eq!(c.n_lv, 3);
+        assert_eq!(c.z_bid.len(), 2);
+        assert_eq!(c.z_bid[0][1], 1.5);
+        assert_eq!(c.z_ask[1][2], 4.0);
+        assert_eq!(c.mid, vec![72900.0, 72901.0]);
+        assert!((c.y_step - 1.758).abs() < 1e-9);
     }
 
     #[test]

@@ -268,6 +268,97 @@ impl<M> canvas::Program<M> for ChartCanvas {
                     }
                     return;
                 }
+                "heatmap" => {
+                    let (nt, nl) = (ch.x.len(), ch.n_lv);
+                    if nt < 2 || nl == 0 || ch.z_bid.len() < nt || ch.y_step <= 0.0 {
+                        empty(frame, "无盘口快照");
+                        return;
+                    }
+                    let Some(xr) = finite_range(ch.x.iter().copied()) else {
+                        empty(frame, "X 轴无有效值");
+                        return;
+                    };
+                    let ylo = ch.y_lo;
+                    let yhi = ch.y_lo + ch.y_step * nl as f64;
+                    Self::axes(frame, w, h, xr, (ylo, yhi), true, "价格");
+                    let sx = |v: f64| ML + pw * (((v - xr.0) / (xr.1 - xr.0)) as f32);
+                    let sy = |v: f64| MT + ph * (1.0 - ((v - ylo) / (yhi - ylo)) as f32);
+                    // 亮度用**对数**标度：挂单量分布极偏（顶档常比深处大两个数量级），
+                    // 线性标度下除了最大格全是黑的。
+                    let zmax = ch
+                        .z_bid
+                        .iter()
+                        .chain(ch.z_ask.iter())
+                        .flat_map(|r| r.iter().copied())
+                        .fold(0.0f64, f64::max);
+                    if zmax <= 0.0 {
+                        empty(frame, "窗口内无挂单量");
+                        return;
+                    }
+                    let lmax = (1.0 + zmax).ln();
+                    let cw = (pw / nt as f32).max(0.6);
+                    let chh = (ph / nl as f32).max(0.6);
+                    // 播放头之后的时间桶不画（时间步进回放，docs/20 §10）
+                    let last = match self.playhead {
+                        Some(head) => ch.x.iter().take_while(|v| **v <= head).count(),
+                        None => nt,
+                    };
+                    let mut cell = |x: f32, k: usize, q: f64, col: Color| {
+                        if q <= 0.0 {
+                            return;
+                        }
+                        let a = ((1.0 + q).ln() / lmax).clamp(0.06, 1.0) as f32;
+                        let y = sy(ylo + ch.y_step * (k as f64 + 1.0));
+                        frame.fill_rectangle(
+                            Point::new(x, y),
+                            Size::new(cw, chh),
+                            Color { a: a * 0.92, ..col },
+                        );
+                    };
+                    for ti in 0..last.min(nt) {
+                        let x = sx(ch.x[ti]);
+                        for (k, q) in ch.z_bid[ti].iter().enumerate().take(nl) {
+                            cell(x, k, *q, C_UP); // 买单堆积
+                        }
+                        if let Some(row) = ch.z_ask.get(ti) {
+                            for (k, q) in row.iter().enumerate().take(nl) {
+                                cell(x, k, *q, C_DN); // 卖单堆积
+                            }
+                        }
+                    }
+                    // 中价线
+                    let mut prev: Option<Point> = None;
+                    for ti in 0..last.min(nt).min(ch.mid.len()) {
+                        let m = ch.mid[ti];
+                        if !m.is_finite() {
+                            prev = None;
+                            continue;
+                        }
+                        let p = Point::new(sx(ch.x[ti]), sy(m));
+                        if let Some(q) = prev {
+                            frame.stroke(
+                                &Path::line(q, p),
+                                Stroke::default()
+                                    .with_color(Color { r: 0.92, g: 0.94, b: 0.97, a: 0.75 })
+                                    .with_width(1.0),
+                            );
+                        }
+                        prev = Some(p);
+                    }
+                    if let Some(head) = self.playhead
+                        && head >= xr.0
+                        && head <= xr.1
+                    {
+                        let x = sx(head);
+                        frame.stroke(
+                            &Path::line(Point::new(x, MT), Point::new(x, MT + ph)),
+                            Stroke::default()
+                                .with_color(Color { r: 0.95, g: 0.78, b: 0.35, a: 0.85 })
+                                .with_width(1.2),
+                        );
+                    }
+                    return;
+                }
                 _ => {}
             }
 
@@ -639,7 +730,11 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
                     playhead: head,
                 })
                     .width(Length::Fill)
-                    .height(Length::Fixed(if is_main { 210.0 } else { 130.0 }))
+                    .height(Length::Fixed(match (ch.kind.as_str(), is_main) {
+                        ("heatmap", _) => 300.0, // 二维图需要更多纵向空间
+                        (_, true) => 210.0,
+                        _ => 130.0,
+                    }))
                     .into();
             let mut col = column![title, cv].spacing(3);
             if !ch.note.is_empty() {
