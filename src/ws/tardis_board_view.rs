@@ -1,0 +1,567 @@
+//! Tardis 历史面板 — 渲染（docs/20 §9）。
+//!
+//! 层次自上而下：**数据源(3) → 数据类型(8) → 图表（主图 + 该类型的衍生图，纵向堆叠）**。
+//! 五种图元全部自绘（candle / line / bar / scatter / profile），**不使用 FS 原生图表、
+//! 不声明任何 ticker、零交易所连接**。
+
+use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
+use iced::widget::{
+    button, canvas as canvas_widget, column, container, pick_list, row, scrollable, text,
+};
+use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
+
+use super::tardis_board::{MINUTES, TardisBoardMsg, TardisBoardState, hours};
+use super::tardis_board_readout as ro;
+
+const ML: f32 = 58.0;
+const MR: f32 = 10.0;
+const MT: f32 = 10.0;
+const MB: f32 = 20.0;
+const C_AXIS: Color = Color { r: 0.52, g: 0.54, b: 0.58, a: 1.0 };
+const C_GRID: Color = Color { r: 0.28, g: 0.29, b: 0.33, a: 0.55 };
+const C_UP: Color = Color { r: 0.29, g: 0.74, b: 0.49, a: 1.0 };
+const C_DN: Color = Color { r: 0.86, g: 0.36, b: 0.40, a: 1.0 };
+const C_DIM: Color = Color { r: 0.55, g: 0.60, b: 0.66, a: 1.0 };
+const PALETTE: [Color; 6] = [
+    Color { r: 0.36, g: 0.62, b: 0.95, a: 1.0 },
+    Color { r: 0.30, g: 0.74, b: 0.49, a: 1.0 },
+    Color { r: 0.92, g: 0.62, b: 0.28, a: 1.0 },
+    Color { r: 0.66, g: 0.50, b: 0.92, a: 1.0 },
+    Color { r: 0.30, g: 0.78, b: 0.78, a: 1.0 },
+    Color { r: 0.86, g: 0.40, b: 0.45, a: 1.0 },
+];
+
+fn finite_range(vals: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for v in vals {
+        if v.is_finite() {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    if lo.is_finite() && hi.is_finite() {
+        let pad = if (hi - lo).abs() < 1e-12 { hi.abs().max(1.0) * 0.01 } else { (hi - lo) * 0.06 };
+        Some((lo - pad, hi + pad))
+    } else {
+        None
+    }
+}
+
+/// 按**量程**（而非绝对量级）决定小数位——否则 72900/72950/72990 会全被压成 "72.9k"。
+fn fmt_tick(v: f64, span: f64) -> String {
+    if !v.is_finite() {
+        return String::new();
+    }
+    let step = (span / 4.0).abs();
+    if step == 0.0 {
+        return fmt_num(v);
+    }
+    // 每格至少能分辨出一位有效变化
+    let dec = (-(step.log10().floor()) as i32 + 1).clamp(0, 8) as usize;
+    if v.abs() >= 1e6 && step >= 1e3 {
+        return format!("{:.2}M", v / 1e6);
+    }
+    format!("{v:.dec$}")
+}
+
+fn fmt_num(v: f64) -> String {
+    let a = v.abs();
+    if a >= 1e9 {
+        format!("{:.2}B", v / 1e9)
+    } else if a >= 1e6 {
+        format!("{:.2}M", v / 1e6)
+    } else if a >= 1e4 {
+        format!("{:.1}k", v / 1e3)
+    } else if a >= 1.0 {
+        format!("{v:.2}")
+    } else if a >= 1e-4 {
+        format!("{v:.5}")
+    } else if a == 0.0 {
+        "0".into()
+    } else {
+        format!("{v:.2e}")
+    }
+}
+
+fn fmt_time(ms: f64) -> String {
+    use chrono::{TimeZone, Utc};
+    Utc.timestamp_millis_opt(ms as i64)
+        .single()
+        .map(|t| t.format("%H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
+struct ChartCanvas {
+    ch: ro::Chart,
+    cache: Cache,
+}
+
+impl ChartCanvas {
+    /// 画坐标轴 + 网格，返回绘图区（x0,y0,w,h）与坐标映射闭包所需参数。
+    #[allow(clippy::too_many_arguments)]
+    fn axes(
+        frame: &mut Frame,
+        w: f32,
+        h: f32,
+        xr: (f64, f64),
+        yr: (f64, f64),
+        x_is_time: bool,
+        y_label: &str,
+    ) {
+        let pw = w - ML - MR;
+        let ph = h - MT - MB;
+        let axis = Stroke::default().with_color(C_AXIS).with_width(1.0);
+        frame.stroke(
+            &Path::line(Point::new(ML, MT + ph), Point::new(ML + pw, MT + ph)),
+            axis.clone(),
+        );
+        frame.stroke(&Path::line(Point::new(ML, MT), Point::new(ML, MT + ph)), axis);
+        // Y 网格 4 格
+        for i in 0..=4 {
+            let t = i as f32 / 4.0;
+            let y = MT + ph * (1.0 - t);
+            frame.stroke(
+                &Path::line(Point::new(ML, y), Point::new(ML + pw, y)),
+                Stroke::default().with_color(C_GRID).with_width(1.0),
+            );
+            let val = yr.0 + (yr.1 - yr.0) * t as f64;
+            frame.fill_text(Text {
+                content: fmt_tick(val, yr.1 - yr.0),
+                position: Point::new(2.0, y - 6.0),
+                color: C_AXIS,
+                size: iced::Pixels(9.0),
+                ..Default::default()
+            });
+        }
+        // X 刻度 4 个
+        for i in 0..=4 {
+            let t = i as f32 / 4.0;
+            let x = ML + pw * t;
+            let val = xr.0 + (xr.1 - xr.0) * t as f64;
+            let s = if x_is_time { fmt_time(val) } else { fmt_tick(val, xr.1 - xr.0) };
+            frame.fill_text(Text {
+                content: s,
+                position: Point::new(x - 18.0, MT + ph + 5.0),
+                color: C_AXIS,
+                size: iced::Pixels(9.0),
+                ..Default::default()
+            });
+        }
+        if !y_label.is_empty() {
+            frame.fill_text(Text {
+                content: y_label.to_string(),
+                position: Point::new(w - MR - 34.0, 0.0),
+                color: C_AXIS,
+                size: iced::Pixels(9.0),
+                ..Default::default()
+            });
+        }
+    }
+}
+
+impl<M> canvas::Program<M> for ChartCanvas {
+    type State = ();
+
+    fn draw(
+        &self,
+        _s: &(),
+        r: &Renderer,
+        _t: &Theme,
+        b: Rectangle,
+        _c: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let geo = self.cache.draw(r, b.size(), |frame: &mut Frame| {
+            let (w, h) = (frame.width(), frame.height());
+            let ch = &self.ch;
+            let pw = w - ML - MR;
+            let ph = h - MT - MB;
+            if pw <= 4.0 || ph <= 4.0 {
+                return;
+            }
+            let empty = |frame: &mut Frame, msg: &str| {
+                frame.fill_text(Text {
+                    content: msg.to_string(),
+                    position: Point::new(ML + 6.0, h / 2.0),
+                    color: C_AXIS,
+                    size: iced::Pixels(11.0),
+                    ..Default::default()
+                });
+            };
+
+            match ch.kind.as_str() {
+                "profile" => {
+                    // 横向深度剖面：y=价格，x=挂单量（买在左、卖在右各占半幅）。
+                    let prices: Vec<f64> =
+                        ch.bid_price.iter().chain(ch.ask_price.iter()).copied().collect();
+                    let amts: Vec<f64> =
+                        ch.bid_amount.iter().chain(ch.ask_amount.iter()).copied().collect();
+                    let (Some(yr), Some(ar)) = (
+                        finite_range(prices.iter().copied()),
+                        finite_range(amts.iter().copied().chain(std::iter::once(0.0))),
+                    ) else {
+                        empty(frame, "无数据");
+                        return;
+                    };
+                    Self::axes(frame, w, h, (0.0, ar.1), yr, false, "价格");
+                    let sy = |v: f64| MT + ph * (1.0 - ((v - yr.0) / (yr.1 - yr.0)) as f32);
+                    let sx = |v: f64| (v / ar.1.max(1e-12)) as f32 * pw;
+                    let bar_h = (ph / (prices.len().max(1) as f32) * 0.8).clamp(1.0, 14.0);
+                    for (p, a) in ch.bid_price.iter().zip(ch.bid_amount.iter()) {
+                        if !p.is_finite() || !a.is_finite() {
+                            continue;
+                        }
+                        let y = sy(*p);
+                        frame.fill_rectangle(
+                            Point::new(ML, y - bar_h / 2.0),
+                            Size::new(sx(*a).max(1.0), bar_h),
+                            C_UP,
+                        );
+                    }
+                    for (p, a) in ch.ask_price.iter().zip(ch.ask_amount.iter()) {
+                        if !p.is_finite() || !a.is_finite() {
+                            continue;
+                        }
+                        let y = sy(*p);
+                        frame.fill_rectangle(
+                            Point::new(ML, y - bar_h / 2.0),
+                            Size::new(sx(*a).max(1.0), bar_h),
+                            Color { a: 0.85, ..C_DN },
+                        );
+                    }
+                    return;
+                }
+                _ => {}
+            }
+
+            let n = ch.x.len();
+            if n == 0 {
+                empty(frame, "无数据");
+                return;
+            }
+            let Some(xr) = finite_range(ch.x.iter().copied()) else {
+                empty(frame, "X 轴无有效值");
+                return;
+            };
+            let sx = |v: f64| ML + pw * (((v - xr.0) / (xr.1 - xr.0)) as f32);
+
+            match ch.kind.as_str() {
+                "candle" => {
+                    let Some(yr) = finite_range(ch.l.iter().chain(ch.h.iter()).copied()) else {
+                        empty(frame, "无有效价格");
+                        return;
+                    };
+                    // 下方 22% 留给成交量
+                    let vh = ph * 0.22;
+                    let cph = ph - vh - 4.0;
+                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, "价格");
+                    let sy = |v: f64| MT + cph * (1.0 - ((v - yr.0) / (yr.1 - yr.0)) as f32);
+                    let bw = (pw / n as f32 * 0.7).clamp(1.0, 12.0);
+                    for i in 0..n {
+                        let (o, hh, ll, c) = (
+                            *ch.o.get(i).unwrap_or(&f64::NAN),
+                            *ch.h.get(i).unwrap_or(&f64::NAN),
+                            *ch.l.get(i).unwrap_or(&f64::NAN),
+                            *ch.c.get(i).unwrap_or(&f64::NAN),
+                        );
+                        if !(o.is_finite() && hh.is_finite() && ll.is_finite() && c.is_finite()) {
+                            continue;
+                        }
+                        let x = sx(ch.x[i]);
+                        let col = if c >= o { C_UP } else { C_DN };
+                        frame.stroke(
+                            &Path::line(Point::new(x, sy(hh)), Point::new(x, sy(ll))),
+                            Stroke::default().with_color(col).with_width(1.0),
+                        );
+                        let (yt, yb) = (sy(o.max(c)), sy(o.min(c)));
+                        frame.fill_rectangle(
+                            Point::new(x - bw / 2.0, yt),
+                            Size::new(bw, (yb - yt).max(1.0)),
+                            col,
+                        );
+                    }
+                    if let Some(vr) = finite_range(ch.v.iter().copied().chain(std::iter::once(0.0)))
+                    {
+                        let vy0 = MT + ph;
+                        for i in 0..n {
+                            let v = *ch.v.get(i).unwrap_or(&f64::NAN);
+                            if !v.is_finite() {
+                                continue;
+                            }
+                            let hgt = ((v / vr.1.max(1e-12)) as f32 * vh).max(0.5);
+                            let up = ch.c.get(i).copied().unwrap_or(0.0)
+                                >= ch.o.get(i).copied().unwrap_or(0.0);
+                            frame.fill_rectangle(
+                                Point::new(sx(ch.x[i]) - bw / 2.0, vy0 - hgt),
+                                Size::new(bw, hgt),
+                                Color { a: 0.55, ..if up { C_UP } else { C_DN } },
+                            );
+                        }
+                    }
+                }
+                "scatter" => {
+                    let Some(yr) = finite_range(ch.y.iter().copied()) else {
+                        empty(frame, "无有效 Y");
+                        return;
+                    };
+                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, &ch.y_label);
+                    let sy = |v: f64| MT + ph * (1.0 - ((v - yr.0) / (yr.1 - yr.0)) as f32);
+                    let smax = ch.size.iter().copied().filter(|v| v.is_finite()).fold(0.0, f64::max);
+                    for i in 0..n {
+                        let y = *ch.y.get(i).unwrap_or(&f64::NAN);
+                        if !y.is_finite() {
+                            continue;
+                        }
+                        let sz = ch.size.get(i).copied().unwrap_or(1.0);
+                        let rad = if smax > 0.0 {
+                            (2.0 + 6.0 * (sz / smax).sqrt() as f32).clamp(1.5, 9.0)
+                        } else {
+                            3.0
+                        };
+                        let col = match ch.cls.get(i).copied().unwrap_or(0) {
+                            1 => C_UP,
+                            2 => C_DN,
+                            _ => C_DIM,
+                        };
+                        frame.fill(
+                            &Path::circle(Point::new(sx(ch.x[i]), sy(y)), rad),
+                            Color { a: 0.75, ..col },
+                        );
+                    }
+                }
+                "bar" => {
+                    let Some(yr) = finite_range(
+                        ch.series
+                            .iter()
+                            .flat_map(|s| s.1.iter().copied())
+                            .chain(std::iter::once(0.0)),
+                    ) else {
+                        empty(frame, "无有效数值");
+                        return;
+                    };
+                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, &ch.y_label);
+                    let sy = |v: f64| MT + ph * (1.0 - ((v - yr.0) / (yr.1 - yr.0)) as f32);
+                    let k = ch.series.len().max(1);
+                    let bw = (pw / n.max(1) as f32 / k as f32 * 0.8).clamp(0.7, 10.0);
+                    let zero = sy(0.0f64.clamp(yr.0, yr.1));
+                    for (si, (_, vals)) in ch.series.iter().enumerate() {
+                        let col = PALETTE[si % PALETTE.len()];
+                        for i in 0..n.min(vals.len()) {
+                            let v = vals[i];
+                            if !v.is_finite() {
+                                continue;
+                            }
+                            let x = sx(ch.x[i]) - (k as f32 * bw) / 2.0 + si as f32 * bw;
+                            let y = sy(v);
+                            frame.fill_rectangle(
+                                Point::new(x, y.min(zero)),
+                                Size::new(bw, (y - zero).abs().max(0.8)),
+                                Color { a: 0.85, ..col },
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    // line
+                    let Some(yr) =
+                        finite_range(ch.series.iter().flat_map(|s| s.1.iter().copied()))
+                    else {
+                        empty(frame, "无有效数值");
+                        return;
+                    };
+                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, &ch.y_label);
+                    let sy = |v: f64| MT + ph * (1.0 - ((v - yr.0) / (yr.1 - yr.0)) as f32);
+                    for (si, (_, vals)) in ch.series.iter().enumerate() {
+                        let col = PALETTE[si % PALETTE.len()];
+                        let mut pending: Option<Point> = None;
+                        for i in 0..n.min(vals.len()) {
+                            let v = vals[i];
+                            if !v.is_finite() {
+                                pending = None; // 断点：NaN 处断线，不连虚假直线
+                                continue;
+                            }
+                            let p = Point::new(sx(ch.x[i]), sy(v));
+                            if let Some(prev) = pending {
+                                frame.stroke(
+                                    &Path::line(prev, p),
+                                    Stroke::default().with_color(col).with_width(1.2),
+                                );
+                            }
+                            pending = Some(p);
+                        }
+                    }
+                    // 图例
+                    for (si, (name, _)) in ch.series.iter().enumerate() {
+                        frame.fill_text(Text {
+                            content: name.clone(),
+                            position: Point::new(ML + 6.0 + si as f32 * 88.0, MT + 1.0),
+                            color: PALETTE[si % PALETTE.len()],
+                            size: iced::Pixels(9.0),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        });
+        vec![geo]
+    }
+}
+
+fn chip<'a>(
+    label: String,
+    active: bool,
+    enabled: bool,
+    msg: TardisBoardMsg,
+) -> Element<'a, TardisBoardMsg> {
+    let t = text(label).size(12).color(if !enabled {
+        Color { r: 0.45, g: 0.47, b: 0.50, a: 1.0 }
+    } else if active {
+        Color::from_rgb(0.98, 0.99, 1.0)
+    } else {
+        Color::from_rgb(0.80, 0.84, 0.88)
+    });
+    let b = button(t)
+        .padding([3, 8])
+        .style(move |theme, status| crate::style::button::modifier(theme, status, active));
+    if enabled { b.on_press(msg).into() } else { b.into() }
+}
+
+fn label<'a>(s: &str) -> Element<'a, TardisBoardMsg> {
+    text(s.to_string()).size(12).into()
+}
+
+pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
+    let cat = ro::catalog();
+    let entry = app.src_entry();
+    let p = ro::panel();
+
+    let header = column![
+        text("Tardis 历史面板 — 数据源 → 数据类型 → 图表")
+            .size(19)
+            .color(Color::from_rgb(0.55, 0.8, 1.0)),
+        text("零交易所流：全部数据来自本地历史文件，不建立任何实时连接")
+            .size(10)
+            .color(Color::from_rgb(0.5, 0.55, 0.6)),
+    ]
+    .spacing(3);
+
+    // ① 数据源
+    let mut src_row = row![label("① 数据源")].spacing(6).align_y(Alignment::Center);
+    for s in &cat.sources {
+        src_row = src_row.push(chip(
+            format!("{}{}", s.label, if s.available { "" } else { "（无）" }),
+            s.key == app.source,
+            s.available,
+            TardisBoardMsg::SourcePick(s.key.clone()),
+        ));
+    }
+    src_row = src_row.push(
+        button(text("刷新清单").size(11))
+            .padding([3, 8])
+            .on_press(TardisBoardMsg::RefreshCatalog),
+    );
+
+    // ② 数据类型（本源没有的类型置灰，不可点——不画空面板）
+    let all: Vec<String> = if cat.type_labels.is_empty() {
+        entry.types.clone()
+    } else {
+        let mut v: Vec<String> = cat.type_labels.keys().cloned().collect();
+        v.sort_by_key(|t| entry.types.iter().position(|x| x == t).unwrap_or(usize::MAX));
+        v
+    };
+    let mut ty_row1 = row![label("② 数据类型")].spacing(6).align_y(Alignment::Center);
+    let mut ty_row2 = row![label("                ")].spacing(6).align_y(Alignment::Center);
+    for (i, t) in all.iter().enumerate() {
+        let has = entry.types.contains(t);
+        let c = chip(
+            ro::type_label(t),
+            *t == app.dtype,
+            has,
+            TardisBoardMsg::TypePick(t.clone()),
+        );
+        if i < 4 {
+            ty_row1 = ty_row1.push(c);
+        } else {
+            ty_row2 = ty_row2.push(c);
+        }
+    }
+
+    // ③ 窗口
+    let dates = entry.dates.get(&app.symbol).cloned().unwrap_or_default();
+    let picks = row![
+        label("③ 窗口"),
+        pick_list(entry.symbols.clone(), Some(app.symbol.clone()), TardisBoardMsg::SymbolPick)
+            .text_size(12),
+        pick_list(dates, Some(app.date.clone()), TardisBoardMsg::DatePick).text_size(12),
+        pick_list(hours(), Some(app.start_hm.clone()), TardisBoardMsg::StartPick).text_size(12),
+        pick_list(MINUTES.to_vec(), Some(app.minutes), TardisBoardMsg::MinutesPick).text_size(12),
+        label("分钟"),
+        button(text("加载").size(12)).padding([3, 12]).on_press(TardisBoardMsg::Load),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    let hint = text(app.hint.clone()).size(11).color(if app.hint.starts_with('✗') {
+        Color::from_rgb(0.9, 0.45, 0.45)
+    } else {
+        Color::from_rgb(0.55, 0.68, 0.58)
+    });
+
+    let mut body = column![].spacing(10);
+    if let Some(e) = cat.error.clone() {
+        body = body.push(text(e).size(11).color(Color::from_rgb(0.9, 0.6, 0.4)));
+    }
+    if !p.loaded {
+        body = body.push(
+            text("尚未加载 —— 选好上面三层后点「加载」").size(12).color(C_DIM),
+        );
+    } else if let Some(e) = p.error.clone() {
+        body = body.push(text(format!("· {e}")).size(12).color(Color::from_rgb(0.9, 0.6, 0.4)));
+    } else {
+        // 下方图是**已加载**的那一份；若与当前三层选择不符，明示，避免误读成当前选择的结果。
+        let stale = p.source != app.source
+            || p.dtype != app.dtype
+            || p.symbol != app.symbol
+            || p.date != app.date
+            || p.start != app.start_hm
+            || p.minutes != app.minutes;
+        body = body.push(
+            text(format!(
+                "{} · {} · {} {} {} +{}min · {} 行 · {} 张图{}",
+                p.source_label, p.type_label, p.symbol, p.date, p.start, p.minutes, p.rows,
+                p.charts.len(),
+                if stale { "　⚠ 这是上次加载的结果，点「加载」刷新" } else { "" }
+            ))
+            .size(11)
+            .color(if stale { Color::from_rgb(0.85, 0.66, 0.35) } else { C_DIM }),
+        );
+        for ch in &p.charts {
+            let is_main = !ch.title.starts_with("衍生");
+            let title = text(ch.title.clone()).size(13).color(if is_main {
+                Color::from_rgb(0.85, 0.88, 0.92)
+            } else {
+                Color::from_rgb(0.62, 0.68, 0.75)
+            });
+            let cv: Element<'_, TardisBoardMsg> =
+                canvas_widget(ChartCanvas { ch: ch.clone(), cache: Cache::new() })
+                    .width(Length::Fill)
+                    .height(Length::Fixed(if is_main { 210.0 } else { 130.0 }))
+                    .into();
+            let mut col = column![title, cv].spacing(3);
+            if !ch.note.is_empty() {
+                col = col.push(text(ch.note.clone()).size(10).color(Color::from_rgb(
+                    0.48, 0.52, 0.57,
+                )));
+            }
+            body = body.push(container(col).padding(4));
+        }
+    }
+
+    container(
+        column![header, src_row, ty_row1, ty_row2, picks, hint, scrollable(body).height(Length::Fill)]
+            .spacing(8)
+            .padding(12),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}

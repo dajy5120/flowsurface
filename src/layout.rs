@@ -209,6 +209,10 @@ impl From<&pane::State> for data::Pane {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
             },
+            pane::Content::TardisBoard(_) => data::Pane::TardisBoard {
+                settings: pane.settings.clone(),
+                link_group: pane.link_group,
+            },
             pane::Content::BacktestResult => data::Pane::BacktestResult {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
@@ -404,6 +408,15 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             settings,
             link_group,
         )),
+        data::Pane::TardisBoard {
+            settings,
+            link_group,
+        } => Configuration::Pane(pane::State::from_config(
+            pane::Content::TardisBoard(crate::ws::tardis_board::TardisBoardState::load()),
+            vec![],
+            settings,
+            link_group,
+        )),
         data::Pane::BacktestResult {
             settings,
             link_group,
@@ -517,6 +530,20 @@ mod tests {
     /// `data::Pane::TardisReplay` → `configuration()` → `pane::State` → `data::Pane`。
     /// 锁住 [`From<&pane::State> for data::Pane`] 的对应臂——写漏了会让该 pane
     /// 在下次启动时静默丢失（退化成别的 content），编译期发现不了。
+    /// 历史面板 pane 的持久化往返（docs/20 §9）。
+    #[test]
+    fn tardis_board_pane_roundtrips() {
+        let original = data::Pane::TardisBoard {
+            settings: data::layout::pane::Settings::default(),
+            link_group: None,
+        };
+        let Configuration::Pane(state) = configuration(original) else {
+            panic!("configuration() 未产出 Pane 配置");
+        };
+        assert!(matches!(state.content, pane::Content::TardisBoard(_)));
+        assert!(matches!(data::Pane::from(&state), data::Pane::TardisBoard { .. }));
+    }
+
     #[test]
     fn tardis_replay_pane_roundtrips() {
         let original = data::Pane::TardisReplay {

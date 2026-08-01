@@ -85,15 +85,9 @@ fn pane_template(name: &str) -> &'static str {
         WS_OPTIONS => r#"{"OptionsBoard":{"settings":{},"link_group":null}}"#,
         // 预测市场 Polymarket（docs/19）。
         WS_PREDICTION => r#"{"PredictionBoard":{"settings":{},"link_group":null}}"#,
-        // Tardis 历史回放（docs/20 Phase 5）：左 M1 K 线（吃 replay 喂的 ws:bt 流）∣ 右 回放控制。
-        // 关键一：图表 stream_type 必须含 **Trades**——`ws_replay_subscriptions` 只对
-        // `specs.trade` 里的 ticker 建回放订阅，只给 Kline 流则订阅根本不建、图永远空。
-        // 关键二：本工作区必须进 main.rs 的 `is_replay` 门控（开 replay 订阅 + **关实时流**），
-        // 否则实时行情会盖掉回放、且历史 K 线落在实时时间窗外看不见。已实测：开启后
-        // 图表价位=Tardis 当日真实价位（2026-06-01 约 72.6k~73.2k），非实时价（63k）。
-        WS_TARDIS => {
-            r#"{"Split":{"axis":"Vertical","ratio":0.62,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}},{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"TardisReplay":{"settings":{},"link_group":null}}}}"#
-        }
+        // Tardis 历史回放（docs/20 §9）：单一历史面板 —— 数据源(3) → 数据类型(8) → 图表。
+        // **不声明任何 ticker/stream**，故本工作区零交易所连接（用户明确要求不接实时流）。
+        WS_TARDIS => r#"{"TardisBoard":{"settings":{},"link_group":null}}"#,
         _ => r#"{"Starter":{"link_group":null}}"#,
     }
 }
