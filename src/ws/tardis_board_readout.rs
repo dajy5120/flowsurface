@@ -258,6 +258,97 @@ fn parse_panel(text: &str) -> Panel {
     p
 }
 
+/// 面板里所有**时间轴**图表的 x 跨度（用于把播放头范围对齐到真实数据范围）。
+/// 全是非时间轴图（如深度剖面）时返回 None —— 该类型不支持时间步进。
+pub fn panel_time_span(p: &Panel) -> Option<(f64, f64)> {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for c in &p.charts {
+        if !c.x_is_time {
+            continue;
+        }
+        for v in &c.x {
+            if v.is_finite() {
+                lo = lo.min(*v);
+                hi = hi.max(*v);
+            }
+        }
+    }
+    (lo.is_finite() && hi > lo).then_some((lo, hi))
+}
+
+// ── 播放头（时间步进回放，docs/20 §10） ───────────────────────────────────
+/// 由 `tardis_cockpit_feed.py --mode panel` 每 ~100ms 发布到 `ws:tardis_replay:status`。
+/// 面板据 `data_ts` 只画 x ≤ data_ts 的部分，形成时间步进动画。
+#[derive(Clone, Default)]
+pub struct Playhead {
+    pub active: bool, // 有 panel 模式的回放记录（running/done/stopped 都算）
+    pub running: bool,
+    pub t0_ms: f64,
+    pub t1_ms: f64,
+    pub data_ts: f64,
+    pub pct: f64,
+    pub speed: f64,
+    pub state: String,
+}
+
+pub const STATUS_KEY: &str = "ws:tardis_replay:status";
+
+static PLAY: OnceLock<Mutex<Playhead>> = OnceLock::new();
+static PLAY_POLLER: OnceLock<()> = OnceLock::new();
+
+fn redis_url() -> String {
+    std::env::var("WS_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+}
+
+/// 读播放头（惰性起 100ms poller——与 feeder 的发布节奏对齐，动画才顺滑）。
+pub fn playhead() -> Playhead {
+    PLAY_POLLER.get_or_init(|| {
+        std::thread::spawn(|| {
+            let mut conn = None;
+            loop {
+                if conn.is_none() {
+                    conn = redis::Client::open(redis_url())
+                        .ok()
+                        .and_then(|c| c.get_connection().ok());
+                }
+                let mut ph = Playhead::default();
+                if let Some(c) = conn.as_mut() {
+                    use redis::Commands;
+                    match c.get::<_, Option<String>>(STATUS_KEY) {
+                        Ok(Some(s)) => parse_playhead(&s, &mut ph),
+                        Ok(None) => {}
+                        Err(_) => conn = None,
+                    }
+                }
+                if let Ok(mut g) = PLAY.get_or_init(|| Mutex::new(Playhead::default())).lock() {
+                    *g = ph;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+    });
+    PLAY.get().and_then(|m| m.lock().ok().map(|g| g.clone())).unwrap_or_default()
+}
+
+fn parse_playhead(s: &str, ph: &mut Playhead) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else {
+        return;
+    };
+    // 只认 panel 模式：stream 模式（§8 喂 FS 图表）不该驱动本面板的游标。
+    if v.get("mode").and_then(|x| x.as_str()) != Some("panel") {
+        return;
+    }
+    let f = |k: &str| v.get(k).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    ph.state = v.get("state").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    ph.t0_ms = f("t0_ms");
+    ph.t1_ms = f("t1_ms");
+    ph.data_ts = f("data_ts");
+    ph.pct = f("pct");
+    ph.speed = f("speed");
+    ph.running = ph.state == "running";
+    ph.active = ph.t1_ms > ph.t0_ms;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +410,33 @@ mod tests {
         assert_eq!(p.rows, 0);
         assert!(p.charts.is_empty());
         assert!(p.error.unwrap().contains("不提供"));
+    }
+
+    #[test]
+    fn playhead_reads_panel_mode() {
+        let mut ph = Playhead::default();
+        parse_playhead(
+            r#"{"run_id":"R","symbol":"BTCUSDT","date":"2026-06-01","mode":"panel",
+                "t0_ms":1780304400000,"t1_ms":1780305000000,"data_ts":1780304700000,
+                "pct":50.0,"speed":120.0,"state":"running"}"#,
+            &mut ph,
+        );
+        assert!(ph.active && ph.running);
+        assert_eq!(ph.data_ts, 1780304700000.0);
+        assert!((ph.pct - 50.0).abs() < 1e-9);
+    }
+
+    /// §8 的 stream 模式状态不得驱动本面板游标（两者共用同一个 status key）。
+    #[test]
+    fn playhead_ignores_stream_mode() {
+        let mut ph = Playhead::default();
+        parse_playhead(
+            r#"{"run_id":"R","symbol":"BTCUSDT","sent":24000,"total":50909,
+                "pct":47.1,"speed":60.0,"state":"running"}"#,
+            &mut ph,
+        );
+        assert!(!ph.active, "stream 模式不该被当成面板播放头");
+        assert!(!ph.running);
     }
 
     #[test]

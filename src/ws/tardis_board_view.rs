@@ -10,7 +10,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
-use super::tardis_board::{MINUTES, TardisBoardMsg, TardisBoardState, hours};
+use super::tardis_board::{MINUTES, Speed, TardisBoardMsg, TardisBoardState, hours, is_playing};
 use super::tardis_board_readout as ro;
 
 const ML: f32 = 58.0;
@@ -94,6 +94,37 @@ fn fmt_time(ms: f64) -> String {
 struct ChartCanvas {
     ch: ro::Chart,
     cache: Cache,
+    /// 时间步进回放的播放头（ms）；None=不裁剪，显示全窗口。
+    playhead: Option<f64>,
+}
+
+/// 按播放头裁剪出「≤ 游标」的部分（docs/20 §10）。x 轴范围**保持整窗不变**，
+/// 这样回放过程中坐标轴不会来回跳动，只是曲线从左往右生长。
+fn clip_to(ch: &ro::Chart, head: f64) -> ro::Chart {
+    if !ch.x_is_time || ch.x.is_empty() {
+        return ch.clone();
+    }
+    let keep = ch.x.iter().take_while(|v| **v <= head).count();
+    if keep >= ch.x.len() {
+        return ch.clone();
+    }
+    let cut = |v: &Vec<f64>| -> Vec<f64> {
+        if v.len() >= ch.x.len() { v[..keep].to_vec() } else { v.clone() }
+    };
+    ro::Chart {
+        // x 保留全长以锁定坐标轴范围；数据序列截断 → 右侧留白即「尚未播到」。
+        x: ch.x.clone(),
+        o: cut(&ch.o),
+        h: cut(&ch.h),
+        l: cut(&ch.l),
+        c: cut(&ch.c),
+        v: cut(&ch.v),
+        y: cut(&ch.y),
+        size: cut(&ch.size),
+        cls: if ch.cls.len() >= ch.x.len() { ch.cls[..keep].to_vec() } else { ch.cls.clone() },
+        series: ch.series.iter().map(|(n, v)| (n.clone(), cut(v))).collect(),
+        ..ch.clone()
+    }
 }
 
 impl ChartCanvas {
@@ -172,7 +203,14 @@ impl<M> canvas::Program<M> for ChartCanvas {
     ) -> Vec<Geometry> {
         let geo = self.cache.draw(r, b.size(), |frame: &mut Frame| {
             let (w, h) = (frame.width(), frame.height());
-            let ch = &self.ch;
+            let clipped;
+            let ch = match self.playhead {
+                Some(head) => {
+                    clipped = clip_to(&self.ch, head);
+                    &clipped
+                }
+                None => &self.ch,
+            };
             let pw = w - ML - MR;
             let ph = h - MT - MB;
             if pw <= 4.0 || ph <= 4.0 {
@@ -401,6 +439,21 @@ impl<M> canvas::Program<M> for ChartCanvas {
                     }
                 }
             }
+
+            // 播放头竖线：标出「已播到哪」，右侧留白即尚未播放的部分。
+            if let Some(head) = self.playhead
+                && ch.x_is_time
+                && head >= xr.0
+                && head <= xr.1
+            {
+                let x = sx(head);
+                frame.stroke(
+                    &Path::line(Point::new(x, MT), Point::new(x, MT + ph)),
+                    Stroke::default()
+                        .with_color(Color { r: 0.95, g: 0.78, b: 0.35, a: 0.85 })
+                        .with_width(1.2),
+                );
+            }
         });
         vec![geo]
     }
@@ -433,6 +486,15 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     let cat = ro::catalog();
     let entry = app.src_entry();
     let p = ro::panel();
+    let ph = ro::playhead();
+    // 播放头只在与**当前已加载面板**的时间范围吻合时生效，避免用上一次回放的游标
+    // 去裁当前这张图（换类型/换窗口后范围会变）。
+    // 播放头记录是否属于**当前这张已加载面板**（换类型/换窗口后范围会变，旧游标必须失效）。
+    let ph_matches = match (ph.active, ro::panel_time_span(&p)) {
+        (true, Some((t0, t1))) => (ph.t0_ms - t0).abs() < 1.0 && (ph.t1_ms - t1).abs() < 1.0,
+        _ => false,
+    };
+    let head = (ph_matches && ph.state != "done").then_some(ph.data_ts);
 
     let header = column![
         text("Tardis 历史面板 — 数据源 → 数据类型 → 图表")
@@ -500,6 +562,35 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     .spacing(6)
     .align_y(Alignment::Center);
 
+    // ④ 时间步进回放（docs/20 §10）：由 §8 的推流器 --mode panel 驱动播放头。
+    let playing = is_playing();
+    let play_row = row![
+        label("④ 回放"),
+        pick_list(Speed::ALL.to_vec(), Some(app.speed), TardisBoardMsg::SpeedPick).text_size(12),
+        if playing {
+            button(text("■ 停止").size(12)).padding([3, 12]).on_press(TardisBoardMsg::StopPlay)
+        } else {
+            button(text("▶ 回放").size(12)).padding([3, 12]).on_press(TardisBoardMsg::Play)
+        },
+        text(match head {
+            Some(h) => format!(
+                "播放头 {} · {:.1}%",
+                fmt_time(h),
+                ph.pct
+            ),
+            None if ph_matches && ph.state == "done" => "播放完毕（显示整窗）".to_string(),
+            None => "未回放（显示整窗）".to_string(),
+        })
+        .size(11)
+        .color(if head.is_some() {
+            Color::from_rgb(0.95, 0.78, 0.35)
+        } else {
+            C_DIM
+        }),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
     let hint = text(app.hint.clone()).size(11).color(if app.hint.starts_with('✗') {
         Color::from_rgb(0.9, 0.45, 0.45)
     } else {
@@ -542,7 +633,11 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
                 Color::from_rgb(0.62, 0.68, 0.75)
             });
             let cv: Element<'_, TardisBoardMsg> =
-                canvas_widget(ChartCanvas { ch: ch.clone(), cache: Cache::new() })
+                canvas_widget(ChartCanvas {
+                    ch: ch.clone(),
+                    cache: Cache::new(),
+                    playhead: head,
+                })
                     .width(Length::Fill)
                     .height(Length::Fixed(if is_main { 210.0 } else { 130.0 }))
                     .into();
@@ -557,7 +652,16 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     }
 
     container(
-        column![header, src_row, ty_row1, ty_row2, picks, hint, scrollable(body).height(Length::Fill)]
+        column![
+            header,
+            src_row,
+            ty_row1,
+            ty_row2,
+            picks,
+            play_row,
+            hint,
+            scrollable(body).height(Length::Fill)
+        ]
             .spacing(8)
             .padding(12),
     )
