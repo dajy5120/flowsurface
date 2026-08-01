@@ -27,9 +27,10 @@ pub const WS_FACTORY: &str = "Alpha Factory";
 pub const WS_C4: &str = "C4 影子"; // maker 影子守护实时/影子日/活体vs重放（docs/14 §2）
 pub const WS_OPTIONS: &str = "期权/0DTE"; // 期权回测·探针面板（docs/18）
 pub const WS_PREDICTION: &str = "预测市场"; // Polymarket 决策支持面板（docs/19）
-pub const WORKSPACES: [&str; 9] = [
+pub const WS_TARDIS: &str = "Tardis 历史回放"; // 已购 30 天逐笔变速回放（docs/20 Phase 5）
+pub const WORKSPACES: [&str; 10] = [
     WS_OFFICIAL, WS_LIVE, WS_RECORDED, WS_SELFDATA, WS_RECORDER, WS_FACTORY, WS_C4, WS_OPTIONS,
-    WS_PREDICTION,
+    WS_PREDICTION, WS_TARDIS,
 ];
 
 /// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
@@ -48,6 +49,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
         WS_C4 => Icon::Checkmark,         // C4 判定进度（合格影子日）
         WS_OPTIONS => Icon::Layout,       // 期权/0DTE 回测面板
         WS_PREDICTION => Icon::Layout,    // 预测市场 Polymarket 面板
+        WS_TARDIS => Icon::Return,        // 历史回放（同「录制数据回测」语义）
         _ => Icon::Layout,
     }
 }
@@ -83,6 +85,15 @@ fn pane_template(name: &str) -> &'static str {
         WS_OPTIONS => r#"{"OptionsBoard":{"settings":{},"link_group":null}}"#,
         // 预测市场 Polymarket（docs/19）。
         WS_PREDICTION => r#"{"PredictionBoard":{"settings":{},"link_group":null}}"#,
+        // Tardis 历史回放（docs/20 Phase 5）：左 M1 K 线（吃 replay 喂的 ws:bt 流）∣ 右 回放控制。
+        // 关键一：图表 stream_type 必须含 **Trades**——`ws_replay_subscriptions` 只对
+        // `specs.trade` 里的 ticker 建回放订阅，只给 Kline 流则订阅根本不建、图永远空。
+        // 关键二：本工作区必须进 main.rs 的 `is_replay` 门控（开 replay 订阅 + **关实时流**），
+        // 否则实时行情会盖掉回放、且历史 K 线落在实时时间窗外看不见。已实测：开启后
+        // 图表价位=Tardis 当日真实价位（2026-06-01 约 72.6k~73.2k），非实时价（63k）。
+        WS_TARDIS => {
+            r#"{"Split":{"axis":"Vertical","ratio":0.62,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}},{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"TardisReplay":{"settings":{},"link_group":null}}}}"#
+        }
         _ => r#"{"Starter":{"link_group":null}}"#,
     }
 }
@@ -130,4 +141,33 @@ pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
     }
     log::info!("WS workspaces: 已刷新模板（新建 {added}）");
     added
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每个工作区模板都必须是合法 `data::Pane` JSON——否则该工作区在运行期静默变空
+    /// （`dashboard_from_template` 只记 error 后跳过）。加 pane 时容易写错，这里锁死。
+    #[test]
+    fn every_workspace_template_parses() {
+        for name in WORKSPACES {
+            let raw = pane_template(name);
+            assert!(
+                serde_json::from_str::<data::Pane>(raw).is_ok(),
+                "工作区 `{name}` 模板不是合法 data::Pane: {raw}"
+            );
+        }
+    }
+
+    /// 模板不得落到 `_ => Starter` 兜底（写错常量名/漏加 match 臂的典型症状）。
+    #[test]
+    fn no_workspace_falls_back_to_starter() {
+        for name in WORKSPACES {
+            assert!(
+                !pane_template(name).contains("Starter"),
+                "工作区 `{name}` 落到了 Starter 兜底模板"
+            );
+        }
+    }
 }

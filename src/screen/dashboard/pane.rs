@@ -106,6 +106,8 @@ pub enum Event {
     MiniTickersListInteraction(modal::pane::mini_tickers_list::Message),
     /// 录制驾驶舱交互（docs/08 F6-P3）：服务启停 / 配置编辑。
     RecorderInteraction(crate::ws::recorder::RecorderMsg),
+    /// Tardis 历史回放交互（docs/20 Phase 5）：选符号/日期/时段/倍速 + 起停。
+    TardisReplayInteraction(crate::ws::tardis_replay::TardisReplayMsg),
 }
 
 pub struct State {
@@ -413,6 +415,10 @@ impl State {
                 ContentKind::Recorder => {
                     (Content::Recorder(crate::ws::recorder::RecorderPaneState::load()), vec![])
                 }
+                ContentKind::TardisReplay => (
+                    Content::TardisReplay(crate::ws::tardis_replay::TardisReplayState::load()),
+                    vec![],
+                ),
                 ContentKind::BacktestResult => (Content::BacktestResult, vec![]),
                 ContentKind::Starter => unreachable!(),
             }
@@ -588,6 +594,7 @@ impl State {
                 | Content::OptionsBoard
                 | Content::PredictionBoard
                 | Content::Recorder(_)
+                | Content::TardisReplay(_)
                 | Content::BacktestResult
         ) && !self.has_stream()
         {
@@ -738,6 +745,20 @@ impl State {
             Content::PredictionBoard => {
                 // 预测市场 Polymarket（docs/19）：渲染走 ws::prediction_readout 旁路快照（prediction_board.json）。
                 let base = crate::ws::prediction_view::pane_body();
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::TardisReplay(tr) => {
+                // Tardis 历史回放（docs/20 Phase 5）：交互视图发 TardisReplayMsg → 包成 pane 事件。
+                let base = crate::ws::tardis_replay_view::pane_body(tr)
+                    .map(move |m| Message::PaneEvent(id, Event::TardisReplayInteraction(m)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1272,6 +1293,7 @@ impl State {
                         | ContentKind::OptionsBoard
                         | ContentKind::PredictionBoard
                         | ContentKind::Recorder
+                        | ContentKind::TardisReplay
                 ) {
                     self.streams = ResolvedStream::waiting(vec![]);
                     let modal = Modal::MiniTickersList(MiniPanel::new());
@@ -1299,6 +1321,12 @@ impl State {
                 // 录制驾驶舱（docs/08 F6-P3）：改可编辑状态 + 副作用（systemctl / 写 toml）。
                 if let Content::Recorder(rec) = &mut self.content {
                     crate::ws::recorder::handle(rec, m);
+                }
+            }
+            Event::TardisReplayInteraction(m) => {
+                // Tardis 历史回放（docs/20 Phase 5）：改选择 + 副作用（起停 feeder 子进程）。
+                if let Content::TardisReplay(tr) = &mut self.content {
+                    crate::ws::tardis_replay::handle(tr, m);
                 }
             }
             Event::ToggleIndicator(ind) => {
@@ -1872,7 +1900,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::OptionsBoard | Content::PredictionBoard | Content::Recorder(_) | Content::BacktestResult => None,
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::OptionsBoard | Content::PredictionBoard | Content::Recorder(_) | Content::TardisReplay(_) | Content::BacktestResult => None,
         }
     }
 
@@ -1902,6 +1930,7 @@ impl State {
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::Recorder(_)
+            | Content::TardisReplay(_)
             | Content::BacktestResult => None,
         }
     }
@@ -2001,6 +2030,8 @@ pub enum Content {
     PredictionBoard,
     /// 录制驾驶舱（docs/08 F6-P3）：交互式控制中心，携带可编辑配置状态。
     Recorder(crate::ws::recorder::RecorderPaneState),
+    /// Tardis 历史回放（docs/20 Phase 5）：交互式控制面板，携带选择状态。
+    TardisReplay(crate::ws::tardis_replay::TardisReplayState),
     /// 回测结果（docs/08 F6-P7）：收益曲线/回撤/统计，渲染走 `ws::backtest_readout` 旁路快照。
     BacktestResult,
 }
@@ -2221,6 +2252,9 @@ impl Content {
             ContentKind::Recorder => {
                 Content::Recorder(crate::ws::recorder::RecorderPaneState::load())
             }
+            ContentKind::TardisReplay => {
+                Content::TardisReplay(crate::ws::tardis_replay::TardisReplayState::load())
+            }
             ContentKind::BacktestResult => Content::BacktestResult,
         }
     }
@@ -2240,6 +2274,7 @@ impl Content {
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::Recorder(_)
+            | Content::TardisReplay(_)
             | Content::BacktestResult => None,
         }
     }
@@ -2322,6 +2357,7 @@ impl Content {
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::Recorder(_)
+            | Content::TardisReplay(_)
             | Content::BacktestResult
             | Content::ShaderHeatmap { .. } => {
                 panic!("indicator reorder on {} pane", self)
@@ -2375,6 +2411,7 @@ impl Content {
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::Recorder(_)
+            | Content::TardisReplay(_)
             | Content::BacktestResult
             | Content::Comparison(_) => None,
         }
@@ -2447,6 +2484,7 @@ impl Content {
             Content::OptionsBoard => ContentKind::OptionsBoard,
             Content::PredictionBoard => ContentKind::PredictionBoard,
             Content::Recorder(_) => ContentKind::Recorder,
+            Content::TardisReplay(_) => ContentKind::TardisReplay,
             Content::BacktestResult => ContentKind::BacktestResult,
         }
     }
@@ -2466,7 +2504,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::OptionsBoard | Content::PredictionBoard | Content::Recorder(_) | Content::BacktestResult => true,
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::OptionsBoard | Content::PredictionBoard | Content::Recorder(_) | Content::TardisReplay(_) | Content::BacktestResult => true,
         }
     }
 }

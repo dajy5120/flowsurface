@@ -914,19 +914,24 @@ impl Flowsurface {
         // 不再跟全局三态——「回测」工作区只走回测 replay（replay 自身已按 active_run mode=backtest
         // 自门控：无回测运行时空闲，绝不混入实时），其余工作区（官方/实盘…）只走 FS 原生实时。
         // 故即便后台正跑回测，「实盘」工作区图表仍是实时；切到「回测」才看回测行情。
-        // 数据源跟随活动工作区：录制数据回测→replay；自有数据回测→result.json 桥；其余→实时。
+        // 数据源跟随活动工作区：录制数据回测 / Tardis 历史回放→replay；自有数据回测→result.json 桥；
+        // 其余→实时。两个回放工作区共用同一条 `ws:bt:{run}:trades` 入图链路（docs/20 Phase 5）。
         let active_ws = self.layout_manager.active_layout_id().map(|l| l.name.clone());
         let is_recorded = active_ws.as_deref() == Some(ws::workspace::WS_RECORDED);
+        let is_tardis = active_ws.as_deref() == Some(ws::workspace::WS_TARDIS);
+        // 回放态：开 replay 订阅 + 关实时流（否则实时行情会盖掉回放，且历史 K 线落在
+        // 实时时间窗之外根本看不见——Tardis 数据距今数月，这一条是必须的）。
+        let is_replay = is_recorded || is_tardis;
         let is_selfdata = active_ws.as_deref() == Some(ws::workspace::WS_SELFDATA);
         let ws_redis_url = std::env::var("WS_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
-        let exchange_streams = if is_recorded || is_selfdata {
+        let exchange_streams = if is_replay || is_selfdata {
             Subscription::none()
         } else {
             self.active_dashboard().market_subscriptions(&self.handles).map(Message::MarketWsEvent)
         };
-        let ws_replay_streams = if is_recorded {
+        let ws_replay_streams = if is_replay {
             self.active_dashboard()
                 .ws_replay_subscriptions(ws_redis_url.clone())
                 .map(Message::MarketWsEvent)

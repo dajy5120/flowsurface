@@ -29,5 +29,8 @@ pub mod recorder_view;
 pub mod replay;
 pub mod selfdata;
 pub mod signals;
+pub mod tardis_replay;
+pub mod tardis_replay_readout;
+pub mod tardis_replay_view;
 pub mod view;
 pub mod workspace;

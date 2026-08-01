@@ -125,6 +125,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    TardisReplay {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     BacktestResult {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -262,6 +268,9 @@ pub enum ContentKind {
     PredictionBoard,
     /// 录制驾驶舱（docs/08 F6-P3）：24/7 守护录制控制中心（服务启停 + 配置 + 实况 + 总览）。
     Recorder,
+    /// Tardis 历史回放（docs/20 Phase 5）：已购 30 天逐笔按变速推进 `ws:bt:{run}:trades` 喂图。
+    /// 控制面板本身无行情数据源（行情进的是同工作区的图表 pane）。
+    TardisReplay,
     /// 回测结果（docs/08 F6-P7）：收益曲线 / 回撤 / 各维度统计（读回测导出的 result.json）。
     BacktestResult,
     /// 自有数据图（docs/08）：读 CSV/JSON 数据文件的通用自适应图（多列折线/散点）。
@@ -286,7 +295,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 16] = [
+    pub const ALL: [ContentKind; 17] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -302,6 +311,7 @@ impl ContentKind {
         ContentKind::OptionsBoard,
         ContentKind::PredictionBoard,
         ContentKind::Recorder,
+        ContentKind::TardisReplay,
         ContentKind::BacktestResult,
     ];
 }
@@ -324,6 +334,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::OptionsBoard => "期权/0DTE",
             ContentKind::PredictionBoard => "预测市场",
             ContentKind::Recorder => "数据录制",
+            ContentKind::TardisReplay => "Tardis 历史回放",
             ContentKind::BacktestResult => "回测结果",
         };
         write!(f, "{s}")
@@ -401,6 +412,7 @@ impl PaneSetup {
                 | ContentKind::OptionsBoard
                 | ContentKind::PredictionBoard
                 | ContentKind::Recorder
+                | ContentKind::TardisReplay
                 | ContentKind::BacktestResult => None,
             };
 
@@ -430,6 +442,7 @@ impl PaneSetup {
             | ContentKind::OptionsBoard
             | ContentKind::PredictionBoard
             | ContentKind::Recorder
+            | ContentKind::TardisReplay
             | ContentKind::BacktestResult
             | ContentKind::Starter => current_tick_multiplier,
         };
