@@ -167,6 +167,9 @@ pub fn hours() -> Vec<String> {
 }
 
 pub fn handle(st: &mut TardisBoardState, msg: TardisBoardMsg) {
+    if !matches!(msg, TardisBoardMsg::Load) {
+        clear_load_message(); // 其它交互后让各自的 hint 显示，不被上次加载结果盖住
+    }
     match msg {
         TardisBoardMsg::SourcePick(s) => {
             st.source = s;
@@ -192,11 +195,63 @@ pub fn handle(st: &mut TardisBoardState, msg: TardisBoardMsg) {
     }
 }
 
-/// 同步调 panels.py 生成面板 JSON（窗口通常几秒内；大窗口 L2 会久一些）。
+/// 进行中的加载任务：(子进程, 人读描述)。加载**异步**——同步 `output()` 会把 iced
+/// 的 update 循环整个卡住（实测 L2 30/60min 窗口 2.3~3.5s，界面全程冻结）。
+static LOAD: std::sync::Mutex<Option<(std::process::Child, String)>> =
+    std::sync::Mutex::new(None);
+/// 最近一次加载的结果（成功/失败），由 [`poll_load`] 在子进程退出时写入。
+static LOAD_MSG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// 每帧由 view 调用：仍在加载则返回描述；刚结束则落结果并刷新面板缓存。
+pub fn poll_load() -> Option<String> {
+    let mut g = LOAD.lock().ok()?;
+    let (child, desc) = g.as_mut()?;
+    match child.try_wait() {
+        Ok(None) => Some(desc.clone()), // 还在跑
+        Ok(Some(status)) => {
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                use std::io::Read;
+                let _ = e.read_to_string(&mut err);
+            }
+            let msg = if status.success() {
+                ro::invalidate();
+                format!("✔ 已加载 {desc}")
+            } else {
+                format!("✗ 生成失败：{}", err.lines().last().unwrap_or("(无输出)"))
+            };
+            if let Ok(mut m) = LOAD_MSG.lock() {
+                *m = msg;
+            }
+            *g = None;
+            None
+        }
+        Err(_) => {
+            *g = None;
+            None
+        }
+    }
+}
+
+pub fn load_message() -> String {
+    LOAD_MSG.lock().map(|m| m.clone()).unwrap_or_default()
+}
+
+fn clear_load_message() {
+    if let Ok(mut m) = LOAD_MSG.lock() {
+        m.clear();
+    }
+}
+
+/// 异步起 panels.py 生成面板 JSON：只 spawn 不等待，结果由 [`poll_load`] 收。
 fn load(st: &TardisBoardState) -> String {
     if st.symbol.is_empty() || st.date.is_empty() || st.dtype.is_empty() {
         return "✗ 该数据源没有可用的符号/日期/类型".into();
     }
+    if poll_load().is_some() {
+        return "（上一次加载还在跑，稍候）".into();
+    }
+    clear_load_message();
     let out = ro::panel_path();
     let r = Command::new(venv_py())
         .current_dir(repo())
@@ -217,15 +272,15 @@ fn load(st: &TardisBoardState) -> String {
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output();
+        .spawn();
     match r {
-        Ok(o) if o.status.success() => {
-            ro::invalidate();
-            format!("✔ 已加载 {} {} {} +{}min", st.symbol, st.date, st.start_hm, st.minutes)
-        }
-        Ok(o) => {
-            let e = String::from_utf8_lossy(&o.stderr);
-            format!("✗ 生成失败：{}", e.lines().last().unwrap_or("(无输出)"))
+        Ok(child) => {
+            let desc =
+                format!("{} {} {} +{}min", st.symbol, st.date, st.start_hm, st.minutes);
+            if let Ok(mut g) = LOAD.lock() {
+                *g = Some((child, desc.clone()));
+            }
+            String::new() // 加载中的提示由 view 按 poll_load() 渲染
         }
         Err(e) => format!("✗ 启动失败：{e}（检查 {}）", venv_py()),
     }

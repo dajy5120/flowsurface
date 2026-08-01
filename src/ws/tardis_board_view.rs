@@ -10,7 +10,9 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
-use super::tardis_board::{MINUTES, Speed, TardisBoardMsg, TardisBoardState, hours, is_playing};
+use super::tardis_board::{
+    MINUTES, Speed, TardisBoardMsg, TardisBoardState, hours, is_playing, load_message, poll_load,
+};
 use super::tardis_board_readout as ro;
 
 const ML: f32 = 58.0;
@@ -574,6 +576,8 @@ fn label<'a>(s: &str) -> Element<'a, TardisBoardMsg> {
 }
 
 pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
+    // 每帧轮询后台加载（顺带收割已结束的子进程并刷新面板缓存）。
+    let loading = poll_load();
     let cat = ro::catalog();
     let entry = app.src_entry();
     let p = ro::panel();
@@ -648,7 +652,12 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
         pick_list(hours(), Some(app.start_hm.clone()), TardisBoardMsg::StartPick).text_size(12),
         pick_list(MINUTES.to_vec(), Some(app.minutes), TardisBoardMsg::MinutesPick).text_size(12),
         label("分钟"),
-        button(text("加载").size(12)).padding([3, 12]).on_press(TardisBoardMsg::Load),
+        {
+            let b = button(text(if loading.is_some() { "加载中…" } else { "加载" }).size(12))
+                .padding([3, 12]);
+            // 加载中不再接受点击（避免叠起多个子进程）
+            if loading.is_none() { b.on_press(TardisBoardMsg::Load) } else { b }
+        },
     ]
     .spacing(6)
     .align_y(Alignment::Center);
@@ -682,8 +691,17 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     .spacing(6)
     .align_y(Alignment::Center);
 
-    let hint = text(app.hint.clone()).size(11).color(if app.hint.starts_with('✗') {
+    let hint_text = match &loading {
+        Some(d) => format!("⏳ 后台加载中 {d}…（界面不冻结，可继续操作）"),
+        None => {
+            let m = load_message();
+            if m.is_empty() { app.hint.clone() } else { m }
+        }
+    };
+    let hint = text(hint_text.clone()).size(11).color(if hint_text.starts_with('✗') {
         Color::from_rgb(0.9, 0.45, 0.45)
+    } else if loading.is_some() {
+        Color::from_rgb(0.85, 0.78, 0.45)
     } else {
         Color::from_rgb(0.55, 0.68, 0.58)
     });
