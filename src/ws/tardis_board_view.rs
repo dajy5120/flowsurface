@@ -668,6 +668,12 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     let dates = entry.dates.get(&app.symbol).cloned().unwrap_or_default();
     let picks = row![
         label("③ 窗口"),
+        chip(
+            if app.compare { "跨符号对比".into() } else { "单符号".into() },
+            app.compare,
+            entry.symbols.len() > 1,
+            TardisBoardMsg::ToggleCompare,
+        ),
         pick_list(entry.symbols.clone(), Some(app.symbol.clone()), TardisBoardMsg::SymbolPick)
             .text_size(12),
         pick_list(dates, Some(app.date.clone()), TardisBoardMsg::DatePick).text_size(12),
@@ -740,9 +746,15 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
         body = body.push(text(format!("· {e}")).size(12).color(Color::from_rgb(0.9, 0.6, 0.4)));
     } else {
         // 下方图是**已加载**的那一份；若与当前三层选择不符，明示，避免误读成当前选择的结果。
+        // 对比模式下 p.symbol 是多符号拼接，不能拿去比；改比「模式是否一致」。
+        let symbol_matches = if p.compare || app.compare {
+            p.compare == app.compare
+        } else {
+            p.symbol == app.symbol
+        };
         let stale = p.source != app.source
             || p.dtype != app.dtype
-            || p.symbol != app.symbol
+            || !symbol_matches
             || p.date != app.date
             || p.start != app.start_hm
             || p.minutes != app.minutes;

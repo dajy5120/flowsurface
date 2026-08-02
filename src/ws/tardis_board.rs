@@ -80,6 +80,8 @@ pub struct TardisBoardState {
     pub speed: Speed,
     /// 用户拖动的播放位置（0~100%）。None = 未拖过（回放从头起、静止时显示整窗）。
     pub seek_pct: Option<f32>,
+    /// 跨符号对比：同窗口把该源全部符号并排画（docs/20 §16）。
+    pub compare: bool,
 }
 
 impl Default for TardisBoardState {
@@ -122,6 +124,7 @@ impl TardisBoardState {
             busy: false,
             speed: Speed::X60,
             seek_pct: None,
+            compare: false,
         }
     }
 
@@ -171,6 +174,8 @@ pub enum TardisBoardMsg {
     StopPlay,
     /// 拖动进度条到 0~100%（docs/20 §15）。
     Seek(f32),
+    /// 切换跨符号对比（docs/20 §16）。
+    ToggleCompare,
 }
 
 pub fn hours() -> Vec<String> {
@@ -203,6 +208,14 @@ pub fn handle(st: &mut TardisBoardState, msg: TardisBoardMsg) {
         TardisBoardMsg::SpeedPick(sp) => st.speed = sp,
         TardisBoardMsg::Play => st.hint = play(st),
         TardisBoardMsg::StopPlay => st.hint = stop_play(),
+        TardisBoardMsg::ToggleCompare => {
+            st.compare = !st.compare;
+            st.hint = if st.compare {
+                "已开对比：同窗口并排画该源全部符号，只出无量纲/同单位量。点「加载」".into()
+            } else {
+                "已回到单符号视图。点「加载」".into()
+            };
+        }
         TardisBoardMsg::Seek(pct) => {
             let p = pct.clamp(0.0, 100.0);
             st.seek_pct = Some(p);
@@ -279,8 +292,8 @@ fn load(st: &TardisBoardState) -> String {
     }
     clear_load_message();
     let out = ro::panel_path();
-    let r = Command::new(venv_py())
-        .current_dir(repo())
+    let mut cmd = Command::new(venv_py());
+    cmd.current_dir(repo())
         .args([
             "-m",
             "factory.replay.panels",
@@ -297,12 +310,20 @@ fn load(st: &TardisBoardState) -> String {
             &out.display().to_string(),
         ])
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn();
+        .stderr(Stdio::piped());
+    if st.compare {
+        cmd.arg("--compare");
+    }
+    let r = cmd.spawn();
     match r {
         Ok(child) => {
-            let desc =
-                format!("{} {} {} +{}min", st.symbol, st.date, st.start_hm, st.minutes);
+            let desc = format!(
+                "{} {} {} +{}min",
+                if st.compare { "跨符号对比" } else { st.symbol.as_str() },
+                st.date,
+                st.start_hm,
+                st.minutes
+            );
             if let Ok(mut g) = LOAD.lock() {
                 *g = Some((child, desc.clone()));
             }

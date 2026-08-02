@@ -174,6 +174,8 @@ pub struct Panel {
     pub rows: u64,
     pub charts: Vec<Chart>,
     pub error: Option<String>,
+    /// 该面板是跨符号对比（此时 `symbol` 是多符号拼接，不能拿去和当前选择比）。
+    pub compare: bool,
 }
 
 static PANEL: OnceLock<Mutex<(Option<SystemTime>, Panel)>> = OnceLock::new();
@@ -227,6 +229,7 @@ fn parse_panel(text: &str) -> Panel {
         type_label: s_of("type_label"),
         rows: v.get("rows").and_then(serde_json::Value::as_u64).unwrap_or(0),
         error: v.get("error").and_then(|x| x.as_str()).map(String::from),
+        compare: v.get("compare").and_then(|x| x.as_bool()).unwrap_or(false),
         ..Default::default()
     };
     for c in v.get("charts").and_then(|x| x.as_array()).into_iter().flatten() {
