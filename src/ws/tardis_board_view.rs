@@ -6,7 +6,7 @@
 
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::{
-    button, canvas as canvas_widget, column, container, pick_list, row, scrollable, text,
+    button, canvas as canvas_widget, column, container, pick_list, row, scrollable, slider, text,
 };
 use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
@@ -599,7 +599,19 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
         (true, Some((t0, t1))) => (ph.t0_ms - t0).abs() < 1.0 && (ph.t1_ms - t1).abs() < 1.0,
         _ => false,
     };
-    let head = (ph_matches && ph.state != "done").then_some(ph.data_ts);
+    let playing_head = (ph_matches && ph.state != "done").then_some(ph.data_ts);
+    // 播放头：回放中跟 feeder；静止时若拖过进度条则停在拖到的位置（否则显示整窗）。
+    let span = ro::panel_time_span(&p);
+    let head = playing_head.or_else(|| match (app.seek_pct, span) {
+        (Some(f), Some((t0, t1))) => Some(t0 + (t1 - t0) * (f as f64) / 100.0),
+        _ => None,
+    });
+    // 进度条位置：回放中用 feeder 的 pct，否则用拖动值。
+    let bar_pct = if playing_head.is_some() {
+        ph.pct as f32
+    } else {
+        app.seek_pct.unwrap_or(0.0)
+    };
 
     let header = column![
         text("Tardis 历史面板 — 数据源 → 数据类型 → 图表")
@@ -682,14 +694,14 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
         } else {
             button(text("▶ 回放").size(12)).padding([3, 12]).on_press(TardisBoardMsg::Play)
         },
+        // 进度条：拖动即 seek（回放中带新起点重起 feeder，静止时只挪游标）
+        slider(0.0..=100.0, bar_pct, TardisBoardMsg::Seek)
+            .step(0.5f32)
+            .width(Length::FillPortion(3)),
         text(match head {
-            Some(h) => format!(
-                "播放头 {} · {:.1}%",
-                fmt_time(h),
-                ph.pct
-            ),
-            None if ph_matches && ph.state == "done" => "播放完毕（显示整窗）".to_string(),
-            None => "未回放（显示整窗）".to_string(),
+            Some(h) => format!("{} · {bar_pct:.0}%", fmt_time(h)),
+            None if ph_matches && ph.state == "done" => "播完（整窗）".to_string(),
+            None => "整窗".to_string(),
         })
         .size(11)
         .color(if head.is_some() {

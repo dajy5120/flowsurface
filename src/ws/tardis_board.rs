@@ -78,6 +78,8 @@ pub struct TardisBoardState {
     pub busy: bool,
     /// 时间步进回放倍速（docs/20 §10）。
     pub speed: Speed,
+    /// 用户拖动的播放位置（0~100%）。None = 未拖过（回放从头起、静止时显示整窗）。
+    pub seek_pct: Option<f32>,
 }
 
 impl Default for TardisBoardState {
@@ -119,6 +121,7 @@ impl TardisBoardState {
             hint: "选 数据源 → 数据类型 → 时段，点「加载」出图；再点「▶ 回放」按时间步进播放".into(),
             busy: false,
             speed: Speed::X60,
+            seek_pct: None,
         }
     }
 
@@ -166,6 +169,8 @@ pub enum TardisBoardMsg {
     SpeedPick(Speed),
     Play,
     StopPlay,
+    /// 拖动进度条到 0~100%（docs/20 §15）。
+    Seek(f32),
 }
 
 pub fn hours() -> Vec<String> {
@@ -198,6 +203,16 @@ pub fn handle(st: &mut TardisBoardState, msg: TardisBoardMsg) {
         TardisBoardMsg::SpeedPick(sp) => st.speed = sp,
         TardisBoardMsg::Play => st.hint = play(st),
         TardisBoardMsg::StopPlay => st.hint = stop_play(),
+        TardisBoardMsg::Seek(pct) => {
+            let p = pct.clamp(0.0, 100.0);
+            st.seek_pct = Some(p);
+            // 正在放 → 带新起点重起（feeder 无状态，重起即跳转）；静止 → 只挪游标。
+            if is_playing() {
+                st.hint = play(st);
+            } else {
+                st.hint = format!("⏱ 已定位到 {p:.0}%（点「▶ 回放」从此处播）");
+            }
+        }
     }
 }
 
@@ -329,6 +344,10 @@ fn play(st: &TardisBoardState) -> String {
     let Some((t0, t1)) = ro::panel_time_span(&p) else {
         return "✗ 本类型的图无时间轴（如深度剖面），不支持时间步进".into();
     };
+    // 从拖动位置起播；已在末尾（>99%）则回到开头，避免点了没反应。
+    let frac = st.seek_pct.unwrap_or(0.0).clamp(0.0, 100.0);
+    let frac = if frac > 99.0 { 0.0 } else { frac };
+    let seek_ms = t0 + (t1 - t0) * (frac as f64) / 100.0;
     stop_play();
     let mut cmd = Command::new(venv_py());
     cmd.current_dir(repo())
@@ -349,6 +368,8 @@ fn play(st: &TardisBoardState) -> String {
             &format!("{}", t0 as i64),
             "--t1-ms",
             &format!("{}", t1 as i64),
+            "--seek-ms",
+            &format!("{}", seek_ms as i64),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -360,7 +381,11 @@ fn play(st: &TardisBoardState) -> String {
             if let Ok(mut g) = CHILD.lock() {
                 *g = Some(child);
             }
-            format!("▶ 回放中（{}）—— 图表按时间步进显示", st.speed)
+            if frac > 0.0 {
+                format!("▶ 从 {frac:.0}% 回放中（{}）", st.speed)
+            } else {
+                format!("▶ 回放中（{}）—— 图表按时间步进显示", st.speed)
+            }
         }
         Err(e) => format!("✗ 回放启动失败：{e}"),
     }
