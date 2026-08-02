@@ -176,6 +176,9 @@ pub enum TardisBoardMsg {
     Seek(f32),
     /// 切换跨符号对比（docs/20 §16）。
     ToggleCompare,
+    /// 导出当前面板为 CSV / 窗口截图（docs/20 §17）。
+    ExportCsv,
+    ExportPng,
 }
 
 pub fn hours() -> Vec<String> {
@@ -208,6 +211,8 @@ pub fn handle(st: &mut TardisBoardState, msg: TardisBoardMsg) {
         TardisBoardMsg::SpeedPick(sp) => st.speed = sp,
         TardisBoardMsg::Play => st.hint = play(st),
         TardisBoardMsg::StopPlay => st.hint = stop_play(),
+        TardisBoardMsg::ExportCsv => st.hint = export_csv(),
+        TardisBoardMsg::ExportPng => st.hint = export_png(),
         TardisBoardMsg::ToggleCompare => {
             st.compare = !st.compare;
             st.hint = if st.compare {
@@ -252,6 +257,10 @@ pub fn poll_load() -> Option<String> {
                 if desc == "数据源清单" {
                     ro::invalidate_catalog();
                     "✔ 数据源清单已刷新".to_string()
+                } else if desc == "CSV" {
+                    format!("✔ 已导出 CSV → {}", export_root().display())
+                } else if let Some(n) = desc.strip_prefix("PNG|") {
+                    format!("✔ 已存图 {n}")
                 } else {
                     ro::invalidate();
                     format!("✔ 已加载 {desc}")
@@ -428,6 +437,113 @@ fn stop_play() -> String {
 
 /// 刷新数据源清单——同样**异步**（扫盘约 0.25s，同步会顿一下）。
 /// 与加载共用后台槽位：两者都改面板输入，同时跑没有意义。
+/// 导出目录（与 Python 侧默认一致）。
+fn export_root() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dajy".into());
+    std::path::PathBuf::from(home).join("ws-data/cockpit/export")
+}
+
+/// 导 CSV：交给 `factory.replay.export` 从已加载的面板 JSON 生成（每图一表）。
+fn export_csv() -> String {
+    if !ro::panel().loaded {
+        return "✗ 先加载面板再导出".into();
+    }
+    if poll_load().is_some() {
+        return "（有后台任务在跑，稍候）".into();
+    }
+    clear_load_message();
+    match Command::new(venv_py())
+        .current_dir(repo())
+        .args([
+            "-m",
+            "factory.replay.export",
+            "--panel",
+            &ro::panel_path().display().to_string(),
+            "--out",
+            &export_root().display().to_string(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => {
+            if let Ok(mut g) = LOAD.lock() {
+                *g = Some((child, "CSV".to_string()));
+            }
+            String::new()
+        }
+        Err(e) => format!("✗ 导出失败：{e}"),
+    }
+}
+
+/// 存图：**窗口截图**（所见即所得）。
+/// 不另实现一套离屏渲染器——那等于把 6 种图元的绘制逻辑写第二遍，必然与面板发散。
+///
+/// ⚠️ 两个坑（都踩过）：
+/// 1. **不能用 `import -window <窗口名>`**：名字匹配不上时 ImageMagick 会**退化成交互式选窗**
+///    并永久阻塞（实测挂死，进程一直在等鼠标点击）。必须先用 xdotool 解析出窗口 id。
+/// 2. **不能同步 `.output()`**：截图挂住会连带冻死 UI（正是 §12 刚消除的问题）。
+///    故走后台槽位 + `timeout` 兜底，任何情况下都不会把界面拖住。
+fn export_png() -> String {
+    let p = ro::panel();
+    if !p.loaded {
+        return "✗ 先加载面板再导出".into();
+    }
+    if poll_load().is_some() {
+        return "（有后台任务在跑，稍候）".into();
+    }
+    // 解析自身窗口 id（本进程拿不到自己的 X window id；xdotool search 立即返回，不阻塞）
+    let wid = Command::new("xdotool")
+        .args(["search", "--name", "Flowsurface"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .last()
+                .map(str::to_string)
+        });
+    let Some(wid) = wid.filter(|w| !w.is_empty()) else {
+        return "✗ 找不到窗口（需 xdotool）".into();
+    };
+    let dir = export_root();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return format!("✗ 建目录失败：{}", dir.display());
+    }
+    let stamp = p
+        .charts
+        .first()
+        .and_then(|c| c.x.first().copied())
+        .map(|t| t as i64)
+        .unwrap_or(0);
+    let name = format!(
+        "{}_{}_{}_{}min_{}{}_{stamp}.png",
+        p.symbol.replace([' ', '/'], ""),
+        p.date,
+        p.start.replace(':', ""),
+        p.minutes,
+        p.dtype,
+        if p.compare { "_compare" } else { "" }
+    );
+    let out = dir.join(&name);
+    clear_load_message();
+    match Command::new("timeout")
+        .args(["15", "import", "-window", &wid, &out.display().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => {
+            if let Ok(mut g) = LOAD.lock() {
+                *g = Some((child, format!("PNG|{name}")));
+            }
+            String::new()
+        }
+        Err(e) => format!("✗ 存图失败：{e}（需 ImageMagick 的 import）"),
+    }
+}
+
 fn refresh_catalog() -> String {
     if poll_load().is_some() {
         return "（有后台任务在跑，稍候）".into();

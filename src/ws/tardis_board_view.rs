@@ -719,6 +719,22 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     .spacing(6)
     .align_y(Alignment::Center);
 
+    // ⑤ 导出（docs/20 §17）：CSV 从面板 JSON 生成；存图走窗口截图（所见即所得）。
+    let export_row = row![
+        label("⑤ 导出"),
+        {
+            let b = button(text("⬇ CSV").size(12)).padding([3, 10]);
+            if loading.is_none() && p.loaded { b.on_press(TardisBoardMsg::ExportCsv) } else { b }
+        },
+        {
+            let b = button(text("📷 存图").size(12)).padding([3, 10]);
+            if loading.is_none() && p.loaded { b.on_press(TardisBoardMsg::ExportPng) } else { b }
+        },
+        text("→ ~/ws-data/cockpit/export/").size(10).color(C_DIM),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
     let hint_text = match &loading {
         Some(d) => format!("⏳ 后台加载中 {d}…（界面不冻结，可继续操作）"),
         None => {
@@ -806,6 +822,7 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
             ty_row2,
             picks,
             play_row,
+            export_row,
             hint,
             scrollable(body).height(Length::Fill)
         ]
