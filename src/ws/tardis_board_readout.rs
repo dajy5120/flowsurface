@@ -155,6 +155,9 @@ pub struct Chart {
     pub z_bid: Vec<Vec<f64>>,
     pub z_ask: Vec<Vec<f64>>,
     pub mid: Vec<f64>,
+    /// 亮度归一化的双锚（非零格 p05 / p99）。见 `panels.py::_heatmap`。
+    pub z_lo: f64,
+    pub z_hi: f64,
 }
 
 #[derive(Clone, Default)]
@@ -253,6 +256,8 @@ fn parse_panel(text: &str) -> Panel {
         ch.y_step = c.get("y_step").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
         ch.n_lv = c.get("n_lv").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
         ch.mid = nums(c.get("mid"));
+        ch.z_lo = c.get("z_lo").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        ch.z_hi = c.get("z_hi").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
         let mat = |k: &str| -> Vec<Vec<f64>> {
             c.get(k)
                 .and_then(|x| x.as_array())
@@ -439,7 +444,7 @@ mod tests {
                 "rows":10,"charts":[{"id":"heatmap","title":"热图","kind":"heatmap",
                 "x_is_time":true,"x":[1,2],"y_lo":72835.3,"y_step":1.758,"n_lv":3,
                 "z_bid":[[0,1.5,0],[2.0,0,0]],"z_ask":[[0,0,3.0],[0,0,4.0]],
-                "mid":[72900.0,72901.0]}]}"#,
+                "mid":[72900.0,72901.0],"z_lo":0.5,"z_hi":3.5}]}"#,
         );
         let c = &p.charts[0];
         assert_eq!(c.kind, "heatmap");
@@ -448,6 +453,8 @@ mod tests {
         assert_eq!(c.z_bid[0][1], 1.5);
         assert_eq!(c.z_ask[1][2], 4.0);
         assert_eq!(c.mid, vec![72900.0, 72901.0]);
+        assert_eq!(c.z_lo, 0.5);
+        assert_eq!(c.z_hi, 3.5);
         assert!((c.y_step - 1.758).abs() < 1e-9);
     }
 

@@ -285,8 +285,9 @@ impl<M> canvas::Program<M> for ChartCanvas {
                     Self::axes(frame, w, h, xr, (ylo, yhi), true, "价格");
                     let sx = |v: f64| ML + pw * (((v - xr.0) / (xr.1 - xr.0)) as f32);
                     let sy = |v: f64| MT + ph * (1.0 - ((v - ylo) / (yhi - ylo)) as f32);
-                    // 亮度用**对数**标度：挂单量分布极偏（顶档常比深处大两个数量级），
-                    // 线性标度下除了最大格全是黑的。
+                    // 亮度：对数标度 + **双锚归一化**，把 [z_lo, z_hi]（非零格 p05~p99）映满量程。
+                    // 单锚不行：SOL 挂单量全 ≫1，ln(1+q)/ln(1+max) 把 4 倍量差压进 0.87~1.00
+                    // → 整片同色；BTC 则是单笔巨量把其余压暗。锚点由 panels.py 算好随 JSON 下发。
                     let zmax = ch
                         .z_bid
                         .iter()
@@ -297,7 +298,13 @@ impl<M> canvas::Program<M> for ChartCanvas {
                         empty(frame, "窗口内无挂单量");
                         return;
                     }
-                    let lmax = (1.0 + zmax).ln();
+                    // 锚点缺失/退化（旧 JSON、或全簿同量）时回退到「对数到最大值」。
+                    let two_anchor = ch.z_lo > 0.0 && ch.z_hi > ch.z_lo;
+                    let (lo_ln, span_ln) = if two_anchor {
+                        (ch.z_lo.ln(), ch.z_hi.ln() - ch.z_lo.ln())
+                    } else {
+                        (0.0, (1.0 + zmax).ln())
+                    };
                     let cw = (pw / nt as f32).max(0.6);
                     let chh = (ph / nl as f32).max(0.6);
                     // 播放头之后的时间桶不画（时间步进回放，docs/20 §10）
@@ -309,7 +316,8 @@ impl<M> canvas::Program<M> for ChartCanvas {
                         if q <= 0.0 {
                             return;
                         }
-                        let a = ((1.0 + q).ln() / lmax).clamp(0.06, 1.0) as f32;
+                        let lq = if two_anchor { q.ln() } else { (1.0 + q).ln() };
+                        let a = ((lq - lo_ln) / span_ln).clamp(0.06, 1.0) as f32;
                         let y = sy(ylo + ch.y_step * (k as f64 + 1.0));
                         frame.fill_rectangle(
                             Point::new(x, y),
