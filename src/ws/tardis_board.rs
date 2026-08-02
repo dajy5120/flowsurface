@@ -122,12 +122,18 @@ impl TardisBoardState {
         }
     }
 
-    /// 当前源在 catalog 里的条目。
+    /// 当前源在 catalog 里的条目（自取 catalog；view 里请用 [`Self::src_entry_in`]）。
     pub fn src_entry(&self) -> ro::SourceEntry {
-        ro::catalog()
-            .sources
-            .into_iter()
+        self.src_entry_in(&ro::catalog())
+    }
+
+    /// 用**已取到的** catalog 查条目。view 每帧渲染，若每处都自取会反复 stat + 深拷贝
+    /// 整份清单（实测 pane_body 一帧要 10 次）；统一取一次再传引用。
+    pub fn src_entry_in(&self, cat: &ro::Catalog) -> ro::SourceEntry {
+        cat.sources
+            .iter()
             .find(|s| s.key == self.source)
+            .cloned()
             .unwrap_or_default()
     }
 
@@ -215,8 +221,13 @@ pub fn poll_load() -> Option<String> {
                 let _ = e.read_to_string(&mut err);
             }
             let msg = if status.success() {
-                ro::invalidate();
-                format!("✔ 已加载 {desc}")
+                if desc == "数据源清单" {
+                    ro::invalidate_catalog();
+                    "✔ 数据源清单已刷新".to_string()
+                } else {
+                    ro::invalidate();
+                    format!("✔ 已加载 {desc}")
+                }
             } else {
                 format!("✗ 生成失败：{}", err.lines().last().unwrap_or("(无输出)"))
             };
@@ -369,9 +380,15 @@ fn stop_play() -> String {
     }
 }
 
+/// 刷新数据源清单——同样**异步**（扫盘约 0.25s，同步会顿一下）。
+/// 与加载共用后台槽位：两者都改面板输入，同时跑没有意义。
 fn refresh_catalog() -> String {
+    if poll_load().is_some() {
+        return "（有后台任务在跑，稍候）".into();
+    }
+    clear_load_message();
     let out = ro::catalog_path();
-    let r = Command::new(venv_py())
+    match Command::new(venv_py())
         .current_dir(repo())
         .args([
             "-m",
@@ -381,13 +398,15 @@ fn refresh_catalog() -> String {
             &out.display().to_string(),
         ])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    match r {
-        Ok(s) if s.success() => {
-            ro::invalidate_catalog();
-            "✔ 数据源清单已刷新".into()
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => {
+            if let Ok(mut g) = LOAD.lock() {
+                *g = Some((child, "数据源清单".to_string()));
+            }
+            String::new()
         }
-        _ => "✗ 刷新清单失败".into(),
+        Err(e) => format!("✗ 刷新清单失败：{e}"),
     }
 }

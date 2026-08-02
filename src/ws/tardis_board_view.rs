@@ -578,8 +578,10 @@ fn label<'a>(s: &str) -> Element<'a, TardisBoardMsg> {
 pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     // 每帧轮询后台加载（顺带收割已结束的子进程并刷新面板缓存）。
     let loading = poll_load();
+    // catalog 每帧只取一次：每次调用都要 stat + 深拷贝整份清单，
+    // 原来 pane_body 一帧要取 10 次（src_entry 1 + 8 个类型 chip 的 type_label + 本处）。
     let cat = ro::catalog();
-    let entry = app.src_entry();
+    let entry = app.src_entry_in(&cat);
     let p = ro::panel();
     let ph = ro::playhead();
     // 播放头只在与**当前已加载面板**的时间范围吻合时生效，避免用上一次回放的游标
@@ -611,11 +613,11 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
             TardisBoardMsg::SourcePick(s.key.clone()),
         ));
     }
-    src_row = src_row.push(
-        button(text("刷新清单").size(11))
-            .padding([3, 8])
-            .on_press(TardisBoardMsg::RefreshCatalog),
-    );
+    src_row = src_row.push({
+        // 与「加载」一致：后台任务跑着时禁用，避免叠起多个子进程
+        let b = button(text("刷新清单").size(11)).padding([3, 8]);
+        if loading.is_none() { b.on_press(TardisBoardMsg::RefreshCatalog) } else { b }
+    });
 
     // ② 数据类型（本源没有的类型置灰，不可点——不画空面板）
     let all: Vec<String> = if cat.type_labels.is_empty() {
@@ -630,7 +632,7 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     for (i, t) in all.iter().enumerate() {
         let has = entry.types.contains(t);
         let c = chip(
-            ro::type_label(t),
+            cat.type_labels.get(t).cloned().unwrap_or_else(|| t.clone()),
             *t == app.dtype,
             has,
             TardisBoardMsg::TypePick(t.clone()),
