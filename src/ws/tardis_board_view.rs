@@ -140,6 +140,7 @@ impl ChartCanvas {
         yr: (f64, f64),
         x_is_time: bool,
         y_label: &str,
+        x_log: bool,
     ) {
         let pw = w - ML - MR;
         let ph = h - MT - MB;
@@ -170,8 +171,19 @@ impl ChartCanvas {
         for i in 0..=4 {
             let t = i as f32 / 4.0;
             let x = ML + pw * t;
-            let val = xr.0 + (xr.1 - xr.0) * t as f64;
-            let s = if x_is_time { fmt_time(val) } else { fmt_tick(val, xr.1 - xr.0) };
+            // 对数横轴：刻度值要按 exp 反算，否则条形用 log 长度、标签却按线性标，对不上。
+            let val = if x_log {
+                ((1.0 + xr.1).ln() * t as f64).exp() - 1.0
+            } else {
+                xr.0 + (xr.1 - xr.0) * t as f64
+            };
+            let s = if x_is_time {
+                fmt_time(val)
+            } else if x_log {
+                fmt_num(val)
+            } else {
+                fmt_tick(val, xr.1 - xr.0)
+            };
             frame.fill_text(Text {
                 content: s,
                 position: Point::new(x - 18.0, MT + ph + 5.0),
@@ -242,9 +254,12 @@ impl<M> canvas::Program<M> for ChartCanvas {
                         empty(frame, "无数据");
                         return;
                     };
-                    Self::axes(frame, w, h, (0.0, ar.1), yr, false, "价格");
+                    // 挂单量用**对数**长度：实测末帧 25 档 max/中位 = 3687×，
+                    // 线性长度下中位档只有最长条的 1/3687，等于看不见（同 §14 热图的病）。
+                    let lmax = (1.0 + ar.1).ln().max(1e-9);
+                    Self::axes(frame, w, h, (0.0, ar.1), yr, false, "价格", true);
                     let sy = |v: f64| MT + ph * (1.0 - ((v - yr.0) / (yr.1 - yr.0)) as f32);
-                    let sx = |v: f64| (v / ar.1.max(1e-12)) as f32 * pw;
+                    let sx = |v: f64| ((1.0 + v.max(0.0)).ln() / lmax) as f32 * pw;
                     let bar_h = (ph / (prices.len().max(1) as f32) * 0.8).clamp(1.0, 14.0);
                     for (p, a) in ch.bid_price.iter().zip(ch.bid_amount.iter()) {
                         if !p.is_finite() || !a.is_finite() {
@@ -282,7 +297,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                     };
                     let ylo = ch.y_lo;
                     let yhi = ch.y_lo + ch.y_step * nl as f64;
-                    Self::axes(frame, w, h, xr, (ylo, yhi), true, "价格");
+                    Self::axes(frame, w, h, xr, (ylo, yhi), true, "价格", false);
                     let sx = |v: f64| ML + pw * (((v - xr.0) / (xr.1 - xr.0)) as f32);
                     let sy = |v: f64| MT + ph * (1.0 - ((v - ylo) / (yhi - ylo)) as f32);
                     // 亮度：对数标度 + **双锚归一化**，把 [z_lo, z_hi]（非零格 p05~p99）映满量程。
@@ -392,7 +407,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                     // 下方 22% 留给成交量
                     let vh = ph * 0.22;
                     let cph = ph - vh - 4.0;
-                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, "价格");
+                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, "价格", false);
                     let sy = |v: f64| MT + cph * (1.0 - ((v - yr.0) / (yr.1 - yr.0)) as f32);
                     let bw = (pw / n as f32 * 0.7).clamp(1.0, 12.0);
                     for i in 0..n {
@@ -442,7 +457,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                         empty(frame, "无有效 Y");
                         return;
                     };
-                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, &ch.y_label);
+                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, &ch.y_label, false);
                     let sy = |v: f64| MT + ph * (1.0 - ((v - yr.0) / (yr.1 - yr.0)) as f32);
                     let smax = ch.size.iter().copied().filter(|v| v.is_finite()).fold(0.0, f64::max);
                     for i in 0..n {
@@ -477,7 +492,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                         empty(frame, "无有效数值");
                         return;
                     };
-                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, &ch.y_label);
+                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, &ch.y_label, false);
                     let sy = |v: f64| MT + ph * (1.0 - ((v - yr.0) / (yr.1 - yr.0)) as f32);
                     let k = ch.series.len().max(1);
                     let bw = (pw / n.max(1) as f32 / k as f32 * 0.8).clamp(0.7, 10.0);
@@ -507,7 +522,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                         empty(frame, "无有效数值");
                         return;
                     };
-                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, &ch.y_label);
+                    Self::axes(frame, w, h, xr, yr, ch.x_is_time, &ch.y_label, false);
                     let sy = |v: f64| MT + ph * (1.0 - ((v - yr.0) / (yr.1 - yr.0)) as f32);
                     for (si, (_, vals)) in ch.series.iter().enumerate() {
                         let col = PALETTE[si % PALETTE.len()];
