@@ -187,7 +187,11 @@ fn parse_ckpt(v: &serde_json::Value, now: f64) -> TodayRow {
         day_pnl: (f("cash") + f("inv") * f("mid") - fees_cli) - f("day_open_equity"),
         win_rate: fifo_win_rate(&fills, fee),
         uptime_h: f("day_uptime") / 3600.0,
-        reconnects: f("n_reconnects") as i64,
+        // 必须减当日基线：`n_reconnects` 是**进程累计**（守护可连跑多日），
+        // 而本行其余字段都是当日口径（day_pnl 减 day_open_equity、uptime 用 day_uptime、
+        // 成交用 day_fills）。漏减会让「今日重连」显示成开机以来的总数——
+        // 实测 2045 累计 vs 今日实际 6 次，差 340 倍，被误读成网络故障（docs/20 §24）。
+        reconnects: (f("n_reconnects") - f("base_reconnects")).max(0.0) as i64,
         age_secs: (now - f("ts")) as i64,
     }
 }
@@ -248,6 +252,21 @@ fn read_registry(st: &mut C4Readout) {
 
 #[cfg(test)]
 mod tests {
+    /// 「今日重连」必须是当日增量，不是进程累计。
+    /// 守护连跑多日时 `n_reconnects` 会一直涨，漏减 `base_reconnects` 会把开机以来的
+    /// 总数当成今日值——实测 2045 vs 实际 6，差 340 倍，被误读成网络故障（docs/20 §24）。
+    #[test]
+    fn today_reconnects_subtracts_daily_base() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"utc_day":"2026-08-03","cash":0.0,"inv":0.0,"mid":0.0,
+                "day_open_equity":0.0,"day_uptime":35362.0,
+                "n_reconnects":2045,"base_reconnects":2039,"fees":0.0,"ts":0.0}"#,
+        )
+        .unwrap();
+        let row = parse_ckpt(&v, 0.0);
+        assert_eq!(row.reconnects, 6, "应为当日增量 6，而非累计 2045");
+    }
+
     use super::*;
 
     #[test]
