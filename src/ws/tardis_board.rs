@@ -82,6 +82,10 @@ pub struct TardisBoardState {
     pub seek_pct: Option<f32>,
     /// 跨符号对比：同窗口把该源全部符号并排画（docs/20 §16）。
     pub compare: bool,
+    /// 选择变化后自动加载（docs/20 §22）。默认开。
+    pub auto_load: bool,
+    /// L2 盘口热图价格带 = mid ± N tick（docs/20 §22）。仅对增量盘口 L2 生效。
+    pub band_ticks: u32,
 }
 
 impl Default for TardisBoardState {
@@ -125,6 +129,8 @@ impl TardisBoardState {
             speed: Speed::X60,
             seek_pct: None,
             compare: false,
+            auto_load: true,
+            band_ticks: 200,
         }
     }
 
@@ -176,6 +182,10 @@ pub enum TardisBoardMsg {
     Seek(f32),
     /// 切换跨符号对比（docs/20 §16）。
     ToggleCompare,
+    /// 切换「改完自动加载」（docs/20 §22）。
+    ToggleAuto,
+    /// L2 热图价格带（tick 数）。
+    BandPick(u32),
     /// 导出当前面板为 CSV / 窗口截图（docs/20 §17）。
     ExportCsv,
     ExportPng,
@@ -185,10 +195,27 @@ pub fn hours() -> Vec<String> {
     (0..24).map(|h| format!("{h:02}:00")).collect()
 }
 
+/// 会改变「该加载什么」的消息——自动加载只对这些触发，
+/// 回放/导出/开关自身等不该触发（否则点个倍速也要重跑一遍数据）。
+fn changes_selection(m: &TardisBoardMsg) -> bool {
+    matches!(
+        m,
+        TardisBoardMsg::SourcePick(_)
+            | TardisBoardMsg::SymbolPick(_)
+            | TardisBoardMsg::DatePick(_)
+            | TardisBoardMsg::StartPick(_)
+            | TardisBoardMsg::MinutesPick(_)
+            | TardisBoardMsg::TypePick(_)
+            | TardisBoardMsg::ToggleCompare
+            | TardisBoardMsg::BandPick(_)
+    )
+}
+
 pub fn handle(st: &mut TardisBoardState, msg: TardisBoardMsg) {
     if !matches!(msg, TardisBoardMsg::Load) {
         clear_load_message(); // 其它交互后让各自的 hint 显示，不被上次加载结果盖住
     }
+    let auto = st.auto_load && changes_selection(&msg);
     match msg {
         TardisBoardMsg::SourcePick(s) => {
             st.source = s;
@@ -208,6 +235,15 @@ pub fn handle(st: &mut TardisBoardState, msg: TardisBoardMsg) {
         }
         TardisBoardMsg::Load => st.hint = load(st),
         TardisBoardMsg::RefreshCatalog => st.hint = refresh_catalog(),
+        TardisBoardMsg::ToggleAuto => {
+            st.auto_load = !st.auto_load;
+            st.hint = if st.auto_load {
+                "已开自动加载：改选择即刷新".into()
+            } else {
+                "已关自动加载：改完需手点「加载」".into()
+            };
+        }
+        TardisBoardMsg::BandPick(b) => st.band_ticks = b,
         TardisBoardMsg::SpeedPick(sp) => st.speed = sp,
         TardisBoardMsg::Play => st.hint = play(st),
         TardisBoardMsg::StopPlay => st.hint = stop_play(),
@@ -230,6 +266,13 @@ pub fn handle(st: &mut TardisBoardState, msg: TardisBoardMsg) {
             } else {
                 st.hint = format!("⏱ 已定位到 {p:.0}%（点「▶ 回放」从此处播）");
             }
+        }
+    }
+    if auto {
+        // 选择变了就直接重载。加载是异步的，界面不会卡；正忙时 load() 自己会拒并提示。
+        let m = load(st);
+        if !m.is_empty() {
+            st.hint = m;
         }
     }
 }
@@ -315,6 +358,8 @@ fn load(st: &TardisBoardState) -> String {
             &st.start_hm,
             "--minutes",
             &st.minutes.to_string(),
+            "--band-ticks",
+            &st.band_ticks.to_string(),
             "--out",
             &out.display().to_string(),
         ])

@@ -756,6 +756,29 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
             // 加载中不再接受点击（避免叠起多个子进程）
             if loading.is_none() { b.on_press(TardisBoardMsg::Load) } else { b }
         },
+        chip(
+            if app.auto_load { "自动".into() } else { "手动".into() },
+            app.auto_load,
+            true,
+            TardisBoardMsg::ToggleAuto,
+        ),
+        // 价格带只影响 L2 热图，故只在该类型下出现——省得对别的类型显示无效控件
+        if app.dtype == "incremental_book_L2" {
+            row![
+                label("热图带宽"),
+                pick_list(
+                    vec![50u32, 100, 200, 400, 800],
+                    Some(app.band_ticks),
+                    TardisBoardMsg::BandPick
+                )
+                .text_size(12),
+                label("tick"),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+        } else {
+            row![]
+        },
     ]
     .spacing(6)
     .align_y(Alignment::Center);
