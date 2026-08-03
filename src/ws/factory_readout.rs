@@ -40,7 +40,9 @@ pub struct IcDecay {
 #[derive(Default, Clone)]
 pub struct PoolRow {
     pub expr: String,
-    pub weight: f64,
+    /// `None` = 库里就没记权重（NULL）。**不要 unwrap_or(0)**——那会把「没记」显示成
+    /// 「权重为 0」，是把未知说成已知（docs/20 §23）。
+    pub weight: Option<f64>,
     pub cluster: i64,
     pub ic_t: f64,
 }
@@ -65,9 +67,11 @@ pub struct StageBRow {
 #[derive(Default, Clone)]
 pub struct LiveRow {
     pub symbol: String,
-    pub realized_ic_1s: f64,
-    pub pnl: f64,
-    pub n_trades: i64,
+    /// 三个字段都可能是 NULL（写入端未填）。渲染成 NaN/0 会与 C4 面板的事实矛盾——
+    /// 实测同一批影子 run，C4 显示 fills 711，这里却显示「成交0」（docs/20 §23）。
+    pub realized_ic_1s: Option<f64>,
+    pub pnl: Option<f64>,
+    pub n_trades: Option<i64>,
     pub age: String,
 }
 
@@ -229,7 +233,7 @@ fn poll_once() -> FactoryReadout {
     }
 
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT a.expr, COALESCE(p.weight,0.0), p.cluster_id,
+        "SELECT a.expr, p.weight, p.cluster_id,
                 COALESCE((SELECT MAX(ABS(e.ic_t)) FROM evals e WHERE e.alpha_id=a.id AND e.stage='A'),0.0)
          FROM pool_membership p JOIN alphas a ON a.id=p.alpha_id
          WHERE p.until_ts IS NULL ORDER BY ABS(COALESCE(p.weight,0.0)) DESC, 4 DESC LIMIT 16",
@@ -238,7 +242,7 @@ fn poll_once() -> FactoryReadout {
             .query_map([], |r| {
                 Ok(PoolRow {
                     expr: r.get(0)?,
-                    weight: r.get(1)?,
+                    weight: r.get::<_, Option<f64>>(1)?,
                     cluster: r.get(2)?,
                     ic_t: r.get(3)?,
                 })
@@ -279,9 +283,9 @@ fn poll_once() -> FactoryReadout {
                     let mins = (now - ts) / 60;
                     Ok(LiveRow {
                         symbol: r.get(0)?,
-                        realized_ic_1s: r.get::<_, Option<f64>>(2)?.unwrap_or(f64::NAN),
-                        pnl: r.get::<_, Option<f64>>(3)?.unwrap_or(f64::NAN),
-                        n_trades: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                        realized_ic_1s: r.get::<_, Option<f64>>(2)?,
+                        pnl: r.get::<_, Option<f64>>(3)?,
+                        n_trades: r.get::<_, Option<i64>>(4)?,
                         age: if mins < 60 {
                             format!("{mins}分前")
                         } else {
@@ -542,6 +546,18 @@ pub fn db_path_display() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// 缺失值必须保持 `None`，绝不能在读取层退化成 0/NaN。
+    /// 退化过一次的后果：同一批影子 run，C4 面板显示 fills 711，Factory 显示「成交0」，
+    /// 两个面板对同一事实互相矛盾（docs/20 §23）。
+    #[test]
+    fn missing_metrics_stay_none() {
+        let l = LiveRow::default();
+        assert!(l.realized_ic_1s.is_none(), "realized_ic 缺失应为 None 而非 NaN");
+        assert!(l.pnl.is_none());
+        assert!(l.n_trades.is_none(), "成交数缺失应为 None 而非 0");
+        assert!(PoolRow::default().weight.is_none(), "权重缺失应为 None 而非 0.0");
+    }
+
     use super::*;
     use std::collections::HashMap;
 

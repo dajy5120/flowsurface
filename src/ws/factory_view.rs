@@ -25,6 +25,16 @@ fn vgap<'a, M: 'a>(h: f32) -> Element<'a, M> {
 fn sec<'a, M: 'a>(title: &str, c: Color) -> Element<'a, M> {
     text(title.to_string()).size(15).color(c).into()
 }
+/// 缺失值一律显示 `—`，**不要退化成 0 或 NaN**。
+/// 「没记录」和「值是 0」是两回事：实测同一批影子 run，C4 面板显示 fills 711，
+/// 而 Factory 因 `unwrap_or(0)` 显示「成交0」——两个面板对同一事实互相矛盾（docs/20 §23）。
+fn opt_f(v: Option<f64>, prec: usize) -> String {
+    match v {
+        Some(x) if x.is_finite() => format!("{x:+.prec$}"),
+        _ => "—".to_string(),
+    }
+}
+
 fn cell<'a, M: 'a>(s: &str, w: f32) -> Element<'a, M> {
     container(text(s.to_string()).size(11))
         .width(Length::Fixed(w))
@@ -342,7 +352,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     for p in &st.pool {
         pool = pool.push(
             row![
-                cell(&format!("{:+.3}", p.weight), 60.0),
+                cell(&opt_f(p.weight, 3), 60.0),
                 cell(&p.cluster.to_string(), 36.0),
                 cell(&format!("{:.1}", p.ic_t), 50.0),
                 cell(&trunc(&p.expr, 38), 280.0),
@@ -386,8 +396,12 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     for l in &st.live {
         live = live.push(
             text(format!(
-                "{} realized IC@1s {:+.3}  PnL {:+.2}  成交{}  {}",
-                l.symbol, l.realized_ic_1s, l.pnl, l.n_trades, l.age
+                "{} realized IC@1s {}  PnL {}  成交{}  {}",
+                l.symbol,
+                opt_f(l.realized_ic_1s, 3),
+                opt_f(l.pnl, 2),
+                l.n_trades.map_or_else(|| "—".to_string(), |n| n.to_string()),
+                l.age
             ))
             .size(11)
             .color(Color::from_rgb(0.72, 0.74, 0.8)),
