@@ -110,6 +110,8 @@ pub enum Event {
     TardisReplayInteraction(crate::ws::tardis_replay::TardisReplayMsg),
     /// Tardis 历史面板交互（docs/20 §9）：选源/类型/窗口 + 加载。
     TardisBoardInteraction(crate::ws::tardis_board::TardisBoardMsg),
+    /// Factory 面板交互（docs/20 §26）：nightly 手动启停。
+    FactoryInteraction(crate::ws::factory::FactoryMsg),
 }
 
 pub struct State {
@@ -711,8 +713,10 @@ impl State {
                 )
             }
             Content::Factory => {
-                // Alpha Factory 仪表盘（docs/08 F6-P2）：渲染走 ws::factory_readout 旁路快照。
-                let base = crate::ws::factory_view::pane_body();
+                // Alpha Factory 仪表盘（docs/08 F6-P2）：渲染走 ws::factory_readout 旁路快照；
+                // ⑦ 区的 nightly 启停按钮发 FactoryMsg → 包成 pane 事件。
+                let base = crate::ws::factory_view::pane_body()
+                    .map(move |m| Message::PaneEvent(id, Event::FactoryInteraction(m)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1344,6 +1348,10 @@ impl State {
                 if let Content::Recorder(rec) = &mut self.content {
                     crate::ws::recorder::handle(rec, m);
                 }
+            }
+            Event::FactoryInteraction(m) => {
+                // Factory 面板（docs/20 §26）：nightly 手动启停（副作用为 systemctl）。
+                crate::ws::factory::handle(m);
             }
             Event::TardisBoardInteraction(m) => {
                 // Tardis 历史面板（docs/20 §9）：改选择 + 副作用（调 Python 生成面板 JSON）。

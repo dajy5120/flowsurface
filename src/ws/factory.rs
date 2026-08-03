@@ -66,3 +66,30 @@ pub fn subscription(redis_url: String) -> iced::Subscription<FactoryPool> {
         )
     })
 }
+
+/// Factory 面板的交互（docs/20 §26）：目前只有 nightly 手动启停。
+#[derive(Debug, Clone)]
+pub enum FactoryMsg {
+    RunNightly,
+    StopNightly,
+    ToggleTimer(bool),
+}
+
+/// 最近一次操作结果（面板无自有状态，用进程级静态承载，同 tardis_board 的做法）。
+static ACTION_MSG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn action_message() -> String {
+    ACTION_MSG.lock().map(|m| m.clone()).unwrap_or_default()
+}
+
+pub fn handle(msg: FactoryMsg) {
+    use super::factory_readout as ro;
+    let m = match msg {
+        FactoryMsg::RunNightly => ro::nightly_start(),
+        FactoryMsg::StopNightly => ro::nightly_stop(),
+        FactoryMsg::ToggleTimer(on) => ro::nightly_toggle_timer(on),
+    };
+    if let Ok(mut g) = ACTION_MSG.lock() {
+        *g = m;
+    }
+}

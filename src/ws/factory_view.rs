@@ -7,7 +7,7 @@
 //! 本模块只渲染、不发消息,对 pane 的消息类型 `M` 泛型。
 
 use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke, Text};
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
 
 use super::factory_readout::{FactoryReadout, HORIZONS, IcDecay};
@@ -216,7 +216,7 @@ impl<M> canvas::Program<M> for DecayChart {
 }
 
 /// 渲染 Alpha Factory 仪表盘（9 面板,3 列）。
-pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
+pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
     let st: FactoryReadout = super::factory_readout::snapshot();
 
     // —— 顶部总览 ——
@@ -239,7 +239,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         .map(|(k, v)| format!("{}={v}", k.rsplit('.').next().unwrap_or(k)))
         .collect::<Vec<_>>()
         .join("  ");
-    let status_line: Element<M> = if !st.started {
+    let status_line: Element<super::factory::FactoryMsg> = if !st.started {
         text("启动 Factory poller…").size(13).color(C_DIM).into()
     } else if st.db_ok {
         text(format!(
@@ -432,6 +432,45 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         );
     }
     let mut nightly = column![sec("⑦ Nightly 流水线（F7）", C_PURPLE)].spacing(2);
+    // 手动启停（docs/20 §26）。定时器与手动运行相互独立：关了定时器仍可手动跑。
+    {
+        use super::factory::FactoryMsg;
+        let running = st.nightly_running;
+        let ctl = row![
+            if running {
+                button(text("■ 中止").size(11)).padding([2, 8]).on_press(FactoryMsg::StopNightly)
+            } else {
+                button(text("▶ 立即运行").size(11)).padding([2, 8]).on_press(FactoryMsg::RunNightly)
+            },
+            button(
+                text(if st.timer_enabled { "每日定时 开" } else { "每日定时 关" }).size(11)
+            )
+            .padding([2, 8])
+            .on_press(FactoryMsg::ToggleTimer(!st.timer_enabled)),
+            text(if running {
+                "运行中".to_string()
+            } else if st.timer_next.is_empty() {
+                "空闲".to_string()
+            } else {
+                format!("空闲 · 下次 {}", st.timer_next)
+            })
+            .size(10)
+            .color(if running { Color::from_rgb(0.45, 0.85, 0.5) } else { C_DIM }),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+        nightly = nightly.push(ctl);
+        // 操作反馈单独一行：和按钮挤一行会溢出换行、把按钮挤变形
+        let am = super::factory::action_message();
+        if !am.is_empty() {
+            let bad = am.starts_with('✗');
+            nightly = nightly.push(text(am).size(10).color(if bad {
+                Color::from_rgb(0.9, 0.45, 0.45)
+            } else {
+                Color::from_rgb(0.55, 0.75, 0.6)
+            }));
+        }
+    }
     // 实时进度（Redis `factory:progress`）：run 进行中即可见，先于 md 报告落盘。
     let lv = &st.nightly_live;
     if lv.seen {

@@ -113,6 +113,11 @@ pub struct FactoryReadout {
     pub nightly_title: String,
     pub nightly_lines: Vec<String>,
     pub nightly_live: NightlyLive,
+    /// nightly 服务/定时器状态（后台 poller 每 4s 刷新——**不能在 view 里查**，
+    /// 那是每帧一次 systemctl 子进程，参见 docs/20 §19.2 的每帧开销教训）。
+    pub nightly_running: bool,
+    pub timer_enabled: bool,
+    pub timer_next: String,
     pub refreshed: String,
     pub started: bool,
 }
@@ -138,10 +143,75 @@ pub fn snapshot() -> FactoryReadout {
         .unwrap_or_default()
 }
 
+/// nightly 的 systemd 单元名（oneshot service + 每日 timer）。
+pub const NIGHTLY_SVC: &str = "ws-factory-nightly.service";
+pub const NIGHTLY_TIMER: &str = "ws-factory-nightly.timer";
+
+fn sysctl_out(args: &[&str]) -> String {
+    std::process::Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn poll_nightly_units(st: &mut FactoryReadout) {
+    st.nightly_running = sysctl_out(&["is-active", NIGHTLY_SVC]) == "active";
+    st.timer_enabled = sysctl_out(&["is-active", NIGHTLY_TIMER]) == "active";
+    // NextElapseUSecRealtime=... → 取人读的下次触发
+    let v = sysctl_out(&["show", NIGHTLY_TIMER, "-p", "NextElapseUSecRealtime"]);
+    st.timer_next = v.split('=').nth(1).unwrap_or("").trim().to_string();
+}
+
+/// 手动触发一次 nightly。
+///
+/// **必须 `--no-block`**：该 service 是 `Type=oneshot` 且 `TimeoutStartSec=4h`，
+/// 不加的话 `systemctl start` 会一直等到整条流水线跑完（最长 4 小时），
+/// 直接把调用线程——也就是 UI——冻死（同 docs/20 §17.3 踩过的坑）。
+pub fn nightly_start() -> String {
+    match std::process::Command::new("systemctl")
+        .args(["--user", "start", "--no-block", NIGHTLY_SVC])
+        .status()
+    {
+        Ok(s) if s.success() => "▶ 已触发 nightly（后台运行，看下方步骤刷新）".into(),
+        Ok(s) => format!("✗ 触发失败，退出码 {:?}", s.code()),
+        Err(e) => format!("✗ 触发失败：{e}"),
+    }
+}
+
+/// 中止正在运行的 nightly。
+pub fn nightly_stop() -> String {
+    match std::process::Command::new("systemctl")
+        .args(["--user", "stop", NIGHTLY_SVC])
+        .status()
+    {
+        Ok(s) if s.success() => "■ 已中止 nightly".into(),
+        Ok(s) => format!("✗ 中止失败，退出码 {:?}", s.code()),
+        Err(e) => format!("✗ 中止失败：{e}"),
+    }
+}
+
+/// 开/关每日定时器（只影响自动触发，不影响手动运行）。
+pub fn nightly_toggle_timer(enable: bool) -> String {
+    let act = if enable { "start" } else { "stop" };
+    match std::process::Command::new("systemctl")
+        .args(["--user", act, NIGHTLY_TIMER])
+        .status()
+    {
+        Ok(s) if s.success() => {
+            if enable { "✔ 每日定时已开".into() } else { "✔ 每日定时已关（手动仍可运行）".into() }
+        }
+        Ok(s) => format!("✗ 操作失败，退出码 {:?}", s.code()),
+        Err(e) => format!("✗ 操作失败：{e}"),
+    }
+}
+
 fn ensure_poller() {
     POLLER.get_or_init(|| {
         std::thread::spawn(|| loop {
-            let snap = poll_once();
+            let mut snap = poll_once();
+            poll_nightly_units(&mut snap);
             let lock = READOUT.get_or_init(|| Mutex::new(FactoryReadout::default()));
             if let Ok(mut g) = lock.lock() {
                 *g = snap;
