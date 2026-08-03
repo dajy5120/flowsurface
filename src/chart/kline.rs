@@ -672,6 +672,17 @@ impl KlineChart {
                 timeseries.insert_klines(klines_raw);
                 timeseries.insert_trades_existing_buckets(&self.raw_trades);
 
+                // 历史批量插入后补一次视口锚点：`latest_x` 原来只在**实时 K 线**到达时更新
+                // （见 `insert_new_kline`），而回放态工作区把交易所流关掉了，永远等不到实时 tick
+                // → `latest_x` 停在 0、视口锚在 epoch 0，图上有 1450 根历史 K 线却什么都看不见，
+                // 只剩一条「0.1/0.0/-0.1、00:01~00:07」的假坐标轴（docs/20 §28）。
+                if let Some(t) = timeseries.latest_timestamp() {
+                    let newest = t.as_u64();
+                    if self.chart.latest_x < newest {
+                        self.chart.latest_x = newest;
+                    }
+                }
+
                 self.indicators
                     .values_mut()
                     .filter_map(Option::as_mut)

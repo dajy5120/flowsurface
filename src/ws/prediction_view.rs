@@ -177,8 +177,30 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
             .color(C_HEAD),
     );
 
-    for m in &st.rows {
+    // 「近乎已定」的市场（Yes ≥95% 或 ≤5%）没有分析价值，却因成交额大排在前面，
+    // 实测把唯一 ★ 标的可分析市场淹没在 13+ 条已定市场里。
+    // **重排而不隐藏**：可分析的提到前面，已定的移到分隔线之后——信息一条不少。
+    // 判据用 yes_prob 而非匹配标签字符串（标签文案变了就失效）。
+    let decided = |m: &MarketRow| m.yes_prob.is_some_and(|p| !(0.05..=0.95).contains(&p));
+    let (settled, open_): (Vec<_>, Vec<_>) = st.rows.iter().partition(|m| decided(m));
+    // 可分析的里面 ★ 关注档再提到最前
+    let mut open_sorted = open_;
+    open_sorted.sort_by_key(|m| !m.watch);
+    for m in &open_sorted {
         body = body.push(market_block(m));
+    }
+    if !settled.is_empty() {
+        body = body.push(
+            text(format!(
+                "── 以下 {} 个近乎已定（Yes ≥95% 或 ≤5%），无分析价值，仅列出 ──",
+                settled.len()
+            ))
+            .size(10)
+            .color(C_DIM),
+        );
+        for m in &settled {
+            body = body.push(market_block(m));
+        }
     }
 
     body = body.push(
