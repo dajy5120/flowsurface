@@ -96,7 +96,17 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
             .color(C_DIM),
     );
     body = body.push(
-        text(format!("快照 {} · 刷新 {}", st.stamp, st.refreshed))
+        text(format!(
+            "快照 {}{} · 刷新 {}",
+            st.stamp,
+            super::staleness::suffix(&st.stamp),
+            st.refreshed
+        ))
+        .color(if super::staleness::is_stale(&st.stamp) {
+            super::staleness::C_STALE
+        } else {
+            C_DIM
+        })
             .size(10)
             .color(C_DIM),
     );

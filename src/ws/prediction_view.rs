@@ -182,7 +182,13 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     }
 
     body = body.push(
-        text(format!("源 {} · 快照 {} · 刷新 {}", st.source, st.stamp, st.refreshed))
+        text(format!(
+            "源 {} · 快照 {}{} · 刷新 {}",
+            st.source,
+            st.stamp,
+            super::staleness::suffix(&st.stamp),
+            st.refreshed
+        ))
             .size(10)
             .color(C_DIM),
     );

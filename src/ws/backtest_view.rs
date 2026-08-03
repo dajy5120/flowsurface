@@ -437,7 +437,19 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     let m = &r.meta;
     let header = column![
         text(format!("回测结果 · {} · {}", m.strategy, m.symbol)).size(16).color(C_HEAD),
-        text(format!("{} 根K线   ·   run {}", m.bars, m.run)).size(10).color(C_DIM),
+        {
+            // run id 里编着日期，据此补「距今多久」——只印 run id 时，
+            // 6 周前的结果和刚跑完的看起来一模一样（docs/20 §27）
+            let stale = super::staleness::is_stale(&m.run);
+            text(format!(
+                "{} 根K线   ·   run {}{}",
+                m.bars,
+                m.run,
+                super::staleness::suffix(&m.run)
+            ))
+            .size(10)
+            .color(if stale { super::staleness::C_STALE } else { C_DIM })
+        },
     ]
     .spacing(2);
 

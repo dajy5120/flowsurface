@@ -29,6 +29,7 @@ pub mod recorder_view;
 pub mod replay;
 pub mod selfdata;
 pub mod signals;
+pub mod staleness;
 pub mod tardis_board;
 pub mod tardis_board_readout;
 pub mod tardis_board_view;
