@@ -21,10 +21,16 @@ pub fn catalog_path() -> PathBuf {
         .unwrap_or_else(|_| base().join("tardis_catalog.json"))
 }
 
+/// Cockpit 自己的面板文件。
+///
+/// **刻意与 Python CLI 的默认输出 `tardis_panel.json` 区分开**：两边同名时，
+/// 命令行跑一次 `panels.py`（不带 `--out`）就会把 GUI 正在显示的内容悄悄换掉，
+/// 反过来 GUI 点加载也会覆盖命令行的产物。分开后互不干扰。
+/// 想让 GUI 显示命令行生成的面板，显式 `--out .../tardis_panel_cockpit.json` 即可。
 pub fn panel_path() -> PathBuf {
     std::env::var("WS_TARDIS_PANEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| base().join("tardis_panel.json"))
+        .unwrap_or_else(|_| base().join("tardis_panel_cockpit.json"))
 }
 
 // ── catalog ────────────────────────────────────────────────────────────────

@@ -683,12 +683,15 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     let dates = entry.dates.get(&app.symbol).cloned().unwrap_or_default();
     let picks = row![
         label("③ 窗口"),
-        chip(
+        // 固定宽度：文字在「单符号」「跨符号对比」间切换时长度不同，不定宽会把整行右推，
+        // 「加载」按钮位置随状态漂移（实测点错过多次）。
+        container(chip(
             if app.compare { "跨符号对比".into() } else { "单符号".into() },
             app.compare,
             entry.symbols.len() > 1,
             TardisBoardMsg::ToggleCompare,
-        ),
+        ))
+        .width(Length::Fixed(104.0)),
         pick_list(entry.symbols.clone(), Some(app.symbol.clone()), TardisBoardMsg::SymbolPick)
             .text_size(12),
         pick_list(dates, Some(app.date.clone()), TardisBoardMsg::DatePick).text_size(12),
