@@ -7,7 +7,8 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 fn base() -> PathBuf {
@@ -178,10 +179,14 @@ pub struct Panel {
     pub dtype: String,
     pub type_label: String,
     pub rows: u64,
-    pub charts: Vec<Chart>,
+    /// 用 `Arc` 装：`panel()` 每帧被 view 调用并整份 clone，图里带热图矩阵
+    /// （300×96×2 f64 ≈ 0.46 MB）。Arc 让 clone 退化成引用计数。
+    pub charts: Vec<Arc<Chart>>,
     pub error: Option<String>,
     /// 该面板是跨符号对比（此时 `symbol` 是多符号拼接，不能拿去和当前选择比）。
     pub compare: bool,
+    /// 内容代号：每次重新解析递增。渲染端据此作废跨帧持有的几何缓存。
+    pub generation: u64,
 }
 
 static PANEL: OnceLock<Mutex<(Option<SystemTime>, Panel)>> = OnceLock::new();
@@ -204,9 +209,11 @@ pub fn panel() -> Panel {
     if g.0.is_some() && g.0 == mt {
         return g.1.clone();
     }
+    static GEN: AtomicU64 = AtomicU64::new(0);
+    let g_id = GEN.fetch_add(1, Ordering::Relaxed) + 1;
     let out = match std::fs::read_to_string(&p) {
-        Ok(t) => parse_panel(&t),
-        Err(_) => Panel::default(), // 尚未加载过：view 显引导语，不报错
+        Ok(t) => Panel { generation: g_id, ..parse_panel(&t) },
+        Err(_) => Panel { generation: g_id, ..Panel::default() }, // 尚未加载过：显引导语
     };
     *g = (mt, out.clone());
     out
@@ -286,7 +293,7 @@ fn parse_panel(text: &str) -> Panel {
                 nums(s.get("v")),
             ));
         }
-        p.charts.push(ch);
+        p.charts.push(Arc::new(ch));
     }
     p
 }

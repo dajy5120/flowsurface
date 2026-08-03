@@ -93,9 +93,59 @@ fn fmt_time(ms: f64) -> String {
         .unwrap_or_default()
 }
 
+/// 帧耗时埋点（docs/20 §20）：累计 `cache.draw()` 的墙钟，每 300 次打一条 INFO。
+/// 优化渲染前必须有这个——面板 CPU 常年 100%（上游 unconditional-rendering），
+/// 用 CPU% 根本量不出边际收益（§19.1）。
+mod probe {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NANOS: AtomicU64 = AtomicU64::new(0);
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+
+    pub fn record(ns: u64) {
+        let n = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+        let tot = NANOS.fetch_add(ns, Ordering::Relaxed) + ns;
+        if n % 3000 == 0 {
+            log::info!(
+                "[tardis-board] 近 3000 次 canvas draw 平均 {:.3} ms（累计 {n} 次）",
+                tot as f64 / n as f64 / 1e6
+            );
+        }
+    }
+}
+
+/// 跨帧持有的 canvas 几何缓存（docs/20 §20）。
+///
+/// 原来每帧 `Cache::new()`，等于**完全绕开** iced 的几何缓存——draw 闭包每帧全量重跑
+/// （热图约 8,000 次 `fill_rectangle`）。改为按 chart id 跨帧复用。
+///
+/// ⚠️ 两个必须守住的点：
+/// 1. `Cache` **只在尺寸变化或显式 clear 时失效，不看内容**。面板换了内容还复用旧缓存
+///    会画出上一份数据，故按 `Panel.generation` 作废整张表。
+/// 2. **回放中不能用缓存**——播放头逐帧推进、几何逐帧变化，而 Cache 不感知内容变化，
+///    复用会让图冻住不动。故 `playhead.is_some()` 时退回每帧新建。
+type CacheRef = std::rc::Rc<Cache>;
+
+thread_local! {
+    static CACHES: std::cell::RefCell<(u64, std::collections::HashMap<String, CacheRef>)> =
+        std::cell::RefCell::new((u64::MAX, std::collections::HashMap::new()));
+}
+
+fn cache_for(generation: u64, id: &str) -> CacheRef {
+    CACHES.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != generation {
+            c.0 = generation;
+            c.1.clear();
+        }
+        c.1.entry(id.to_string())
+            .or_insert_with(|| std::rc::Rc::new(Cache::new()))
+            .clone()
+    })
+}
+
 struct ChartCanvas {
-    ch: ro::Chart,
-    cache: Cache,
+    ch: std::sync::Arc<ro::Chart>,
+    cache: CacheRef,
     /// 时间步进回放的播放头（ms）；None=不裁剪，显示全窗口。
     playhead: Option<f64>,
 }
@@ -215,6 +265,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
         b: Rectangle,
         _c: mouse::Cursor,
     ) -> Vec<Geometry> {
+        let _t0 = std::time::Instant::now();
         let geo = self.cache.draw(r, b.size(), |frame: &mut Frame| {
             let (w, h) = (frame.width(), frame.height());
             let clipped;
@@ -571,6 +622,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                 );
             }
         });
+        probe::record(_t0.elapsed().as_nanos() as u64);
         vec![geo]
     }
 }
@@ -811,8 +863,12 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
             });
             let cv: Element<'_, TardisBoardMsg> =
                 canvas_widget(ChartCanvas {
-                    ch: ch.clone(),
-                    cache: Cache::new(),
+                    ch: ch.clone(), // Arc：仅增引用计数
+                    // 回放中几何逐帧变化，缓存不感知内容变化，复用会冻住 → 退回每帧新建
+                    cache: match head {
+                        Some(_) => std::rc::Rc::new(Cache::new()),
+                        None => cache_for(p.generation, &ch.id),
+                    },
                     playhead: head,
                 })
                     .width(Length::Fill)
