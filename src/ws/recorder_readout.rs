@@ -46,6 +46,13 @@ pub struct SvcState {
     pub lake: BTreeMap<String, LakeSym>,
     pub refreshed: String,
     pub started: bool,
+    /// F0 72h 验收（`ws-f0-accept.service`）的运行状态 + 上次报告结论。
+    /// 验收的对象就是本服务的录制质量，所以挂在录制驾驶舱里。
+    pub accept: super::svcctl::UnitState,
+    /// 上次验收报告的结论行（`PASS` / `FAIL(...)`；空=没有报告）。
+    pub accept_verdict: String,
+    /// 上次验收报告的文件名日期（空=从没跑过）。
+    pub accept_day: String,
 }
 
 static STATE: OnceLock<Mutex<SvcState>> = OnceLock::new();
@@ -75,14 +82,67 @@ fn ensure_poller() {
                 prev = st.live.clone();
                 let dd = super::recorder::config_data_dir();
                 scan_lake(&mut st, &super::recorder::expand_dir(&dd));
+                poll_accept(&mut st, &super::recorder::expand_dir(&dd));
                 let lock = STATE.get_or_init(|| Mutex::new(SvcState::default()));
                 if let Ok(mut g) = lock.lock() {
                     *g = st;
                 }
-                std::thread::sleep(Duration::from_secs(3));
+                WAKER.wait(Duration::from_secs(3));
             }
         });
     });
+}
+
+static WAKER: super::svcctl::Waker = super::svcctl::Waker::new();
+
+/// 面板「刷新」按钮：叫醒 poller 立刻刷一轮（不阻塞 UI）。
+pub fn request_refresh() {
+    WAKER.request();
+}
+
+/// F0 72h 验收单元名（oneshot；跑一次写一份报告到数据目录）。
+pub const ACCEPT_SVC: &str = "ws-f0-accept.service";
+
+/// 手动跑一次 F0 验收。
+///
+/// **必须 `--no-block`**：oneshot 要扫两整天的 parquet 算覆盖率，同步等会冻死 UI
+/// （同 nightly 踩过的坑，见 [`super::factory_readout::nightly_start`]）。
+pub fn accept_start() -> String {
+    let r = match Command::new("systemctl")
+        .args(["--user", "start", "--no-block", ACCEPT_SVC])
+        .status()
+    {
+        Ok(s) if s.success() => "▶ 已触发 F0 验收（后台跑，完成后看结论）".into(),
+        Ok(s) => format!("✗ 触发失败，退出码 {:?}", s.code()),
+        Err(e) => format!("✗ 触发失败：{e}"),
+    };
+    WAKER.request();
+    r
+}
+
+/// 读最新一份 `f0-accept-*.log` 的结论行（脚本末行形如 `F0-ACCEPT: PASS`）。
+fn poll_accept(st: &mut SvcState, data_dir: &Path) {
+    st.accept = super::svcctl::query(ACCEPT_SVC);
+    let Ok(rd) = std::fs::read_dir(data_dir) else { return };
+    let mut latest: Option<(String, std::path::PathBuf)> = None;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if let Some(day) = name.strip_prefix("f0-accept-").and_then(|s| s.strip_suffix(".log"))
+            && latest.as_ref().is_none_or(|(d, _)| day > d.as_str())
+        {
+            latest = Some((day.to_string(), e.path()));
+        }
+    }
+    if let Some((day, path)) = latest {
+        st.accept_day = day;
+        if let Ok(c) = std::fs::read_to_string(&path) {
+            st.accept_verdict = c
+                .lines()
+                .rev()
+                .find_map(|l| l.trim().strip_prefix("F0-ACCEPT:").map(|v| v.trim().to_string()))
+                .unwrap_or_default();
+        }
+    }
 }
 
 fn sysctl(args: &[&str]) -> String {

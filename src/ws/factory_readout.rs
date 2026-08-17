@@ -113,9 +113,12 @@ pub struct FactoryReadout {
     pub nightly_title: String,
     pub nightly_lines: Vec<String>,
     pub nightly_live: NightlyLive,
-    /// nightly 服务/定时器状态（后台 poller 每 4s 刷新——**不能在 view 里查**，
-    /// 那是每帧一次 systemctl 子进程，参见 docs/20 §19.2 的每帧开销教训）。
-    pub nightly_running: bool,
+    /// nightly 服务状态（在跑/时长/上次结果）。后台 poller 每 4s 刷新，或被面板
+    /// 「刷新」按钮唤醒——**不能在 view 里查**，那是每帧一次 systemctl 子进程
+    /// （docs/20 §19.2 的每帧开销教训）。
+    ///
+    /// nightly 是 `Type=oneshot`，`restarts` 对它恒 0 无意义，看 `last_result` 才对。
+    pub svc: super::svcctl::UnitState,
     pub timer_enabled: bool,
     pub timer_next: String,
     pub refreshed: String,
@@ -147,21 +150,17 @@ pub fn snapshot() -> FactoryReadout {
 pub const NIGHTLY_SVC: &str = "ws-factory-nightly.service";
 pub const NIGHTLY_TIMER: &str = "ws-factory-nightly.timer";
 
-fn sysctl_out(args: &[&str]) -> String {
-    std::process::Command::new("systemctl")
-        .arg("--user")
-        .args(args)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
+static WAKER: super::svcctl::Waker = super::svcctl::Waker::new();
+
+/// 面板「刷新」按钮：叫醒 poller 立刻刷一轮（不阻塞 UI）。
+pub fn request_refresh() {
+    WAKER.request();
 }
 
 fn poll_nightly_units(st: &mut FactoryReadout) {
-    st.nightly_running = sysctl_out(&["is-active", NIGHTLY_SVC]) == "active";
-    st.timer_enabled = sysctl_out(&["is-active", NIGHTLY_TIMER]) == "active";
-    // NextElapseUSecRealtime=... → 取人读的下次触发
-    let v = sysctl_out(&["show", NIGHTLY_TIMER, "-p", "NextElapseUSecRealtime"]);
-    st.timer_next = v.split('=').nth(1).unwrap_or("").trim().to_string();
+    st.svc = super::svcctl::query(NIGHTLY_SVC);
+    st.timer_enabled = super::svcctl::timer_active(NIGHTLY_TIMER);
+    st.timer_next = super::svcctl::next_elapse(NIGHTLY_TIMER);
 }
 
 /// 手动触发一次 nightly。
@@ -174,7 +173,10 @@ pub fn nightly_start() -> String {
         .args(["--user", "start", "--no-block", NIGHTLY_SVC])
         .status()
     {
-        Ok(s) if s.success() => "▶ 已触发 nightly（后台运行，看下方步骤刷新）".into(),
+        Ok(s) if s.success() => {
+            WAKER.request();
+            "▶ 已触发 nightly（后台运行，看下方步骤刷新）".into()
+        }
         Ok(s) => format!("✗ 触发失败，退出码 {:?}", s.code()),
         Err(e) => format!("✗ 触发失败：{e}"),
     }
@@ -186,7 +188,10 @@ pub fn nightly_stop() -> String {
         .args(["--user", "stop", NIGHTLY_SVC])
         .status()
     {
-        Ok(s) if s.success() => "■ 已中止 nightly".into(),
+        Ok(s) if s.success() => {
+            WAKER.request();
+            "■ 已中止 nightly".into()
+        }
         Ok(s) => format!("✗ 中止失败，退出码 {:?}", s.code()),
         Err(e) => format!("✗ 中止失败：{e}"),
     }
@@ -200,6 +205,7 @@ pub fn nightly_toggle_timer(enable: bool) -> String {
         .status()
     {
         Ok(s) if s.success() => {
+            WAKER.request();
             if enable { "✔ 每日定时已开".into() } else { "✔ 每日定时已关（手动仍可运行）".into() }
         }
         Ok(s) => format!("✗ 操作失败，退出码 {:?}", s.code()),
@@ -216,7 +222,7 @@ fn ensure_poller() {
             if let Ok(mut g) = lock.lock() {
                 *g = snap;
             }
-            std::thread::sleep(Duration::from_secs(4));
+            WAKER.wait(Duration::from_secs(4));
         });
     });
 }

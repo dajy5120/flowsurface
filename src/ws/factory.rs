@@ -72,7 +72,10 @@ pub fn subscription(redis_url: String) -> iced::Subscription<FactoryPool> {
 pub enum FactoryMsg {
     RunNightly,
     StopNightly,
-    ToggleTimer(bool),
+    /// 把每日定时**设为**开/关（两个独立按钮，非切换——切换式按钮看不出当前是哪态）。
+    SetTimer(bool),
+    /// 手动刷新：叫醒 poller 立刻取一次状态（不必等下一轮 4s）。
+    Refresh,
 }
 
 /// 最近一次操作结果（面板无自有状态，用进程级静态承载，同 tardis_board 的做法）。
@@ -87,7 +90,11 @@ pub fn handle(msg: FactoryMsg) {
     let m = match msg {
         FactoryMsg::RunNightly => ro::nightly_start(),
         FactoryMsg::StopNightly => ro::nightly_stop(),
-        FactoryMsg::ToggleTimer(on) => ro::nightly_toggle_timer(on),
+        FactoryMsg::SetTimer(on) => ro::nightly_toggle_timer(on),
+        FactoryMsg::Refresh => {
+            ro::request_refresh();
+            String::new() // 刷新无需反馈文字，时间戳自己会跳
+        }
     };
     if let Ok(mut g) = ACTION_MSG.lock() {
         *g = m;

@@ -1,14 +1,16 @@
 //! C4 活体影子 pane 的视图渲染（docs/14 §2「live 指标接 P2 面板」）。
 //!
 //! **独立新增面板**（`Content::C4Shadow`）——不改任何既有面板；数据走
-//! [`super::c4_readout`] 旁路快照。本模块只渲染、不发消息，对消息类型 `M` 泛型。
+//! [`super::c4_readout`] 旁路快照。
 //!
-//! 布局：今日实时（checkpoint）→ 影子日表（UTC 日切落账）→ 活体vs重放对照
+//! 布局：守护控制条（启停，[`super::c4::C4Msg`]）→ 今日实时（checkpoint）
+//! → 影子日表（UTC 日切落账）→ 活体vs重放对照
 //! → C4 进度（合格日 n/7，判定规则 docs/preregister-c4-live.md）。
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Color, Element, Length};
 
+use super::c4::C4Msg;
 use super::c4_readout::{C4Readout, QUALIFY_TARGET, QUALIFY_UPTIME_SECS};
 
 const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
@@ -34,9 +36,48 @@ fn bp_s(b: Option<f64>) -> String {
     b.map(|x| format!("{x:+.2}")).unwrap_or_else(|| "—".into())
 }
 
-pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
+pub fn pane_body<'a>() -> Element<'a, C4Msg> {
     let st: C4Readout = super::c4_readout::snapshot();
     let mut body = column![].spacing(6).padding(10);
+
+    // ── 守护启停（不随开机自启，全由这里控制；状态来自 poller，非每帧查） ──
+    body = body.push(sec("maker 影子守护（SOLUSDT · 不下真实单）"));
+    {
+        // 状态行：● 运行中 已X 重启N次 / ○ 已停止（同录制驾驶舱口径）
+        let (dot, dotc, run) = if st.svc.active {
+            (
+                "●",
+                C_GREEN,
+                format!(
+                    "运行中  已 {}  重启 {} 次",
+                    super::svcctl::fmt_dur(st.svc.uptime_secs),
+                    st.svc.restarts
+                ),
+            )
+        } else {
+            ("○", C_DIM, "已停止".to_string())
+        };
+        body = body.push(
+            row![text(format!("{dot} ")).size(14).color(dotc), text(run).size(12).color(C_TXT)]
+                .align_y(iced::Alignment::Center),
+        );
+        let ctl = row![
+            button(text("▶ 启动").size(11)).padding([2, 8]).on_press(C4Msg::StartShadow),
+            button(text("■ 停止").size(11)).padding([2, 8]).on_press(C4Msg::StopShadow),
+            button(text("↻ 重启").size(11)).padding([2, 8]).on_press(C4Msg::RestartShadow),
+            button(text("⟳ 刷新").size(11)).padding([2, 8]).on_press(C4Msg::Refresh),
+            text(format!("  刷新于 {}", st.refreshed)).size(10).color(C_DIM),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+        body = body.push(ctl);
+        // 操作反馈单独一行：和按钮挤一行会溢出换行、把按钮挤变形（同 factory 面板）
+        let am = super::c4::action_message();
+        if !am.is_empty() {
+            let bad = am.starts_with('✗');
+            body = body.push(text(am).size(10).color(if bad { C_RED } else { C_GREEN }));
+        }
+    }
 
     // ── 今日实时（守护 checkpoint，5min 刷新） ──
     body = body.push(sec("今日实时（maker 影子守护 · SOLUSDT · 不下真实单）"));
@@ -67,7 +108,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
             );
             if stale {
                 body = body.push(
-                    text("⚠ checkpoint 未更新——守护可能停了（systemctl --user status wealthspring-maker-shadow）")
+                    text("⚠ checkpoint 未更新——守护可能卡住，可点上方「↻ 重启」")
                         .size(11)
                         .color(C_GOLD),
                 );
@@ -75,7 +116,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         }
         None => {
             body = body.push(
-                text("（无 checkpoint——守护未运行：systemctl --user enable --now wealthspring-maker-shadow）")
+                text("（无 checkpoint——守护未运行，点上方「▶ 启动」开始）")
                     .size(11)
                     .color(C_GOLD),
             );

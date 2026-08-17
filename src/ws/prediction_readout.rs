@@ -62,6 +62,14 @@ pub struct PredictionReadout {
     pub calib: Option<CalibrationView>,
     pub refreshed: String,
     pub present: bool,
+    /// 夜跑 service 状态（在跑/时长/上次结果）。后台 poller 每 10s 刷，或被面板
+    /// 「刷新」按钮唤醒——**不能在 view 里查**，那是每帧一次 systemctl 子进程
+    /// （docs/20 §19.2 的每帧开销教训）。
+    ///
+    /// 夜跑是 `Type=oneshot`，`restarts` 对它恒 0 无意义，看 `last_result` 才对。
+    pub svc: super::svcctl::UnitState,
+    pub timer_enabled: bool,
+    pub timer_next: String,
 }
 
 static READOUT: OnceLock<Mutex<PredictionReadout>> = OnceLock::new();
@@ -89,15 +97,84 @@ pub fn snapshot() -> PredictionReadout {
         .unwrap_or_default()
 }
 
+/// 预测市场夜跑的 systemd 单元名（oneshot service + 每日 timer）。
+pub const NIGHTLY_SVC: &str = "ws-prediction-nightly.service";
+pub const NIGHTLY_TIMER: &str = "ws-prediction-nightly.timer";
+
+static WAKER: super::svcctl::Waker = super::svcctl::Waker::new();
+
+/// 面板「刷新」按钮：叫醒 poller 立刻刷一轮（不阻塞 UI）。
+pub fn request_refresh() {
+    WAKER.request();
+}
+
+/// 查 service/timer 状态。**只在后台 poller 里调**（起子进程，不可进渲染线程）。
+fn poll_nightly_units(st: &mut PredictionReadout) {
+    st.svc = super::svcctl::query(NIGHTLY_SVC);
+    st.timer_enabled = super::svcctl::timer_active(NIGHTLY_TIMER);
+    st.timer_next = super::svcctl::next_elapse(NIGHTLY_TIMER);
+}
+
+/// 手动触发一次夜跑。
+///
+/// **必须 `--no-block`**：该 service 是 `Type=oneshot` 且 `TimeoutStartSec=30min`，
+/// 不加的话 `systemctl start` 会一直等到跑完才返回，直接冻死 UI 线程
+/// （同 factory nightly 踩过的坑，见 [`super::factory_readout::nightly_start`]）。
+pub fn nightly_start() -> String {
+    match std::process::Command::new("systemctl")
+        .args(["--user", "start", "--no-block", NIGHTLY_SVC])
+        .status()
+    {
+        Ok(s) if s.success() => {
+            WAKER.request();
+            "▶ 已触发预测夜跑（后台运行）".into()
+        }
+        Ok(s) => format!("✗ 触发失败，退出码 {:?}", s.code()),
+        Err(e) => format!("✗ 触发失败：{e}"),
+    }
+}
+
+/// 中止正在运行的夜跑。
+pub fn nightly_stop() -> String {
+    match std::process::Command::new("systemctl")
+        .args(["--user", "stop", NIGHTLY_SVC])
+        .status()
+    {
+        Ok(s) if s.success() => {
+            WAKER.request();
+            "■ 已中止预测夜跑".into()
+        }
+        Ok(s) => format!("✗ 中止失败，退出码 {:?}", s.code()),
+        Err(e) => format!("✗ 中止失败：{e}"),
+    }
+}
+
+/// 开/关每日定时器（只影响自动触发，不影响手动运行）。
+pub fn nightly_toggle_timer(enable: bool) -> String {
+    let act = if enable { "start" } else { "stop" };
+    match std::process::Command::new("systemctl")
+        .args(["--user", act, NIGHTLY_TIMER])
+        .status()
+    {
+        Ok(s) if s.success() => {
+            WAKER.request();
+            if enable { "✔ 每日定时已开".into() } else { "✔ 每日定时已关（手动仍可运行）".into() }
+        }
+        Ok(s) => format!("✗ 操作失败，退出码 {:?}", s.code()),
+        Err(e) => format!("✗ 操作失败：{e}"),
+    }
+}
+
 fn ensure_poller() {
     POLLER.get_or_init(|| {
         std::thread::spawn(|| loop {
-            let snap = poll_once();
+            let mut snap = poll_once();
+            poll_nightly_units(&mut snap);
             let lock = READOUT.get_or_init(|| Mutex::new(PredictionReadout::default()));
             if let Ok(mut g) = lock.lock() {
                 *g = snap;
             }
-            std::thread::sleep(Duration::from_secs(10));
+            WAKER.wait(Duration::from_secs(10));
         });
     });
 }
@@ -204,6 +281,8 @@ fn parse_board(v: &serde_json::Value) -> PredictionReadout {
         calib: None,
         refreshed: String::new(),
         present: true,
+        // 单元状态不来自 board JSON，由 poller 的 poll_nightly_units 覆盖填入。
+        ..Default::default()
     }
 }
 

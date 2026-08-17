@@ -131,9 +131,43 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
             button(text("▶ 启动").size(14)).on_press(RecorderMsg::Start),
             button(text("■ 停止").size(14)).on_press(RecorderMsg::Stop),
             button(text("↻ 重启").size(14)).on_press(RecorderMsg::Restart),
-            text(format!("  刷新 {}", st.refreshed)).size(11).color(Color::from_rgb(0.5, 0.5, 0.5)),
+            button(text("⟳ 刷新").size(14)).on_press(RecorderMsg::Refresh),
+            text(format!("  刷新于 {}", st.refreshed))
+                .size(11)
+                .color(Color::from_rgb(0.5, 0.5, 0.5)),
         ]
         .spacing(8),
+        // F0 72h 验收：验收对象就是本服务的录制质量，故并入①区。
+        // oneshot，「重启次数」无意义，看的是上次结论 PASS/FAIL。
+        {
+            let (adot, adotc, atxt) = if st.accept.active {
+                (
+                    "●",
+                    Color::from_rgb(0.4, 0.85, 0.45),
+                    format!("验收运行中  已 {}", fmt_dur(st.accept.uptime_secs)),
+                )
+            } else if st.accept_verdict.starts_with("PASS") {
+                ("✔", Color::from_rgb(0.4, 0.85, 0.45), format!("上次验收 {} PASS", st.accept_day))
+            } else if !st.accept_verdict.is_empty() {
+                (
+                    "✗",
+                    Color::from_rgb(0.9, 0.45, 0.4),
+                    format!("上次验收 {} {}", st.accept_day, st.accept_verdict),
+                )
+            } else {
+                ("○", Color::from_rgb(0.6, 0.6, 0.6), "未跑过验收".to_string())
+            };
+            row![
+                button(text("▶ 跑 F0 验收").size(13)).on_press(RecorderMsg::RunAccept),
+                text(format!("  {adot} ")).size(14).color(adotc),
+                text(atxt).size(12).color(Color::from_rgb(0.75, 0.77, 0.82)),
+                text("  (覆盖率≥99%×2整日，报告写数据目录)")
+                    .size(10)
+                    .color(Color::from_rgb(0.5, 0.5, 0.5)),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+        },
     ]
     .spacing(6);
 

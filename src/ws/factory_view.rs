@@ -435,29 +435,64 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
     // 手动启停（docs/20 §26）。定时器与手动运行相互独立：关了定时器仍可手动跑。
     {
         use super::factory::FactoryMsg;
-        let running = st.nightly_running;
-        let ctl = row![
-            if running {
-                button(text("■ 中止").size(11)).padding([2, 8]).on_press(FactoryMsg::StopNightly)
-            } else {
-                button(text("▶ 立即运行").size(11)).padding([2, 8]).on_press(FactoryMsg::RunNightly)
-            },
-            button(
-                text(if st.timer_enabled { "每日定时 开" } else { "每日定时 关" }).size(11)
+        const C_GREEN: Color = Color::from_rgb(0.45, 0.85, 0.5);
+        const C_RED: Color = Color::from_rgb(0.9, 0.45, 0.4);
+        let running = st.svc.active;
+        // 状态行：nightly 是 oneshot，「重启次数」无意义，看的是上次跑没跑成。
+        let (dot, dotc, run) = if running {
+            ("●", C_GREEN, format!("运行中  已 {}", super::svcctl::fmt_dur(st.svc.uptime_secs)))
+        } else if st.svc.ever_ran() {
+            let ok = st.svc.last_ok();
+            (
+                if ok { "○" } else { "✗" },
+                if ok { C_DIM } else { C_RED },
+                format!(
+                    "空闲  上次 {} {}",
+                    super::svcctl::fmt_stamp(&st.svc.last_finish),
+                    if ok { "成功".into() } else { format!("失败（{}）", st.svc.last_result) }
+                ),
             )
-            .padding([2, 8])
-            .on_press(FactoryMsg::ToggleTimer(!st.timer_enabled)),
-            text(if running {
-                "运行中".to_string()
-            } else if st.timer_next.is_empty() {
-                "空闲".to_string()
-            } else {
-                format!("空闲 · 下次 {}", st.timer_next)
-            })
-            .size(10)
-            .color(if running { Color::from_rgb(0.45, 0.85, 0.5) } else { C_DIM }),
+        } else {
+            ("○", C_DIM, "空闲  未跑过".to_string())
+        };
+        nightly = nightly.push(
+            row![
+                text(format!("{dot} ")).size(13).color(dotc),
+                text(run).size(11).color(Color::from_rgb(0.85, 0.87, 0.92)),
+                text(if st.timer_enabled && !st.timer_next.is_empty() {
+                    format!("　下次定时 {}", st.timer_next)
+                } else if st.timer_enabled {
+                    "　每日定时开".to_string()
+                } else {
+                    "　每日定时已关".to_string()
+                })
+                .size(10)
+                .color(C_DIM),
+            ]
+            .align_y(iced::Alignment::Center),
+        );
+        // 动作按钮常驻、当前状态那个置灰（灰掉的=现在就是这个态），不用切换式按钮
+        // ——切换式按钮上写「每日定时 开」时，分不清是「当前开」还是「点了会开」。
+        let ctl = row![
+            text("运行 ").size(11).color(C_DIM),
+            button(text("▶ 立即运行").size(11))
+                .padding([2, 8])
+                .on_press_maybe((!running).then_some(FactoryMsg::RunNightly)),
+            button(text("■ 停止").size(11))
+                .padding([2, 8])
+                .on_press_maybe(running.then_some(FactoryMsg::StopNightly)),
+            text("　每日定时 ").size(11).color(C_DIM),
+            button(text(if st.timer_enabled { "✔ 开" } else { "开" }).size(11))
+                .padding([2, 8])
+                .on_press_maybe((!st.timer_enabled).then_some(FactoryMsg::SetTimer(true))),
+            button(text(if st.timer_enabled { "关" } else { "✔ 关" }).size(11))
+                .padding([2, 8])
+                .on_press_maybe(st.timer_enabled.then_some(FactoryMsg::SetTimer(false))),
+            text("　").size(11),
+            button(text("⟳ 刷新").size(11)).padding([2, 8]).on_press(FactoryMsg::Refresh),
+            text(format!("  刷新于 {}", st.refreshed)).size(10).color(C_DIM),
         ]
-        .spacing(6)
+        .spacing(4)
         .align_y(iced::Alignment::Center);
         nightly = nightly.push(ctl);
         // 操作反馈单独一行：和按钮挤一行会溢出换行、把按钮挤变形

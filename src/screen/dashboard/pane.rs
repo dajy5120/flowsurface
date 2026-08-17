@@ -112,6 +112,10 @@ pub enum Event {
     TardisBoardInteraction(crate::ws::tardis_board::TardisBoardMsg),
     /// Factory 面板交互（docs/20 §26）：nightly 手动启停。
     FactoryInteraction(crate::ws::factory::FactoryMsg),
+    /// C4 活体影子交互：maker 影子守护启停（服务默认不自启，全由面板控制）。
+    C4Interaction(crate::ws::c4::C4Msg),
+    /// 预测市场面板交互：夜跑手动启停 + 每日定时开关（同上，默认不自启）。
+    PredictionInteraction(crate::ws::prediction::PredictionMsg),
 }
 
 pub struct State {
@@ -728,8 +732,10 @@ impl State {
                 )
             }
             Content::C4Shadow => {
-                // C4 活体影子（docs/14 §2）：渲染走 ws::c4_readout 旁路快照（checkpoint+Registry）。
-                let base = crate::ws::c4_view::pane_body();
+                // C4 活体影子（docs/14 §2）：渲染走 ws::c4_readout 旁路快照（checkpoint+Registry）；
+                // 顶部守护启停按钮发 C4Msg → 包成 pane 事件。
+                let base = crate::ws::c4_view::pane_body()
+                    .map(move |m| Message::PaneEvent(id, Event::C4Interaction(m)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -754,8 +760,10 @@ impl State {
                 )
             }
             Content::PredictionBoard => {
-                // 预测市场 Polymarket（docs/19）：渲染走 ws::prediction_readout 旁路快照（prediction_board.json）。
-                let base = crate::ws::prediction_view::pane_body();
+                // 预测市场 Polymarket（docs/19）：渲染走 ws::prediction_readout 旁路快照（prediction_board.json）；
+                // 顶部夜跑启停按钮发 PredictionMsg → 包成 pane 事件。
+                let base = crate::ws::prediction_view::pane_body()
+                    .map(move |m| Message::PaneEvent(id, Event::PredictionInteraction(m)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1352,6 +1360,14 @@ impl State {
             Event::FactoryInteraction(m) => {
                 // Factory 面板（docs/20 §26）：nightly 手动启停（副作用为 systemctl）。
                 crate::ws::factory::handle(m);
+            }
+            Event::C4Interaction(m) => {
+                // C4 活体影子：maker 影子守护启停（副作用为 systemctl，无面板状态）。
+                crate::ws::c4::handle(m);
+            }
+            Event::PredictionInteraction(m) => {
+                // 预测市场：夜跑启停 + 定时开关（副作用为 systemctl，无面板状态）。
+                crate::ws::prediction::handle(m);
             }
             Event::TardisBoardInteraction(m) => {
                 // Tardis 历史面板（docs/20 §9）：改选择 + 副作用（调 Python 生成面板 JSON）。

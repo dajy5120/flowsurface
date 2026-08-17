@@ -57,6 +57,10 @@ pub struct C4Readout {
     pub days: Vec<DayRow>,
     pub vs: Vec<VsRow>,
     pub refreshed: String,
+    /// maker 影子守护的运行状态（在跑/时长/重启次数）。后台 poller 每 10s 刷，
+    /// 或被面板「刷新」按钮唤醒——**不能在 view 里查**，那是每帧一次 systemctl
+    /// 子进程（docs/20 §19.2 的每帧开销教训）。
+    pub svc: super::svcctl::UnitState,
 }
 
 impl C4Readout {
@@ -98,15 +102,51 @@ pub fn snapshot() -> C4Readout {
         .unwrap_or_default()
 }
 
+/// maker 影子守护的 systemd 单元名（用户级，无 sudo）。
+pub const SHADOW_SVC: &str = "wealthspring-maker-shadow.service";
+
+static WAKER: super::svcctl::Waker = super::svcctl::Waker::new();
+
+/// 面板「刷新」按钮：叫醒 poller 立刻刷一轮（不阻塞 UI）。
+pub fn request_refresh() {
+    WAKER.request();
+}
+
+/// 启停/重启守护（start/stop 很快，内联同步执行，同录制驾驶舱）。
+///
+/// 服务是 `Restart=always`，但 `systemctl stop` 是显式停止，不会被自动拉起。
+/// 动作完成后叫醒 poller，状态立刻跟着翻转，不必干等下一轮。
+pub fn svc_action(action: &str) -> String {
+    let r = match std::process::Command::new("systemctl")
+        .args(["--user", action, SHADOW_SVC])
+        .status()
+    {
+        Ok(s) if s.success() => format!(
+            "✔ 影子守护已{}",
+            match action {
+                "start" => "启动",
+                "stop" => "停止",
+                "restart" => "重启",
+                _ => "操作",
+            }
+        ),
+        Ok(s) => format!("✗ systemctl {action} 退出码 {:?}", s.code()),
+        Err(e) => format!("✗ systemctl 失败：{e}"),
+    };
+    WAKER.request();
+    r
+}
+
 fn ensure_poller() {
     POLLER.get_or_init(|| {
         std::thread::spawn(|| loop {
-            let snap = poll_once();
+            let mut snap = poll_once();
+            snap.svc = super::svcctl::query(SHADOW_SVC);
             let lock = READOUT.get_or_init(|| Mutex::new(C4Readout::default()));
             if let Ok(mut g) = lock.lock() {
                 *g = snap;
             }
-            std::thread::sleep(Duration::from_secs(10));
+            WAKER.wait(Duration::from_secs(10));
         });
     });
 }

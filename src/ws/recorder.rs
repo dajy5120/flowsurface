@@ -105,6 +105,10 @@ pub enum RecorderMsg {
     Stop,
     Restart,
     ApplyConfig,
+    /// 手动刷新：叫醒 poller 立刻取一次状态（不必等下一轮 3s）。
+    Refresh,
+    /// 跑一次 F0 72h 验收（覆盖率 ≥99% × 2 整日，报告写数据目录）。
+    RunAccept,
 }
 
 /// 处理一条交互:改状态 + 必要的副作用(systemctl / 写 toml)。
@@ -133,6 +137,11 @@ pub fn handle(st: &mut RecorderPaneState, msg: RecorderMsg) {
         RecorderMsg::Stop => st.hint = svc_action("stop"),
         RecorderMsg::Restart => st.hint = svc_action("restart"),
         RecorderMsg::ApplyConfig => st.hint = apply_config(st),
+        RecorderMsg::Refresh => {
+            super::recorder_readout::request_refresh();
+            st.hint.clear(); // 刷新无需反馈文字，时间戳自己会跳
+        }
+        RecorderMsg::RunAccept => st.hint = super::recorder_readout::accept_start(),
     }
 }
 
@@ -167,11 +176,14 @@ pub fn is_active() -> bool {
 }
 
 fn svc_action(action: &str) -> String {
-    match Command::new("systemctl").args(["--user", action, SERVICE]).status() {
+    let r = match Command::new("systemctl").args(["--user", action, SERVICE]).status() {
         Ok(s) if s.success() => format!("✔ 24/7 服务已{}", zh(action)),
         Ok(s) => format!("✗ systemctl {action} 退出码 {:?}", s.code()),
         Err(e) => format!("✗ systemctl 失败: {e}"),
-    }
+    };
+    // 动作后立刻叫醒 poller，状态跟着翻转，不必干等下一轮
+    super::recorder_readout::request_refresh();
+    r
 }
 fn zh(a: &str) -> &'static str {
     match a {

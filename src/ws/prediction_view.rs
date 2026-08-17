@@ -1,13 +1,15 @@
 //! 预测市场 pane 的视图渲染（docs/19）。
 //!
 //! **独立新增面板**（`Content::PredictionBoard`）——不改任何既有面板；数据走
-//! [`super::prediction_readout`] 旁路快照。只渲染、不发消息，对消息类型 `M` 泛型。
+//! [`super::prediction_readout`] 旁路快照。
 //!
-//! 布局：合规/非信号横幅 → 市场列表（Yes 概率/成交/流动性/关注标签）+ AI 决策支持行（估计 vs 市场·edge·置信度）。
+//! 布局：夜跑控制条（启停+定时开关，[`super::prediction::PredictionMsg`]）→ 合规/非信号横幅
+//! → 市场列表（Yes 概率/成交/流动性/关注标签）+ AI 决策支持行（估计 vs 市场·edge·置信度）。
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Color, Element, Length};
 
+use super::prediction::PredictionMsg;
 use super::prediction_readout::{CalibrationView, MarketRow, PredictionReadout};
 
 const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
@@ -138,15 +140,89 @@ fn market_block<'a, M: 'a>(m: &MarketRow) -> Element<'a, M> {
     col.into()
 }
 
-pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
+pub fn pane_body<'a>() -> Element<'a, PredictionMsg> {
     let st: PredictionReadout = super::prediction_readout::snapshot();
     let mut body = column![].spacing(8).padding(10);
 
     body = body.push(sec("预测市场 · Polymarket（docs/19 · 决策支持·非投注信号）"));
 
+    // ── 夜跑启停（不随开机自启，全由这里控制；状态来自 poller，非每帧查） ──
+    // 放在下面「暂无快照」的提前返回之前：没数据时正是最需要点「立即运行」的时候。
+    {
+        let running = st.svc.active;
+        // 状态行：夜跑是 oneshot，「重启次数」无意义，看的是上次跑没跑成。
+        let (dot, dotc, run) = if running {
+            ("●", C_GREEN, format!("运行中  已 {}", super::svcctl::fmt_dur(st.svc.uptime_secs)))
+        } else if st.svc.ever_ran() {
+            let ok = st.svc.last_ok();
+            (
+                if ok { "○" } else { "✗" },
+                if ok { C_DIM } else { C_RED },
+                format!(
+                    "空闲  上次 {} {}",
+                    super::svcctl::fmt_stamp(&st.svc.last_finish),
+                    if ok { "成功".into() } else { format!("失败（{}）", st.svc.last_result) }
+                ),
+            )
+        } else if !st.stamp.is_empty() {
+            // systemd 的 ExecMainExitTimestamp 会被 `systemctl stop` / `reset-failed` 清空，
+            // 那时 unit 已无「上次何时跑」的记录。用产物（board 快照）的时间戳兜底，
+            // 免得明明跑过却显示「未跑过」。
+            ("○", C_DIM, format!("空闲  快照 {}", st.stamp))
+        } else {
+            ("○", C_DIM, "空闲  未跑过".to_string())
+        };
+        body = body.push(
+            row![
+                text(format!("{dot} ")).size(14).color(dotc),
+                text(run).size(12).color(C_TXT),
+                text(if st.timer_enabled && !st.timer_next.is_empty() {
+                    format!("　下次定时 {}", st.timer_next)
+                } else if st.timer_enabled {
+                    "　每日定时开".to_string()
+                } else {
+                    "　每日定时已关".to_string()
+                })
+                .size(11)
+                .color(C_DIM),
+            ]
+            .align_y(iced::Alignment::Center),
+        );
+        // 动作按钮常驻、当前状态那个置灰（灰掉的=现在就是这个态），不用切换式按钮
+        // ——切换式按钮上写「每日定时 开」时，分不清是「当前开」还是「点了会开」。
+        let ctl = row![
+            text("运行 ").size(11).color(C_DIM),
+            button(text("▶ 立即运行").size(11))
+                .padding([2, 8])
+                .on_press_maybe((!running).then_some(PredictionMsg::RunNightly)),
+            button(text("■ 停止").size(11))
+                .padding([2, 8])
+                .on_press_maybe(running.then_some(PredictionMsg::StopNightly)),
+            text("　每日定时 ").size(11).color(C_DIM),
+            button(text(if st.timer_enabled { "✔ 开" } else { "开" }).size(11))
+                .padding([2, 8])
+                .on_press_maybe((!st.timer_enabled).then_some(PredictionMsg::SetTimer(true))),
+            button(text(if st.timer_enabled { "关" } else { "✔ 关" }).size(11))
+                .padding([2, 8])
+                .on_press_maybe(st.timer_enabled.then_some(PredictionMsg::SetTimer(false))),
+            text("　").size(11),
+            button(text("⟳ 刷新").size(11)).padding([2, 8]).on_press(PredictionMsg::Refresh),
+            text(format!("  刷新于 {}", st.refreshed)).size(10).color(C_DIM),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+        body = body.push(ctl);
+        // 操作反馈单独一行：和按钮挤一行会溢出换行、把按钮挤变形（同 factory 面板）
+        let am = super::prediction::action_message();
+        if !am.is_empty() {
+            let bad = am.starts_with('✗');
+            body = body.push(text(am).size(10).color(if bad { C_RED } else { C_GREEN }));
+        }
+    }
+
     if !st.present || st.rows.is_empty() {
         body = body.push(
-            text("暂无快照——运行 `python -m factory.prediction.run [--ai]` 生成")
+            text("暂无快照——点上方「▶ 立即运行」生成（夜跑含 AI 校准+回填结算）")
                 .size(11)
                 .color(C_DIM),
         );
