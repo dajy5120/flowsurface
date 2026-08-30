@@ -116,6 +116,8 @@ pub enum Event {
     C4Interaction(crate::ws::c4::C4Msg),
     /// 预测市场面板交互：夜跑手动启停 + 每日定时开关（同上，默认不自启）。
     PredictionInteraction(crate::ws::prediction::PredictionMsg),
+    /// 全市场雷达交互（docs/22 P0b）：守护启停 + 窗口/排序口径切换。
+    RadarInteraction(crate::ws::radar::RadarMsg),
 }
 
 pub struct State {
@@ -420,6 +422,7 @@ impl State {
                 ContentKind::C4Shadow => (Content::C4Shadow, vec![]),
                 ContentKind::OptionsBoard => (Content::OptionsBoard, vec![]),
                 ContentKind::PredictionBoard => (Content::PredictionBoard, vec![]),
+                ContentKind::MarketMap => (Content::MarketMap, vec![]),
                 ContentKind::Recorder => {
                     (Content::Recorder(crate::ws::recorder::RecorderPaneState::load()), vec![])
                 }
@@ -605,6 +608,7 @@ impl State {
                 | Content::C4Shadow
                 | Content::OptionsBoard
                 | Content::PredictionBoard
+                | Content::MarketMap
                 | Content::Recorder(_)
                 | Content::TardisReplay(_)
                 | Content::TardisBoard(_)
@@ -764,6 +768,21 @@ impl State {
                 // 顶部夜跑启停按钮发 PredictionMsg → 包成 pane 事件。
                 let base = crate::ws::prediction_view::pane_body()
                     .map(move |m| Message::PaneEvent(id, Event::PredictionInteraction(m)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::MarketMap => {
+                // 全市场雷达（docs/22 P0b）：树图 + 排行，渲染走 ws::radar_readout 旁路快照
+                // （radar_board.json）；顶部按钮发 RadarMsg → 包成 pane 事件。
+                let base = crate::ws::radar_view::pane_body()
+                    .map(move |m| Message::PaneEvent(id, Event::RadarInteraction(m)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1325,6 +1344,7 @@ impl State {
                         | ContentKind::C4Shadow
                         | ContentKind::OptionsBoard
                         | ContentKind::PredictionBoard
+                        | ContentKind::MarketMap
                         | ContentKind::Recorder
                         | ContentKind::TardisReplay
                         | ContentKind::TardisBoard
@@ -1368,6 +1388,11 @@ impl State {
             Event::PredictionInteraction(m) => {
                 // 预测市场：夜跑启停 + 定时开关（副作用为 systemctl，无面板状态）。
                 crate::ws::prediction::handle(m);
+            }
+            Event::RadarInteraction(m) => {
+                // 全市场雷达（docs/22 P0b）：守护启停 + 窗口/排序切换（状态在 ws::radar 的
+                // 进程级静态里，与 pane 无关——同一份口径对所有雷达 pane 生效）。
+                crate::ws::radar::handle(m);
             }
             Event::TardisBoardInteraction(m) => {
                 // Tardis 历史面板（docs/20 §9）：改选择 + 副作用（调 Python 生成面板 JSON）。
@@ -1952,7 +1977,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::OptionsBoard | Content::PredictionBoard | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult => None,
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult => None,
         }
     }
 
@@ -1981,6 +2006,7 @@ impl State {
             | Content::C4Shadow
             | Content::OptionsBoard
             | Content::PredictionBoard
+            | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
             | Content::TardisBoard(_)
@@ -2081,6 +2107,9 @@ pub enum Content {
     OptionsBoard,
     /// 预测市场 Polymarket（docs/19）：无行情流，渲染走 `ws::prediction_readout` 旁路快照。
     PredictionBoard,
+    /// 全市场雷达（docs/22 P0）：无行情流，渲染走 `ws::radar_readout` 旁路快照。
+    /// ⚠ 与 `Content::Heatmap`（订单簿深度热图）无关，别混（docs/22 §9 坑 1）。
+    MarketMap,
     /// 录制驾驶舱（docs/08 F6-P3）：交互式控制中心，携带可编辑配置状态。
     Recorder(crate::ws::recorder::RecorderPaneState),
     /// Tardis 历史回放（docs/20 Phase 5）：交互式控制面板，携带选择状态。
@@ -2304,6 +2333,7 @@ impl Content {
             ContentKind::C4Shadow => Content::C4Shadow,
             ContentKind::OptionsBoard => Content::OptionsBoard,
             ContentKind::PredictionBoard => Content::PredictionBoard,
+            ContentKind::MarketMap => Content::MarketMap,
             ContentKind::Recorder => {
                 Content::Recorder(crate::ws::recorder::RecorderPaneState::load())
             }
@@ -2331,6 +2361,7 @@ impl Content {
             | Content::C4Shadow
             | Content::OptionsBoard
             | Content::PredictionBoard
+            | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
             | Content::TardisBoard(_)
@@ -2415,6 +2446,7 @@ impl Content {
             | Content::C4Shadow
             | Content::OptionsBoard
             | Content::PredictionBoard
+            | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
             | Content::TardisBoard(_)
@@ -2470,6 +2502,7 @@ impl Content {
             | Content::C4Shadow
             | Content::OptionsBoard
             | Content::PredictionBoard
+            | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
             | Content::TardisBoard(_)
@@ -2544,6 +2577,7 @@ impl Content {
             Content::C4Shadow => ContentKind::C4Shadow,
             Content::OptionsBoard => ContentKind::OptionsBoard,
             Content::PredictionBoard => ContentKind::PredictionBoard,
+            Content::MarketMap => ContentKind::MarketMap,
             Content::Recorder(_) => ContentKind::Recorder,
             Content::TardisReplay(_) => ContentKind::TardisReplay,
             Content::TardisBoard(_) => ContentKind::TardisBoard,
@@ -2566,7 +2600,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::OptionsBoard | Content::PredictionBoard | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult => true,
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult => true,
         }
     }
 }

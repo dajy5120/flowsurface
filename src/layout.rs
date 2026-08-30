@@ -197,6 +197,10 @@ impl From<&pane::State> for data::Pane {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
             },
+            pane::Content::MarketMap => data::Pane::MarketMap {
+                settings: pane.settings.clone(),
+                link_group: pane.link_group,
+            },
             pane::Content::OptionsBoard => data::Pane::OptionsBoard {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
@@ -368,6 +372,15 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             link_group,
         } => Configuration::Pane(pane::State::from_config(
             pane::Content::PredictionBoard,
+            vec![],
+            settings,
+            link_group,
+        )),
+        data::Pane::MarketMap {
+            settings,
+            link_group,
+        } => Configuration::Pane(pane::State::from_config(
+            pane::Content::MarketMap,
             vec![],
             settings,
             link_group,
@@ -561,6 +574,27 @@ mod tests {
         assert!(
             matches!(back, data::Pane::TardisReplay { .. }),
             "序列化回去丢了 TardisReplay（layout.rs 序列化臂缺失/写错）"
+        );
+    }
+
+    #[test]
+    fn market_map_pane_roundtrips() {
+        // docs/22 P0b：新面板最容易漏的是 layout.rs 的两条臂——漏了不会编译报错，
+        // 只会在重启后把用户摆好的雷达 pane 静默变回 Starter。
+        let original = data::Pane::MarketMap {
+            settings: data::layout::pane::Settings::default(),
+            link_group: None,
+        };
+        let Configuration::Pane(state) = configuration(original) else {
+            panic!("configuration() 未产出 Pane 配置");
+        };
+        assert!(
+            matches!(state.content, pane::Content::MarketMap),
+            "反序列化后 content 不是 MarketMap"
+        );
+        assert!(
+            matches!(data::Pane::from(&state), data::Pane::MarketMap { .. }),
+            "序列化回去丢了 MarketMap（layout.rs 序列化臂缺失/写错）"
         );
     }
 }

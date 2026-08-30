@@ -28,9 +28,10 @@ pub const WS_C4: &str = "C4 影子"; // maker 影子守护实时/影子日/活�
 pub const WS_OPTIONS: &str = "期权/0DTE"; // 期权回测·探针面板（docs/18）
 pub const WS_PREDICTION: &str = "预测市场"; // Polymarket 决策支持面板（docs/19）
 pub const WS_TARDIS: &str = "Tardis 历史回放"; // 已购 30 天逐笔变速回放（docs/20 Phase 5）
-pub const WORKSPACES: [&str; 10] = [
+pub const WS_GLOBAL: &str = "全球市场"; // 全市场雷达 + 树图（docs/22）
+pub const WORKSPACES: [&str; 11] = [
     WS_OFFICIAL, WS_LIVE, WS_RECORDED, WS_SELFDATA, WS_RECORDER, WS_FACTORY, WS_C4, WS_OPTIONS,
-    WS_PREDICTION, WS_TARDIS,
+    WS_PREDICTION, WS_TARDIS, WS_GLOBAL,
 ];
 
 /// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
@@ -50,6 +51,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
         WS_OPTIONS => Icon::Layout,       // 期权/0DTE 回测面板
         WS_PREDICTION => Icon::Layout,    // 预测市场 Polymarket 面板
         WS_TARDIS => Icon::Return,        // 历史回放（同「录制数据回测」语义）
+        WS_GLOBAL => Icon::Search,        // 全市场扫描
         _ => Icon::Layout,
     }
 }
@@ -88,6 +90,7 @@ fn pane_template(name: &str) -> &'static str {
         // Tardis 历史回放（docs/20 §9）：单一历史面板 —— 数据源(3) → 数据类型(8) → 图表。
         // **不声明任何 ticker/stream**，故本工作区零交易所连接（用户明确要求不接实时流）。
         WS_TARDIS => r#"{"TardisBoard":{"settings":{},"link_group":null}}"#,
+        WS_GLOBAL => r#"{"MarketMap":{"settings":{},"link_group":null}}"#,
         _ => r#"{"Starter":{"link_group":null}}"#,
     }
 }
