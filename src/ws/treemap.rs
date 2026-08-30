@@ -136,6 +136,50 @@ pub fn squarify(weights: &[f64], bounds: Rect) -> Vec<Tile> {
     out
 }
 
+/// 一个分组的布局结果。
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupLayout {
+    /// 在入参 `members` 里的下标。
+    pub group_idx: usize,
+    /// 整组矩形（含标题带）。
+    pub rect: Rect,
+    /// 标题带（`header_h = 0` 时高度为 0）。
+    pub header: Rect,
+    /// 组内瓦片。`Tile::idx` 是该组 `members[group_idx]` 内的下标，**不是全局下标**。
+    pub tiles: Vec<Tile>,
+}
+
+/// 分组树图（TradingView 股票热图那种：先按板块切大块，块内再切个股）。
+///
+/// 两级都用 [`squarify`]：外层按各组权重和切分，内层在扣掉标题带后的剩余矩形里切分。
+/// 组太小以致扣完标题带没剩下空间时，该组只保留标题带、不出瓦片——
+/// 强行画会得到高度为负的格子。
+pub fn squarify_nested(members: &[Vec<f64>], bounds: Rect, header_h: f32) -> Vec<GroupLayout> {
+    let totals: Vec<f64> = members
+        .iter()
+        .map(|m| m.iter().filter(|v| v.is_finite() && **v > 0.0).sum())
+        .collect();
+    let mut out = Vec::new();
+    for g in squarify(&totals, bounds) {
+        let r = g.rect;
+        let hh = header_h.min(r.h);
+        let header = Rect::new(r.x, r.y, r.w, hh);
+        let inner = Rect::new(r.x, r.y + hh, r.w, r.h - hh);
+        let tiles = if inner.area() > 0.0 {
+            squarify(&members[g.idx], inner)
+        } else {
+            Vec::new()
+        };
+        out.push(GroupLayout {
+            group_idx: g.idx,
+            rect: r,
+            header,
+            tiles,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +277,60 @@ mod tests {
         assert!(squarify(&[], B).is_empty());
         assert!(squarify(&[1.0], Rect::new(0.0, 0.0, 0.0, 100.0)).is_empty());
         assert!(squarify(&[0.0, -1.0], B).is_empty());
+    }
+
+    #[test]
+    fn nested_groups_partition_bounds_and_reserve_headers() {
+        let members = vec![vec![3.0, 2.0, 1.0], vec![4.0, 4.0], vec![10.0]];
+        let hh = 14.0;
+        let gs = squarify_nested(&members, B, hh);
+        assert_eq!(gs.len(), 3);
+
+        // 组矩形之间不重叠，且合起来铺满 bounds
+        let covered: f64 = gs.iter().map(|g| g.rect.area()).sum();
+        assert!((covered - B.area()).abs() / B.area() < 1e-3);
+        for (i, a) in gs.iter().enumerate() {
+            for b in &gs[i + 1..] {
+                assert!(!overlaps(&a.rect, &b.rect), "组矩形重叠");
+            }
+        }
+
+        for g in &gs {
+            assert!((g.header.h - hh).abs() < 1e-3, "标题带高度不对：{:?}", g.header);
+            assert_eq!(g.tiles.len(), members[g.group_idx].len());
+            // 组内瓦片必须落在扣掉标题带之后的区域里
+            for t in &g.tiles {
+                assert!(
+                    t.rect.y >= g.rect.y + hh - 1e-3,
+                    "瓦片侵入标题带：{:?} vs 组 {:?}",
+                    t.rect,
+                    g.rect
+                );
+                assert!(t.rect.y + t.rect.h <= g.rect.y + g.rect.h + 1e-3);
+            }
+        }
+    }
+
+    #[test]
+    fn nested_group_too_small_for_header_emits_no_tiles() {
+        // 组高度不足标题带 → 只留标题带，不画负高度的格子
+        let members = vec![vec![1.0; 4], vec![1e-6]];
+        let gs = squarify_nested(&members, Rect::new(0.0, 0.0, 400.0, 20.0), 18.0);
+        let tiny = gs.iter().find(|g| g.group_idx == 1).unwrap();
+        assert!(tiny.tiles.is_empty() || tiny.rect.h > 18.0);
+        for g in &gs {
+            for t in &g.tiles {
+                assert!(t.rect.h >= 0.0 && t.rect.w >= 0.0, "出现负尺寸瓦片 {t:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nested_with_zero_header_is_plain_two_level_split() {
+        let members = vec![vec![1.0, 1.0], vec![2.0]];
+        let gs = squarify_nested(&members, B, 0.0);
+        let area: f64 = gs.iter().flat_map(|g| &g.tiles).map(|t| t.rect.area()).sum();
+        assert!((area - B.area()).abs() / B.area() < 1e-3, "零标题带时应铺满");
     }
 
     #[test]
