@@ -35,6 +35,10 @@ pub enum ColorBy {
 pub enum GroupBy {
     None,
     Venue,
+    /// 按国别（股票层才有；加密行归入「加密」一组）。
+    Country,
+    /// 按板块，同 TradingView 股票热图的默认分组。
+    Sector,
 }
 
 /// 色板。TradingView 用绿涨红跌；但树图上格子多且小，红绿对红绿色盲不可分辨，
@@ -56,13 +60,19 @@ pub enum ColumnSet {
     Performance,
     Speed,
     Volume,
+    /// 参考数据（国别/板块/市值）——股票层进来后才有意义。
+    Reference,
 }
 
 /// 排序键。`Ret`/`Z` 带窗口下标。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     Symbol,
+    Tier,
     Venue,
+    Country,
+    Sector,
+    Mcap,
     Price,
     Turnover,
     Ret(usize),
@@ -147,7 +157,10 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
                 v.desc = !v.desc;
             } else {
                 v.sort = k;
-                v.desc = !matches!(k, SortKey::Symbol | SortKey::Venue);
+                v.desc = !matches!(
+                k,
+                SortKey::Symbol | SortKey::Venue | SortKey::Tier | SortKey::Country | SortKey::Sector
+            );
             }
         }
         RadarMsg::Start | RadarMsg::Stop | RadarMsg::Refresh => {}
@@ -179,7 +192,10 @@ pub fn handle(msg: RadarMsg) {
 /// 取某行在某个排序键上的数值。`None` 一律沉底（不论升降序）。
 pub fn key_value(r: &RadarRow, k: SortKey) -> Option<f64> {
     match k {
-        SortKey::Symbol | SortKey::Venue => None,
+        SortKey::Symbol | SortKey::Venue | SortKey::Tier | SortKey::Country | SortKey::Sector => {
+            None
+        }
+        SortKey::Mcap => Some(r.mcap),
         SortKey::Price => Some(r.price),
         SortKey::Turnover => Some(r.quote_vol_24h),
         SortKey::Ret(i) => r.ret[i],
@@ -199,6 +215,9 @@ pub fn order(rows: &[RadarRow], v: ViewState) -> Vec<usize> {
         let ord = match v.sort {
             SortKey::Symbol => ra.symbol.cmp(&rb.symbol),
             SortKey::Venue => ra.venue.cmp(&rb.venue).then(ra.symbol.cmp(&rb.symbol)),
+            SortKey::Tier => ra.tier.cmp(&rb.tier).then(ra.symbol.cmp(&rb.symbol)),
+            SortKey::Country => ra.country.cmp(&rb.country).then(ra.symbol.cmp(&rb.symbol)),
+            SortKey::Sector => ra.sector.cmp(&rb.sector).then(ra.symbol.cmp(&rb.symbol)),
             k => {
                 let (va, vb) = (key_value(ra, k), key_value(rb, k));
                 match (va, vb) {
@@ -234,6 +253,15 @@ mod tests {
         r.z_ret[1] = z5;
         r.ret[1] = ret5;
         r
+    }
+
+    #[test]
+    fn group_by_covers_reference_data_dimensions() {
+        // 股票层进来后，venue 分组不够用了——板块/国别才是股票的自然维度
+        for g in [GroupBy::None, GroupBy::Venue, GroupBy::Country, GroupBy::Sector] {
+            let v = apply(ViewState::DEFAULT, RadarMsg::SetGroupBy(g));
+            assert_eq!(v.group_by, g);
+        }
     }
 
     #[test]

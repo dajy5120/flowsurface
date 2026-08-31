@@ -234,7 +234,11 @@ pub(crate) fn columns(v: ViewState) -> Vec<Col> {
         title: title.to_string(),
         width,
     };
-    let mut out = vec![c(SortKey::Symbol, "标的", 118.0), c(SortKey::Venue, "venue", 62.0)];
+    let mut out = vec![
+        c(SortKey::Symbol, "标的", 112.0),
+        c(SortKey::Tier, "档", 30.0),
+        c(SortKey::Venue, "市场", 76.0),
+    ];
     match v.cols {
         ColumnSet::Overview => {
             out.push(c(SortKey::Price, "价格", 88.0));
@@ -255,6 +259,13 @@ pub(crate) fn columns(v: ViewState) -> Vec<Col> {
                 out.push(c(SortKey::Z(i), w, 68.0));
             }
             out.push(c(SortKey::Turnover, "24h 额", 74.0));
+        }
+        ColumnSet::Reference => {
+            out.push(c(SortKey::Country, "国别", 108.0));
+            out.push(c(SortKey::Sector, "板块", 150.0));
+            out.push(c(SortKey::Mcap, "市值", 84.0));
+            out.push(c(SortKey::Price, "价格", 88.0));
+            out.push(c(SortKey::Ret(5), "日", 74.0));
         }
         ColumnSet::Volume => {
             out.push(c(SortKey::VolZ, "量异常z", 80.0));
@@ -290,6 +301,21 @@ pub(crate) fn cell_text(r: &RadarRow, k: SortKey, p: Palette) -> (String, Color)
             if trusted { C_TXT } else { C_DIM },
         ),
         SortKey::Venue => (r.venue.trim_start_matches("binance:").to_string(), C_DIM),
+        // 数据等级用颜色分档：A 常态、C/D 明显发暗——扫一眼就知道哪些行是延迟的
+        SortKey::Tier => (
+            r.tier.clone(),
+            match r.tier.as_str() {
+                "A" => C_TXT,
+                "B" => C_HEAD,
+                _ => C_GOLD,
+            },
+        ),
+        SortKey::Country => (r.country.clone(), C_DIM),
+        SortKey::Sector => (r.sector.clone(), C_DIM),
+        SortKey::Mcap => (
+            if r.mcap > 0.0 { usd(r.mcap) } else { "—".into() },
+            C_DIM,
+        ),
         SortKey::Price => (price(r.price), C_TXT),
         SortKey::Turnover => (usd(r.quote_vol_24h), C_DIM),
         SortKey::Ret(i) => (opt_pct(r.ret[i]), scale_text(r.ret[i], ColorBy::Change, p, trusted)),
@@ -575,7 +601,10 @@ fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, RadarMsg>
 
 /// 该列是否为数值列（决定对齐方式）。
 fn is_numeric(k: SortKey) -> bool {
-    !matches!(k, SortKey::Symbol | SortKey::Venue)
+    !matches!(
+        k,
+        SortKey::Symbol | SortKey::Venue | SortKey::Tier | SortKey::Country | SortKey::Sector
+    )
 }
 
 /// 可点排序的列头。箭头**前置**且只出现在活动列上（同 TradingView 的 `↓ Mkt cap`）——
@@ -654,10 +683,26 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // ── 状态行：数据等级 + 热身 + 回填（docs/22 §0：不标等级 = 自欺）──
     let warm = st.rows.iter().filter(|r| r.trustworthy()).count();
     let prov = st.rows.iter().filter(|r| r.z_provisional).count();
+    // 逐行 tier 的构成。一张表里混着 A 档实时加密和 C 档延迟股票，
+    // 只显示一个「等级 A」会让人把整张表当成实时的。
+    let mut tiers: Vec<(String, usize)> = {
+        let mut m = std::collections::BTreeMap::new();
+        for r in &st.rows {
+            *m.entry(if r.tier.is_empty() { "?".to_string() } else { r.tier.clone() })
+                .or_insert(0usize) += 1;
+        }
+        m.into_iter().collect()
+    };
+    tiers.sort_by(|a, b| a.0.cmp(&b.0));
+    let tier_txt = tiers
+        .iter()
+        .map(|(t, n)| format!("{t}×{n}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     body = body.push(
         text(format!(
-            "等级 {} 交易所直连·真实时 · {} 标的 · 单轮 {}ms · z 可信 {}/{}{}",
-            if st.tier.is_empty() { "?" } else { &st.tier },
+            "等级 {} （A=交易所直连·真实时 C=延迟约15分钟）· {} 标的 · 单轮 {}ms · z 可信 {}/{}{}",
+            tier_txt,
             st.n_symbols,
             st.refreshed_ms,
             warm,
@@ -706,7 +751,12 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         r1 = r1.push(chip(l, s == v.size_by, RadarMsg::SetSizeBy(s)));
     }
     r1 = r1.push(text("　分组 ").size(11).color(C_DIM));
-    for (g, l) in [(GroupBy::None, "无"), (GroupBy::Venue, "按 venue")] {
+    for (g, l) in [
+        (GroupBy::None, "无"),
+        (GroupBy::Venue, "venue"),
+        (GroupBy::Country, "国别"),
+        (GroupBy::Sector, "板块"),
+    ] {
         r1 = r1.push(chip(l, g == v.group_by, RadarMsg::SetGroupBy(g)));
     }
     body = body.push(r1.align_y(iced::Alignment::Center));
@@ -761,6 +811,20 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             color: scale_color(m, v.color_by, v.palette, r.trustworthy()),
         }
     };
+    /// 一行归入哪个分组。空值统一落到「其他」，免得散成一堆无名组。
+    fn group_key(r: &RadarRow, g: GroupBy) -> String {
+        let pick = |s: &str, fallback: &str| {
+            if s.is_empty() { fallback.to_string() } else { s.to_string() }
+        };
+        match g {
+            GroupBy::None => String::new(),
+            GroupBy::Venue => r.venue.trim_start_matches("binance:").to_string(),
+            // 加密没有国别/板块，单独成组而不是混进「其他」
+            GroupBy::Country => pick(&r.country, if r.tier == "A" { "加密" } else { "其他" }),
+            GroupBy::Sector => pick(&r.sector, if r.tier == "A" { "加密" } else { "其他" }),
+        }
+    }
+
     let (groups, header_h) = match v.group_by {
         GroupBy::None => (
             vec![GroupData {
@@ -769,18 +833,18 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             }],
             0.0,
         ),
-        GroupBy::Venue => {
+        g => {
             let mut names: Vec<String> =
-                picked.iter().map(|&i| st.rows[i].venue.clone()).collect();
+                picked.iter().map(|&i| group_key(&st.rows[i], g)).collect();
             names.sort();
             names.dedup();
             let gs = names
                 .iter()
                 .map(|n| GroupData {
-                    title: n.trim_start_matches("binance:").to_string(),
+                    title: n.clone(),
                     tiles: picked
                         .iter()
-                        .filter(|&&i| &st.rows[i].venue == n)
+                        .filter(|&&i| &group_key(&st.rows[i], g) == n)
                         .map(|&i| mk_tile(i))
                         .collect(),
                 })
@@ -806,6 +870,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         (ColumnSet::Performance, "表现"),
         (ColumnSet::Speed, "速度"),
         (ColumnSet::Volume, "量"),
+        (ColumnSet::Reference, "参考"),
     ] {
         cs = cs.push(chip(l, c == v.cols, RadarMsg::SetColumns(c)));
     }

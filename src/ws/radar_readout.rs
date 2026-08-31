@@ -18,6 +18,15 @@ pub const N_WIN: usize = 6;
 pub struct RadarRow {
     pub symbol: String,
     pub venue: String,
+    /// 数据等级 A/B/C/D（docs/22 §0）。**逐行**给——一张表里混着 A 档加密和
+    /// C 档延迟股票，不标就会被当成同一等级。
+    pub tier: String,
+    /// 全称（股票源有，加密源空）。
+    pub name: String,
+    pub sector: String,
+    pub country: String,
+    pub currency: String,
+    pub mcap: f64,
     pub price: f64,
     pub quote_vol_24h: f64,
     /// 各窗口对数收益。`None` = **该窗口还没热身**，不是「没涨没跌」。
@@ -194,6 +203,12 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 .map(|o| RadarRow {
                     symbol: s(o, "symbol"),
                     venue: s(o, "venue"),
+                    tier: s(o, "tier"),
+                    name: s(o, "name"),
+                    sector: s(o, "sector"),
+                    country: s(o, "country"),
+                    currency: s(o, "currency"),
+                    mcap: o.get("mcap").and_then(|x| x.as_f64()).unwrap_or(0.0),
                     price: o.get("price").and_then(|x| x.as_f64()).unwrap_or(0.0),
                     quote_vol_24h: o
                         .get("quote_vol_24h")
@@ -252,10 +267,12 @@ mod tests {
       "n_symbols":577,"n_rows":2,"refreshed_ms":1312,
       "backfill":{"done":37,"total":574,"failed":2,"running":true,"finished":false},
       "rows":[
-        {"symbol":"KNCUSDT","venue":"binance:linear","price":0.42,"quote_vol_24h":5.1e6,
+        {"symbol":"KNCUSDT","venue":"binance:linear","tier":"A","price":0.42,"quote_vol_24h":5.1e6,
          "ret":{"1m":0.00165,"24h":0.042},"z_ret":{"1m":3.55},
          "z_vol":null,"z_cnt":null,"sigma_ok":true,"z_provisional":false},
-        {"symbol":"NEWUSDT","venue":"binance:spot","price":1.0,"quote_vol_24h":2e6,
+        {"symbol":"NVDA","venue":"tv:america","tier":"C","name":"NVIDIA Corporation",
+         "sector":"Electronic Technology","country":"United States","currency":"USD","mcap":5.2e12,
+         "price":1.0,"quote_vol_24h":2e6,
          "ret":{"1m":0.001},"z_ret":{"1m":1.2},
          "z_vol":4.4,"z_cnt":2.1,"sigma_ok":false,"z_provisional":true}
       ]}"#;
@@ -298,6 +315,21 @@ mod tests {
     fn headline_z_falls_back_to_1m() {
         let r = board();
         assert_eq!(r.rows[0].headline_z(), Some(3.55));
+    }
+
+    #[test]
+    fn parses_per_row_tier_and_reference_data() {
+        let r = board();
+        assert_eq!(r.rows[0].tier, "A", "加密应是 A 档");
+        let eq = &r.rows[1];
+        assert_eq!(eq.tier, "C", "延迟股票必须标 C，不能被当成实时");
+        assert_eq!(eq.name, "NVIDIA Corporation");
+        assert_eq!(eq.sector, "Electronic Technology");
+        assert_eq!(eq.country, "United States");
+        assert_eq!(eq.currency, "USD");
+        assert!((eq.mcap - 5.2e12).abs() < 1.0);
+        // 加密行没有这些参考数据，应是空而不是乱填
+        assert_eq!(r.rows[0].country, "");
     }
 
     #[test]
