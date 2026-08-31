@@ -37,6 +37,18 @@ pub enum GroupBy {
     Venue,
 }
 
+/// 色板。TradingView 用绿涨红跌；但树图上格子多且小，红绿对红绿色盲不可分辨，
+/// 故默认仍是蓝橙。A 股习惯又是红涨绿跌——三种都给，别替用户猜。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Palette {
+    /// 蓝涨橙跌（默认，色盲安全）。
+    BlueOrange,
+    /// 绿涨红跌（TradingView / 欧美习惯）。
+    GreenUp,
+    /// 红涨绿跌（A 股习惯）。
+    RedUp,
+}
+
 /// Screener 的列组（对应 TradingView 筛选器顶部的 Overview/Performance/… 标签）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnSet {
@@ -66,6 +78,7 @@ pub struct ViewState {
     pub color_by: ColorBy,
     pub group_by: GroupBy,
     pub cols: ColumnSet,
+    pub palette: Palette,
     pub sort: SortKey,
     /// true = 降序。点同一列再点一次翻向。
     pub desc: bool,
@@ -78,6 +91,7 @@ impl ViewState {
         color_by: ColorBy::SpeedZ,
         group_by: GroupBy::None,
         cols: ColumnSet::Overview,
+        palette: Palette::BlueOrange,
         sort: SortKey::Z(1),
         desc: true,
     };
@@ -93,6 +107,7 @@ pub enum RadarMsg {
     SetColorBy(ColorBy),
     SetGroupBy(GroupBy),
     SetColumns(ColumnSet),
+    SetPalette(Palette),
     /// 点列头：同列则翻向，异列则换列并回到降序（数值列降序更符合「看榜」的直觉）。
     SortBy(SortKey),
 }
@@ -126,6 +141,7 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
         RadarMsg::SetColorBy(c) => v.color_by = c,
         RadarMsg::SetGroupBy(g) => v.group_by = g,
         RadarMsg::SetColumns(c) => v.cols = c,
+        RadarMsg::SetPalette(p) => v.palette = p,
         RadarMsg::SortBy(k) => {
             if v.sort == k {
                 v.desc = !v.desc;
@@ -218,6 +234,16 @@ mod tests {
         r.z_ret[1] = z5;
         r.ret[1] = ret5;
         r
+    }
+
+    #[test]
+    fn palette_is_settable_and_defaults_to_colorblind_safe() {
+        assert_eq!(ViewState::DEFAULT.palette, Palette::BlueOrange);
+        let v = apply(ViewState::DEFAULT, RadarMsg::SetPalette(Palette::GreenUp));
+        assert_eq!(v.palette, Palette::GreenUp);
+        // 换色板不该顺手改掉别的口径
+        assert_eq!(v.sort, ViewState::DEFAULT.sort);
+        assert_eq!(v.win, ViewState::DEFAULT.win);
     }
 
     #[test]

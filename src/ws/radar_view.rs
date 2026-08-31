@@ -16,12 +16,12 @@
 //! 配色用蓝(涨)–橙(跌)而非 TV 默认的红绿：树图上格子多且小，红绿对色盲不可分辨。
 
 use iced::mouse;
-use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
+use iced::widget::canvas::{self, Cache, Frame, Geometry, Text};
 use iced::widget::{button, canvas as canvas_widget, column, container, row, scrollable, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use super::radar::{
-    order, ColorBy, ColumnSet, GroupBy, RadarMsg, SizeBy, SortKey, ViewState,
+    order, ColorBy, ColumnSet, GroupBy, Palette, RadarMsg, SizeBy, SortKey, ViewState,
 };
 use super::radar_readout::{RadarReadout, RadarRow, WINDOWS};
 use super::treemap::{squarify_nested, Rect};
@@ -31,57 +31,77 @@ const C_DIM: Color = Color::from_rgb(0.55, 0.55, 0.6);
 const C_TXT: Color = Color::from_rgb(0.85, 0.87, 0.92);
 const C_GOLD: Color = Color::from_rgb(0.9, 0.8, 0.4);
 const C_BAD: Color = Color::from_rgb(0.9, 0.45, 0.4);
+/// 状态「正常/运行中」的提示色（与涨跌色板无关，不随色板切换）。
+const C_OK: Color = Color::from_rgb(0.35, 0.78, 0.98);
 
 // ───────────────────────── 离散色阶 ─────────────────────────
 
-const C_NEUTRAL: Color = Color::from_rgb(0.20, 0.21, 0.24);
-/// 跌档，由弱到强。
+const C_NEUTRAL: Color = Color::from_rgb(0.24, 0.25, 0.29);
+
+/// 一套色阶：3 档/侧 + 中性，由弱到强。
 ///
-/// ⚠ 最弱档**必须仍带明确色相**。第一版把它做得太暗（跟中性灰几乎同色），
-/// 而市场大部分时候就落在最弱档——结果整张图看着一片灰蓝，
-/// 明明 39% 的标的在跌却一个橙格都看不见。TV 的最弱档也是明确有色、只是降饱和。
-const DOWN: [Color; 4] = [
-    Color::from_rgb(0.55, 0.36, 0.22),
-    Color::from_rgb(0.70, 0.42, 0.20),
-    Color::from_rgb(0.84, 0.49, 0.17),
-    Color::from_rgb(0.97, 0.58, 0.16),
+/// **7 档而非 9 档**，同 TradingView（图例就是 −13/−8/−3/0/3/8/13 七格）。
+/// 档位越少每档越可分辨；9 档在几百个小格上相邻档已经看不出差别。
+///
+/// TV 在浅色背景上把「最极端」做成**深色**（深红/深绿）；深色背景要反过来——
+/// 最极端 = 最亮，否则极端值反而沉进背景里。
+pub(crate) struct Ramp {
+    pub up: [Color; 3],
+    pub down: [Color; 3],
+}
+
+const BLUE: [Color; 3] = [
+    Color::from_rgb(0.24, 0.42, 0.56),
+    Color::from_rgb(0.20, 0.55, 0.82),
+    Color::from_rgb(0.32, 0.72, 1.00),
 ];
-/// 涨档，由弱到强。
-const UP: [Color; 4] = [
-    Color::from_rgb(0.20, 0.36, 0.50),
-    Color::from_rgb(0.18, 0.46, 0.68),
-    Color::from_rgb(0.19, 0.56, 0.84),
-    Color::from_rgb(0.24, 0.66, 1.00),
+const ORANGE: [Color; 3] = [
+    Color::from_rgb(0.60, 0.40, 0.26),
+    Color::from_rgb(0.82, 0.48, 0.19),
+    Color::from_rgb(1.00, 0.62, 0.20),
+];
+const GREEN: [Color; 3] = [
+    Color::from_rgb(0.22, 0.47, 0.36),
+    Color::from_rgb(0.13, 0.64, 0.42),
+    Color::from_rgb(0.22, 0.83, 0.52),
+];
+const RED: [Color; 3] = [
+    Color::from_rgb(0.56, 0.29, 0.32),
+    Color::from_rgb(0.82, 0.27, 0.31),
+    Color::from_rgb(1.00, 0.37, 0.39),
 ];
 
-/// 文字专用色阶：填充档是给大色块设计的，最弱档拿来当深色背景上的文字几乎读不出来。
-/// 同一分档、更高亮度，语义一致而可读。
-const DOWN_TXT: [Color; 4] = [
-    Color::from_rgb(0.72, 0.56, 0.42),
-    Color::from_rgb(0.85, 0.61, 0.34),
-    Color::from_rgb(0.93, 0.63, 0.28),
-    Color::from_rgb(1.00, 0.67, 0.26),
-];
-const UP_TXT: [Color; 4] = [
-    Color::from_rgb(0.56, 0.71, 0.86),
-    Color::from_rgb(0.46, 0.74, 0.96),
-    Color::from_rgb(0.38, 0.77, 1.00),
-    Color::from_rgb(0.35, 0.82, 1.00),
-];
+/// 文字专用（同分档、更高亮度）：填充档是给大色块设计的，
+/// 最弱档直接当深色背景上的文字读不出来。
+fn brighten(c: Color) -> Color {
+    Color::from_rgb(
+        (c.r * 0.45 + 0.55).min(1.0),
+        (c.g * 0.45 + 0.55).min(1.0),
+        (c.b * 0.45 + 0.55).min(1.0),
+    )
+}
 
-/// 分档边界（对称，绝对值递增）。
-pub(crate) fn edges(cb: ColorBy) -> [f64; 4] {
-    match cb {
-        // 实测 z 分布：median≈0.13、p90≈1.5、max≈5。首档取 0.5 会把半个市场压进中性档，
-        // 图上就没有信息了；0.3 起分档才让常态波动也看得出方向。
-        ColorBy::SpeedZ => [0.3, 0.9, 1.8, 3.0],
-        ColorBy::Change => [0.005, 0.01, 0.02, 0.03],
-        ColorBy::VolZ => [1.0, 2.0, 3.0, 4.0],
+pub(crate) fn ramp(p: Palette) -> Ramp {
+    match p {
+        Palette::BlueOrange => Ramp { up: BLUE, down: ORANGE },
+        Palette::GreenUp => Ramp { up: GREEN, down: RED },
+        Palette::RedUp => Ramp { up: RED, down: GREEN },
     }
 }
 
-/// 落在第几档：0 = 中性，1..=4 由弱到强。
-pub(crate) fn bucket(v: f64, e: &[f64; 4]) -> usize {
+/// 分档边界（对称，绝对值递增）。3 个边界 → 7 档。
+pub(crate) fn edges(cb: ColorBy) -> [f64; 3] {
+    match cb {
+        // 实测 5m z 分布：median≈0.13、p90≈1.5、max≈5。首档取太高会把半个市场
+        // 压进中性档，图上就没有信息了。
+        ColorBy::SpeedZ => [0.4, 1.2, 2.5],
+        ColorBy::Change => [0.005, 0.015, 0.03],
+        ColorBy::VolZ => [1.0, 2.5, 4.5],
+    }
+}
+
+/// 落在第几档：0 = 中性，1..=3 由弱到强。
+pub(crate) fn bucket(v: f64, e: &[f64; 3]) -> usize {
     let a = v.abs();
     if !a.is_finite() {
         return 0;
@@ -89,16 +109,15 @@ pub(crate) fn bucket(v: f64, e: &[f64; 4]) -> usize {
     e.iter().filter(|x| a >= **x).count()
 }
 
-fn pick(v: Option<f64>, cb: ColorBy, up: &[Color; 4], down: &[Color; 4], zero: Color) -> Color {
+fn pick(v: Option<f64>, cb: ColorBy, r: &Ramp, bright: bool, zero: Color) -> Color {
     match v {
         Some(v) if v.is_finite() => {
             let b = bucket(v, &edges(cb));
             if b == 0 {
                 zero
-            } else if v >= 0.0 {
-                up[b - 1]
             } else {
-                down[b - 1]
+                let c = if v >= 0.0 { r.up[b - 1] } else { r.down[b - 1] };
+                if bright { brighten(c) } else { c }
             }
         }
         _ => zero,
@@ -114,14 +133,14 @@ fn fade(c: Color, toward: Color, t: f32) -> Color {
 }
 
 /// 值 → 树图填充色。`trusted=false`（未热身 / 借横截面基线）向中性去饱和，视觉上就弱一等。
-pub(crate) fn scale_color(v: Option<f64>, cb: ColorBy, trusted: bool) -> Color {
-    let c = pick(v, cb, &UP, &DOWN, C_NEUTRAL);
+pub(crate) fn scale_color(v: Option<f64>, cb: ColorBy, p: Palette, trusted: bool) -> Color {
+    let c = pick(v, cb, &ramp(p), false, C_NEUTRAL);
     if trusted { c } else { fade(c, C_NEUTRAL, 0.6) }
 }
 
 /// 值 → 表格文字色（同一分档，更高亮度）。
-pub(crate) fn scale_text(v: Option<f64>, cb: ColorBy, trusted: bool) -> Color {
-    let c = pick(v, cb, &UP_TXT, &DOWN_TXT, C_DIM);
+pub(crate) fn scale_text(v: Option<f64>, cb: ColorBy, p: Palette, trusted: bool) -> Color {
+    let c = pick(v, cb, &ramp(p), true, C_DIM);
     if trusted { c } else { fade(c, C_DIM, 0.55) }
 }
 
@@ -192,6 +211,14 @@ fn opt_z(v: Option<f64>) -> String {
     v.map(|x| format!("{x:+.2}")).unwrap_or_else(|| "—".into())
 }
 
+/// 树图窄格用的紧凑写法（少一位小数 / 去掉百分号）。
+fn opt_pct_compact(v: Option<f64>) -> String {
+    v.map(|x| format!("{:+.1}", x * 100.0)).unwrap_or_else(|| "—".into())
+}
+fn opt_z_compact(v: Option<f64>) -> String {
+    v.map(|x| format!("{x:+.1}")).unwrap_or_else(|| "—".into())
+}
+
 // ───────────────────────── Screener 列定义 ─────────────────────────
 
 pub(crate) struct Col {
@@ -255,7 +282,7 @@ pub(crate) fn top_by_turnover(rows: &[RadarRow], n: usize) -> Vec<usize> {
 }
 
 /// 一格的文本与颜色。
-pub(crate) fn cell_text(r: &RadarRow, k: SortKey) -> (String, Color) {
+pub(crate) fn cell_text(r: &RadarRow, k: SortKey, p: Palette) -> (String, Color) {
     let trusted = r.trustworthy();
     match k {
         SortKey::Symbol => (
@@ -265,10 +292,10 @@ pub(crate) fn cell_text(r: &RadarRow, k: SortKey) -> (String, Color) {
         SortKey::Venue => (r.venue.trim_start_matches("binance:").to_string(), C_DIM),
         SortKey::Price => (price(r.price), C_TXT),
         SortKey::Turnover => (usd(r.quote_vol_24h), C_DIM),
-        SortKey::Ret(i) => (opt_pct(r.ret[i]), scale_text(r.ret[i], ColorBy::Change, trusted)),
-        SortKey::Z(i) => (opt_z(r.z_ret[i]), scale_text(r.z_ret[i], ColorBy::SpeedZ, trusted)),
-        SortKey::VolZ => (opt_z(r.z_vol), scale_text(r.z_vol, ColorBy::VolZ, trusted)),
-        SortKey::CntZ => (opt_z(r.z_cnt), scale_text(r.z_cnt, ColorBy::VolZ, trusted)),
+        SortKey::Ret(i) => (opt_pct(r.ret[i]), scale_text(r.ret[i], ColorBy::Change, p, trusted)),
+        SortKey::Z(i) => (opt_z(r.z_ret[i]), scale_text(r.z_ret[i], ColorBy::SpeedZ, p, trusted)),
+        SortKey::VolZ => (opt_z(r.z_vol), scale_text(r.z_vol, ColorBy::VolZ, p, trusted)),
+        SortKey::CntZ => (opt_z(r.z_cnt), scale_text(r.z_cnt, ColorBy::VolZ, p, trusted)),
     }
 }
 
@@ -276,7 +303,10 @@ pub(crate) fn cell_text(r: &RadarRow, k: SortKey) -> (String, Color) {
 
 struct TileData {
     label: String,
+    /// 数值的两种写法：完整优先，放不下退紧凑；两个都放不下就**不画**。
+    /// 绝不对数字做省略号截断——`-0.…` 分不出是 -0.1 还是 -0.9，比没有更糟。
     value: String,
+    value_compact: String,
     weight: f64,
     color: Color,
 }
@@ -292,8 +322,6 @@ struct TreemapCanvas {
     cache: std::rc::Rc<Cache>,
 }
 
-const MIN_LABEL_W: f32 = 34.0;
-const MIN_LABEL_H: f32 = 18.0;
 /// 半角字符的平均字宽 / 字号。canvas 里拿不到实际排版宽度，只能估。
 const ADV_NARROW: f32 = 0.62;
 /// 全角（CJK 等）字宽 / 字号。Binance 有中文名标的（如「我踏马来了」），
@@ -323,7 +351,8 @@ pub(crate) fn fit_font(s: &str, avail: f32, max: f32) -> f32 {
     (avail / u).min(max)
 }
 
-/// 把文本裁到 `avail` 像素内。裁到 2 字符以下就整个不画——一两个字母认不出是谁。
+/// 把文本裁到 `avail` 像素内，截断时补省略号（同 TradingView 的 `Consumer non-dur…`）。
+/// 裁到 2 个真实字符以下就整个不画——一两个字母认不出是谁。
 pub(crate) fn fit_text(s: &str, font_size: f32, avail: f32) -> Option<String> {
     if avail <= 0.0 || font_size <= 0.0 {
         return None;
@@ -331,20 +360,37 @@ pub(crate) fn fit_text(s: &str, font_size: f32, avail: f32) -> Option<String> {
     if text_units(s) * font_size <= avail {
         return Some(s.to_string());
     }
+    // 省略号本身要占位，否则补上去又溢出了
+    let budget = avail - ADV_NARROW * font_size;
     let mut used = 0.0f32;
     let mut out = String::new();
     let mut n = 0usize;
     for c in s.chars() {
         let w = if is_wide(c) { ADV_WIDE } else { ADV_NARROW } * font_size;
-        if used + w > avail {
+        if used + w > budget {
             break;
         }
         used += w;
         out.push(c);
         n += 1;
     }
-    (n >= 2).then_some(out)
+    if n < 2 {
+        return None;
+    }
+    out.push('…');
+    Some(out)
 }
+
+const MIN_LABEL_W: f32 = 30.0;
+const MIN_LABEL_H: f32 = 16.0;
+/// 格子之间的留白（每边）。TradingView 用**间隙**分隔格子，不描边——
+/// 1px 描边在密集小格上会连成一片网格线，反而盖过颜色本身。
+const TILE_GAP: f32 = 1.5;
+/// 文字最多用掉格子宽度的比例。用满会让相邻格的标签视觉上贴在一起
+/// （实测 PROM|SOL 两格的字几乎连成一体）。
+const TEXT_WIDTH_FRAC: f32 = 0.86;
+/// 分组标题带高度（标题画在面板底色上，不填充色块，同 TV 的 `Finance ›`）。
+const GROUP_HEADER_H: f32 = 15.0;
 
 impl<M> canvas::Program<M> for TreemapCanvas {
     type State = ();
@@ -380,58 +426,80 @@ impl<M> canvas::Program<M> for TreemapCanvas {
 
             for gl in squarify_nested(&members, Rect::new(0.0, 0.0, w, h), self.header_h) {
                 let g = &self.groups[gl.group_idx];
-                if self.header_h > 0.0 {
-                    frame.fill_rectangle(
-                        Point::new(gl.header.x, gl.header.y),
-                        Size::new(gl.header.w, gl.header.h),
-                        Color::from_rgb(0.13, 0.14, 0.17),
-                    );
-                    frame.fill_text(Text {
-                        content: g.title.clone(),
-                        position: Point::new(gl.header.x + 5.0, gl.header.y + 2.0),
-                        color: C_HEAD,
-                        size: iced::Pixels(10.0),
-                        ..Default::default()
-                    });
+                if self.header_h > 0.0 && !g.title.is_empty() {
+                    // 标题画在底色上（不填色块），末尾带 › ——同 TV 的 `Finance ›`
+                    if let Some(t) =
+                        fit_text(&format!("{} ›", g.title), 10.0, gl.header.w - 4.0)
+                    {
+                        frame.fill_text(Text {
+                            content: t,
+                            position: Point::new(gl.header.x + 2.0, gl.header.y + 1.0),
+                            color: C_TXT,
+                            size: iced::Pixels(10.0),
+                            ..Default::default()
+                        });
+                    }
                 }
                 for t in gl.tiles {
                     let d = &g.tiles[t.idx];
-                    let (x, y, tw, th) = (t.rect.x, t.rect.y, t.rect.w, t.rect.h);
+                    // 用留白而非描边分隔
+                    let x = t.rect.x + TILE_GAP;
+                    let y = t.rect.y + TILE_GAP;
+                    let tw = t.rect.w - TILE_GAP * 2.0;
+                    let th = t.rect.h - TILE_GAP * 2.0;
+                    if tw <= 0.0 || th <= 0.0 {
+                        continue;
+                    }
                     frame.fill_rectangle(Point::new(x, y), Size::new(tw, th), d.color);
-                    frame.stroke(
-                        &Path::rectangle(Point::new(x, y), Size::new(tw, th)),
-                        Stroke::default()
-                            .with_color(Color::from_rgba(0.0, 0.0, 0.0, 0.45))
-                            .with_width(1.0),
-                    );
-                    // LOD：字号随格子缩放；放不下就只留色块，硬画会糊成噪声
                     if tw < MIN_LABEL_W || th < MIN_LABEL_H {
                         continue;
                     }
-                    let avail = tw - 6.0;
-                    // 字号由**标签实际宽度**定，而不只是格子尺寸：只按格子算的话，
-                    // 5 个字母的 TRUMP 会被放到 24px 直接压到隔壁 AVAX 上（实测拼成 TRUMPAVAX）。
-                    let fs = fit_font(&d.label, avail, th * 0.34).clamp(8.0, 26.0);
-                    if let Some(lab) = fit_text(&d.label, fs, avail) {
+
+                    // 文字居中（水平 + 作为整块垂直居中），同 TV。
+                    //
+                    // **字号只由格子尺寸决定**，不按标签长度反推：按长度反推会让
+                    // SAMSUNG 缩到 8px 而邻格 ADA 是 20px，同样大的格子字号却差一倍；
+                    // 而且会把文字撑满整格宽，相邻格的标签视觉上贴到一起。
+                    let avail = tw * TEXT_WIDTH_FRAC;
+                    let fs = (th * 0.30).min(tw * 0.40).clamp(8.0, 24.0);
+                    let vfs = (fs * 0.76).max(8.0);
+                    let two_lines = th >= fs + vfs + 4.0;
+                    // 数值：完整 → 紧凑 → 不画（数字不做省略号截断）
+                    let val = [&d.value, &d.value_compact]
+                        .into_iter()
+                        .find(|v| text_units(v) * vfs <= avail)
+                        .cloned();
+                    let lab = fit_text(&d.label, fs, avail);
+                    let show_val = two_lines && val.is_some();
+
+                    let block_h = match (&lab, show_val) {
+                        (Some(_), true) => fs + vfs + 2.0,
+                        (Some(_), false) => fs,
+                        (None, true) => vfs,
+                        (None, false) => continue,
+                    };
+                    let cx = x + tw / 2.0;
+                    let mut cy = y + (th - block_h) / 2.0;
+
+                    if let Some(lab) = lab {
                         frame.fill_text(Text {
-                            content: lab,
-                            position: Point::new(x + 3.0, y + 2.0),
+                            content: lab.clone(),
+                            position: Point::new(cx - text_units(&lab) * fs / 2.0, cy),
                             color: Color::WHITE,
                             size: iced::Pixels(fs),
                             ..Default::default()
                         });
+                        cy += fs + 2.0;
                     }
-                    let vfs = (fs * 0.72).max(8.0);
-                    if th >= fs * 2.3 {
-                        if let Some(val) = fit_text(&d.value, vfs, avail) {
-                            frame.fill_text(Text {
-                                content: val,
-                                position: Point::new(x + 3.0, y + 2.0 + fs * 1.15),
-                                color: Color::from_rgba(1.0, 1.0, 1.0, 0.82),
-                                size: iced::Pixels(vfs),
-                                ..Default::default()
-                            });
-                        }
+                    if show_val {
+                        let v = val.unwrap();
+                        frame.fill_text(Text {
+                            content: v.clone(),
+                            position: Point::new(cx - text_units(&v) * vfs / 2.0, cy),
+                            color: Color::from_rgba(1.0, 1.0, 1.0, 0.88),
+                            size: iced::Pixels(vfs),
+                            ..Default::default()
+                        });
                     }
                 }
             }
@@ -442,82 +510,99 @@ impl<M> canvas::Program<M> for TreemapCanvas {
 
 // ───────────────────────── 图例 ─────────────────────────
 
-fn legend<'a>(cb: ColorBy) -> Element<'a, RadarMsg> {
+/// 图例：7 格色块，标签**居中压在各自色块上方**表示该档代表值（同 TradingView：
+/// `−13% −8% −3% 0 3% 8% 13%`）。第一版在色块**之间**标边界值，导致标签和色块
+/// 一一对不上，读起来要在心里错半格。
+fn legend<'a>(cb: ColorBy, p: Palette) -> Element<'a, RadarMsg> {
+    const SW: f32 = 34.0;
     let e = edges(cb);
-    let sw = |c: Color| -> Element<'a, RadarMsg> {
-        container(text(" ").size(9))
-            .width(Length::Fixed(26.0))
-            .height(Length::Fixed(11.0))
-            .style(move |_: &Theme| container::Style {
-                background: Some(c.into()),
-                ..Default::default()
-            })
-            .into()
-    };
-    let lbl = |s: String| -> Element<'a, RadarMsg> {
-        container(text(s).size(9).color(C_DIM))
-            .width(Length::Fixed(26.0))
-            .into()
-    };
-    let mut sw_row = row![].spacing(1);
-    for c in DOWN.iter().rev() {
-        sw_row = sw_row.push(sw(*c));
+    let r = ramp(p);
+    let cells: [(Color, String); 7] = [
+        (r.down[2], format!("-{}", edge_label(cb, e[2]))),
+        (r.down[1], format!("-{}", edge_label(cb, e[1]))),
+        (r.down[0], format!("-{}", edge_label(cb, e[0]))),
+        (C_NEUTRAL, "0".into()),
+        (r.up[0], format!("+{}", edge_label(cb, e[0]))),
+        (r.up[1], format!("+{}", edge_label(cb, e[1]))),
+        (r.up[2], format!("+{}", edge_label(cb, e[2]))),
+    ];
+    let mut labels = row![].spacing(1);
+    let mut swatches = row![].spacing(1);
+    for (c, l) in cells {
+        labels = labels.push(
+            container(text(l).size(9).color(C_DIM))
+                .width(Length::Fixed(SW))
+                .align_x(iced::Alignment::Center),
+        );
+        swatches = swatches.push(
+            container(text(" ").size(8))
+                .width(Length::Fixed(SW))
+                .height(Length::Fixed(9.0))
+                .style(move |_: &Theme| container::Style {
+                    background: Some(c.into()),
+                    ..Default::default()
+                }),
+        );
     }
-    sw_row = sw_row.push(sw(C_NEUTRAL));
-    for c in UP.iter() {
-        sw_row = sw_row.push(sw(*c));
-    }
-
-    // 标签压在档位分界处：4档跌 + 中性 + 4档涨 = 9 格
-    let mut lb_row = row![].spacing(1);
-    for x in e.iter().rev() {
-        lb_row = lb_row.push(lbl(format!("-{}", edge_label(cb, *x))));
-    }
-    lb_row = lb_row.push(lbl("0".into()));
-    for x in e.iter() {
-        lb_row = lb_row.push(lbl(format!("+{}", edge_label(cb, *x))));
-    }
-
-    row![
-        text("跌 ").size(9).color(C_DIM),
-        column![sw_row, lb_row].spacing(1),
-        text(" 涨").size(9).color(C_DIM),
-    ]
-    .align_y(iced::Alignment::Center)
-    .into()
+    column![labels, swatches].spacing(1).into()
 }
 
 // ───────────────────────── 小部件 ─────────────────────────
 
+/// 选择器 chip。**选中态用高亮而非置灰**——对齐 TradingView（活动标签是高亮药丸）。
+/// 置灰会让人分不清「当前是这个」还是「这个不可选」，且按钮始终可点更符合直觉。
+/// 用项目既有的 `style::button::modifier`（指标/标的表都是这套）。
 fn chip<'a>(label: &str, active: bool, msg: RadarMsg) -> Element<'a, RadarMsg> {
     button(text(label.to_string()).size(11))
         .padding([2, 7])
-        .on_press_maybe((!active).then_some(msg))
+        .style(move |t, st| crate::style::button::modifier(t, st, active))
+        .on_press(msg)
         .into()
 }
 
-fn cell<'a>(s: String, w: f32, c: Color) -> Element<'a, RadarMsg> {
-    container(text(s).size(11).color(c)).width(Length::Fixed(w)).into()
+/// 表格单元。数值列**右对齐**（同 TradingView）：右对齐后小数点纵向成列，
+/// 一眼能比大小；左对齐的数字列要逐行读才知道谁大。
+fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, RadarMsg> {
+    container(text(s).size(11).color(c))
+        .width(Length::Fixed(w))
+        .align_x(if numeric {
+            iced::Alignment::End
+        } else {
+            iced::Alignment::Start
+        })
+        .into()
 }
 
-/// 可点排序的列头（带 ▲▼）。
+/// 该列是否为数值列（决定对齐方式）。
+fn is_numeric(k: SortKey) -> bool {
+    !matches!(k, SortKey::Symbol | SortKey::Venue)
+}
+
+/// 可点排序的列头。箭头**前置**且只出现在活动列上（同 TradingView 的 `↓ Mkt cap`）——
+/// 后置箭头会把列标题推离它对齐的那列数字。
 fn head_cell<'a>(col: &Col, v: ViewState) -> Element<'a, RadarMsg> {
     let active = col.key == v.sort;
-    let arrow = if active {
-        if v.desc { " ▼" } else { " ▲" }
+    let label = if active {
+        format!("{} {}", if v.desc { "↓" } else { "↑" }, col.title)
     } else {
-        ""
+        col.title.clone()
     };
     container(
         button(
-            text(format!("{}{arrow}", col.title))
+            text(label)
                 .size(11)
-                .color(if active { C_HEAD } else { C_TXT }),
+                .color(if active { C_HEAD } else { C_DIM }),
         )
         .padding([1, 2])
+        .style(|t, st| crate::style::button::transparent(t, st, false))
         .on_press(RadarMsg::SortBy(col.key)),
     )
     .width(Length::Fixed(col.width))
+    .align_x(if is_numeric(col.key) {
+        iced::Alignment::End
+    } else {
+        iced::Alignment::Start
+    })
     .into()
 }
 
@@ -543,7 +628,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             chip("■ 停止", !running, RadarMsg::Stop),
             text(format!("　{}", if running { "运行中" } else { "未运行" }))
                 .size(11)
-                .color(if running { UP[3] } else { C_DIM }),
+                .color(if running { C_OK } else { C_DIM }),
             text("　").size(11),
             button(text("⟳ 刷新").size(11)).padding([2, 7]).on_press(RadarMsg::Refresh),
             text(format!("  刷新于 {}", st.refreshed)).size(10).color(C_DIM),
@@ -554,7 +639,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     let am = super::radar::action_message();
     if !am.is_empty() {
         let bad = am.starts_with('✗');
-        body = body.push(text(am).size(10).color(if bad { C_BAD } else { UP[3] }));
+        body = body.push(text(am).size(10).color(if bad { C_BAD } else { C_OK }));
     }
 
     if !st.present || st.rows.is_empty() {
@@ -635,7 +720,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         r2 = r2.push(chip(l, c == v.color_by, RadarMsg::SetColorBy(c)));
     }
     r2 = r2.push(text("　　").size(11));
-    r2 = r2.push(legend(v.color_by));
+    r2 = r2.push(legend(v.color_by, v.palette));
     body = body.push(r2.align_y(iced::Alignment::Center));
 
     if v.color_by == ColorBy::Change {
@@ -668,8 +753,12 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
                 ColorBy::Change => opt_pct(m),
                 _ => opt_z(m),
             },
+            value_compact: match v.color_by {
+                ColorBy::Change => opt_pct_compact(m),
+                _ => opt_z_compact(m),
+            },
             weight: area_weight(r, v.size_by),
-            color: scale_color(m, v.color_by, r.trustworthy()),
+            color: scale_color(m, v.color_by, v.palette, r.trustworthy()),
         }
     };
     let (groups, header_h) = match v.group_by {
@@ -696,7 +785,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
                         .collect(),
                 })
                 .collect();
-            (gs, 14.0)
+            (gs, GROUP_HEADER_H)
         }
     };
     body = body.push(
@@ -726,6 +815,14 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             .size(10)
             .color(C_DIM),
     );
+    cs = cs.push(text("　色板 ").size(11).color(C_DIM));
+    for (pal, l) in [
+        (Palette::BlueOrange, "蓝橙"),
+        (Palette::GreenUp, "绿涨红跌"),
+        (Palette::RedUp, "红涨绿跌"),
+    ] {
+        cs = cs.push(chip(l, pal == v.palette, RadarMsg::SetPalette(pal)));
+    }
     body = body.push(cs.align_y(iced::Alignment::Center));
 
     let cols = columns(v);
@@ -739,8 +836,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         let r = &st.rows[i];
         let mut tr = row![].spacing(3);
         for c in &cols {
-            let (s, col) = cell_text(r, c.key);
-            tr = tr.push(cell(s, c.width, col));
+            let (s, col) = cell_text(r, c.key, v.palette);
+            tr = tr.push(cell(s, c.width, col, is_numeric(c.key)));
         }
         let flag = if !r.sigma_ok && r.z_provisional {
             "≈"
@@ -749,7 +846,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         } else {
             ""
         };
-        tr = tr.push(cell(flag.into(), 22.0, C_GOLD));
+        tr = tr.push(cell(flag.into(), 22.0, C_GOLD, false));
         body = body.push(tr);
     }
 
@@ -770,6 +867,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const P: Palette = Palette::BlueOrange;
 
     fn row_of(sym: &str, z5: Option<f64>) -> RadarRow {
         let mut r = RadarRow {
@@ -793,7 +892,7 @@ mod tests {
             assert_eq!(bucket(*x, &e), i + 1, "边界值应落进上一档（>=）");
             assert_eq!(bucket(-*x, &e), i + 1, "分档按绝对值，正负对称");
         }
-        assert_eq!(bucket(e[3] * 100.0, &e), 4, "超出最强档应封顶，不越界");
+        assert_eq!(bucket(e[2] * 100.0, &e), 3, "超出最强档应封顶，不越界");
         assert_eq!(bucket(f64::NAN, &e), 0);
         assert_eq!(bucket(f64::INFINITY, &e), 0);
     }
@@ -805,30 +904,31 @@ mod tests {
         for cb in [ColorBy::SpeedZ, ColorBy::Change, ColorBy::VolZ] {
             let e = edges(cb);
             for probe in [-9.0, -3.0, -1.0, -0.1, 0.0, 0.1, 1.0, 3.0, 9.0] {
-                let c = scale_color(Some(probe), cb, true);
+                let c = scale_color(Some(probe), cb, P, true);
+                let r = ramp(P);
                 let known = std::iter::once(C_NEUTRAL)
-                    .chain(UP.iter().copied())
-                    .chain(DOWN.iter().copied())
+                    .chain(r.up.iter().copied())
+                    .chain(r.down.iter().copied())
                     .any(|k| (k.r - c.r).abs() < 1e-6 && (k.g - c.g).abs() < 1e-6);
                 assert!(known, "{cb:?} 在 {probe} 处上了色阶之外的颜色");
             }
-            assert_eq!(e.len(), 4);
+            assert_eq!(e.len(), 3, "7 档色阶 = 3 个边界");
         }
     }
 
     #[test]
     fn color_is_diverging_and_desaturates_untrusted() {
-        let up = scale_color(Some(4.0), ColorBy::SpeedZ, true);
-        let down = scale_color(Some(-4.0), ColorBy::SpeedZ, true);
+        let up = scale_color(Some(4.0), ColorBy::SpeedZ, P, true);
+        let down = scale_color(Some(-4.0), ColorBy::SpeedZ, P, true);
         assert!(up.b > up.r, "涨端应偏蓝");
         assert!(down.r > down.b, "跌端应偏橙");
         let dist = |c: Color| (c.r - C_NEUTRAL.r).abs() + (c.b - C_NEUTRAL.b).abs();
-        assert!(dist(scale_color(Some(4.0), ColorBy::SpeedZ, false)) < dist(up));
+        assert!(dist(scale_color(Some(4.0), ColorBy::SpeedZ, P, false)) < dist(up));
     }
 
     #[test]
     fn missing_value_is_neutral() {
-        let c = scale_color(None, ColorBy::SpeedZ, true);
+        let c = scale_color(None, ColorBy::SpeedZ, P, true);
         assert!((c.r - C_NEUTRAL.r).abs() < 1e-6 && (c.b - C_NEUTRAL.b).abs() < 1e-6);
     }
 
@@ -878,9 +978,9 @@ mod tests {
     #[test]
     fn cell_text_marks_missing_as_dash_not_zero() {
         let r = row_of("XUSDT", None);
-        assert_eq!(cell_text(&r, SortKey::Z(1)).0, "—");
-        assert_eq!(cell_text(&r, SortKey::Ret(1)).0, "—");
-        assert_eq!(cell_text(&r, SortKey::VolZ).0, "—");
+        assert_eq!(cell_text(&r, SortKey::Z(1), P).0, "—");
+        assert_eq!(cell_text(&r, SortKey::Ret(1), P).0, "—");
+        assert_eq!(cell_text(&r, SortKey::VolZ, P).0, "—");
     }
 
     #[test]
@@ -915,10 +1015,13 @@ mod tests {
     #[test]
     fn fit_text_truncates_instead_of_overflowing() {
         assert_eq!(fit_text("BTC", 10.0, 200.0).as_deref(), Some("BTC"));
-        // 放不下就截断，绝不返回超长串（溢出会把 PENGU+ONDO 拼成 PENGUONDO）
+        // 放不下就截断并补省略号（同 TV 的 `Consumer non-dur…`），
+        // 绝不返回超长串（溢出会把 PENGU+ONDO 拼成 PENGUONDO）
         let cut = fit_text("1000PEPE", 20.0, 40.0).unwrap();
-        assert!(cut.chars().count() < 8, "没截断：{cut}");
-        assert!("1000PEPE".starts_with(&cut));
+        assert!(cut.ends_with('…'), "截断后应补省略号：{cut}");
+        let stem: String = cut.chars().take_while(|c| *c != '…').collect();
+        assert!(stem.chars().count() < 8, "没截断：{cut}");
+        assert!("1000PEPE".starts_with(&stem));
         // 只剩一两个字母认不出是谁，不如不画
         assert!(fit_text("ABCDEF", 20.0, 10.0).is_none());
         assert!(fit_text("ABC", 10.0, 0.0).is_none());
@@ -946,6 +1049,16 @@ mod tests {
     }
 
     #[test]
+    fn compact_number_format_is_shorter_but_still_signed() {
+        // 窄格退而用紧凑写法，而不是把数字截成 `-0.…`（分不出 -0.1 还是 -0.9）
+        assert_eq!(opt_z(Some(-1.234)), "-1.23");
+        assert_eq!(opt_z_compact(Some(-1.234)), "-1.2");
+        assert!(text_units(&opt_z_compact(Some(-1.234))) < text_units(&opt_z(Some(-1.234))));
+        assert_eq!(opt_pct_compact(Some(0.0512)), "+5.1");
+        assert!(opt_z_compact(Some(2.0)).starts_with('+'), "紧凑写法也必须带符号");
+    }
+
+    #[test]
     fn fit_font_shrinks_to_make_label_fit() {
         // 只按格子高算字号会让 TRUMP 压到隔壁 AVAX 上（实测拼成 TRUMPAVAX）
         let avail = 40.0;
@@ -962,9 +1075,9 @@ mod tests {
         let sep = |a: Color, b: Color| {
             (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
         };
-        let up1 = scale_color(Some(0.4), ColorBy::SpeedZ, true);
-        let dn1 = scale_color(Some(-0.4), ColorBy::SpeedZ, true);
-        let neu = scale_color(Some(0.0), ColorBy::SpeedZ, true);
+        let up1 = scale_color(Some(0.4), ColorBy::SpeedZ, P, true);
+        let dn1 = scale_color(Some(-0.4), ColorBy::SpeedZ, P, true);
+        let neu = scale_color(Some(0.0), ColorBy::SpeedZ, P, true);
         assert!(sep(up1, neu) > 0.15, "最弱涨档与中性太接近：{:.3}", sep(up1, neu));
         assert!(sep(dn1, neu) > 0.15, "最弱跌档与中性太接近：{:.3}", sep(dn1, neu));
         assert!(up1.b > up1.r && dn1.r > dn1.b, "最弱档必须仍带方向色相");
@@ -972,20 +1085,25 @@ mod tests {
 
     #[test]
     fn speed_edges_do_not_swallow_the_market_in_neutral() {
-        // 实测 5m z 的 median≈0.13、p90≈1.5。首档边界若取 0.5，
-        // 半个市场会被压进中性档，图上就没有信息了。
+        // 首档边界应在实测 |z| 中位数附近或之下，好让**至少一半市场**能显出方向。
+        // 取得太高的话中性档吞掉半张图，图上就没有信息了（第一版取 0.5 的实测问题）。
+        const MEASURED_MEDIAN_ABS_Z: f64 = 0.5;
         let e = edges(ColorBy::SpeedZ);
-        assert!(e[0] <= 0.35, "首档边界 {} 太高", e[0]);
-        assert_eq!(bucket(0.5, &e), 1, "常态波动应落进有色档");
-        assert_eq!(bucket(1.5, &e), 2);
+        assert!(
+            e[0] <= MEASURED_MEDIAN_ABS_Z,
+            "首档边界 {} 高过实测 |z| 中位数，半个市场会变中性",
+            e[0]
+        );
+        assert_eq!(bucket(MEASURED_MEDIAN_ABS_Z, &e), 1, "常态波动应落进有色档");
+        assert!(e[1] > e[0] && e[2] > e[1], "边界必须递增");
     }
 
     #[test]
     fn table_text_is_brighter_than_tile_fill() {
         let lum = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
         for probe in [0.6, 1.8, -0.6, -3.9] {
-            let fill = scale_color(Some(probe), ColorBy::SpeedZ, true);
-            let txt = scale_text(Some(probe), ColorBy::SpeedZ, true);
+            let fill = scale_color(Some(probe), ColorBy::SpeedZ, P, true);
+            let txt = scale_text(Some(probe), ColorBy::SpeedZ, P, true);
             assert!(
                 lum(txt) > lum(fill),
                 "z={probe} 文字色不比填充色亮：{:.3} vs {:.3}",
@@ -997,11 +1115,11 @@ mod tests {
 
     #[test]
     fn text_scale_keeps_direction_and_neutral() {
-        let up = scale_text(Some(3.0), ColorBy::SpeedZ, true);
-        let dn = scale_text(Some(-3.0), ColorBy::SpeedZ, true);
+        let up = scale_text(Some(3.0), ColorBy::SpeedZ, P, true);
+        let dn = scale_text(Some(-3.0), ColorBy::SpeedZ, P, true);
         assert!(up.b > up.r, "涨端应偏蓝");
         assert!(dn.r > dn.b, "跌端应偏橙");
-        assert!((scale_text(None, ColorBy::SpeedZ, true).r - C_DIM.r).abs() < 1e-6);
+        assert!((scale_text(None, ColorBy::SpeedZ, P, true).r - C_DIM.r).abs() < 1e-6);
     }
 
     #[test]
