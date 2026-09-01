@@ -665,7 +665,7 @@ fn overview_view<'a>(rows: &[OverviewRow], v: ViewState) -> Element<'a, RadarMsg
             .into();
     }
     col = col.push(
-        text("各国指数 · 本币 / 美元并列。**本币计价的国家横比是假的**——指数涨而本币贬，对美元投资者可能是亏的。")
+        text("各国指数 · 本币 / 美元并列。本币计价的国家横比是假的——指数涨而本币贬，对美元投资者可能是亏的。")
             .size(10)
             .color(C_GOLD),
     );
@@ -712,7 +712,7 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState) -> Element<'a, RadarMsg> 
             .into();
     }
     col = col.push(
-        text("⚠ 口径是**各市场按市值排序的前 N 只**，不是全市场：这是大盘股宽度。真正的 A/D 线要拉全部上市证券。")
+        text("⚠ 口径是各市场按市值排序的前 N 只，不是全市场——这是大盘股宽度。真正的 A/D 线要拉全部上市证券。")
             .size(10)
             .color(C_GOLD),
     );
@@ -756,14 +756,14 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState) -> Element<'a, RadarMsg> 
             row![
                 cell(b.market.clone(), 92.0, C_TXT, false),
                 cell(b.n.to_string(), 46.0, C_DIM, true),
-                cell(b.adv.to_string(), 46.0, brighten(up), true),
-                cell(b.dec.to_string(), 46.0, brighten(dn), true),
+                cell(b.adv.to_string(), 46.0, up, true),
+                cell(b.dec.to_string(), 46.0, dn, true),
                 cell(ratio, 56.0, C_TXT, true),
                 container(bar(b.adv_pct, 16, up)).width(Length::Fixed(172.0)),
                 container(bar(b.above_ma200_pct, 16, up)).width(Length::Fixed(172.0)),
-                cell(b.new_high.to_string(), 46.0, brighten(up), true),
-                cell(b.new_low.to_string(), 46.0, brighten(dn), true),
-                cell(format!("{:+}", b.net_new_high), 56.0, brighten(net_c), true),
+                cell(b.new_high.to_string(), 46.0, up, true),
+                cell(b.new_low.to_string(), 46.0, dn, true),
+                cell(format!("{:+}", b.net_new_high), 56.0, net_c, true),
             ]
             .spacing(3),
         );
