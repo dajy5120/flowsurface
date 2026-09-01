@@ -23,7 +23,7 @@ use iced::widget::{
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use super::radar::{
-    order, scale_kind, visible, AssetFilter, ColumnSet, GroupBy, Opt, Palette, RadarMsg,
+    order, scale_kind, visible, AssetFilter, ColumnSet, GroupBy, Palette, RadarMsg,
     ScaleKind, SortKey, ViewMode, ViewState, COLOR_OPTS, SIZE_OPTS,
 };
 use super::radar_readout::{BreadthRow, OverviewRow, RadarReadout, RadarRow, OV_WINDOWS, WINDOWS};
