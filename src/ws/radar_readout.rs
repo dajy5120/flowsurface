@@ -72,6 +72,37 @@ impl BackfillView {
     }
 }
 
+/// 一个市场的宽度（docs/22 §2 ③）。
+#[derive(Default, Clone, PartialEq)]
+pub struct BreadthRow {
+    pub market: String,
+    pub n: i64,
+    pub adv: i64,
+    pub dec: i64,
+    pub unch: i64,
+    pub new_high: i64,
+    pub new_low: i64,
+    pub net_new_high: i64,
+    /// 比值一律 `Option`——分母为 0 时给 `None`，面板显示「—」而不是 inf。
+    pub adv_pct: Option<f64>,
+    pub ad_ratio: Option<f64>,
+    pub above_ma200_pct: Option<f64>,
+}
+
+/// 一行全球总览（docs/22 §2 ②）。
+#[derive(Default, Clone, PartialEq)]
+pub struct OverviewRow {
+    pub label: String,
+    pub ticker: String,
+    pub currency: String,
+    /// 本币对数收益，键为「日/周/月/YTD」。
+    pub local: [Option<f64>; 4],
+    /// 美元对数收益。**缺席即缺席**——拿不到汇率时绝不退回本币值。
+    pub usd: [Option<f64>; 4],
+}
+
+pub const OV_WINDOWS: [&str; 4] = ["日", "周", "月", "YTD"];
+
 #[derive(Default, Clone)]
 pub struct RadarReadout {
     pub stamp: String,
@@ -82,6 +113,8 @@ pub struct RadarReadout {
     pub refreshed_ms: i64,
     pub rows: Vec<RadarRow>,
     pub backfill: BackfillView,
+    pub breadth: Vec<BreadthRow>,
+    pub overview: Vec<OverviewRow>,
     pub refreshed: String,
     pub present: bool,
     /// 守护 service 状态。后台 poller 刷——**不能在 view 里查**，那是每帧一次
@@ -238,6 +271,53 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
             .and_then(|x| x.as_bool())
             .unwrap_or(false)
     };
+    let i64_of = |o: &serde_json::Value, k: &str| o.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+    let optf_of = |o: &serde_json::Value, k: &str| o.get(k).and_then(|x| x.as_f64());
+    let breadth = v
+        .get("breadth")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|o| BreadthRow {
+                    market: s(o, "market"),
+                    n: i64_of(o, "n"),
+                    adv: i64_of(o, "adv"),
+                    dec: i64_of(o, "dec"),
+                    unch: i64_of(o, "unch"),
+                    new_high: i64_of(o, "new_high"),
+                    new_low: i64_of(o, "new_low"),
+                    net_new_high: i64_of(o, "net_new_high"),
+                    adv_pct: optf_of(o, "adv_pct"),
+                    ad_ratio: optf_of(o, "ad_ratio"),
+                    above_ma200_pct: optf_of(o, "above_ma200_pct"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let ov_arr = |o: Option<&serde_json::Value>| {
+        let mut out = [None; 4];
+        if let Some(m) = o {
+            for (i, k) in OV_WINDOWS.iter().enumerate() {
+                out[i] = m.get(*k).and_then(|x| x.as_f64());
+            }
+        }
+        out
+    };
+    let overview = v
+        .get("overview")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|o| OverviewRow {
+                    label: s(o, "label"),
+                    ticker: s(o, "ticker"),
+                    currency: s(o, "currency"),
+                    local: ov_arr(o.get("local")),
+                    usd: ov_arr(o.get("usd")),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     RadarReadout {
         stamp: s(v, "stamp"),
         source: s(v, "source"),
@@ -245,6 +325,8 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
         n_symbols: v.get("n_symbols").and_then(|x| x.as_i64()).unwrap_or(0),
         refreshed_ms: v.get("refreshed_ms").and_then(|x| x.as_i64()).unwrap_or(0),
         rows,
+        breadth,
+        overview,
         backfill: BackfillView {
             done: bi("done"),
             total: bi("total"),
@@ -266,6 +348,16 @@ mod tests {
       "stamp":"2026-08-30 07:00:00","source":"binance:linear+binance:spot","tier":"A",
       "n_symbols":577,"n_rows":2,"refreshed_ms":1312,
       "backfill":{"done":37,"total":574,"failed":2,"running":true,"finished":false},
+      "breadth":[{"market":"japan","n":300,"adv":194,"dec":103,"unch":3,
+                  "new_high":1,"new_low":0,"net_new_high":1,"above_ma200":231,"ma200_n":300,
+                  "adv_pct":0.653,"ad_ratio":1.883,"above_ma200_pct":0.77},
+                 {"market":"x","n":1,"adv":1,"dec":0,"unch":0,"new_high":0,"new_low":0,
+                  "net_new_high":0,"above_ma200":0,"ma200_n":0,
+                  "adv_pct":1.0,"ad_ratio":null,"above_ma200_pct":null}],
+      "overview":[{"market":"india","ticker":"NSE:NIFTY","label":"印度 Nifty 50","currency":"INR",
+                   "local":{"日":-0.0039,"YTD":-0.0834},"usd":{"日":-0.0018,"YTD":-0.1394}},
+                  {"market":"japan","ticker":"TVC:NI225","label":"日本 日经 225","currency":"JPY",
+                   "local":{"日":0.0008},"usd":{}}],
       "rows":[
         {"symbol":"KNCUSDT","venue":"binance:linear","tier":"A","price":0.42,"quote_vol_24h":5.1e6,
          "ret":{"1m":0.00165,"24h":0.042},"z_ret":{"1m":3.55},
@@ -330,6 +422,33 @@ mod tests {
         assert!((eq.mcap - 5.2e12).abs() < 1.0);
         // 加密行没有这些参考数据，应是空而不是乱填
         assert_eq!(r.rows[0].country, "");
+    }
+
+    #[test]
+    fn parses_breadth_with_null_ratios() {
+        let b = &board().breadth;
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].market, "japan");
+        assert_eq!((b[0].adv, b[0].dec, b[0].n), (194, 103, 300));
+        assert!((b[0].above_ma200_pct.unwrap() - 0.77).abs() < 1e-9);
+        // 分母为 0 的比值必须是 None，面板显示「—」而不是 inf
+        assert!(b[1].ad_ratio.is_none());
+        assert!(b[1].above_ma200_pct.is_none());
+        assert_eq!(b[1].adv_pct, Some(1.0));
+    }
+
+    #[test]
+    fn parses_overview_and_keeps_usd_absent_when_fx_missing() {
+        let o = &board().overview;
+        assert_eq!(o.len(), 2);
+        let ind = &o[0];
+        assert_eq!(ind.currency, "INR");
+        assert!((ind.local[0].unwrap() - (-0.0039)).abs() < 1e-9);
+        assert!((ind.usd[3].unwrap() - (-0.1394)).abs() < 1e-9);
+        assert!(ind.local[1].is_none(), "缺的窗口应为 None");
+        // 拿不到汇率时美元口径必须全空，绝不退回本币值
+        assert!(o[1].usd.iter().all(Option::is_none));
+        assert!(o[1].local[0].is_some());
     }
 
     #[test]

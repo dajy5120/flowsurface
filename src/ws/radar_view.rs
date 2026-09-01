@@ -21,9 +21,10 @@ use iced::widget::{button, canvas as canvas_widget, column, container, row, scro
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use super::radar::{
-    order, ColorBy, ColumnSet, GroupBy, Palette, RadarMsg, SizeBy, SortKey, ViewState,
+    order, ColorBy, ColumnSet, GroupBy, Palette, RadarMsg, SizeBy, SortKey, ViewMode,
+    ViewState,
 };
-use super::radar_readout::{RadarReadout, RadarRow, WINDOWS};
+use super::radar_readout::{BreadthRow, OverviewRow, RadarReadout, RadarRow, OV_WINDOWS, WINDOWS};
 use super::treemap::{squarify_nested, Rect};
 
 const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
@@ -635,6 +636,141 @@ fn head_cell<'a>(col: &Col, v: ViewState) -> Element<'a, RadarMsg> {
     .into()
 }
 
+/// 0..1 → 定宽条形。纯文本块拼的，够表达占比且不必再起一层 canvas。
+fn bar<'a>(frac: Option<f64>, width: usize, c: Color) -> Element<'a, RadarMsg> {
+    let Some(f) = frac else {
+        return text("—").size(11).color(C_DIM).into();
+    };
+    let n = ((f.clamp(0.0, 1.0)) * width as f64).round() as usize;
+    row![
+        text("█".repeat(n)).size(11).color(c),
+        text("░".repeat(width.saturating_sub(n))).size(11).color(C_NEUTRAL),
+        text(format!(" {:>3.0}%", f * 100.0)).size(11).color(C_TXT),
+    ]
+    .into()
+}
+
+fn pct_log(v: Option<f64>) -> String {
+    v.map(|x| format!("{:+.2}%", (x.exp() - 1.0) * 100.0))
+        .unwrap_or_else(|| "—".into())
+}
+
+/// World Overview（docs/22 §2 ②）：各国指数横向对比，本币 vs 美元并列。
+fn overview_view<'a>(rows: &[OverviewRow], v: ViewState) -> Element<'a, RadarMsg> {
+    let mut col = column![].spacing(3);
+    if rows.is_empty() {
+        return text("暂无总览数据——需开启股票层（radar.toml 的 [equities]）")
+            .size(11)
+            .color(C_DIM)
+            .into();
+    }
+    col = col.push(
+        text("各国指数 · 本币 / 美元并列。**本币计价的国家横比是假的**——指数涨而本币贬，对美元投资者可能是亏的。")
+            .size(10)
+            .color(C_GOLD),
+    );
+    let mut hdr = row![cell("指数".into(), 150.0, C_HEAD, false), cell("币".into(), 40.0, C_HEAD, false)]
+        .spacing(3);
+    for w in OV_WINDOWS {
+        hdr = hdr.push(cell(format!("{w} 本币"), 82.0, C_HEAD, true));
+        hdr = hdr.push(cell(format!("{w} 美元"), 82.0, C_HEAD, true));
+    }
+    col = col.push(hdr);
+    for r in rows {
+        let mut tr = row![
+            cell(r.label.clone(), 150.0, C_TXT, false),
+            cell(r.currency.clone(), 40.0, C_DIM, false)
+        ]
+        .spacing(3);
+        for i in 0..OV_WINDOWS.len() {
+            tr = tr.push(cell(
+                pct_log(r.local[i]),
+                82.0,
+                scale_text(r.local[i], ColorBy::Change, v.palette, true),
+                true,
+            ));
+            // 美元口径缺席就是缺席——绝不退回本币值
+            tr = tr.push(cell(
+                pct_log(r.usd[i]),
+                82.0,
+                scale_text(r.usd[i], ColorBy::Change, v.palette, true),
+                true,
+            ));
+        }
+        col = col.push(tr);
+    }
+    col.into()
+}
+
+/// 市场宽度（docs/22 §2 ③）。
+fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState) -> Element<'a, RadarMsg> {
+    let mut col = column![].spacing(3);
+    if rows.is_empty() {
+        return text("暂无宽度数据——需开启股票层（radar.toml 的 [equities]）")
+            .size(11)
+            .color(C_DIM)
+            .into();
+    }
+    col = col.push(
+        text("⚠ 口径是**各市场按市值排序的前 N 只**，不是全市场：这是大盘股宽度。真正的 A/D 线要拉全部上市证券。")
+            .size(10)
+            .color(C_GOLD),
+    );
+    col = col.push(
+        text("热图说今天谁红谁绿；宽度说这个市场是健康上涨，还是靠几只权重撑着。")
+            .size(10)
+            .color(C_DIM),
+    );
+    let up = ramp(v.palette).up[2];
+    let dn = ramp(v.palette).down[2];
+    let mut hdr = row![].spacing(3);
+    for (t, w) in [
+        ("市场", 92.0),
+        ("只数", 46.0),
+        ("涨", 46.0),
+        ("跌", 46.0),
+        ("涨跌比", 56.0),
+    ] {
+        hdr = hdr.push(cell(t.into(), w, C_HEAD, t != "市场"));
+    }
+    hdr = hdr.push(cell("上涨占比".into(), 172.0, C_HEAD, false));
+    hdr = hdr.push(cell("站上 MA200".into(), 172.0, C_HEAD, false));
+    hdr = hdr.push(cell("新高".into(), 46.0, C_HEAD, true));
+    hdr = hdr.push(cell("新低".into(), 46.0, C_HEAD, true));
+    hdr = hdr.push(cell("净新高".into(), 56.0, C_HEAD, true));
+    col = col.push(hdr);
+
+    for b in rows {
+        let ratio = b
+            .ad_ratio
+            .map(|x| format!("{x:.2}"))
+            .unwrap_or_else(|| "—".into());
+        let net_c = if b.net_new_high > 0 {
+            up
+        } else if b.net_new_high < 0 {
+            dn
+        } else {
+            C_DIM
+        };
+        col = col.push(
+            row![
+                cell(b.market.clone(), 92.0, C_TXT, false),
+                cell(b.n.to_string(), 46.0, C_DIM, true),
+                cell(b.adv.to_string(), 46.0, brighten(up), true),
+                cell(b.dec.to_string(), 46.0, brighten(dn), true),
+                cell(ratio, 56.0, C_TXT, true),
+                container(bar(b.adv_pct, 16, up)).width(Length::Fixed(172.0)),
+                container(bar(b.above_ma200_pct, 16, up)).width(Length::Fixed(172.0)),
+                cell(b.new_high.to_string(), 46.0, brighten(up), true),
+                cell(b.new_low.to_string(), 46.0, brighten(dn), true),
+                cell(format!("{:+}", b.net_new_high), 56.0, brighten(net_c), true),
+            ]
+            .spacing(3),
+        );
+    }
+    col.into()
+}
+
 // ───────────────────────── 面板体 ─────────────────────────
 
 pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
@@ -739,6 +875,36 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             .size(10)
             .color(C_GOLD),
         );
+    }
+
+    // ── 视图切换 ──
+    let mut mr = row![text("视图 ").size(11).color(C_DIM)].spacing(3);
+    for (m, l) in [
+        (ViewMode::Heatmap, "热图 · Screener"),
+        (ViewMode::Overview, "全球总览"),
+        (ViewMode::Breadth, "市场宽度"),
+    ] {
+        mr = mr.push(chip(l, m == v.mode, RadarMsg::SetMode(m)));
+    }
+    body = body.push(mr.align_y(iced::Alignment::Center));
+
+    if v.mode != ViewMode::Heatmap {
+        let inner = match v.mode {
+            ViewMode::Overview => overview_view(&st.overview, v),
+            _ => breadth_view(&st.breadth, v),
+        };
+        body = body.push(inner);
+        body = body.push(
+            text(format!(
+                "源 {} · 快照 {}{}",
+                st.source,
+                st.stamp,
+                super::staleness::suffix(&st.stamp),
+            ))
+            .size(10)
+            .color(C_DIM),
+        );
+        return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
 
     // ── 热图控制条 ──
@@ -1111,6 +1277,17 @@ mod tests {
         // Binance 有中文名标的（「我踏马来了」）。按半角估宽会让标签压到隔壁格子上。
         assert!(text_units("我踏马来了") > text_units("ABCDE") * 1.5);
         assert!((text_units("我A") - (ADV_WIDE + ADV_NARROW)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pct_log_converts_log_return_back_to_percent() {
+        // 快照里存的是对数收益；面板要显示的是人看得懂的百分比
+        assert_eq!(pct_log(None), "—");
+        let p = pct_log(Some(1.3010f64.ln()));
+        assert_eq!(p, "+30.10%");
+        let n = pct_log(Some(0.92f64.ln()));
+        assert_eq!(n, "-8.00%");
+        assert!(pct_log(Some(0.0)).starts_with('+'), "零也要带符号，免得和缺值混淆");
     }
 
     #[test]

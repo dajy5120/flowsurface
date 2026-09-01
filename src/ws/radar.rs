@@ -53,6 +53,15 @@ pub enum Palette {
     RedUp,
 }
 
+/// 面板视图。三块回答的是不同问题（docs/22 §2）：
+/// 热图=「谁在动」、总览=「哪个国家最强」、宽度=「整个市场什么状态」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Heatmap,
+    Overview,
+    Breadth,
+}
+
 /// Screener 的列组（对应 TradingView 筛选器顶部的 Overview/Performance/… 标签）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnSet {
@@ -89,6 +98,7 @@ pub struct ViewState {
     pub group_by: GroupBy,
     pub cols: ColumnSet,
     pub palette: Palette,
+    pub mode: ViewMode,
     pub sort: SortKey,
     /// true = 降序。点同一列再点一次翻向。
     pub desc: bool,
@@ -102,6 +112,7 @@ impl ViewState {
         group_by: GroupBy::None,
         cols: ColumnSet::Overview,
         palette: Palette::BlueOrange,
+        mode: ViewMode::Heatmap,
         sort: SortKey::Z(1),
         desc: true,
     };
@@ -118,6 +129,7 @@ pub enum RadarMsg {
     SetGroupBy(GroupBy),
     SetColumns(ColumnSet),
     SetPalette(Palette),
+    SetMode(ViewMode),
     /// 点列头：同列则翻向，异列则换列并回到降序（数值列降序更符合「看榜」的直觉）。
     SortBy(SortKey),
 }
@@ -152,6 +164,7 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
         RadarMsg::SetGroupBy(g) => v.group_by = g,
         RadarMsg::SetColumns(c) => v.cols = c,
         RadarMsg::SetPalette(p) => v.palette = p,
+        RadarMsg::SetMode(m) => v.mode = m,
         RadarMsg::SortBy(k) => {
             if v.sort == k {
                 v.desc = !v.desc;
@@ -253,6 +266,15 @@ mod tests {
         r.z_ret[1] = z5;
         r.ret[1] = ret5;
         r
+    }
+
+    #[test]
+    fn mode_switch_preserves_the_other_knobs() {
+        let v = apply(ViewState::DEFAULT, RadarMsg::SetWindow(3));
+        let v = apply(v, RadarMsg::SetMode(ViewMode::Breadth));
+        assert_eq!(v.mode, ViewMode::Breadth);
+        assert_eq!(v.win, 3, "换视图不该顺手重置窗口");
+        assert_eq!(v.palette, ViewState::DEFAULT.palette);
     }
 
     #[test]
