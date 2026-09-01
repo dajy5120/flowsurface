@@ -17,12 +17,14 @@
 
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Text};
-use iced::widget::{button, canvas as canvas_widget, column, container, row, scrollable, text};
+use iced::widget::{
+    button, canvas as canvas_widget, column, container, pick_list, row, scrollable, text,
+};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use super::radar::{
-    order, visible, AssetFilter, ColorBy, ColumnSet, GroupBy, Palette, RadarMsg, SizeBy,
-    SortKey, ViewMode, ViewState,
+    order, scale_kind, visible, AssetFilter, ColumnSet, GroupBy, Opt, Palette, RadarMsg,
+    ScaleKind, SortKey, ViewMode, ViewState, COLOR_OPTS, SIZE_OPTS,
 };
 use super::radar_readout::{BreadthRow, OverviewRow, RadarReadout, RadarRow, OV_WINDOWS, WINDOWS};
 use super::treemap::{squarify_nested, Rect};
@@ -91,13 +93,28 @@ pub(crate) fn ramp(p: Palette) -> Ramp {
 }
 
 /// 分档边界（对称，绝对值递增）。3 个边界 → 7 档。
-pub(crate) fn edges(cb: ColorBy) -> [f64; 3] {
-    match cb {
-        // 实测 5m z 分布：median≈0.13、p90≈1.5、max≈5。首档取太高会把半个市场
-        // 压进中性档，图上就没有信息了。
-        ColorBy::SpeedZ => [0.4, 1.2, 2.5],
-        ColorBy::Change => [0.005, 0.015, 0.03],
-        ColorBy::VolZ => [1.0, 2.5, 4.5],
+///
+/// 按指标的**量纲**分族：百分数类用 %，z 类用 σ，相对成交量是倍数。
+/// 混用一套边界的话，`Perf.YTD` 那种动辄 ±30% 的指标会全档饱和，
+/// 而 `change|60` 那种 ±0.5% 的会全落中性。
+pub(crate) fn edges(key: &str) -> [f64; 3] {
+    match key {
+        "own:speed_z" | "own:zvol" => [0.4, 1.2, 2.5],
+        // 长视界的表现类天然幅度更大，边界要跟着放
+        "Perf.3M" | "Perf.6M" | "Perf.YTD" | "Perf.Y" => [3.0, 10.0, 25.0],
+        "Perf.W" | "Perf.1M" => [1.5, 5.0, 12.0],
+        "relative_volume_10d_calc" => [0.3, 1.0, 2.5],
+        "Volatility.D" => [1.0, 2.5, 5.0],
+        // 其余百分数类（涨跌 1h/4h/1天、盘前盘后、跳空、自有涨跌幅）
+        _ => [0.5, 1.5, 3.0],
+    }
+}
+
+/// 该指标的中性点（相对成交量以 1.0 为常态）。
+fn center(key: &str) -> f64 {
+    match scale_kind(key) {
+        ScaleKind::AroundOne => 1.0,
+        _ => 0.0,
     }
 }
 
@@ -110,16 +127,18 @@ pub(crate) fn bucket(v: f64, e: &[f64; 3]) -> usize {
     e.iter().filter(|x| a >= **x).count()
 }
 
-fn pick(v: Option<f64>, cb: ColorBy, r: &Ramp, bright: bool, zero: Color) -> Color {
+fn pick(v: Option<f64>, key: &str, r: &Ramp, bright: bool, zero: Color) -> Color {
     match v {
         Some(v) if v.is_finite() => {
-            let b = bucket(v, &edges(cb));
+            let d = v - center(key);
+            let b = bucket(d, &edges(key));
             if b == 0 {
-                zero
-            } else {
-                let c = if v >= 0.0 { r.up[b - 1] } else { r.down[b - 1] };
-                if bright { brighten(c) } else { c }
+                return zero;
             }
+            // 量级型（波动率）恒非负，双向上色会把「低波动」画成跌，是错的
+            let up = matches!(scale_kind(key), ScaleKind::Magnitude) || d >= 0.0;
+            let c = if up { r.up[b - 1] } else { r.down[b - 1] };
+            if bright { brighten(c) } else { c }
         }
         _ => zero,
     }
@@ -134,40 +153,51 @@ fn fade(c: Color, toward: Color, t: f32) -> Color {
 }
 
 /// 值 → 树图填充色。`trusted=false`（未热身 / 借横截面基线）向中性去饱和，视觉上就弱一等。
-pub(crate) fn scale_color(v: Option<f64>, cb: ColorBy, p: Palette, trusted: bool) -> Color {
-    let c = pick(v, cb, &ramp(p), false, C_NEUTRAL);
+pub(crate) fn scale_color(v: Option<f64>, key: &str, p: Palette, trusted: bool) -> Color {
+    let c = pick(v, key, &ramp(p), false, C_NEUTRAL);
     if trusted { c } else { fade(c, C_NEUTRAL, 0.6) }
 }
 
 /// 值 → 表格文字色（同一分档，更高亮度）。
-pub(crate) fn scale_text(v: Option<f64>, cb: ColorBy, p: Palette, trusted: bool) -> Color {
-    let c = pick(v, cb, &ramp(p), true, C_DIM);
+pub(crate) fn scale_text(v: Option<f64>, key: &str, p: Palette, trusted: bool) -> Color {
+    let c = pick(v, key, &ramp(p), true, C_DIM);
     if trusted { c } else { fade(c, C_DIM, 0.55) }
 }
 
-fn edge_label(cb: ColorBy, e: f64) -> String {
-    match cb {
-        ColorBy::Change => format!("{:.1}%", e * 100.0),
-        _ => format!("{e:.1}σ"),
+fn edge_label(key: &str, e: f64) -> String {
+    if key.starts_with("own:") && key != "own:ret_pct" {
+        format!("{e:.1}σ")
+    } else if key == "relative_volume_10d_calc" {
+        format!("{:.1}×", 1.0 + e)
+    } else {
+        format!("{e:.1}%")
     }
 }
 
 // ───────────────────────── 取值与格式化 ─────────────────────────
 
-/// 树图上色用的指标。
-fn color_metric(r: &RadarRow, v: ViewState) -> Option<f64> {
-    match v.color_by {
-        ColorBy::SpeedZ => r.z_ret[v.win],
-        ColorBy::Change => r.ret[v.win],
-        ColorBy::VolZ => r.z_vol,
+/// 按指标键取值。`own:` 前缀是雷达自有指标，其余从快照的 `m` 字典取
+/// （TradingView 口径，全量随行情一次取回）。
+///
+/// 百分数类一律返回**百分数**（与 TradingView 同量纲），自有的对数收益要换算——
+/// 不换的话同一个色阶下 0.02 的对数收益会被当成 0.02%。
+pub(crate) fn metric_value(r: &RadarRow, key: &str, win: usize) -> Option<f64> {
+    match key {
+        "equal" => Some(1.0),
+        "own:turnover" => Some(r.quote_vol_24h.max(0.0)),
+        "own:speed_z" => r.z_ret[win],
+        "own:zvol" => r.z_vol,
+        "own:ret_pct" => r.ret[win].map(|x| (x.exp() - 1.0) * 100.0),
+        k => r.m.get(k).copied(),
     }
 }
 
-fn area_weight(r: &RadarRow, s: SizeBy) -> f64 {
-    match s {
-        SizeBy::Turnover => r.quote_vol_24h.max(0.0),
-        SizeBy::Equal => 1.0,
-    }
+/// 树图面积权重。负值/缺失一律 0——负权重会让树图布局出负尺寸。
+fn area_weight(r: &RadarRow, v: ViewState) -> f64 {
+    metric_value(r, v.size.key, v.win)
+        .filter(|x| x.is_finite())
+        .unwrap_or(0.0)
+        .max(0.0)
 }
 
 /// `BTCUSDT` → `BTC`。TV 的加密热图显示基础币，格子里放得下且更好认。
@@ -324,10 +354,10 @@ pub(crate) fn cell_text(r: &RadarRow, k: SortKey, p: Palette) -> (String, Color)
         ),
         SortKey::Price => (price(r.price), C_TXT),
         SortKey::Turnover => (usd(r.quote_vol_24h), C_DIM),
-        SortKey::Ret(i) => (opt_pct(r.ret[i]), scale_text(r.ret[i], ColorBy::Change, p, trusted)),
-        SortKey::Z(i) => (opt_z(r.z_ret[i]), scale_text(r.z_ret[i], ColorBy::SpeedZ, p, trusted)),
-        SortKey::VolZ => (opt_z(r.z_vol), scale_text(r.z_vol, ColorBy::VolZ, p, trusted)),
-        SortKey::CntZ => (opt_z(r.z_cnt), scale_text(r.z_cnt, ColorBy::VolZ, p, trusted)),
+        SortKey::Ret(i) => (opt_pct(r.ret[i]), scale_text(r.ret[i].map(|x| (x.exp() - 1.0) * 100.0), "change", p, trusted)),
+        SortKey::Z(i) => (opt_z(r.z_ret[i]), scale_text(r.z_ret[i], "own:speed_z", p, trusted)),
+        SortKey::VolZ => (opt_z(r.z_vol), scale_text(r.z_vol, "own:zvol", p, trusted)),
+        SortKey::CntZ => (opt_z(r.z_cnt), scale_text(r.z_cnt, "own:zvol", p, trusted)),
     }
 }
 
@@ -545,18 +575,18 @@ impl<M> canvas::Program<M> for TreemapCanvas {
 /// 图例：7 格色块，标签**居中压在各自色块上方**表示该档代表值（同 TradingView：
 /// `−13% −8% −3% 0 3% 8% 13%`）。第一版在色块**之间**标边界值，导致标签和色块
 /// 一一对不上，读起来要在心里错半格。
-fn legend<'a>(cb: ColorBy, p: Palette) -> Element<'a, RadarMsg> {
+fn legend<'a>(key: &'static str, p: Palette) -> Element<'a, RadarMsg> {
     const SW: f32 = 34.0;
-    let e = edges(cb);
+    let e = edges(key);
     let r = ramp(p);
     let cells: [(Color, String); 7] = [
-        (r.down[2], format!("-{}", edge_label(cb, e[2]))),
-        (r.down[1], format!("-{}", edge_label(cb, e[1]))),
-        (r.down[0], format!("-{}", edge_label(cb, e[0]))),
-        (C_NEUTRAL, "0".into()),
-        (r.up[0], format!("+{}", edge_label(cb, e[0]))),
-        (r.up[1], format!("+{}", edge_label(cb, e[1]))),
-        (r.up[2], format!("+{}", edge_label(cb, e[2]))),
+        (r.down[2], format!("-{}", edge_label(key, e[2]))),
+        (r.down[1], format!("-{}", edge_label(key, e[1]))),
+        (r.down[0], format!("-{}", edge_label(key, e[0]))),
+        (C_NEUTRAL, if center(key) == 1.0 { "1×".into() } else { "0".into() }),
+        (r.up[0], format!("+{}", edge_label(key, e[0]))),
+        (r.up[1], format!("+{}", edge_label(key, e[1]))),
+        (r.up[2], format!("+{}", edge_label(key, e[2]))),
     ];
     let mut labels = row![].spacing(1);
     let mut swatches = row![].spacing(1);
@@ -641,6 +671,35 @@ fn head_cell<'a>(col: &Col, v: ViewState) -> Element<'a, RadarMsg> {
     .into()
 }
 
+/// 来源市场下拉的一项。`key` 是快照里的 venue（空串 = 全部）。
+///
+/// venue 形如 `tv:america:stock` / `binance:linear`；显示时剥掉 `tv:` 前缀，
+/// 否则每一项前面都顶着一样的前缀，看不出差别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarketOpt {
+    pub key: &'static str,
+    label: &'static str,
+}
+
+impl MarketOpt {
+    fn all() -> Self {
+        MarketOpt { key: "", label: "全部市场" }
+    }
+    /// venue 来自快照、生命周期不是 `'static`；泄漏一份短字符串换取 `pick_list`
+    /// 需要的 `'static`。市场数由配置封顶（几十个），不会无界增长。
+    fn of(v: &str) -> Self {
+        let key: &'static str = Box::leak(v.to_string().into_boxed_str());
+        let short = key.strip_prefix("tv:").unwrap_or(key);
+        MarketOpt { key, label: short }
+    }
+}
+
+impl std::fmt::Display for MarketOpt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label)
+    }
+}
+
 /// 0..1 → 定宽条形。纯文本块拼的，够表达占比且不必再起一层 canvas。
 fn bar<'a>(frac: Option<f64>, width: usize, c: Color) -> Element<'a, RadarMsg> {
     let Some(f) = frac else {
@@ -691,14 +750,14 @@ fn overview_view<'a>(rows: &[OverviewRow], v: ViewState) -> Element<'a, RadarMsg
             tr = tr.push(cell(
                 pct_log(r.local[i]),
                 82.0,
-                scale_text(r.local[i], ColorBy::Change, v.palette, true),
+                scale_text(r.local[i].map(|x| (x.exp() - 1.0) * 100.0), "change", v.palette, true),
                 true,
             ));
             // 美元口径缺席就是缺席——绝不退回本币值
             tr = tr.push(cell(
                 pct_log(r.usd[i]),
                 82.0,
-                scale_text(r.usd[i], ColorBy::Change, v.palette, true),
+                scale_text(r.usd[i].map(|x| (x.exp() - 1.0) * 100.0), "change", v.palette, true),
                 true,
             ));
         }
@@ -914,15 +973,37 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
     // ── 资产类过滤 ──
     // 股票的成交额远大于加密，同图时加密会被挤到几乎看不见（实测 BTC 只剩一个小格）。
-    let vis = visible(&st.rows, v.asset);
+    let vis = visible(&st.rows, v.asset, v.market);
     let mut ar = row![text("资产 ").size(11).color(C_DIM)].spacing(3);
     for (a, l) in [
         (AssetFilter::All, "全部"),
-        (AssetFilter::Crypto, "加密"),
+        (AssetFilter::Crypto, "加密货币"),
         (AssetFilter::Equity, "股票"),
+        (AssetFilter::Etf, "ETF"),
     ] {
         ar = ar.push(chip(l, a == v.asset, RadarMsg::SetAsset(a)));
     }
+    // 来源市场下拉（TV 的「来源」）。选项由当前资产类下**实际存在**的 venue 生成——
+    // 硬编码一张市场表的话，用户在 radar.toml 里增减市场后下拉就会对不上。
+    let mut venues: Vec<&str> = visible(&st.rows, v.asset, "")
+        .iter()
+        .map(|&i| st.rows[i].venue.as_str())
+        .collect();
+    venues.sort_unstable();
+    venues.dedup();
+    let mut opts: Vec<MarketOpt> = vec![MarketOpt::all()];
+    opts.extend(venues.iter().map(|x| MarketOpt::of(x)));
+    let cur = opts
+        .iter()
+        .find(|o| o.key == v.market)
+        .copied()
+        .unwrap_or_else(MarketOpt::all);
+    ar = ar.push(text("　来源 ").size(11).color(C_DIM));
+    ar = ar.push(
+        pick_list(opts, Some(cur), |o: MarketOpt| RadarMsg::SetMarket(o.key))
+            .text_size(11)
+            .padding([2, 6]),
+    );
     ar = ar.push(
         text(format!("　{} / {} 行", vis.len(), st.rows.len()))
             .size(10)
@@ -943,10 +1024,12 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     for (i, w) in WINDOWS.iter().enumerate() {
         r1 = r1.push(chip(w, i == v.win, RadarMsg::SetWindow(i)));
     }
-    r1 = r1.push(text("　面积 ").size(11).color(C_DIM));
-    for (s, l) in [(SizeBy::Turnover, "24h 成交额"), (SizeBy::Equal, "等权")] {
-        r1 = r1.push(chip(l, s == v.size_by, RadarMsg::SetSizeBy(s)));
-    }
+    r1 = r1.push(text("　大小 ").size(11).color(C_DIM));
+    r1 = r1.push(
+        pick_list(SIZE_OPTS.to_vec(), Some(v.size), RadarMsg::SetSize)
+            .text_size(11)
+            .padding([2, 6]),
+    );
     r1 = r1.push(text("　分组 ").size(11).color(C_DIM));
     for (g, l) in [
         (GroupBy::None, "无"),
@@ -959,30 +1042,25 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     body = body.push(r1.align_y(iced::Alignment::Center));
 
     let mut r2 = row![text("颜色 ").size(11).color(C_DIM)].spacing(3);
-    for (c, l) in [
-        (ColorBy::SpeedZ, "涨跌速度 z"),
-        (ColorBy::Change, "裸涨跌幅"),
-        (ColorBy::VolZ, "量异常 z"),
-    ] {
-        r2 = r2.push(chip(l, c == v.color_by, RadarMsg::SetColorBy(c)));
-    }
-    r2 = r2.push(text("　　").size(11));
-    r2 = r2.push(legend(v.color_by, v.palette));
+    r2 = r2.push(
+        pick_list(COLOR_OPTS.to_vec(), Some(v.color), RadarMsg::SetColor)
+            .text_size(11)
+            .padding([2, 6]),
+    );
+    r2 = r2.push(text("　").size(11));
+    r2 = r2.push(legend(v.color.key, v.palette));
     body = body.push(r2.align_y(iced::Alignment::Center));
 
-    if v.color_by == ColorBy::Change {
-        body = body.push(
-            text("⚠ 裸涨跌幅跨标的不可比——小市值/低流动标的会占满深色档，对照用")
-                .size(10)
-                .color(C_GOLD),
-        );
-    }
-    if v.color_by == ColorBy::VolZ {
-        body = body.push(
-            text("ⓘ 量异常只看正尾：负值来自 24 小时前那段量掉出滚动窗口，不代表当前清淡")
-                .size(10)
-                .color(C_DIM),
-        );
+    let hint = match v.color.key {
+        "own:ret_pct" => Some("⚠ 裸涨跌幅跨标的不可比——小市值/低流动标的会占满深色档，对照用"),
+        "own:zvol" => Some("ⓘ 量异常只看正尾：负值来自 24 小时前那段量掉出滚动窗口，不代表当前清淡"),
+        "Volatility.D" => Some("ⓘ 波动率恒非负，用单向量级色阶（深=波动大），不是涨跌方向"),
+        "relative_volume_10d_calc" => Some("ⓘ 相对成交量以 1.0× 为常态，中性档即常态量"),
+        "premarket_change" | "postmarket_change" => Some("ⓘ 盘前/盘后只有股票有；加密与休市市场会是空值"),
+        _ => None,
+    };
+    if let Some(h) = hint {
+        body = body.push(text(h).size(10).color(C_GOLD));
     }
 
     // ── 树图 ──
@@ -993,19 +1071,24 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     let picked = top_by_turnover_within(&st.rows, &vis, 180);
     let mk_tile = |i: usize| {
         let r = &st.rows[i];
-        let m = color_metric(r, v);
+        let m = metric_value(r, v.color.key, v.win);
         TileData {
             label: base_asset(&r.symbol).to_string(),
-            value: match v.color_by {
-                ColorBy::Change => opt_pct(m),
-                _ => opt_z(m),
+            // 百分数类带 %，z/倍数类不带
+            value: if crate::ws::radar::scale_kind(v.color.key) == ScaleKind::AroundOne {
+                m.map(|x| format!("{x:.2}×")).unwrap_or_else(|| "—".into())
+            } else if v.color.key.starts_with("own:") && v.color.key != "own:ret_pct" {
+                opt_z(m)
+            } else {
+                m.map(|x| format!("{x:+.2}%")).unwrap_or_else(|| "—".into())
             },
-            value_compact: match v.color_by {
-                ColorBy::Change => opt_pct_compact(m),
-                _ => opt_z_compact(m),
+            value_compact: if v.color.key.starts_with("own:") && v.color.key != "own:ret_pct" {
+                opt_z_compact(m)
+            } else {
+                m.map(|x| format!("{x:+.1}")).unwrap_or_else(|| "—".into())
             },
-            weight: area_weight(r, v.size_by),
-            color: scale_color(m, v.color_by, v.palette, r.trustworthy()),
+            weight: area_weight(r, v),
+            color: scale_color(m, v.color.key, v.palette, r.trustworthy()),
         }
     };
     /// 一行归入哪个分组。空值统一落到「其他」，免得散成一堆无名组。
@@ -1147,7 +1230,7 @@ mod tests {
     #[test]
     fn buckets_are_discrete_and_symmetric() {
         // 从 edges() 推探针，别硬编码——调过一次分档边界，硬编码的断言会假失败
-        let e = edges(ColorBy::SpeedZ);
+        let e = edges("own:speed_z");
         assert_eq!(bucket(0.0, &e), 0);
         assert_eq!(bucket(e[0] - 1e-9, &e), 0);
         for (i, x) in e.iter().enumerate() {
@@ -1163,8 +1246,7 @@ mod tests {
     fn legend_and_tiles_share_one_definition() {
         // 图例画 4 档跌 + 中性 + 4 档涨；上色也必须只用这 9 个颜色。
         // 两者若各写一套，图例和格子会对不上——那比没有图例更糟。
-        for cb in [ColorBy::SpeedZ, ColorBy::Change, ColorBy::VolZ] {
-            let e = edges(cb);
+        for cb in ["own:speed_z", "change", "Perf.YTD", "relative_volume_10d_calc"] {
             for probe in [-9.0, -3.0, -1.0, -0.1, 0.0, 0.1, 1.0, 3.0, 9.0] {
                 let c = scale_color(Some(probe), cb, P, true);
                 let r = ramp(P);
@@ -1174,23 +1256,23 @@ mod tests {
                     .any(|k| (k.r - c.r).abs() < 1e-6 && (k.g - c.g).abs() < 1e-6);
                 assert!(known, "{cb:?} 在 {probe} 处上了色阶之外的颜色");
             }
-            assert_eq!(e.len(), 3, "7 档色阶 = 3 个边界");
+            assert_eq!(edges(cb).len(), 3, "7 档色阶 = 3 个边界");
         }
     }
 
     #[test]
     fn color_is_diverging_and_desaturates_untrusted() {
-        let up = scale_color(Some(4.0), ColorBy::SpeedZ, P, true);
-        let down = scale_color(Some(-4.0), ColorBy::SpeedZ, P, true);
+        let up = scale_color(Some(4.0), "own:speed_z", P, true);
+        let down = scale_color(Some(-4.0), "own:speed_z", P, true);
         assert!(up.b > up.r, "涨端应偏蓝");
         assert!(down.r > down.b, "跌端应偏橙");
         let dist = |c: Color| (c.r - C_NEUTRAL.r).abs() + (c.b - C_NEUTRAL.b).abs();
-        assert!(dist(scale_color(Some(4.0), ColorBy::SpeedZ, P, false)) < dist(up));
+        assert!(dist(scale_color(Some(4.0), "own:speed_z", P, false)) < dist(up));
     }
 
     #[test]
     fn missing_value_is_neutral() {
-        let c = scale_color(None, ColorBy::SpeedZ, P, true);
+        let c = scale_color(None, "own:speed_z", P, true);
         assert!((c.r - C_NEUTRAL.r).abs() < 1e-6 && (c.b - C_NEUTRAL.b).abs() < 1e-6);
     }
 
@@ -1249,8 +1331,11 @@ mod tests {
     fn area_weight_equal_mode_ignores_turnover() {
         let mut r = row_of("A", Some(1.0));
         r.quote_vol_24h = 9e9;
-        assert!((area_weight(&r, SizeBy::Equal) - 1.0).abs() < 1e-12);
-        assert!((area_weight(&r, SizeBy::Turnover) - 9e9).abs() < 1e-3);
+        let mut v = ViewState::DEFAULT;
+        v.size = SIZE_OPTS.iter().find(|o| o.key == "equal").copied().unwrap();
+        assert!((area_weight(&r, v) - 1.0).abs() < 1e-12);
+        v.size = SIZE_OPTS.iter().find(|o| o.key == "own:turnover").copied().unwrap();
+        assert!((area_weight(&r, v) - 9e9).abs() < 1e-3);
     }
 
     #[test]
@@ -1275,7 +1360,7 @@ mod tests {
         cr.quote_vol_24h = 1e6;
         cr.asset = "crypto".into();
         let rows = vec![eq, cr];
-        let sub = super::visible(&rows, AssetFilter::Crypto);
+        let sub = super::visible(&rows, AssetFilter::Crypto, "");
         let top = top_by_turnover_within(&rows, &sub, 5);
         assert_eq!(top.len(), 1);
         assert_eq!(rows[top[0]].symbol, "BTCUSDT");
@@ -1364,9 +1449,9 @@ mod tests {
         let sep = |a: Color, b: Color| {
             (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
         };
-        let up1 = scale_color(Some(0.4), ColorBy::SpeedZ, P, true);
-        let dn1 = scale_color(Some(-0.4), ColorBy::SpeedZ, P, true);
-        let neu = scale_color(Some(0.0), ColorBy::SpeedZ, P, true);
+        let up1 = scale_color(Some(0.4), "own:speed_z", P, true);
+        let dn1 = scale_color(Some(-0.4), "own:speed_z", P, true);
+        let neu = scale_color(Some(0.0), "own:speed_z", P, true);
         assert!(sep(up1, neu) > 0.15, "最弱涨档与中性太接近：{:.3}", sep(up1, neu));
         assert!(sep(dn1, neu) > 0.15, "最弱跌档与中性太接近：{:.3}", sep(dn1, neu));
         assert!(up1.b > up1.r && dn1.r > dn1.b, "最弱档必须仍带方向色相");
@@ -1377,7 +1462,7 @@ mod tests {
         // 首档边界应在实测 |z| 中位数附近或之下，好让**至少一半市场**能显出方向。
         // 取得太高的话中性档吞掉半张图，图上就没有信息了（第一版取 0.5 的实测问题）。
         const MEASURED_MEDIAN_ABS_Z: f64 = 0.5;
-        let e = edges(ColorBy::SpeedZ);
+        let e = edges("own:speed_z");
         assert!(
             e[0] <= MEASURED_MEDIAN_ABS_Z,
             "首档边界 {} 高过实测 |z| 中位数，半个市场会变中性",
@@ -1391,8 +1476,8 @@ mod tests {
     fn table_text_is_brighter_than_tile_fill() {
         let lum = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
         for probe in [0.6, 1.8, -0.6, -3.9] {
-            let fill = scale_color(Some(probe), ColorBy::SpeedZ, P, true);
-            let txt = scale_text(Some(probe), ColorBy::SpeedZ, P, true);
+            let fill = scale_color(Some(probe), "own:speed_z", P, true);
+            let txt = scale_text(Some(probe), "own:speed_z", P, true);
             assert!(
                 lum(txt) > lum(fill),
                 "z={probe} 文字色不比填充色亮：{:.3} vs {:.3}",
@@ -1404,31 +1489,31 @@ mod tests {
 
     #[test]
     fn text_scale_keeps_direction_and_neutral() {
-        let up = scale_text(Some(3.0), ColorBy::SpeedZ, P, true);
-        let dn = scale_text(Some(-3.0), ColorBy::SpeedZ, P, true);
+        let up = scale_text(Some(3.0), "own:speed_z", P, true);
+        let dn = scale_text(Some(-3.0), "own:speed_z", P, true);
         assert!(up.b > up.r, "涨端应偏蓝");
         assert!(dn.r > dn.b, "跌端应偏橙");
-        assert!((scale_text(None, ColorBy::SpeedZ, P, true).r - C_DIM.r).abs() < 1e-6);
+        assert!((scale_text(None, "own:speed_z", P, true).r - C_DIM.r).abs() < 1e-6);
     }
 
     #[test]
     fn area_weight_never_negative() {
         let mut r = row_of("A", Some(1.0));
         r.quote_vol_24h = -5.0; // 脏数据
-        assert!(area_weight(&r, SizeBy::Turnover) >= 0.0, "负权重会让树图布局出负尺寸");
+        let mut v = ViewState::DEFAULT;
+        v.size = SIZE_OPTS.iter().find(|o| o.key == "own:turnover").copied().unwrap();
+        assert!(area_weight(&r, v) >= 0.0, "负权重会让树图布局出负尺寸");
     }
 
     #[test]
-    fn color_metric_follows_color_by_selector() {
+    fn metric_value_covers_own_and_tv_keys() {
         let mut r = row_of("A", Some(2.0));
         r.ret[1] = Some(0.03);
         r.z_vol = Some(5.0);
-        let mut v = ViewState::DEFAULT;
-        v.color_by = ColorBy::SpeedZ;
-        assert_eq!(color_metric(&r, v), Some(2.0));
-        v.color_by = ColorBy::Change;
-        assert_eq!(color_metric(&r, v), Some(0.03));
-        v.color_by = ColorBy::VolZ;
-        assert_eq!(color_metric(&r, v), Some(5.0));
+        assert_eq!(metric_value(&r, "own:speed_z", 1), Some(2.0));
+        assert_eq!(metric_value(&r, "own:zvol", 1), Some(5.0));
+        r.m.insert("Perf.YTD".into(), 16.3);
+        assert_eq!(metric_value(&r, "Perf.YTD", 1), Some(16.3));
+        assert!(metric_value(&r, "gap", 1).is_none(), "缺的指标应为 None");
     }
 }

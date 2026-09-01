@@ -9,24 +9,78 @@ use std::sync::Mutex;
 
 use super::radar_readout::{RadarRow, N_WIN};
 
-/// 树图的面积口径（对应 TradingView 热图的 "Size by"）。
+/// 一个下拉选项。`key` 是快照契约里的指标键（见 docs/22 §4.3），
+/// `own:` 前缀表示雷达自有指标（TradingView 没有的）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SizeBy {
-    /// 24h 成交额——加密没有市值口径可用，成交额是最接近「重要性」的量。
-    Turnover,
-    /// 等权：每格一样大。看结构不看体量时用。
-    Equal,
+pub struct Opt {
+    pub key: &'static str,
+    pub label: &'static str,
 }
 
-/// 树图的颜色口径（对应 "Color by"）。
+impl std::fmt::Display for Opt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label)
+    }
+}
+
+const fn o(key: &'static str, label: &'static str) -> Opt {
+    Opt { key, label }
+}
+
+/// 「大小来自」——对齐 TradingView 股票热图的 8 项。
+pub const SIZE_OPTS: [Opt; 9] = [
+    o("market_cap_basic", "市值"),
+    o("volume", "成交量 1天"),
+    o("average_volume_10d_calc", "成交量 ~1周"),
+    o("average_volume_30d_calc", "成交量 ~1月"),
+    o("Value.Traded", "价格×成交量 1天"),
+    o("value_traded_10d", "价格×成交量 ~1周"),
+    o("value_traded_30d", "价格×成交量 ~1月"),
+    // 加密没有市值口径，用自有的 24h 成交额
+    o("own:turnover", "24h 成交额（加密）"),
+    o("equal", "相同大小"),
+];
+
+/// 「颜色来自」——TradingView 的 14 项 + 雷达自有的 3 项。
+///
+/// 自有那三项是 TradingView 没有的：波动归一化的涨跌速度、成交额异常度。
+pub const COLOR_OPTS: [Opt; 17] = [
+    o("own:speed_z", "涨跌速度 z（雷达）"),
+    o("own:ret_pct", "涨跌幅·选定窗口（雷达）"),
+    o("own:zvol", "量异常 z（雷达）"),
+    o("change|60", "涨跌 1小时, %"),
+    o("change|240", "涨跌 4小时, %"),
+    o("change", "涨跌 1天, %"),
+    o("Perf.W", "表现 1周, %"),
+    o("Perf.1M", "表现 1月, %"),
+    o("Perf.3M", "表现 3月, %"),
+    o("Perf.6M", "表现 6月, %"),
+    o("Perf.YTD", "表现 YTD, %"),
+    o("Perf.Y", "表现 1年, %"),
+    o("premarket_change", "盘前涨跌, %"),
+    o("postmarket_change", "盘后涨跌, %"),
+    o("relative_volume_10d_calc", "相对成交量"),
+    o("Volatility.D", "波动率 1天, %"),
+    o("gap", "跳空, %"),
+];
+
+/// 色阶形态：决定中性点在哪、以及是否双向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorBy {
-    /// 波动归一化的涨跌速度 z——跨标的可比（docs/22 §3）。
-    SpeedZ,
-    /// 裸涨跌幅。**跨标的不可比**，留作对照。
-    Change,
-    /// 成交额异常度。只有正尾可解读（docs/22 §3）。
-    VolZ,
+pub enum ScaleKind {
+    /// 以 0 为中性的双向（涨跌类）。
+    Diverging,
+    /// 以 1 为中性的双向（相对成交量：1.0 = 常态）。
+    AroundOne,
+    /// 单向量级（波动率恒非负，双向上色是错的）。
+    Magnitude,
+}
+
+pub fn scale_kind(key: &str) -> ScaleKind {
+    match key {
+        "relative_volume_10d_calc" => ScaleKind::AroundOne,
+        "Volatility.D" => ScaleKind::Magnitude,
+        _ => ScaleKind::Diverging,
+    }
 }
 
 /// 树图分组（对应 TradingView 股票热图按板块分组）。加密没有板块，
@@ -60,6 +114,7 @@ pub enum AssetFilter {
     All,
     Crypto,
     Equity,
+    Etf,
 }
 
 impl AssetFilter {
@@ -69,6 +124,7 @@ impl AssetFilter {
             AssetFilter::All => true,
             AssetFilter::Crypto => asset == "crypto",
             AssetFilter::Equity => asset == "equity",
+            AssetFilter::Etf => asset == "etf",
         }
     }
 }
@@ -113,13 +169,15 @@ pub enum SortKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewState {
     pub win: usize,
-    pub size_by: SizeBy,
-    pub color_by: ColorBy,
+    pub size: Opt,
+    pub color: Opt,
     pub group_by: GroupBy,
     pub cols: ColumnSet,
     pub palette: Palette,
     pub mode: ViewMode,
     pub asset: AssetFilter,
+    /// 来源市场过滤（快照里的 venue，空串 = 全部）。对应 TV 的「来源」下拉。
+    pub market: &'static str,
     pub sort: SortKey,
     /// true = 降序。点同一列再点一次翻向。
     pub desc: bool,
@@ -128,13 +186,14 @@ pub struct ViewState {
 impl ViewState {
     pub const DEFAULT: Self = Self {
         win: 1, // 5m
-        size_by: SizeBy::Turnover,
-        color_by: ColorBy::SpeedZ,
+        size: SIZE_OPTS[0],
+        color: COLOR_OPTS[0],
         group_by: GroupBy::None,
         cols: ColumnSet::Overview,
         palette: Palette::BlueOrange,
         mode: ViewMode::Heatmap,
         asset: AssetFilter::All,
+        market: "",
         sort: SortKey::Z(1),
         desc: true,
     };
@@ -146,13 +205,14 @@ pub enum RadarMsg {
     Stop,
     Refresh,
     SetWindow(usize),
-    SetSizeBy(SizeBy),
-    SetColorBy(ColorBy),
+    SetSize(Opt),
+    SetColor(Opt),
     SetGroupBy(GroupBy),
     SetColumns(ColumnSet),
     SetPalette(Palette),
     SetMode(ViewMode),
     SetAsset(AssetFilter),
+    SetMarket(&'static str),
     /// 点列头：同列则翻向，异列则换列并回到降序（数值列降序更符合「看榜」的直觉）。
     SortBy(SortKey),
 }
@@ -182,13 +242,19 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
             };
             v.win = i;
         }
-        RadarMsg::SetSizeBy(s) => v.size_by = s,
-        RadarMsg::SetColorBy(c) => v.color_by = c,
+        RadarMsg::SetSize(x) => v.size = x,
+        RadarMsg::SetColor(x) => v.color = x,
         RadarMsg::SetGroupBy(g) => v.group_by = g,
         RadarMsg::SetColumns(c) => v.cols = c,
         RadarMsg::SetPalette(p) => v.palette = p,
         RadarMsg::SetMode(m) => v.mode = m,
-        RadarMsg::SetAsset(a) => v.asset = a,
+        RadarMsg::SetAsset(a) => {
+            v.asset = a;
+            // 换资产类时清掉市场过滤：加密的 venue 和股票的完全不同，
+            // 留着旧值会得到一张空表，看起来像数据没了
+            v.market = "";
+        }
+        RadarMsg::SetMarket(m) => v.market = m,
         RadarMsg::SortBy(k) => {
             if v.sort == k {
                 v.desc = !v.desc;
@@ -243,15 +309,17 @@ pub fn key_value(r: &RadarRow, k: SortKey) -> Option<f64> {
 }
 
 /// 通过资产类过滤的行下标。
-pub fn visible(rows: &[RadarRow], a: AssetFilter) -> Vec<usize> {
-    (0..rows.len()).filter(|&i| a.keeps(&rows[i].asset)).collect()
+pub fn visible(rows: &[RadarRow], a: AssetFilter, market: &str) -> Vec<usize> {
+    (0..rows.len())
+        .filter(|&i| a.keeps(&rows[i].asset) && (market.is_empty() || rows[i].venue == market))
+        .collect()
 }
 
 /// 按当前口径排序，返回行下标。
 ///
 /// 缺值恒沉底：把「还没热身」排在榜首等于用空数据占据最显眼的位置。
 pub fn order(rows: &[RadarRow], v: ViewState) -> Vec<usize> {
-    order_within(rows, &visible(rows, v.asset), v)
+    order_within(rows, &visible(rows, v.asset, v.market), v)
 }
 
 /// 只对给定子集排序（资产类过滤后用）。
@@ -348,6 +416,83 @@ mod tests {
             let v = apply(ViewState::DEFAULT, RadarMsg::SetGroupBy(g));
             assert_eq!(v.group_by, g);
         }
+    }
+
+    #[test]
+    fn option_lists_match_tradingview_counts() {
+        // 对齐 TV 股票热图：大小 8 项（我们多一项加密成交额）、颜色 14 项（我们多 3 项自有）
+        assert_eq!(SIZE_OPTS.len(), 9);
+        assert_eq!(COLOR_OPTS.len(), 17);
+        let tv_color = COLOR_OPTS.iter().filter(|o| !o.key.starts_with("own:")).count();
+        assert_eq!(tv_color, 14, "TradingView 的 14 个颜色口径不能漏");
+        let tv_size = SIZE_OPTS
+            .iter()
+            .filter(|o| !o.key.starts_with("own:") && o.key != "equal")
+            .count();
+        assert_eq!(tv_size, 7);
+    }
+
+    #[test]
+    fn option_keys_are_unique() {
+        // 键重复会让下拉选中项与实际取值对不上
+        for list in [&SIZE_OPTS[..], &COLOR_OPTS[..]] {
+            let mut k: Vec<_> = list.iter().map(|o| o.key).collect();
+            let n = k.len();
+            k.sort();
+            k.dedup();
+            assert_eq!(k.len(), n);
+        }
+    }
+
+    #[test]
+    fn scale_kind_is_not_diverging_for_magnitudes() {
+        // 波动率恒非负，双向上色是错的；相对成交量的中性点是 1.0 不是 0
+        assert_eq!(scale_kind("Volatility.D"), ScaleKind::Magnitude);
+        assert_eq!(scale_kind("relative_volume_10d_calc"), ScaleKind::AroundOne);
+        assert_eq!(scale_kind("change"), ScaleKind::Diverging);
+        assert_eq!(scale_kind("own:speed_z"), ScaleKind::Diverging);
+    }
+
+    #[test]
+    fn size_and_color_are_settable_independently() {
+        // 按 key 找，不写死下标——加一项就会让下标断言假失败
+        let by = |list: &'static [Opt], k: &str| *list.iter().find(|o| o.key == k).unwrap();
+        let v = apply(ViewState::DEFAULT, RadarMsg::SetSize(by(&SIZE_OPTS, "Value.Traded")));
+        assert_eq!(v.size.key, "Value.Traded");
+        assert_eq!(v.color, ViewState::DEFAULT.color, "换大小不该动颜色");
+        let v = apply(v, RadarMsg::SetColor(by(&COLOR_OPTS, "Perf.YTD")));
+        assert_eq!(v.color.key, "Perf.YTD");
+        assert_eq!(v.size.key, "Value.Traded");
+    }
+
+    #[test]
+    fn switching_asset_clears_the_market_filter() {
+        // 加密的 venue 与股票的完全不同；留着旧值会得到一张空表，看起来像数据没了
+        let mut v = ViewState::DEFAULT;
+        v.market = "tv:america:stock";
+        let v = apply(v, RadarMsg::SetAsset(AssetFilter::Crypto));
+        assert_eq!(v.market, "");
+    }
+
+    #[test]
+    fn market_filter_narrows_to_one_venue() {
+        let mut a = row("NVDA", "tv:america:stock", Some(1.0), None, 1.0);
+        a.asset = "equity".into();
+        let mut b = row("7203", "tv:japan:stock", Some(1.0), None, 1.0);
+        b.asset = "equity".into();
+        let rows = vec![a, b];
+        assert_eq!(visible(&rows, AssetFilter::All, "").len(), 2);
+        let v = visible(&rows, AssetFilter::All, "tv:japan:stock");
+        assert_eq!(v.len(), 1);
+        assert_eq!(rows[v[0]].symbol, "7203");
+    }
+
+    #[test]
+    fn asset_filter_covers_etf() {
+        assert!(AssetFilter::Etf.keeps("etf"));
+        assert!(!AssetFilter::Etf.keeps("equity"));
+        assert!(!AssetFilter::Equity.keeps("etf"), "ETF 不该混进股票");
+        assert!(AssetFilter::All.keeps("etf"));
     }
 
     #[test]

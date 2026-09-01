@@ -29,6 +29,9 @@ pub struct RadarRow {
     pub country: String,
     pub currency: String,
     pub mcap: f64,
+    /// TradingView 口径的全量指标（键见 docs/22 §4.3）。缺的指标**不在表里**，
+    /// 不是 0——面板据此显示「—」并把格子置中性。
+    pub m: std::collections::HashMap<String, f64>,
     pub price: f64,
     pub quote_vol_24h: f64,
     /// 各窗口对数收益。`None` = **该窗口还没热身**，不是「没涨没跌」。
@@ -247,6 +250,15 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                     country: s(o, "country"),
                     currency: s(o, "currency"),
                     mcap: o.get("mcap").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    m: o
+                        .get("m")
+                        .and_then(|x| x.as_object())
+                        .map(|mm| {
+                            mm.iter()
+                                .filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f)))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     price: o.get("price").and_then(|x| x.as_f64()).unwrap_or(0.0),
                     quote_vol_24h: o
                         .get("quote_vol_24h")
@@ -370,6 +382,7 @@ mod tests {
         {"symbol":"NVDA","venue":"tv:america","tier":"C","asset":"equity","name":"NVIDIA Corporation",
          "sector":"Electronic Technology","country":"United States","currency":"USD","mcap":5.2e12,
          "price":1.0,"quote_vol_24h":2e6,
+         "m":{"Perf.YTD":16.3,"gap":-0.6,"relative_volume_10d_calc":1.42,"market_cap_basic":5.2e12},
          "ret":{"1m":0.001},"z_ret":{"1m":1.2},
          "z_vol":4.4,"z_cnt":2.1,"sigma_ok":false,"z_provisional":true}
       ]}"#;
@@ -456,6 +469,19 @@ mod tests {
         // 拿不到汇率时美元口径必须全空，绝不退回本币值
         assert!(o[1].usd.iter().all(Option::is_none));
         assert!(o[1].local[0].is_some());
+    }
+
+    #[test]
+    fn parses_tv_metric_map() {
+        let eq = &board().rows[1];
+        assert_eq!(eq.m.get("Perf.YTD"), Some(&16.3));
+        assert_eq!(eq.m.get("gap"), Some(&-0.6));
+        assert_eq!(eq.m.get("relative_volume_10d_calc"), Some(&1.42));
+        assert!(
+            eq.m.get("premarket_change").is_none(),
+            "没给的指标必须缺席——补 0 会把「没有数据」显示成「值是 0」"
+        );
+        assert!(board().rows[0].m.is_empty(), "加密行没有 m 字段时应为空表");
     }
 
     #[test]
