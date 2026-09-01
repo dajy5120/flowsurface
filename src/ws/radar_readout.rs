@@ -21,6 +21,8 @@ pub struct RadarRow {
     /// 数据等级 A/B/C/D（docs/22 §0）。**逐行**给——一张表里混着 A 档加密和
     /// C 档延迟股票，不标就会被当成同一等级。
     pub tier: String,
+    /// 资产类（`crypto` / `equity` / …）。由数据源声明，面板据此过滤。
+    pub asset: String,
     /// 全称（股票源有，加密源空）。
     pub name: String,
     pub sector: String,
@@ -109,6 +111,8 @@ pub struct RadarReadout {
     pub source: String,
     /// 数据等级（docs/22 §0）：加密直连 = "A"。面板**必须**把它显示出来。
     pub tier: String,
+    /// 资产类（`crypto` / `equity` / …）。由数据源声明，面板据此过滤。
+    pub asset: String,
     pub n_symbols: i64,
     pub refreshed_ms: i64,
     pub rows: Vec<RadarRow>,
@@ -237,6 +241,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                     symbol: s(o, "symbol"),
                     venue: s(o, "venue"),
                     tier: s(o, "tier"),
+                    asset: s(o, "asset"),
                     name: s(o, "name"),
                     sector: s(o, "sector"),
                     country: s(o, "country"),
@@ -359,10 +364,10 @@ mod tests {
                   {"market":"japan","ticker":"TVC:NI225","label":"日本 日经 225","currency":"JPY",
                    "local":{"日":0.0008},"usd":{}}],
       "rows":[
-        {"symbol":"KNCUSDT","venue":"binance:linear","tier":"A","price":0.42,"quote_vol_24h":5.1e6,
+        {"symbol":"KNCUSDT","venue":"binance:linear","tier":"A","asset":"crypto","price":0.42,"quote_vol_24h":5.1e6,
          "ret":{"1m":0.00165,"24h":0.042},"z_ret":{"1m":3.55},
          "z_vol":null,"z_cnt":null,"sigma_ok":true,"z_provisional":false},
-        {"symbol":"NVDA","venue":"tv:america","tier":"C","name":"NVIDIA Corporation",
+        {"symbol":"NVDA","venue":"tv:america","tier":"C","asset":"equity","name":"NVIDIA Corporation",
          "sector":"Electronic Technology","country":"United States","currency":"USD","mcap":5.2e12,
          "price":1.0,"quote_vol_24h":2e6,
          "ret":{"1m":0.001},"z_ret":{"1m":1.2},
@@ -415,6 +420,8 @@ mod tests {
         assert_eq!(r.rows[0].tier, "A", "加密应是 A 档");
         let eq = &r.rows[1];
         assert_eq!(eq.tier, "C", "延迟股票必须标 C，不能被当成实时");
+        assert_eq!(eq.asset, "equity");
+        assert_eq!(r.rows[0].asset, "crypto");
         assert_eq!(eq.name, "NVIDIA Corporation");
         assert_eq!(eq.sector, "Electronic Technology");
         assert_eq!(eq.country, "United States");

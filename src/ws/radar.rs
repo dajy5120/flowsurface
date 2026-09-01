@@ -53,6 +53,26 @@ pub enum Palette {
     RedUp,
 }
 
+/// 资产类过滤。股票的成交额远大于加密，同图时加密会被挤到看不见——
+/// 想专看某一类就用这个，而不是靠分组去找。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetFilter {
+    All,
+    Crypto,
+    Equity,
+}
+
+impl AssetFilter {
+    /// 该行是否通过。`All` 恒通过。
+    pub fn keeps(self, asset: &str) -> bool {
+        match self {
+            AssetFilter::All => true,
+            AssetFilter::Crypto => asset == "crypto",
+            AssetFilter::Equity => asset == "equity",
+        }
+    }
+}
+
 /// 面板视图。三块回答的是不同问题（docs/22 §2）：
 /// 热图=「谁在动」、总览=「哪个国家最强」、宽度=「整个市场什么状态」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +119,7 @@ pub struct ViewState {
     pub cols: ColumnSet,
     pub palette: Palette,
     pub mode: ViewMode,
+    pub asset: AssetFilter,
     pub sort: SortKey,
     /// true = 降序。点同一列再点一次翻向。
     pub desc: bool,
@@ -113,6 +134,7 @@ impl ViewState {
         cols: ColumnSet::Overview,
         palette: Palette::BlueOrange,
         mode: ViewMode::Heatmap,
+        asset: AssetFilter::All,
         sort: SortKey::Z(1),
         desc: true,
     };
@@ -130,6 +152,7 @@ pub enum RadarMsg {
     SetColumns(ColumnSet),
     SetPalette(Palette),
     SetMode(ViewMode),
+    SetAsset(AssetFilter),
     /// 点列头：同列则翻向，异列则换列并回到降序（数值列降序更符合「看榜」的直觉）。
     SortBy(SortKey),
 }
@@ -165,6 +188,7 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
         RadarMsg::SetColumns(c) => v.cols = c,
         RadarMsg::SetPalette(p) => v.palette = p,
         RadarMsg::SetMode(m) => v.mode = m,
+        RadarMsg::SetAsset(a) => v.asset = a,
         RadarMsg::SortBy(k) => {
             if v.sort == k {
                 v.desc = !v.desc;
@@ -218,11 +242,21 @@ pub fn key_value(r: &RadarRow, k: SortKey) -> Option<f64> {
     }
 }
 
+/// 通过资产类过滤的行下标。
+pub fn visible(rows: &[RadarRow], a: AssetFilter) -> Vec<usize> {
+    (0..rows.len()).filter(|&i| a.keeps(&rows[i].asset)).collect()
+}
+
 /// 按当前口径排序，返回行下标。
 ///
 /// 缺值恒沉底：把「还没热身」排在榜首等于用空数据占据最显眼的位置。
 pub fn order(rows: &[RadarRow], v: ViewState) -> Vec<usize> {
-    let mut idx: Vec<usize> = (0..rows.len()).collect();
+    order_within(rows, &visible(rows, v.asset), v)
+}
+
+/// 只对给定子集排序（资产类过滤后用）。
+pub fn order_within(rows: &[RadarRow], subset: &[usize], v: ViewState) -> Vec<usize> {
+    let mut idx: Vec<usize> = subset.to_vec();
     idx.sort_by(|&a, &b| {
         let (ra, rb) = (&rows[a], &rows[b]);
         let ord = match v.sort {
@@ -266,6 +300,36 @@ mod tests {
         r.z_ret[1] = z5;
         r.ret[1] = ret5;
         r
+    }
+
+    #[test]
+    fn asset_filter_keeps_only_the_selected_class() {
+        assert!(AssetFilter::All.keeps("crypto") && AssetFilter::All.keeps("equity"));
+        assert!(AssetFilter::Crypto.keeps("crypto"));
+        assert!(!AssetFilter::Crypto.keeps("equity"));
+        assert!(AssetFilter::Equity.keeps("equity"));
+        assert!(!AssetFilter::Equity.keeps("crypto"));
+        // 未声明资产类的行不该被任何具体过滤器意外收进来
+        assert!(!AssetFilter::Crypto.keeps(""));
+        assert!(!AssetFilter::Equity.keeps("other"));
+    }
+
+    #[test]
+    fn order_respects_the_asset_filter() {
+        let mut c = row("BTCUSDT", "binance:linear", Some(9.0), None, 1.0);
+        c.asset = "crypto".into();
+        let mut e = row("NVDA", "tv:america", Some(1.0), None, 2.0);
+        e.asset = "equity".into();
+        let rows = vec![c, e];
+
+        let mut v = ViewState::DEFAULT;
+        assert_eq!(order(&rows, v).len(), 2);
+        v.asset = AssetFilter::Equity;
+        let o = order(&rows, v);
+        assert_eq!(o.len(), 1, "过滤后只该剩股票");
+        assert_eq!(rows[o[0]].symbol, "NVDA");
+        v.asset = AssetFilter::Crypto;
+        assert_eq!(rows[order(&rows, v)[0]].symbol, "BTCUSDT");
     }
 
     #[test]

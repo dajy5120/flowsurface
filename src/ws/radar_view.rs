@@ -21,8 +21,8 @@ use iced::widget::{button, canvas as canvas_widget, column, container, row, scro
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use super::radar::{
-    order, ColorBy, ColumnSet, GroupBy, Palette, RadarMsg, SizeBy, SortKey, ViewMode,
-    ViewState,
+    order, visible, AssetFilter, ColorBy, ColumnSet, GroupBy, Palette, RadarMsg, SizeBy,
+    SortKey, ViewMode, ViewState,
 };
 use super::radar_readout::{BreadthRow, OverviewRow, RadarReadout, RadarRow, OV_WINDOWS, WINDOWS};
 use super::treemap::{squarify_nested, Rect};
@@ -281,7 +281,12 @@ pub(crate) fn columns(v: ViewState) -> Vec<Col> {
 
 /// 按 24h 成交额取前 n 个（树图选行）。同额按标的定序，避免刷新抖动。
 pub(crate) fn top_by_turnover(rows: &[RadarRow], n: usize) -> Vec<usize> {
-    let mut idx: Vec<usize> = (0..rows.len()).collect();
+    top_by_turnover_within(rows, &(0..rows.len()).collect::<Vec<_>>(), n)
+}
+
+/// 只在给定子集里取前 n（资产类过滤后用）。
+pub(crate) fn top_by_turnover_within(rows: &[RadarRow], subset: &[usize], n: usize) -> Vec<usize> {
+    let mut idx: Vec<usize> = subset.to_vec();
     idx.sort_by(|&a, &b| {
         rows[b]
             .quote_vol_24h
@@ -907,6 +912,32 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
 
+    // ── 资产类过滤 ──
+    // 股票的成交额远大于加密，同图时加密会被挤到几乎看不见（实测 BTC 只剩一个小格）。
+    let vis = visible(&st.rows, v.asset);
+    let mut ar = row![text("资产 ").size(11).color(C_DIM)].spacing(3);
+    for (a, l) in [
+        (AssetFilter::All, "全部"),
+        (AssetFilter::Crypto, "加密"),
+        (AssetFilter::Equity, "股票"),
+    ] {
+        ar = ar.push(chip(l, a == v.asset, RadarMsg::SetAsset(a)));
+    }
+    ar = ar.push(
+        text(format!("　{} / {} 行", vis.len(), st.rows.len()))
+            .size(10)
+            .color(C_DIM),
+    );
+    body = body.push(ar.align_y(iced::Alignment::Center));
+    if vis.is_empty() {
+        body = body.push(
+            text("该资产类暂无数据——股票层需在 radar.toml 的 [equities] 里开启")
+                .size(11)
+                .color(C_GOLD),
+        );
+        return scrollable(body).width(Length::Fill).height(Length::Fill).into();
+    }
+
     // ── 热图控制条 ──
     let mut r1 = row![text("窗口 ").size(11).color(C_DIM)].spacing(3);
     for (i, w) in WINDOWS.iter().enumerate() {
@@ -959,7 +990,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // 树图选行**按体量**，不按当前排序：热图要回答「整个市场此刻什么样」，
     // 取排序前 N 会让整张图只剩涨幅榜（实测就是满屏一片蓝，看不到任何下跌）。
     // 排序只管下面的 Screener。超过 180 格就小于可辨识尺寸，只会拖慢绘制。
-    let picked = top_by_turnover(&st.rows, 180);
+    let picked = top_by_turnover_within(&st.rows, &vis, 180);
     let mk_tile = |i: usize| {
         let r = &st.rows[i];
         let m = color_metric(r, v);
@@ -1042,7 +1073,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     }
     let shown = idx.len().min(80);
     cs = cs.push(
-        text(format!("　{} / {} 条 · 点列头排序", shown, st.rows.len()))
+        text(format!("　{} / {} 条 · 点列头排序", shown, idx.len()))
             .size(10)
             .color(C_DIM),
     );
@@ -1232,6 +1263,22 @@ mod tests {
         let rows = vec![small, big];
         let top = top_by_turnover(&rows, 1);
         assert_eq!(rows[top[0]].symbol, "BIG", "体量最大的必须进图，哪怕它 z 最低");
+    }
+
+    #[test]
+    fn treemap_selection_honours_the_asset_subset() {
+        // 股票成交额远大于加密；不按子集选行的话，切到「加密」后图上还是股票
+        let mut eq = row_of("NVDA", Some(1.0));
+        eq.quote_vol_24h = 9e9;
+        eq.asset = "equity".into();
+        let mut cr = row_of("BTCUSDT", Some(1.0));
+        cr.quote_vol_24h = 1e6;
+        cr.asset = "crypto".into();
+        let rows = vec![eq, cr];
+        let sub = super::visible(&rows, AssetFilter::Crypto);
+        let top = top_by_turnover_within(&rows, &sub, 5);
+        assert_eq!(top.len(), 1);
+        assert_eq!(rows[top[0]].symbol, "BTCUSDT");
     }
 
     #[test]
