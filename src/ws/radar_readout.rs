@@ -1,7 +1,8 @@
 //! 全市场雷达面板只读快照（docs/22 §4.2）。
 //!
 //! **独立新增面板**（`Content::MarketMap`）——不改任何既有面板/readout。数据源（全只读）：
-//! `~/ws-data/live/radar_board.json`（`ws-radar` 守护产出）。沿用
+//! `$XDG_RUNTIME_DIR/wealthspring/radar_board.json`（`ws-radar` 守护产出，
+//! 落在 tmpfs 上、不写硬盘，见 `runtime_dir_from`）。沿用
 //! c4_readout / prediction_readout 的旁路 poller 模式，但节拍取 2s——守护 5s 出一版，
 //! 10s 会让面板明显滞后于数据。
 
@@ -178,14 +179,43 @@ static WAKER: super::svcctl::Waker = super::svcctl::Waker::new();
 
 pub const RADAR_SVC: &str = "ws-radar.service";
 
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+/// 快照落点：**内存文件系统，不写硬盘**。
+///
+/// 快照是纯易失数据，重启就该重新生成，没有一份值得留在盘上；写盘的唯一
+/// 后果是磨损 SSD（实测 0.23 MB/s、一天 20GB）。按顺序取第一个可用的：
+///   1. `$XDG_RUNTIME_DIR/wealthspring`（systemd 给每个用户挂的 tmpfs，0700、登出即清）
+///   2. `/dev/shm/wealthspring-$USER`（tmpfs 兜底）
+///   3. `$HOME/ws-data/live`（**会写盘**，只在系统没有 tmpfs 时走到）
+///
+/// ⚠ 守护侧 `wealthspring-radar/src/runtime.rs` 有一份**逐字相同**的实现。
+/// 两个 crate 互不依赖，只能各写一份，靠两边同名的单测钉住同样的行为——
+/// 一边改了另一边没改，表现是面板永远「等待数据」而守护日志一切正常。
+fn runtime_dir_from(xdg: Option<&str>, user: Option<&str>, home: Option<&str>) -> PathBuf {
+    // 空字符串按「没设」处理：systemd 里未设的变量常常是空串而不是不存在
+    fn ok(s: Option<&str>) -> Option<&str> {
+        s.filter(|v| !v.is_empty())
+    }
+    if let Some(x) = ok(xdg) {
+        return PathBuf::from(x).join("wealthspring");
+    }
+    if std::path::Path::new("/dev/shm").is_dir() {
+        return PathBuf::from(format!("/dev/shm/wealthspring-{}", ok(user).unwrap_or("ws")));
+    }
+    PathBuf::from(ok(home).unwrap_or("/tmp")).join("ws-data/live")
+}
+
+fn runtime_dir() -> PathBuf {
+    runtime_dir_from(
+        std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
+        std::env::var("USER").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
 }
 
 fn board_path() -> PathBuf {
     std::env::var("WS_RADAR_BOARD")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join("ws-data/live/radar_board.json"))
+        .unwrap_or_else(|_| runtime_dir().join("radar_board.json"))
 }
 
 /// 慢层快照（股票/ETF + 宽度 + 总览），与热层同目录、文件名加 `_slow`。
@@ -213,7 +243,7 @@ pub fn request_refresh() {
 fn request_path() -> PathBuf {
     std::env::var("WS_RADAR_REQUEST")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join("ws-data/live/radar_request.json"))
+        .unwrap_or_else(|_| runtime_dir().join("radar_request.json"))
 }
 
 /// 纯构造（可单测）：选中的来源 → 请求 JSON。
@@ -535,6 +565,71 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
 
 #[cfg(test)]
 mod tests {
+
+    // ── 快照落点（与守护侧 runtime.rs 逐字相同的行为，两边同名单测钉住）──
+
+    #[test]
+    fn xdg_runtime_dir_wins() {
+        assert_eq!(
+            runtime_dir_from(Some("/run/user/1000"), Some("dajy"), Some("/home/dajy")),
+            PathBuf::from("/run/user/1000/wealthspring")
+        );
+    }
+
+    #[test]
+    fn empty_env_counts_as_unset() {
+        // systemd 里未设的变量常常是空串；当成已设会得到 "/wealthspring"
+        let p = runtime_dir_from(Some(""), Some("dajy"), Some("/home/dajy"));
+        assert_ne!(p, PathBuf::from("/wealthspring"));
+        assert!(p.is_absolute());
+    }
+
+    #[test]
+    fn falls_back_to_shm_when_xdg_missing() {
+        if std::path::Path::new("/dev/shm").is_dir() {
+            assert_eq!(
+                runtime_dir_from(None, Some("dajy"), Some("/home/dajy")),
+                PathBuf::from("/dev/shm/wealthspring-dajy")
+            );
+            assert_eq!(
+                runtime_dir_from(None, None, Some("/home/dajy")),
+                PathBuf::from("/dev/shm/wealthspring-ws")
+            );
+        }
+    }
+
+    #[test]
+    fn never_returns_a_relative_or_empty_path() {
+        // 相对路径会让守护和面板按各自的 cwd 解析到不同文件，
+        // 表现是面板一直「等待数据」而守护日志一切正常
+        for c in [
+            (Some("/run/user/1000"), Some("u"), Some("/home/u")),
+            (None, Some("u"), Some("/home/u")),
+            (None, None, None),
+        ] {
+            let p = runtime_dir_from(c.0, c.1, c.2);
+            assert!(p.is_absolute() && p.as_os_str().len() > 1, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn default_location_is_not_on_disk() {
+        // 这几条测试存在的理由：默认落点必须在 tmpfs 上
+        let d = runtime_dir();
+        let tmpfs = d.starts_with("/run/user") || d.starts_with("/dev/shm");
+        assert!(
+            tmpfs || !std::path::Path::new("/dev/shm").is_dir(),
+            "有 tmpfs 却把快照默认读写到了 {d:?}"
+        );
+    }
+
+    #[test]
+    fn hot_and_slow_and_request_share_one_directory() {
+        // 三个文件必须同目录：慢层路径是从热层派生的，
+        // 控制通道分家的话面板改的来源守护看不到
+        assert_eq!(board_path().parent(), slow_path().parent());
+        assert_eq!(board_path().parent(), request_path().parent());
+    }
     use super::*;
 
     const BOARD: &str = r#"{
