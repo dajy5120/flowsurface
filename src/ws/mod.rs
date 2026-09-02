@@ -34,6 +34,7 @@ pub mod signals;
 pub mod staleness;
 pub mod svcctl;
 pub mod radar;
+pub mod radar_filter;
 pub mod radar_readout;
 pub mod radar_view;
 pub mod treemap;

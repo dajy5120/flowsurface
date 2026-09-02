@@ -26,6 +26,7 @@ use super::radar::{
     order, scale_kind, visible, AssetFilter, ColumnSet, GroupBy, Palette, RadarMsg,
     ScaleKind, SortKey, ViewMode, ViewState, COLOR_OPTS, SIZE_OPTS,
 };
+use super::radar_filter::{self, FILTERS, N_FILTERS};
 use super::radar_readout::{BreadthRow, OverviewRow, RadarReadout, RadarRow, OV_WINDOWS, WINDOWS};
 use super::treemap::{squarify_nested, Rect};
 
@@ -185,6 +186,9 @@ pub(crate) fn metric_value(r: &RadarRow, key: &str, win: usize) -> Option<f64> {
     match key {
         "equal" => Some(1.0),
         "own:turnover" => Some(r.quote_vol_24h.max(0.0)),
+        // 加密行的 `m` 里没有 `close`（那是股票 scanner 的列），
+        // 价格筛选用行上的 price 字段才能同时覆盖两类
+        "own:price" => Some(r.price).filter(|x| *x > 0.0),
         "own:speed_z" => r.z_ret[win],
         "own:zvol" => r.z_vol,
         "own:ret_pct" => r.ret[win].map(|x| (x.exp() - 1.0) * 100.0),
@@ -234,6 +238,25 @@ fn money_cell(v: f64) -> String {
         usd(v)
     } else {
         format!("{v:.2}")
+    }
+}
+
+/// Unix 秒 → `MM-DD`（同年）或 `YY-MM-DD`。财报日期用。
+///
+/// 不加这一路，表里会直接显示 `1795608000`。
+fn date_cell(secs: f64) -> String {
+    use chrono::{Datelike, TimeZone};
+    if !secs.is_finite() || secs <= 0.0 {
+        return "—".into();
+    }
+    let Some(t) = chrono::Local.timestamp_opt(secs as i64, 0).single() else {
+        return "—".into();
+    };
+    let now = chrono::Local::now();
+    if t.year() == now.year() {
+        format!("{:02}-{:02}", t.month(), t.day())
+    } else {
+        format!("{:02}-{:02}-{:02}", t.year() % 100, t.month(), t.day())
     }
 }
 
@@ -398,6 +421,9 @@ pub(crate) fn metric_title(k: &str) -> &str {
         "oper_income_ttm" => "营业利润",
         "net_income_ttm" => "净利润",
         "ebitda_ttm" => "EBITDA",
+        "earnings_release_date" => "上次财报",
+        "earnings_release_next_date" => "下次财报",
+        "beta_1_year" => "Beta",
         "price_target_average" => "目标价",
         "recommendation_total" => "分析师数",
         "recommendation_mark" => "分析师评级",
@@ -405,12 +431,14 @@ pub(crate) fn metric_title(k: &str) -> &str {
     }
 }
 
+/// 列宽。由表头实际排版宽度反推：`text_units` 是**字号的倍数**（中文 1.0、
+/// 西文 0.62），表头字号 11，排序箭头再占约 2 个单位，左右内边距 8。
+///
+/// 原来按 `chars().count()` 判断长短：中文标题都短，看不出问题；一旦某个键
+/// 漏了中文名而回退到原始键（`earnings_release_date` 折合 13 个单位 ≈143px），
+/// 就会算出 78px 然后和右边一列叠在一起。
 fn metric_width(k: &str) -> f32 {
-    if crate::ws::radar_view::metric_title(k).chars().count() >= 6 {
-        92.0
-    } else {
-        78.0
-    }
+    ((text_units(metric_title(k)) + 2.0) * 11.0 + 8.0).clamp(78.0, 132.0)
 }
 
 /// 树图去重键。
@@ -484,6 +512,7 @@ pub(crate) fn cell_text(
                 // 量纲由目录标注：百分数带 %、金额缩写并加 $、其余原样
                 Some(x) if cat.pct_keys.contains(key) => format!("{x:+.2}%"),
                 Some(x) if cat.money_keys.contains(key) => money_cell(x),
+                Some(x) if cat.date_keys.contains(key) => date_cell(x),
                 Some(x) if x.abs() >= 1e6 => usd(x),
                 Some(x) => format!("{x:.2}"),
             };
@@ -761,6 +790,82 @@ fn legend<'a>(key: &'static str, p: Palette) -> Element<'a, RadarMsg> {
 /// 选择器 chip。**选中态用高亮而非置灰**——对齐 TradingView（活动标签是高亮药丸）。
 /// 置灰会让人分不清「当前是这个」还是「这个不可选」，且按钮始终可点更符合直觉。
 /// 用项目既有的 `style::button::modifier`（指标/标的表都是这套）。
+/// 筛选下拉的一个选项：第 `fi` 个筛选器的第 `pi` 档（`pi = 0` 为不限）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FSel {
+    pub fi: usize,
+    pub pi: u8,
+}
+
+impl std::fmt::Display for FSel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(radar_filter::preset_label(self.fi, self.pi))
+    }
+}
+
+/// 筛选栏（对齐 TradingView 筛选器顶部那排下拉）。
+///
+/// 收起时只显示已设的几个（点一下即清除），展开才铺开全部 19 个——
+/// 一直铺着的话热图就没地方了。
+fn filter_bar<'a>(v: ViewState) -> Element<'a, RadarMsg> {
+    let n = radar_filter::active_count(&v);
+    let mut head = row![chip(
+        &if n > 0 { format!("筛选 {n}") } else { "筛选".into() },
+        n > 0 || v.show_filters,
+        RadarMsg::ToggleFilters,
+    )]
+    .spacing(3)
+    .align_y(iced::Alignment::Center);
+
+    if !v.show_filters {
+        // 收起时把已设的列出来，否则「为什么表里只剩 3 行」无从查起
+        for (fi, &pi) in v.filters.iter().enumerate() {
+            if pi != 0 {
+                head = head.push(chip(
+                    &format!("{} {} ✕", FILTERS[fi].label, radar_filter::preset_label(fi, pi)),
+                    true,
+                    RadarMsg::SetFilter { fi, pi: 0 },
+                ));
+            }
+        }
+    }
+    if n > 0 {
+        head = head.push(chip("清空", false, RadarMsg::ClearFilters));
+    }
+
+    let mut col = column![head].spacing(3);
+    if v.show_filters {
+        // 每行 4 个：19 个下拉铺成 5 行，比横向滚动好找
+        let mut r = row![].spacing(6).align_y(iced::Alignment::Center);
+        for (fi, d) in FILTERS.iter().enumerate() {
+            let opts: Vec<FSel> = (0..=radar_filter::n_presets(fi) as u8)
+                .map(|pi| FSel { fi, pi })
+                .collect();
+            r = r.push(text(format!("{} ", d.label)).size(11).color(C_DIM));
+            r = r.push(
+                pick_list(opts, Some(FSel { fi, pi: v.filters[fi] }), |o: FSel| {
+                    RadarMsg::SetFilter { fi: o.fi, pi: o.pi }
+                })
+                .text_size(11)
+                .padding([2, 6])
+                .width(Length::Fixed(132.0)),
+            );
+            if fi % 4 == 3 || fi == N_FILTERS - 1 {
+                col = col.push(std::mem::replace(
+                    &mut r,
+                    row![].spacing(6).align_y(iced::Alignment::Center),
+                ));
+            }
+        }
+        col = col.push(
+            text("筛选只对已加载的行生效；基本面类指标加密没有，设了会把加密行全筛掉")
+                .size(10)
+                .color(C_DIM),
+        );
+    }
+    col.into()
+}
+
 fn chip<'a>(label: &str, active: bool, msg: RadarMsg) -> Element<'a, RadarMsg> {
     button(text(label.to_string()).size(11))
         .padding([2, 7])
@@ -1154,7 +1259,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
     // ── 资产类过滤 ──
     // 股票的成交额远大于加密，同图时加密会被挤到几乎看不见（实测 BTC 只剩一个小格）。
-    let vis = visible(&st.rows, v.asset, v.source);
+    let vis = visible(&st.rows, v);
     let mut ar = row![text("资产 ").size(11).color(C_DIM)].spacing(3);
     for (a, l) in [
         (AssetFilter::All, "全部"),
@@ -1223,9 +1328,15 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             .color(C_DIM),
     );
     body = body.push(ar.align_y(iced::Alignment::Center));
+    // 筛选栏放在空表判断**之前**——被筛空时也得有清除的入口
+    body = body.push(filter_bar(v));
     if vis.is_empty() {
+        let nf = radar_filter::active_count(&v);
         body = body.push(
-            text(if v.source.is_empty() {
+            text(if nf > 0 {
+                // 空表最常见的原因就是筛选，而不是没数据——直接说，并给出清除入口
+                format!("{nf} 个筛选把 {} 行全筛掉了——点上面的「清空」恢复", st.rows.len())
+            } else if v.source.is_empty() {
                 "该资产类暂无数据——股票层需在 radar.toml 的 [equities] 里开启".to_string()
             } else {
                 format!(
@@ -1472,6 +1583,115 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
 #[cfg(test)]
 mod tests {
+
+    /// 守护会下发的全部列键（对齐 `metricdef::TABS`）。加列时要同步这里——
+    /// 靠下面那条单测保证「加了列却忘了写中文名」会当场失败，
+    /// 而不是在表头上安静地显示一行 `earnings_release_next_date`。
+    const ALL_TAB_COLS: [&str; 72] = [
+            "close",
+            "change",
+            "volume",
+            "relative_volume_10d_calc",
+            "market_cap_basic",
+            "price_earnings_ttm",
+            "earnings_per_share_diluted_ttm",
+            "earnings_per_share_diluted_yoy_growth_ttm",
+            "dividends_yield_current",
+            "Perf.W",
+            "Perf.1M",
+            "Perf.3M",
+            "Perf.6M",
+            "Perf.YTD",
+            "Perf.Y",
+            "Perf.5Y",
+            "Perf.10Y",
+            "Perf.All",
+            "Volatility.W",
+            "Volatility.M",
+            "Recommend.All",
+            "Recommend.MA",
+            "Recommend.Other",
+            "RSI",
+            "Mom",
+            "AO",
+            "CCI20",
+            "Stoch.K",
+            "Stoch.D",
+            "premarket_close",
+            "premarket_change",
+            "premarket_gap",
+            "premarket_volume",
+            "gap",
+            "volume_change",
+            "postmarket_close",
+            "postmarket_change",
+            "postmarket_volume",
+            "price_target_average",
+            "recommendation_total",
+            "recommendation_mark",
+            "earnings_per_share_forecast_next_fq",
+            "earnings_release_date",
+            "earnings_release_next_date",
+            "price_earnings_growth_ttm",
+            "price_sales_current",
+            "price_book_fq",
+            "price_to_cash_f_operating_activities_ttm",
+            "price_free_cash_flow_ttm",
+            "price_cash_flow_current",
+            "enterprise_value_current",
+            "enterprise_value_ebitda_ttm",
+            "dividends_per_share_fq",
+            "dividend_payout_ratio_ttm",
+            "dps_common_stock_prim_issue_yoy_growth_fy",
+            "continuous_dividend_payout",
+            "continuous_dividend_growth",
+            "gross_margin",
+            "operating_margin",
+            "pre_tax_margin",
+            "net_margin",
+            "free_cash_flow_margin_ttm",
+            "return_on_assets",
+            "return_on_equity",
+            "return_on_invested_capital",
+            "total_revenue_ttm",
+            "total_revenue_yoy_growth_ttm",
+            "gross_profit",
+            "oper_income_ttm",
+            "net_income_ttm",
+            "ebitda_ttm",
+            "earnings_per_share_basic_ttm",
+    ];
+
+    /// 这几个指标在中文语境里就用原名，不算「漏翻」。
+    const KEEP_AS_IS: [&str; 2] = ["RSI", "AO"];
+
+    #[test]
+    fn every_column_has_a_chinese_title() {
+        // metric_title 的兜底是原样返回键名——漏一个不会报错，只会让表头
+        // 显示原始英文键，还会因为算出来的列宽装不下而和右边一列叠在一起
+        //（实测 earnings_release_date / earnings_release_next_date 就是这样）
+        let miss: Vec<_> = ALL_TAB_COLS
+            .iter()
+            .filter(|k| metric_title(k) == **k && !KEEP_AS_IS.contains(k))
+            .copied()
+            .collect();
+        assert!(miss.is_empty(), "这些列没有中文名: {miss:?}");
+    }
+
+    #[test]
+    fn every_column_is_wide_enough_for_its_own_header() {
+        // 装不下就会和右边一列叠字。上界（132）也得真的够用，
+        // 不能靠 clamp 把问题压掉
+        for k in ALL_TAB_COLS {
+            let need = (text_units(metric_title(k)) + 2.0) * 11.0 + 8.0;
+            assert!(
+                metric_width(k) >= need,
+                "{k}（{}）需要 {need:.0}px，只给了 {:.0}px",
+                metric_title(k),
+                metric_width(k)
+            );
+        }
+    }
     use super::*;
 
     const P: Palette = Palette::BlueOrange;
@@ -1564,6 +1784,7 @@ mod tests {
             ],
             pct_keys: ["change", "Perf.YTD"].iter().map(|s| s.to_string()).collect(),
             money_keys: ["close", "market_cap_basic"].iter().map(|s| s.to_string()).collect(),
+            date_keys: ["earnings_release_next_date"].iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         }
     }
@@ -1765,7 +1986,7 @@ mod tests {
         cr.quote_vol_24h = 1e6;
         cr.asset = "crypto".into();
         let rows = vec![eq, cr];
-        let sub = super::visible(&rows, AssetFilter::Crypto, "");
+        let sub = super::visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Crypto; v });
         let top = top_by_turnover_within(&rows, &sub, 5);
         assert_eq!(top.len(), 1);
         assert_eq!(rows[top[0]].symbol, "BTCUSDT");

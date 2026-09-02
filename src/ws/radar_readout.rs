@@ -137,6 +137,8 @@ pub struct Catalog {
     /// 百分数口径的指标键。
     pub pct_keys: std::collections::HashSet<String>,
     /// 本币金额口径的指标键（已换算成美元）。
+    /// 值是 Unix 秒的指标（财报日期）——不单列一类会显示成十位整数。
+    pub date_keys: std::collections::HashSet<String>,
     pub money_keys: std::collections::HashSet<String>,
     pub markets: Vec<CatalogItem>,
     /// 指数成分股来源。`code` 是来源 id（`america@SPX`），`region` 借用为所属市场。
@@ -457,6 +459,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
         tabs,
         pct_keys: keys("pct"),
         money_keys: keys("money"),
+        date_keys: keys("date"),
         markets: items("markets"),
         indices: index_items,
         types: items("types"),

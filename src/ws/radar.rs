@@ -7,6 +7,7 @@
 
 use std::sync::Mutex;
 
+use super::radar_filter::{self, N_FILTERS};
 use super::radar_readout::{RadarRow, N_WIN};
 
 /// 一个下拉选项。`key` 是快照契约里的指标键（见 docs/22 §4.3），
@@ -186,6 +187,11 @@ pub struct ViewState {
     pub sort: SortKey,
     /// true = 降序。点同一列再点一次翻向。
     pub desc: bool,
+    /// 筛选栏是否展开。默认收起——19 个下拉一直占着屏幕，热图就没地方了。
+    pub show_filters: bool,
+    /// 各筛选器选中的档位下标，`0` = 不限（见 `radar_filter::FILTERS`）。
+    /// 用定长数组而不是 Map，好让整个视图状态保持 `Copy`。
+    pub filters: [u8; N_FILTERS],
 }
 
 impl ViewState {
@@ -201,6 +207,8 @@ impl ViewState {
         source: "",
         sort: SortKey::Z(1),
         desc: true,
+        show_filters: false,
+        filters: [0; N_FILTERS],
     };
 }
 
@@ -218,6 +226,11 @@ pub enum RadarMsg {
     SetMode(ViewMode),
     SetAsset(AssetFilter),
     SetSource(&'static str),
+    /// 设某个筛选器的档位。`pi = 0` 为不限。
+    SetFilter { fi: usize, pi: u8 },
+    /// 一键清空全部筛选。
+    ClearFilters,
+    ToggleFilters,
     /// 点列头：同列则翻向，异列则换列并回到降序（数值列降序更符合「看榜」的直觉）。
     SortBy(SortKey),
 }
@@ -258,7 +271,17 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
             // 换资产类时清掉来源：加密选的是分类、股票选的是市场，
             // 留着旧值会得到一张空表，看起来像数据没了
             v.source = "";
+            // 筛选同理，而且更隐蔽：市盈率/股息这些基本面指标加密根本没有，
+            // 带着「市盈率 10–15」切到加密，会得到一张空表且**没有任何提示**
+            v.filters = [0; N_FILTERS];
         }
+        RadarMsg::SetFilter { fi, pi } => {
+            if fi < N_FILTERS && (pi as usize) <= radar_filter::n_presets(fi) {
+                v.filters[fi] = pi;
+            }
+        }
+        RadarMsg::ClearFilters => v.filters = [0; N_FILTERS],
+        RadarMsg::ToggleFilters => v.show_filters = !v.show_filters,
         RadarMsg::SetSource(m) => v.source = m,
         RadarMsg::SortBy(k) => {
             if v.sort == k {
@@ -331,9 +354,19 @@ pub fn matches_source(r: &RadarRow, source: &str) -> bool {
     }
 }
 
-pub fn visible(rows: &[RadarRow], a: AssetFilter, source: &str) -> Vec<usize> {
+pub fn visible(rows: &[RadarRow], v: ViewState) -> Vec<usize> {
+    visible_at(rows, v, radar_filter::now_s())
+}
+
+/// 同 `visible`，但「现在」由调用方给——日期类筛选要用，单测也要用。
+pub fn visible_at(rows: &[RadarRow], v: ViewState, now_s: i64) -> Vec<usize> {
     (0..rows.len())
-        .filter(|&i| a.keeps(&rows[i].asset) && matches_source(&rows[i], source))
+        .filter(|&i| {
+            let r = &rows[i];
+            v.asset.keeps(&r.asset)
+                && matches_source(r, v.source)
+                && radar_filter::passes(r, &v, now_s)
+        })
         .collect()
 }
 
@@ -341,7 +374,7 @@ pub fn visible(rows: &[RadarRow], a: AssetFilter, source: &str) -> Vec<usize> {
 ///
 /// 缺值恒沉底：把「还没热身」排在榜首等于用空数据占据最显眼的位置。
 pub fn order(rows: &[RadarRow], v: ViewState) -> Vec<usize> {
-    order_within(rows, &visible(rows, v.asset, v.source), v)
+    order_within(rows, &visible(rows, v), v)
 }
 
 /// 只对给定子集排序（资产类过滤后用）。
@@ -503,15 +536,15 @@ mod tests {
         let mut b = row("7203", "tv:japan:stock", Some(1.0), None, 1.0);
         b.asset = "equity".into();
         let rows = vec![a, b];
-        assert_eq!(visible(&rows, AssetFilter::All, "").len(), 2);
-        let v = visible(&rows, AssetFilter::All, "japan");
+        assert_eq!(visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::All; v.source = ""; v }).len(), 2);
+        let v = visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::All; v.source = "japan"; v });
         assert_eq!(v.len(), 1);
         assert_eq!(rows[v[0]].symbol, "7203");
         // 同一市场的股票与 ETF 都该匹配
         let mut c = row("SPY", "tv:america:fund", Some(1.0), None, 1.0);
         c.asset = "etf".into();
         let rows = vec![rows[0].clone(), c];
-        assert_eq!(visible(&rows, AssetFilter::All, "america").len(), 2);
+        assert_eq!(visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::All; v.source = "america"; v }).len(), 2);
     }
 
     #[test]
@@ -523,7 +556,7 @@ mod tests {
         b.asset = "crypto".into();
         b.cats = vec!["defi".into()];
         let rows = vec![a, b];
-        let v = visible(&rows, AssetFilter::Crypto, "defi");
+        let v = visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Crypto; v.source = "defi"; v });
         assert_eq!(v.len(), 1);
         assert_eq!(rows[v[0]].symbol, "UNIUSDT");
         // 没打上分类的不该被任何具体分类收进来
