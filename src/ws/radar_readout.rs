@@ -124,6 +124,8 @@ pub struct CatalogItem {
 #[derive(Default, Clone)]
 pub struct Catalog {
     pub markets: Vec<CatalogItem>,
+    /// 指数成分股来源。`code` 是来源 id（`america@SPX`），`region` 借用为所属市场。
+    pub indices: Vec<CatalogItem>,
     pub types: Vec<CatalogItem>,
     pub crypto_cats: Vec<CatalogItem>,
 }
@@ -188,13 +190,13 @@ fn request_path() -> PathBuf {
 ///
 /// 只带**当前选中项**，不累积：累积会让守护的请求数随用户点击单调增长，
 /// 最后把非官方接口打爆。配置里的默认市场恒在，选中的额外加一个。
-pub fn request_body(market: &str, security_types: &[&str]) -> String {
-    let sources: Vec<serde_json::Value> = if market.is_empty() {
+pub fn request_body(source: &str, security_types: &[&str]) -> String {
+    let sources: Vec<serde_json::Value> = if source.is_empty() {
         Vec::new()
     } else {
         security_types
             .iter()
-            .map(|t| serde_json::json!({"market": market, "security_type": t}))
+            .map(|t| serde_json::json!({"market": source, "security_type": t}))
             .collect()
     };
     serde_json::json!({ "sources": sources }).to_string()
@@ -203,9 +205,9 @@ pub fn request_body(market: &str, security_types: &[&str]) -> String {
 /// 把选中的来源写给守护（原子写，同快照）。
 ///
 /// 内容没变就不写：面板每帧都会走到这里，每帧重写文件既浪费也会让守护看到抖动。
-pub fn write_request(market: &str, security_types: &[&str]) {
+pub fn write_request(source: &str, security_types: &[&str]) {
     static LAST: Mutex<String> = Mutex::new(String::new());
-    let body = request_body(market, security_types);
+    let body = request_body(source, security_types);
     if let Ok(mut g) = LAST.lock() {
         if *g == body {
             return;
@@ -377,8 +379,23 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
             })
             .unwrap_or_default()
     };
+    let index_items: Vec<CatalogItem> = v
+        .get("catalog")
+        .and_then(|c| c.get("indices"))
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|o| CatalogItem {
+                    code: s(o, "id"),
+                    label: s(o, "label"),
+                    region: s(o, "market"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let catalog = Catalog {
         markets: items("markets"),
+        indices: index_items,
         types: items("types"),
         crypto_cats: items("crypto_cats"),
     };
@@ -461,6 +478,8 @@ mod tests {
       "catalog":{"markets":[{"code":"america","label":"美国","region":"美洲"},
                             {"code":"japan","label":"日本","region":"亚太"}],
                  "types":[{"code":"stock","label":"股票"},{"code":"fund","label":"ETF"}],
+                 "indices":[{"market":"america","id":"america@SPX","label":"标准普尔500指数"},
+                            {"market":"japan","id":"japan@NI225","label":"日经225指数"}],
                  "crypto_cats":[{"code":"","label":"全部加密货币"},{"code":"defi","label":"DeFi"}]},
       "breadth":[{"market":"japan","n":300,"adv":194,"dec":103,"unch":3,
                   "new_high":1,"new_low":0,"net_new_high":1,"above_ma200":231,"ma200_n":300,
@@ -582,6 +601,13 @@ mod tests {
     }
 
     #[test]
+    fn request_body_carries_index_source_ids() {
+        let v: serde_json::Value =
+            serde_json::from_str(&request_body("america@SPX", &["stock"])).unwrap();
+        assert_eq!(v["sources"][0]["market"], "america@SPX");
+    }
+
+    #[test]
     fn empty_selection_requests_nothing() {
         // 选「全部市场」时不该请求任何额外来源——那等于要求守护拉全世界
         let v: serde_json::Value =
@@ -599,6 +625,10 @@ mod tests {
         assert_eq!(c.markets[0].region, "美洲");
         assert_eq!(c.types.len(), 2);
         assert_eq!(c.crypto_cats[0].code, "", "首项必须是「全部」");
+        assert_eq!(c.indices.len(), 2);
+        assert_eq!(c.indices[0].code, "america@SPX");
+        assert_eq!(c.indices[0].label, "标准普尔500指数");
+        assert_eq!(c.indices[0].region, "america", "指数要知道自己属于哪个市场");
     }
 
     #[test]

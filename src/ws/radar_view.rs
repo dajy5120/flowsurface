@@ -1019,34 +1019,45 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // 不是已加载的 venue——只列已加载的话，用户永远只能在守护恰好在拉的
     // 那几个市场里打转。选了没在拉的市场会通过 radar_request.json 通知守护去拉。
     let crypto_mode = v.asset == AssetFilter::Crypto;
-    let src = if crypto_mode {
-        &st.catalog.crypto_cats
-    } else {
-        &st.catalog.markets
-    };
     let mut opts: Vec<MarketOpt> = vec![MarketOpt::all(crypto_mode)];
-    // 已加载的市场（venue 中段）——用于在下拉里标注哪些是现成的
-    let loaded: std::collections::HashSet<&str> = st
-        .rows
-        .iter()
-        .filter_map(|r| r.venue.split(':').nth(1))
-        .collect();
-    for it in src {
-        if it.code.is_empty() {
-            continue; // 「全部」已单列
+    if crypto_mode {
+        for it in &st.catalog.crypto_cats {
+            if !it.code.is_empty() {
+                opts.push(MarketOpt::of(&it.code, &it.label, "", true));
+            }
         }
-        opts.push(MarketOpt::of(
-            &it.code,
-            &it.label,
-            &it.region,
-            crypto_mode || loaded.contains(it.code.as_str()),
-        ));
+    } else {
+        // 已加载的来源 id（venue 中段）——用于在下拉里标注哪些是现成的
+        let loaded: std::collections::HashSet<&str> = st
+            .rows
+            .iter()
+            .filter_map(|r| r.venue.split(':').nth(1))
+            .collect();
+        for m in &st.catalog.markets {
+            // 「所有 X 公司」+ 该市场下的每个指数（同 TradingView 的来源分组）
+            opts.push(MarketOpt::of(
+                &m.code,
+                &format!("所有{}公司", m.label),
+                &m.region,
+                loaded.contains(m.code.as_str()),
+            ));
+            for ix in st.catalog.indices.iter().filter(|i| i.region == m.code) {
+                opts.push(MarketOpt::of(
+                    &ix.code,
+                    &ix.label,
+                    &m.region,
+                    loaded.contains(ix.code.as_str()),
+                ));
+            }
+        }
     }
+
     let cur = opts
         .iter()
         .find(|o| o.key == v.source)
         .copied()
         .unwrap_or_else(|| MarketOpt::all(crypto_mode));
+
     // 把选中的来源写给守护——选了没在拉的市场，下一轮就会去取
     if !crypto_mode {
         super::radar_readout::write_request(v.source, &["stock", "fund"]);
