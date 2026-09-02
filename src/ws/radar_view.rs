@@ -682,16 +682,48 @@ pub struct MarketOpt {
 }
 
 impl MarketOpt {
-    fn all() -> Self {
-        MarketOpt { key: "", label: "全部市场" }
+    fn all(crypto: bool) -> Self {
+        MarketOpt {
+            key: "",
+            label: if crypto { "全部加密货币" } else { "全部市场" },
+        }
     }
-    /// venue 来自快照、生命周期不是 `'static`；泄漏一份短字符串换取 `pick_list`
-    /// 需要的 `'static`。市场数由配置封顶（几十个），不会无界增长。
-    fn of(v: &str) -> Self {
-        let key: &'static str = Box::leak(v.to_string().into_boxed_str());
-        let short = key.strip_prefix("tv:").unwrap_or(key);
-        MarketOpt { key, label: short }
+
+    /// 目录项 → 下拉项。未加载的市场标 `＋`，让人知道选了要等一轮才有数据。
+    ///
+    /// 目录来自快照、生命周期不是 `'static`；泄漏一份短字符串换取 `pick_list`
+    /// 需要的 `'static`。目录是固定的 71 个市场 + 22 个分类，不会无界增长
+    /// （同一项重复泄漏由 `INTERN` 去重）。
+    fn of(code: &str, label: &str, region: &str, loaded: bool) -> Self {
+        let shown = if region.is_empty() {
+            label.to_string()
+        } else if loaded {
+            format!("{region} · {label}")
+        } else {
+            format!("{region} · {label} ＋")
+        };
+        MarketOpt {
+            key: intern(code),
+            label: intern(&shown),
+        }
     }
+}
+
+/// 字符串驻留：同一份文本只泄漏一次，避免每帧重建下拉时无界泄漏。
+fn intern(s: &str) -> &'static str {
+    use std::sync::Mutex;
+    static POOL: Mutex<Option<std::collections::HashSet<&'static str>>> = Mutex::new(None);
+    let mut g = match POOL.lock() {
+        Ok(g) => g,
+        Err(_) => return "",
+    };
+    let set = g.get_or_insert_with(std::collections::HashSet::new);
+    if let Some(x) = set.get(s) {
+        return x;
+    }
+    let leaked: &'static str = Box::leak(s.to_string().into_boxed_str());
+    set.insert(leaked);
+    leaked
 }
 
 impl std::fmt::Display for MarketOpt {
@@ -973,7 +1005,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
     // ── 资产类过滤 ──
     // 股票的成交额远大于加密，同图时加密会被挤到几乎看不见（实测 BTC 只剩一个小格）。
-    let vis = visible(&st.rows, v.asset, v.market);
+    let vis = visible(&st.rows, v.asset, v.source);
     let mut ar = row![text("资产 ").size(11).color(C_DIM)].spacing(3);
     for (a, l) in [
         (AssetFilter::All, "全部"),
@@ -983,24 +1015,45 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     ] {
         ar = ar.push(chip(l, a == v.asset, RadarMsg::SetAsset(a)));
     }
-    // 来源市场下拉（TV 的「来源」）。选项由当前资产类下**实际存在**的 venue 生成——
-    // 硬编码一张市场表的话，用户在 radar.toml 里增减市场后下拉就会对不上。
-    let mut venues: Vec<&str> = visible(&st.rows, v.asset, "")
+    // 「来源」下拉（TV 的「来源」）。列的是**全部可选项**（随快照下发的目录），
+    // 不是已加载的 venue——只列已加载的话，用户永远只能在守护恰好在拉的
+    // 那几个市场里打转。选了没在拉的市场会通过 radar_request.json 通知守护去拉。
+    let crypto_mode = v.asset == AssetFilter::Crypto;
+    let src = if crypto_mode {
+        &st.catalog.crypto_cats
+    } else {
+        &st.catalog.markets
+    };
+    let mut opts: Vec<MarketOpt> = vec![MarketOpt::all(crypto_mode)];
+    // 已加载的市场（venue 中段）——用于在下拉里标注哪些是现成的
+    let loaded: std::collections::HashSet<&str> = st
+        .rows
         .iter()
-        .map(|&i| st.rows[i].venue.as_str())
+        .filter_map(|r| r.venue.split(':').nth(1))
         .collect();
-    venues.sort_unstable();
-    venues.dedup();
-    let mut opts: Vec<MarketOpt> = vec![MarketOpt::all()];
-    opts.extend(venues.iter().map(|x| MarketOpt::of(x)));
+    for it in src {
+        if it.code.is_empty() {
+            continue; // 「全部」已单列
+        }
+        opts.push(MarketOpt::of(
+            &it.code,
+            &it.label,
+            &it.region,
+            crypto_mode || loaded.contains(it.code.as_str()),
+        ));
+    }
     let cur = opts
         .iter()
-        .find(|o| o.key == v.market)
+        .find(|o| o.key == v.source)
         .copied()
-        .unwrap_or_else(MarketOpt::all);
+        .unwrap_or_else(|| MarketOpt::all(crypto_mode));
+    // 把选中的来源写给守护——选了没在拉的市场，下一轮就会去取
+    if !crypto_mode {
+        super::radar_readout::write_request(v.source, &["stock", "fund"]);
+    }
     ar = ar.push(text("　来源 ").size(11).color(C_DIM));
     ar = ar.push(
-        pick_list(opts, Some(cur), |o: MarketOpt| RadarMsg::SetMarket(o.key))
+        pick_list(opts, Some(cur), |o: MarketOpt| RadarMsg::SetSource(o.key))
             .text_size(11)
             .padding([2, 6]),
     );
@@ -1012,9 +1065,17 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     body = body.push(ar.align_y(iced::Alignment::Center));
     if vis.is_empty() {
         body = body.push(
-            text("该资产类暂无数据——股票层需在 radar.toml 的 [equities] 里开启")
-                .size(11)
-                .color(C_GOLD),
+            text(if v.source.is_empty() {
+                "该资产类暂无数据——股票层需在 radar.toml 的 [equities] 里开启".to_string()
+            } else {
+                format!(
+                    "「{}」尚未加载——已通知守护去取，下一轮（≤{}s）出数据",
+                    cur.to_string(),
+                    60
+                )
+            })
+            .size(11)
+            .color(C_GOLD),
         );
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }

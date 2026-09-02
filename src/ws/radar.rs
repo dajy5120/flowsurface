@@ -176,8 +176,9 @@ pub struct ViewState {
     pub palette: Palette,
     pub mode: ViewMode,
     pub asset: AssetFilter,
-    /// 来源市场过滤（快照里的 venue，空串 = 全部）。对应 TV 的「来源」下拉。
-    pub market: &'static str,
+    /// 来源选择。股票/ETF 时是市场代码（如 `america`），加密时是分类
+    /// （如 `defi`）。空串 = 全部。对应 TV 的「来源」下拉。
+    pub source: &'static str,
     pub sort: SortKey,
     /// true = 降序。点同一列再点一次翻向。
     pub desc: bool,
@@ -193,7 +194,7 @@ impl ViewState {
         palette: Palette::BlueOrange,
         mode: ViewMode::Heatmap,
         asset: AssetFilter::All,
-        market: "",
+        source: "",
         sort: SortKey::Z(1),
         desc: true,
     };
@@ -212,7 +213,7 @@ pub enum RadarMsg {
     SetPalette(Palette),
     SetMode(ViewMode),
     SetAsset(AssetFilter),
-    SetMarket(&'static str),
+    SetSource(&'static str),
     /// 点列头：同列则翻向，异列则换列并回到降序（数值列降序更符合「看榜」的直觉）。
     SortBy(SortKey),
 }
@@ -250,11 +251,11 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
         RadarMsg::SetMode(m) => v.mode = m,
         RadarMsg::SetAsset(a) => {
             v.asset = a;
-            // 换资产类时清掉市场过滤：加密的 venue 和股票的完全不同，
+            // 换资产类时清掉来源：加密选的是分类、股票选的是市场，
             // 留着旧值会得到一张空表，看起来像数据没了
-            v.market = "";
+            v.source = "";
         }
-        RadarMsg::SetMarket(m) => v.market = m,
+        RadarMsg::SetSource(m) => v.source = m,
         RadarMsg::SortBy(k) => {
             if v.sort == k {
                 v.desc = !v.desc;
@@ -309,9 +310,25 @@ pub fn key_value(r: &RadarRow, k: SortKey) -> Option<f64> {
 }
 
 /// 通过资产类过滤的行下标。
-pub fn visible(rows: &[RadarRow], a: AssetFilter, market: &str) -> Vec<usize> {
+/// 该行是否匹配来源选择。
+///
+/// 股票/ETF 按**市场代码**匹配 venue（`tv:america:stock` 含 `america`）；
+/// 加密按**分类**匹配。两者语义不同，不能共用一个字符串相等判断。
+pub fn matches_source(r: &RadarRow, source: &str) -> bool {
+    if source.is_empty() {
+        return true;
+    }
+    if r.asset == "crypto" {
+        r.cats.iter().any(|c| c == source)
+    } else {
+        // venue 形如 `tv:{market}:{type}`
+        r.venue.split(':').nth(1).is_some_and(|m| m == source)
+    }
+}
+
+pub fn visible(rows: &[RadarRow], a: AssetFilter, source: &str) -> Vec<usize> {
     (0..rows.len())
-        .filter(|&i| a.keeps(&rows[i].asset) && (market.is_empty() || rows[i].venue == market))
+        .filter(|&i| a.keeps(&rows[i].asset) && matches_source(&rows[i], source))
         .collect()
 }
 
@@ -319,7 +336,7 @@ pub fn visible(rows: &[RadarRow], a: AssetFilter, market: &str) -> Vec<usize> {
 ///
 /// 缺值恒沉底：把「还没热身」排在榜首等于用空数据占据最显眼的位置。
 pub fn order(rows: &[RadarRow], v: ViewState) -> Vec<usize> {
-    order_within(rows, &visible(rows, v.asset, v.market), v)
+    order_within(rows, &visible(rows, v.asset, v.source), v)
 }
 
 /// 只对给定子集排序（资产类过滤后用）。
@@ -466,25 +483,49 @@ mod tests {
     }
 
     #[test]
-    fn switching_asset_clears_the_market_filter() {
-        // 加密的 venue 与股票的完全不同；留着旧值会得到一张空表，看起来像数据没了
+    fn switching_asset_clears_the_source() {
+        // 加密选分类、股票选市场；留着旧值会得到一张空表，看起来像数据没了
         let mut v = ViewState::DEFAULT;
-        v.market = "tv:america:stock";
+        v.source = "america";
         let v = apply(v, RadarMsg::SetAsset(AssetFilter::Crypto));
-        assert_eq!(v.market, "");
+        assert_eq!(v.source, "");
     }
 
     #[test]
-    fn market_filter_narrows_to_one_venue() {
+    fn source_matches_market_for_equities() {
         let mut a = row("NVDA", "tv:america:stock", Some(1.0), None, 1.0);
         a.asset = "equity".into();
         let mut b = row("7203", "tv:japan:stock", Some(1.0), None, 1.0);
         b.asset = "equity".into();
         let rows = vec![a, b];
         assert_eq!(visible(&rows, AssetFilter::All, "").len(), 2);
-        let v = visible(&rows, AssetFilter::All, "tv:japan:stock");
+        let v = visible(&rows, AssetFilter::All, "japan");
         assert_eq!(v.len(), 1);
         assert_eq!(rows[v[0]].symbol, "7203");
+        // 同一市场的股票与 ETF 都该匹配
+        let mut c = row("SPY", "tv:america:fund", Some(1.0), None, 1.0);
+        c.asset = "etf".into();
+        let rows = vec![rows[0].clone(), c];
+        assert_eq!(visible(&rows, AssetFilter::All, "america").len(), 2);
+    }
+
+    #[test]
+    fn source_matches_category_for_crypto() {
+        let mut a = row("BTCUSDT", "binance:linear", Some(1.0), None, 1.0);
+        a.asset = "crypto".into();
+        a.cats = vec!["layer-1".into(), "cryptocurrencies".into()];
+        let mut b = row("UNIUSDT", "binance:linear", Some(1.0), None, 1.0);
+        b.asset = "crypto".into();
+        b.cats = vec!["defi".into()];
+        let rows = vec![a, b];
+        let v = visible(&rows, AssetFilter::Crypto, "defi");
+        assert_eq!(v.len(), 1);
+        assert_eq!(rows[v[0]].symbol, "UNIUSDT");
+        // 没打上分类的不该被任何具体分类收进来
+        let mut c = row("XUSDT", "binance:linear", Some(1.0), None, 1.0);
+        c.asset = "crypto".into();
+        assert!(!matches_source(&c, "defi"));
+        assert!(matches_source(&c, ""), "「全部」应恒匹配");
     }
 
     #[test]

@@ -32,6 +32,8 @@ pub struct RadarRow {
     /// TradingView 口径的全量指标（键见 docs/22 §4.3）。缺的指标**不在表里**，
     /// 不是 0——面板据此显示「—」并把格子置中性。
     pub m: std::collections::HashMap<String, f64>,
+    /// 加密分类（TradingView `crypto_common_categories`）。「来源」下拉据此过滤。
+    pub cats: Vec<String>,
     pub price: f64,
     pub quote_vol_24h: f64,
     /// 各窗口对数收益。`None` = **该窗口还没热身**，不是「没涨没跌」。
@@ -108,6 +110,24 @@ pub struct OverviewRow {
 
 pub const OV_WINDOWS: [&str; 4] = ["日", "周", "月", "YTD"];
 
+/// 来源目录的一项。
+#[derive(Default, Clone, PartialEq)]
+pub struct CatalogItem {
+    pub code: String,
+    pub label: String,
+    /// 市场才有；类型/分类为空。
+    pub region: String,
+}
+
+/// 来源目录（docs/22 §6.5）：面板「来源」下拉的**全部可选项**，随快照下发。
+/// 只列已加载的 venue 的话，用户永远只能在守护恰好在拉的那几个市场里打转。
+#[derive(Default, Clone)]
+pub struct Catalog {
+    pub markets: Vec<CatalogItem>,
+    pub types: Vec<CatalogItem>,
+    pub crypto_cats: Vec<CatalogItem>,
+}
+
 #[derive(Default, Clone)]
 pub struct RadarReadout {
     pub stamp: String,
@@ -120,6 +140,7 @@ pub struct RadarReadout {
     pub refreshed_ms: i64,
     pub rows: Vec<RadarRow>,
     pub backfill: BackfillView,
+    pub catalog: Catalog,
     pub breadth: Vec<BreadthRow>,
     pub overview: Vec<OverviewRow>,
     pub refreshed: String,
@@ -155,6 +176,50 @@ pub fn snapshot() -> RadarReadout {
 
 pub fn request_refresh() {
     WAKER.request();
+}
+
+fn request_path() -> PathBuf {
+    std::env::var("WS_RADAR_REQUEST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home().join("ws-data/live/radar_request.json"))
+}
+
+/// 纯构造（可单测）：选中的来源 → 请求 JSON。
+///
+/// 只带**当前选中项**，不累积：累积会让守护的请求数随用户点击单调增长，
+/// 最后把非官方接口打爆。配置里的默认市场恒在，选中的额外加一个。
+pub fn request_body(market: &str, security_types: &[&str]) -> String {
+    let sources: Vec<serde_json::Value> = if market.is_empty() {
+        Vec::new()
+    } else {
+        security_types
+            .iter()
+            .map(|t| serde_json::json!({"market": market, "security_type": t}))
+            .collect()
+    };
+    serde_json::json!({ "sources": sources }).to_string()
+}
+
+/// 把选中的来源写给守护（原子写，同快照）。
+///
+/// 内容没变就不写：面板每帧都会走到这里，每帧重写文件既浪费也会让守护看到抖动。
+pub fn write_request(market: &str, security_types: &[&str]) {
+    static LAST: Mutex<String> = Mutex::new(String::new());
+    let body = request_body(market, security_types);
+    if let Ok(mut g) = LAST.lock() {
+        if *g == body {
+            return;
+        }
+        *g = body.clone();
+    }
+    let p = request_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let tmp = p.with_extension("json.tmp");
+    if std::fs::write(&tmp, body.as_bytes()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
 }
 
 /// 启动守护。**必须 `--no-block`**（同 prediction/factory 踩过的坑：`systemctl start`
@@ -250,6 +315,13 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                     country: s(o, "country"),
                     currency: s(o, "currency"),
                     mcap: o.get("mcap").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    cats: o
+                        .get("cats")
+                        .and_then(|x| x.as_array())
+                        .map(|a| {
+                            a.iter().filter_map(|c| c.as_str().map(String::from)).collect()
+                        })
+                        .unwrap_or_default(),
                     m: o
                         .get("m")
                         .and_then(|x| x.as_object())
@@ -290,6 +362,26 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
     };
     let i64_of = |o: &serde_json::Value, k: &str| o.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
     let optf_of = |o: &serde_json::Value, k: &str| o.get(k).and_then(|x| x.as_f64());
+    let items = |k: &str| -> Vec<CatalogItem> {
+        v.get("catalog")
+            .and_then(|c| c.get(k))
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|o| CatalogItem {
+                        code: s(o, "code"),
+                        label: s(o, "label"),
+                        region: s(o, "region"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let catalog = Catalog {
+        markets: items("markets"),
+        types: items("types"),
+        crypto_cats: items("crypto_cats"),
+    };
     let breadth = v
         .get("breadth")
         .and_then(|x| x.as_array())
@@ -342,6 +434,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
         n_symbols: v.get("n_symbols").and_then(|x| x.as_i64()).unwrap_or(0),
         refreshed_ms: v.get("refreshed_ms").and_then(|x| x.as_i64()).unwrap_or(0),
         rows,
+        catalog,
         breadth,
         overview,
         backfill: BackfillView {
@@ -365,6 +458,10 @@ mod tests {
       "stamp":"2026-08-30 07:00:00","source":"binance:linear+binance:spot","tier":"A",
       "n_symbols":577,"n_rows":2,"refreshed_ms":1312,
       "backfill":{"done":37,"total":574,"failed":2,"running":true,"finished":false},
+      "catalog":{"markets":[{"code":"america","label":"美国","region":"美洲"},
+                            {"code":"japan","label":"日本","region":"亚太"}],
+                 "types":[{"code":"stock","label":"股票"},{"code":"fund","label":"ETF"}],
+                 "crypto_cats":[{"code":"","label":"全部加密货币"},{"code":"defi","label":"DeFi"}]},
       "breadth":[{"market":"japan","n":300,"adv":194,"dec":103,"unch":3,
                   "new_high":1,"new_low":0,"net_new_high":1,"above_ma200":231,"ma200_n":300,
                   "adv_pct":0.653,"ad_ratio":1.883,"above_ma200_pct":0.77},
@@ -376,12 +473,13 @@ mod tests {
                   {"market":"japan","ticker":"TVC:NI225","label":"日本 日经 225","currency":"JPY",
                    "local":{"日":0.0008},"usd":{}}],
       "rows":[
-        {"symbol":"KNCUSDT","venue":"binance:linear","tier":"A","asset":"crypto","price":0.42,"quote_vol_24h":5.1e6,
+        {"symbol":"KNCUSDT","venue":"binance:linear","tier":"A","asset":"crypto","cats":["layer-1","defi"],"price":0.42,"quote_vol_24h":5.1e6,
          "ret":{"1m":0.00165,"24h":0.042},"z_ret":{"1m":3.55},
          "z_vol":null,"z_cnt":null,"sigma_ok":true,"z_provisional":false},
         {"symbol":"NVDA","venue":"tv:america","tier":"C","asset":"equity","name":"NVIDIA Corporation",
          "sector":"Electronic Technology","country":"United States","currency":"USD","mcap":5.2e12,
          "price":1.0,"quote_vol_24h":2e6,
+         "cats":[],
          "m":{"Perf.YTD":16.3,"gap":-0.6,"relative_volume_10d_calc":1.42,"market_cap_basic":5.2e12},
          "ret":{"1m":0.001},"z_ret":{"1m":1.2},
          "z_vol":4.4,"z_cnt":2.1,"sigma_ok":false,"z_provisional":true}
@@ -469,6 +567,52 @@ mod tests {
         // 拿不到汇率时美元口径必须全空，绝不退回本币值
         assert!(o[1].usd.iter().all(Option::is_none));
         assert!(o[1].local[0].is_some());
+    }
+
+    #[test]
+    fn request_body_carries_only_the_current_selection() {
+        // 累积式请求会让守护的请求数随点击单调增长，最后把非官方接口打爆
+        let b = request_body("japan", &["stock", "fund"]);
+        let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+        let s = v["sources"].as_array().unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0]["market"], "japan");
+        assert_eq!(s[0]["security_type"], "stock");
+        assert_eq!(s[1]["security_type"], "fund");
+    }
+
+    #[test]
+    fn empty_selection_requests_nothing() {
+        // 选「全部市场」时不该请求任何额外来源——那等于要求守护拉全世界
+        let v: serde_json::Value =
+            serde_json::from_str(&request_body("", &["stock"])).unwrap();
+        assert!(v["sources"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn parses_the_source_catalog() {
+        // 面板据此建「来源」下拉；漏了的话下拉只剩已加载的那几个市场
+        let c = board().catalog;
+        assert_eq!(c.markets.len(), 2);
+        assert_eq!(c.markets[0].code, "america");
+        assert_eq!(c.markets[0].label, "美国");
+        assert_eq!(c.markets[0].region, "美洲");
+        assert_eq!(c.types.len(), 2);
+        assert_eq!(c.crypto_cats[0].code, "", "首项必须是「全部」");
+    }
+
+    #[test]
+    fn parses_crypto_categories_per_row() {
+        let b = board();
+        assert_eq!(b.rows[0].cats, vec!["layer-1", "defi"]);
+        assert!(b.rows[1].cats.is_empty(), "股票用板块，不该有加密分类");
+    }
+
+    #[test]
+    fn missing_catalog_is_empty_not_a_parse_failure() {
+        // 老版守护写的快照没有 catalog——面板必须照常工作
+        let r = parse_board(&serde_json::from_str(r#"{"stamp":"t","rows":[]}"#).unwrap());
+        assert!(r.catalog.markets.is_empty());
     }
 
     #[test]
