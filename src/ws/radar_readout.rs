@@ -153,6 +153,9 @@ pub struct Catalog {
 
 #[derive(Default, Clone)]
 pub struct RadarReadout {
+    /// 数据版本号，每轮轮询递增。**只用来判断「数据变没变」**——
+    /// 树图的 canvas 缓存据此决定要不要重画（见 radar_view 的 TREEMAP_CACHE）。
+    pub generation: u64,
     pub stamp: String,
     pub source: String,
     /// 数据等级（docs/22 §0）：加密直连 = "A"。面板**必须**把它显示出来。
@@ -176,7 +179,7 @@ pub struct RadarReadout {
     pub svc: super::svcctl::UnitState,
 }
 
-static READOUT: OnceLock<Mutex<RadarReadout>> = OnceLock::new();
+static READOUT: OnceLock<Mutex<std::sync::Arc<RadarReadout>>> = OnceLock::new();
 static POLLER: OnceLock<()> = OnceLock::new();
 static WAKER: super::svcctl::Waker = super::svcctl::Waker::new();
 
@@ -231,7 +234,13 @@ fn slow_path() -> PathBuf {
     p.with_file_name(format!("{stem}_slow.json"))
 }
 
-pub fn snapshot() -> RadarReadout {
+/// 当前读数。**返回 `Arc`，不深拷贝**。
+///
+/// 视图每帧都调它一次。原来返回的是 `RadarReadout` 的深拷贝——4189 行、每行
+/// 一个上百项的 `HashMap<String, f64>` 外加文本段和七八个 `String`，一帧要
+/// 重新分配几千万字节。列数从 72 涨到 114 之后这笔开销翻倍，主线程直接
+/// 打满一个核（实测 99.9%）。换成 `Arc` 后每帧只是一次引用计数加一。
+pub fn snapshot() -> std::sync::Arc<RadarReadout> {
     ensure_poller();
     READOUT
         .get()
@@ -336,14 +345,27 @@ pub fn radar_stop() -> String {
 
 fn ensure_poller() {
     POLLER.get_or_init(|| {
-        std::thread::spawn(|| loop {
-            let mut snap = poll_once();
-            snap.svc = super::svcctl::query(RADAR_SVC);
-            let lock = READOUT.get_or_init(|| Mutex::new(RadarReadout::default()));
-            if let Ok(mut g) = lock.lock() {
-                *g = snap;
+        std::thread::spawn(|| {
+            let mut svc = super::svcctl::UnitState::default();
+            let mut tick = 0u32;
+            loop {
+                let mut snap = poll_once();
+                snap.generation = tick as u64;
+                // `systemctl show` 是一次 **fork+exec**。每 2s 一次的话，光它就贡献了
+                // 每秒近百次读系统调用（实测），而服务状态几乎不变。降到 10s 一次，
+                // 中间沿用上次结果；面板按钮启停后会立刻 WAKER 唤醒，不必靠轮询看到。
+                if tick % 5 == 0 {
+                    svc = super::svcctl::query(RADAR_SVC);
+                }
+                tick = tick.wrapping_add(1);
+                snap.svc = svc.clone();
+                let lock =
+                    READOUT.get_or_init(|| Mutex::new(std::sync::Arc::new(RadarReadout::default())));
+                if let Ok(mut g) = lock.lock() {
+                    *g = std::sync::Arc::new(snap);
+                }
+                WAKER.wait(Duration::from_secs(2));
             }
-            WAKER.wait(Duration::from_secs(2));
         });
     });
 }

@@ -27,7 +27,7 @@ use super::radar::{
     ScaleKind, SortKey, ViewMode, ViewState, COLOR_OPTS, SIZE_OPTS,
 };
 use super::radar_filter::{self, FILTERS, N_FILTERS};
-use super::radar_readout::{BreadthRow, OverviewRow, RadarReadout, RadarRow, OV_WINDOWS, WINDOWS};
+use super::radar_readout::{BreadthRow, OverviewRow, RadarRow, OV_WINDOWS, WINDOWS};
 use super::treemap::{squarify_nested, Rect};
 
 const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
@@ -1052,6 +1052,81 @@ impl MarketOpt {
 }
 
 /// 字符串驻留：同一份文本只泄漏一次，避免每帧重建下拉时无界泄漏。
+/// 记忆化「只依赖数据版本 + 当前口径」的行下标集合。
+///
+/// 视图每帧都会重建——上游用 `iced::window::frames()` 驱动图表动画，整个应用
+/// 每秒重建 60 次视图（main.rs 的 subscription）。但可见集与排序只在数据换一轮
+/// （2s）或用户改口径时才变，每帧重算 4189 行是纯浪费：实测排序一项就占掉
+/// 一帧 8ms 里的 **4.5ms**。
+///
+/// `thread_local` 是因为 `Rc` 不是 `Send`，而视图只在主线程构建。
+macro_rules! memo_idx {
+    ($name:ident, $make:expr) => {
+        fn $name(generation: u64, v: ViewState, rows: &[RadarRow]) -> std::rc::Rc<Vec<usize>> {
+            thread_local! {
+                static CELL: std::cell::RefCell<Option<(u64, ViewState, std::rc::Rc<Vec<usize>>)>> =
+                    const { std::cell::RefCell::new(None) };
+            }
+            CELL.with(|c| {
+                let mut g = c.borrow_mut();
+                match &*g {
+                    Some((g0, vs, rc)) if *g0 == generation && *vs == v => rc.clone(),
+                    _ => {
+                        let f: fn(&[RadarRow], ViewState) -> Vec<usize> = $make;
+                        let rc = std::rc::Rc::new(f(rows, v));
+                        *g = Some((generation, v, rc.clone()));
+                        rc
+                    }
+                }
+            })
+        }
+    };
+}
+
+memo_idx!(memo_visible, |r, v| visible(r, v));
+memo_idx!(memo_order, |r, v| order(r, v));
+
+/// 树图取的那 180 格。同样只依赖数据版本 + 口径，不必每帧重挑一遍。
+fn memo_picked(generation: u64, v: ViewState, rows: &[RadarRow]) -> std::rc::Rc<Vec<usize>> {
+    thread_local! {
+        static CELL: std::cell::RefCell<Option<(u64, ViewState, std::rc::Rc<Vec<usize>>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    CELL.with(|c| {
+        let mut g = c.borrow_mut();
+        match &*g {
+            Some((g0, vs, rc)) if *g0 == generation && *vs == v => rc.clone(),
+            _ => {
+                let vis = memo_visible(generation, v, rows);
+                let rc = std::rc::Rc::new(top_by_turnover_within(rows, &vis, 180));
+                *g = Some((generation, v, rc.clone()));
+                rc
+            }
+        }
+    })
+}
+
+/// 树图的 canvas 缓存。`key` 变了才清——`key` 由数据版本号与当前口径组成。
+///
+/// 用 `thread_local` 是因为 `Cache` 不是 `Send`；视图只在主线程构建。
+fn treemap_cache(generation: u64, v: ViewState) -> std::rc::Rc<Cache> {
+    thread_local! {
+        static CELL: std::cell::RefCell<Option<(u64, ViewState, std::rc::Rc<Cache>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    CELL.with(|c| {
+        let mut g = c.borrow_mut();
+        match &*g {
+            Some((g0, vs, rc)) if *g0 == generation && *vs == v => rc.clone(),
+            _ => {
+                let rc = std::rc::Rc::new(Cache::new());
+                *g = Some((generation, v, rc.clone()));
+                rc
+            }
+        }
+    })
+}
+
 fn intern(s: &str) -> &'static str {
     use std::sync::Mutex;
     static POOL: Mutex<Option<std::collections::HashSet<&'static str>>> = Mutex::new(None);
@@ -1212,7 +1287,8 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState) -> Element<'a, RadarMsg> 
 // ───────────────────────── 面板体 ─────────────────────────
 
 pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
-    let st: RadarReadout = super::radar_readout::snapshot();
+    // Arc：每帧只是引用计数加一，不再深拷贝整份读数（见 snapshot 的说明）
+    let st = super::radar_readout::snapshot();
     let v = super::radar::view();
     let mut body = column![].spacing(6).padding(10);
 
@@ -1347,7 +1423,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
     // ── 资产类过滤 ──
     // 股票的成交额远大于加密，同图时加密会被挤到几乎看不见（实测 BTC 只剩一个小格）。
-    let vis = visible(&st.rows, v);
+    let vis = memo_visible(st.generation, v, &st.rows);
     let mut ar = row![text("资产 ").size(11).color(C_DIM)].spacing(3);
     for (a, l) in [
         (AssetFilter::All, "全部"),
@@ -1493,7 +1569,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // 树图选行**按体量**，不按当前排序：热图要回答「整个市场此刻什么样」，
     // 取排序前 N 会让整张图只剩涨幅榜（实测就是满屏一片蓝，看不到任何下跌）。
     // 排序只管下面的 Screener。超过 180 格就小于可辨识尺寸，只会拖慢绘制。
-    let picked = top_by_turnover_within(&st.rows, &vis, 180);
+    let picked = memo_picked(st.generation, v, &st.rows);
     // 选中的大小口径对当前这批行没有数据 → 权重全 0 → 树图整个是空的。
     // 空白且无提示是最难排查的一种坏（实测：切到加密后图没了，因为默认口径是
     // 市值而 Binance 不给市值）。这里说清楚缺的是哪个口径，并给出可用的替代。
@@ -1590,8 +1666,14 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         canvas_widget(TreemapCanvas {
             groups,
             header_h,
-            // 每帧新建：数据 2s 一变，Cache 不感知内容变化，复用会把画面冻住
-            cache: std::rc::Rc::new(Cache::new()),
+            // **只在数据或口径真的变了时清缓存。**
+            //
+            // 原来是每帧 `Cache::new()`——理由是「Cache 不感知内容变化，复用会
+            // 把画面冻住」。那确实是个真问题，但代价是缓存彻底失效：180 个格子
+            // 的文字排版 + 填充 + 描边每帧全量重画，主线程直接打满一个核
+            // （实测 99.9%）。正确做法不是不缓存，而是给数据一个版本号，
+            // 版本或 ViewState 变了才 clear。
+            cache: treemap_cache(st.generation, v),
         })
         .width(Length::Fill)
         .height(Length::Fixed(340.0)),
@@ -1608,7 +1690,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             ev.desc = true;
         }
     }
-    let idx = order(&st.rows, ev);
+    let idx = memo_order(st.generation, ev, &st.rows);
     let mut cs = row![text("列组 ").size(11).color(C_DIM)].spacing(3);
     for (c, l) in [
         (ColumnSet::Speed, "涨跌幅"),
@@ -1677,6 +1759,38 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
 #[cfg(test)]
 mod tests {
+
+    fn memo_row(sym: &str, tv: f64) -> RadarRow {
+        RadarRow {
+            symbol: sym.into(),
+            venue: "binance:linear".into(),
+            asset: "crypto".into(),
+            quote_vol_24h: tv,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn memoized_index_recomputes_when_data_or_view_state_changes() {
+        // 记忆化的键必须**同时**含数据版本与口径。少一个就是一类静默错误：
+        // 只用版本 → 点了排序表格不动；只用口径 → 数据更新了表格不刷新。
+        // 引入记忆化是因为上游用 window::frames() 每秒重建 60 次视图，
+        // 而排序 4189 行占掉一帧 8ms 里的 4.5ms（实测）。
+        let rows = vec![memo_row("A", 1.0), memo_row("B", 2.0)];
+        let mut v = ViewState::DEFAULT;
+        v.sort = SortKey::Turnover;
+        v.desc = true;
+
+        let first = memo_order(1, v, &rows);
+        assert_eq!(rows[first[0]].symbol, "B");
+        assert!(std::rc::Rc::ptr_eq(&first, &memo_order(1, v, &rows)), "同键该命中缓存");
+
+        v.desc = false;
+        assert_eq!(rows[memo_order(1, v, &rows)[0]].symbol, "A", "改了排序方向却没重算");
+
+        let rows2 = vec![memo_row("C", 9.0)];
+        assert_eq!(rows2[memo_order(2, v, &rows2)[0]].symbol, "C", "数据换了一轮却没重算");
+    }
 
     /// 守护会下发的全部列键（对齐 `metricdef::TABS`）。加列时要同步这里——
     /// 靠下面那条单测保证「加了列却忘了写中文名」会当场失败，
