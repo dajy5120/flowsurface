@@ -110,6 +110,14 @@ pub struct OverviewRow {
 
 pub const OV_WINDOWS: [&str; 4] = ["日", "周", "月", "YTD"];
 
+/// 一个列组标签。
+#[derive(Default, Clone, PartialEq)]
+pub struct ColumnTab {
+    pub key: String,
+    pub label: String,
+    pub cols: Vec<String>,
+}
+
 /// 来源目录的一项。
 #[derive(Default, Clone, PartialEq)]
 pub struct CatalogItem {
@@ -123,6 +131,13 @@ pub struct CatalogItem {
 /// 只列已加载的 venue 的话，用户永远只能在守护恰好在拉的那几个市场里打转。
 #[derive(Default, Clone)]
 pub struct Catalog {
+    /// Screener 的列组（对齐 TV 的 Overview/Performance/…）。随快照下发，
+    /// 面板不硬编码列名——加列只改守护侧一处。
+    pub tabs: Vec<ColumnTab>,
+    /// 百分数口径的指标键。
+    pub pct_keys: std::collections::HashSet<String>,
+    /// 本币金额口径的指标键（已换算成美元）。
+    pub money_keys: std::collections::HashSet<String>,
     pub markets: Vec<CatalogItem>,
     /// 指数成分股来源。`code` 是来源 id（`america@SPX`），`region` 借用为所属市场。
     pub indices: Vec<CatalogItem>,
@@ -146,6 +161,9 @@ pub struct RadarReadout {
     pub breadth: Vec<BreadthRow>,
     pub overview: Vec<OverviewRow>,
     pub refreshed: String,
+    /// 慢层快照的时间戳（股票 60s 一刷，与热层不同步——面板要分别标注，
+    /// 否则会拿热层的时间当成股票数据的时间）。
+    pub slow_stamp: String,
     pub present: bool,
     /// 守护 service 状态。后台 poller 刷——**不能在 view 里查**，那是每帧一次
     /// systemctl 子进程（docs/20 §19.2 的每帧开销教训）。
@@ -166,6 +184,16 @@ fn board_path() -> PathBuf {
     std::env::var("WS_RADAR_BOARD")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home().join("ws-data/live/radar_board.json"))
+}
+
+/// 慢层快照（股票/ETF + 宽度 + 总览），与热层同目录、文件名加 `_slow`。
+///
+/// 拆两个文件是为写盘量：加密 5s 一变、股票 60s 才变，合成一个的话股票那
+/// 五十多列基本面指标会跟着每 5s 重写（实测 1.94 MB/s、一天 167GB）。
+fn slow_path() -> PathBuf {
+    let p = board_path();
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("radar_board");
+    p.with_file_name(format!("{stem}_slow.json"))
 }
 
 pub fn snapshot() -> RadarReadout {
@@ -268,21 +296,29 @@ fn ensure_poller() {
     });
 }
 
-fn poll_once() -> RadarReadout {
-    let refreshed = chrono::Local::now().format("%H:%M:%S").to_string();
-    match std::fs::read_to_string(board_path())
+fn read_json(p: PathBuf) -> Option<serde_json::Value> {
+    std::fs::read_to_string(p)
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-    {
-        Some(v) => RadarReadout {
-            refreshed,
-            ..parse_board(&v)
-        },
-        None => RadarReadout {
-            refreshed,
-            ..Default::default()
-        },
+}
+
+fn poll_once() -> RadarReadout {
+    let refreshed = chrono::Local::now().format("%H:%M:%S").to_string();
+    let Some(hot) = read_json(board_path()) else {
+        return RadarReadout { refreshed, ..Default::default() };
+    };
+    let mut st = RadarReadout { refreshed, ..parse_board(&hot) };
+    // 慢层可缺（股票层没开、或还没写第一轮）——热层照常显示，不整个作废
+    if let Some(slow) = read_json(slow_path()) {
+        let s = parse_board(&slow);
+        st.rows.extend(s.rows);
+        st.breadth = s.breadth;
+        st.overview = s.overview;
+        // 标的总数是两层之和；单层的 n_symbols 只算自己那部分
+        st.n_symbols += s.n_symbols;
+        st.slow_stamp = s.stamp;
     }
+    st
 }
 
 /// 从窗口字典里按 [`WINDOWS`] 顺序取值。**缺席即 `None`，不补 0**——
@@ -393,7 +429,34 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 .collect()
         })
         .unwrap_or_default();
+    let cat = |k: &str| v.get("catalog").and_then(|c| c.get(k));
+    let tabs: Vec<ColumnTab> = cat("tabs")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|o| ColumnTab {
+                    key: s(o, "key"),
+                    label: s(o, "label"),
+                    cols: o
+                        .get("cols")
+                        .and_then(|x| x.as_array())
+                        .map(|c| c.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let keys = |k: &str| -> std::collections::HashSet<String> {
+        cat("units")
+            .and_then(|u| u.get(k))
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
     let catalog = Catalog {
+        tabs,
+        pct_keys: keys("pct"),
+        money_keys: keys("money"),
         markets: items("markets"),
         indices: index_items,
         types: items("types"),
@@ -478,6 +541,9 @@ mod tests {
       "catalog":{"markets":[{"code":"america","label":"美国","region":"美洲"},
                             {"code":"japan","label":"日本","region":"亚太"}],
                  "types":[{"code":"stock","label":"股票"},{"code":"fund","label":"ETF"}],
+                 "tabs":[{"key":"overview","label":"概览","cols":["close","change","volume"]},
+                         {"key":"valuation","label":"估值","cols":["price_earnings_ttm","price_book_fq"]}],
+                 "units":{"pct":["change","Perf.YTD"],"money":["close","market_cap_basic"]},
                  "indices":[{"market":"america","id":"america@SPX","label":"标准普尔500指数"},
                             {"market":"japan","id":"japan@NI225","label":"日经225指数"}],
                  "crypto_cats":[{"code":"","label":"全部加密货币"},{"code":"defi","label":"DeFi"}]},
@@ -616,6 +682,17 @@ mod tests {
     }
 
     #[test]
+    fn slow_layer_absence_does_not_void_the_hot_layer() {
+        // 股票层没开、或慢层还没写第一轮时，加密照常显示
+        let hot = parse_board(&serde_json::from_str(
+            r#"{"stamp":"t","layer":"hot","rows":[{"symbol":"BTCUSDT","asset":"crypto"}]}"#,
+        ).unwrap());
+        assert_eq!(hot.rows.len(), 1);
+        assert!(hot.breadth.is_empty());
+        assert!(hot.slow_stamp.is_empty());
+    }
+
+    #[test]
     fn parses_the_source_catalog() {
         // 面板据此建「来源」下拉；漏了的话下拉只剩已加载的那几个市场
         let c = board().catalog;
@@ -629,6 +706,12 @@ mod tests {
         assert_eq!(c.indices[0].code, "america@SPX");
         assert_eq!(c.indices[0].label, "标准普尔500指数");
         assert_eq!(c.indices[0].region, "america", "指数要知道自己属于哪个市场");
+        assert_eq!(c.tabs.len(), 2);
+        assert_eq!(c.tabs[0].key, "overview");
+        assert_eq!(c.tabs[0].cols, vec!["close", "change", "volume"]);
+        assert!(c.pct_keys.contains("Perf.YTD"));
+        assert!(c.money_keys.contains("market_cap_basic"));
+        assert!(!c.pct_keys.contains("market_cap_basic"), "金额不是百分数");
     }
 
     #[test]

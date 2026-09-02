@@ -141,12 +141,14 @@ pub enum ViewMode {
 /// Screener 的列组（对应 TradingView 筛选器顶部的 Overview/Performance/… 标签）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnSet {
-    Overview,
-    Performance,
+    /// 雷达自有：多窗口涨跌幅。
     Speed,
-    Volume,
-    /// 参考数据（国别/板块/市值）——股票层进来后才有意义。
+    /// 雷达自有：多窗口速度 z。
+    SpeedZ,
+    /// 参考数据（国别/板块/市值）。
     Reference,
+    /// TradingView 的九个列组之一，按目录里的下标寻址。
+    Tv(usize),
 }
 
 /// 排序键。`Ret`/`Z` 带窗口下标。
@@ -164,6 +166,8 @@ pub enum SortKey {
     Z(usize),
     VolZ,
     CntZ,
+    /// TradingView 口径的任意指标（键见 docs/22 §4.3）。
+    Metric(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,7 +194,7 @@ impl ViewState {
         size: SIZE_OPTS[0],
         color: COLOR_OPTS[0],
         group_by: GroupBy::None,
-        cols: ColumnSet::Overview,
+        cols: ColumnSet::Tv(0),
         palette: Palette::BlueOrange,
         mode: ViewMode::Heatmap,
         asset: AssetFilter::All,
@@ -306,6 +310,7 @@ pub fn key_value(r: &RadarRow, k: SortKey) -> Option<f64> {
         SortKey::Z(i) => r.z_ret[i],
         SortKey::VolZ => r.z_vol,
         SortKey::CntZ => r.z_cnt,
+        SortKey::Metric(k) => r.m.get(k).copied(),
     }
 }
 

@@ -213,7 +213,10 @@ pub(crate) fn base_asset(sym: &str) -> &str {
 }
 
 fn usd(v: f64) -> String {
-    if v >= 1e9 {
+    // 市值动辄万亿——没有 T 档的话 NVDA 会显示成 5240.0B（TradingView 是 5.24 T）
+    if v.abs() >= 1e12 {
+        format!("{:.2}T", v / 1e12)
+    } else if v >= 1e9 {
         format!("{:.1}B", v / 1e9)
     } else if v >= 1e6 {
         format!("{:.1}M", v / 1e6)
@@ -221,6 +224,16 @@ fn usd(v: f64) -> String {
         format!("{:.0}K", v / 1e3)
     } else {
         format!("{v:.0}")
+    }
+}
+
+/// 金额格：**只有大额聚合量才缩写**。每股金额（价格/EPS/每股股息/目标价）
+/// 要保留小数——`usd()` 从千位就缩写，会把 MELI 的 $1963.49 显示成 `2K`。
+fn money_cell(v: f64) -> String {
+    if v.abs() >= 1e6 {
+        usd(v)
+    } else {
+        format!("{v:.2}")
     }
 }
 
@@ -259,7 +272,11 @@ pub(crate) struct Col {
 }
 
 /// 当前列组下要显示的列（对应 TV Screener 顶部的 Overview/Performance/… 标签）。
-pub(crate) fn columns(v: ViewState) -> Vec<Col> {
+///
+/// TV 的九个列组由**快照下发的目录**给出，面板不硬编码列名——加列只改守护侧一处。
+/// 另有三个雷达自有的列组（多窗口涨跌幅 / 多窗口速度 z / 参考数据），
+/// 是 TradingView 没有的。
+pub(crate) fn columns(v: ViewState, cat: &Catalog) -> Vec<Col> {
     let c = |key, title: &str, width| Col {
         key,
         title: title.to_string(),
@@ -271,52 +288,136 @@ pub(crate) fn columns(v: ViewState) -> Vec<Col> {
         c(SortKey::Venue, "市场", 76.0),
     ];
     match v.cols {
-        ColumnSet::Overview => {
-            out.push(c(SortKey::Price, "价格", 88.0));
-            out.push(c(SortKey::Ret(v.win), &format!("{} 涨跌", WINDOWS[v.win]), 78.0));
-            out.push(c(SortKey::Z(v.win), &format!("{} 速度z", WINDOWS[v.win]), 78.0));
-            out.push(c(SortKey::VolZ, "量异常z", 74.0));
-            out.push(c(SortKey::Ret(5), "24h", 74.0));
-            out.push(c(SortKey::Turnover, "24h 额", 74.0));
-        }
-        ColumnSet::Performance => {
+        ColumnSet::Speed => {
             for (i, w) in WINDOWS.iter().enumerate() {
                 out.push(c(SortKey::Ret(i), w, 74.0));
             }
-            out.push(c(SortKey::Turnover, "24h 额", 74.0));
         }
-        ColumnSet::Speed => {
+        ColumnSet::SpeedZ => {
             for (i, w) in WINDOWS.iter().enumerate() {
                 out.push(c(SortKey::Z(i), w, 68.0));
             }
-            out.push(c(SortKey::Turnover, "24h 额", 74.0));
+            out.push(c(SortKey::VolZ, "量异常z", 74.0));
+            out.push(c(SortKey::CntZ, "笔数异常z", 80.0));
         }
         ColumnSet::Reference => {
             out.push(c(SortKey::Country, "国别", 108.0));
             out.push(c(SortKey::Sector, "板块", 150.0));
             out.push(c(SortKey::Mcap, "市值", 84.0));
             out.push(c(SortKey::Price, "价格", 88.0));
-            out.push(c(SortKey::Ret(5), "日", 74.0));
         }
-        ColumnSet::Volume => {
-            out.push(c(SortKey::VolZ, "量异常z", 80.0));
-            out.push(c(SortKey::CntZ, "笔数异常z", 84.0));
-            out.push(c(SortKey::Turnover, "24h 额", 80.0));
-            out.push(c(SortKey::Ret(v.win), &format!("{} 涨跌", WINDOWS[v.win]), 78.0));
-            out.push(c(SortKey::Price, "价格", 88.0));
+        ColumnSet::Tv(i) => {
+            if let Some(t) = cat.tabs.get(i) {
+                for k in &t.cols {
+                    out.push(Col {
+                        key: SortKey::Metric(intern(k)),
+                        title: metric_title(k).to_string(),
+                        width: metric_width(k),
+                    });
+                }
+            }
         }
     }
     out
 }
 
+/// 指标键 → 列头中文名。未收录的键直接显示原键——比显示空白强，
+/// 也让「加了列但忘了配名字」这件事一眼看得见。
+pub(crate) fn metric_title(k: &str) -> &str {
+    match k {
+        "close" => "价格",
+        "change" => "涨跌%",
+        "change|60" => "1h%",
+        "change|240" => "4h%",
+        "volume" => "成交量",
+        "volume_change" => "量变化%",
+        "relative_volume_10d_calc" => "相对量",
+        "average_volume_10d_calc" => "10日均量",
+        "average_volume_30d_calc" => "30日均量",
+        "Value.Traded" => "成交额",
+        "market_cap_basic" => "市值",
+        "enterprise_value_current" => "企业价值",
+        "price_earnings_ttm" => "市盈率",
+        "price_earnings_growth_ttm" => "PEG",
+        "price_sales_current" => "市销率",
+        "price_book_fq" => "市净率",
+        "price_to_cash_f_operating_activities_ttm" => "P/CF",
+        "price_free_cash_flow_ttm" => "P/FCF",
+        "price_cash_flow_current" => "价格/现金",
+        "enterprise_value_ebitda_ttm" => "EV/EBITDA",
+        "earnings_per_share_diluted_ttm" => "摊薄EPS",
+        "earnings_per_share_basic_ttm" => "基本EPS",
+        "earnings_per_share_diluted_yoy_growth_ttm" => "EPS增速%",
+        "earnings_per_share_forecast_next_fq" => "EPS预测",
+        "dividends_yield_current" => "股息率%",
+        "dividends_per_share_fq" => "每股股息",
+        "dividend_payout_ratio_ttm" => "派息率%",
+        "dps_common_stock_prim_issue_yoy_growth_fy" => "股息增速%",
+        "continuous_dividend_payout" => "连续派息",
+        "continuous_dividend_growth" => "连续增息",
+        "Perf.W" => "1周%",
+        "Perf.1M" => "1月%",
+        "Perf.3M" => "3月%",
+        "Perf.6M" => "6月%",
+        "Perf.YTD" => "YTD%",
+        "Perf.Y" => "1年%",
+        "Perf.5Y" => "5年%",
+        "Perf.10Y" => "10年%",
+        "Perf.All" => "全部%",
+        "Volatility.W" => "周波动%",
+        "Volatility.M" => "月波动%",
+        "Volatility.D" => "日波动%",
+        "Recommend.All" => "技术评级",
+        "Recommend.MA" => "均线评级",
+        "Recommend.Other" => "震荡评级",
+        "RSI" => "RSI",
+        "Mom" => "动量",
+        "AO" => "AO",
+        "CCI20" => "CCI",
+        "Stoch.K" => "KDJ-K",
+        "Stoch.D" => "KDJ-D",
+        "premarket_close" => "盘前价",
+        "premarket_change" => "盘前%",
+        "premarket_gap" => "盘前跳空%",
+        "premarket_volume" => "盘前量",
+        "postmarket_close" => "盘后价",
+        "postmarket_change" => "盘后%",
+        "postmarket_volume" => "盘后量",
+        "gap" => "跳空%",
+        "gross_margin" => "毛利率%",
+        "operating_margin" => "营业利润率%",
+        "pre_tax_margin" => "税前利润率%",
+        "net_margin" => "净利率%",
+        "free_cash_flow_margin_ttm" => "FCF利润率%",
+        "return_on_assets" => "ROA%",
+        "return_on_equity" => "ROE%",
+        "return_on_invested_capital" => "ROIC%",
+        "total_revenue_ttm" => "营收",
+        "total_revenue_yoy_growth_ttm" => "营收增速%",
+        "gross_profit" => "毛利",
+        "oper_income_ttm" => "营业利润",
+        "net_income_ttm" => "净利润",
+        "ebitda_ttm" => "EBITDA",
+        "price_target_average" => "目标价",
+        "recommendation_total" => "分析师数",
+        "recommendation_mark" => "分析师评级",
+        other => other,
+    }
+}
+
+fn metric_width(k: &str) -> f32 {
+    if crate::ws::radar_view::metric_title(k).chars().count() >= 6 {
+        92.0
+    } else {
+        78.0
+    }
+}
+
 /// 树图去重键。
 ///
 /// 同一个币在 `binance:spot` 与 `binance:linear` 各有一行、市值相同——
-/// 按市值铺图时两者各占一个满格，**面积被重复计算，半张图是冗余的**
-/// （实测 BTC/ETH/XRP/SOL 各出现两次）。加密按基础币去重。
-///
-/// 股票不能只按代号去重：不同市场会有同名代号（港股 `700` 与别处的 `700`
-/// 不是一回事），故带上市场段。
+/// 按市值铺图时两者各占一个满格，**面积被重复计算**（实测 BTC/ETH 各出现两次）。
+/// 加密按基础币去重；股票必须带**市场段**——港股 `700` 与别处的 `700` 不是一回事。
 pub(crate) fn dedup_key(r: &RadarRow) -> String {
     if r.asset == "crypto" {
         format!("crypto:{}", base_asset(&r.symbol))
@@ -325,12 +426,12 @@ pub(crate) fn dedup_key(r: &RadarRow) -> String {
     }
 }
 
-/// 按 24h 成交额取前 n 个（树图选行）。同额按标的定序，避免刷新抖动。
+/// 按 24h 成交额取前 n 个（树图选行）。**同一标的只保留成交额最大的那条挂牌**。
 pub(crate) fn top_by_turnover(rows: &[RadarRow], n: usize) -> Vec<usize> {
     top_by_turnover_within(rows, &(0..rows.len()).collect::<Vec<_>>(), n)
 }
 
-/// 只在给定子集里取前 n（资产类过滤后用）。**同一标的只保留成交额最大的那条挂牌**。
+/// 只在给定子集里取前 n（资产类过滤后用）。
 pub(crate) fn top_by_turnover_within(rows: &[RadarRow], subset: &[usize], n: usize) -> Vec<usize> {
     let mut idx: Vec<usize> = subset.to_vec();
     idx.sort_by(|&a, &b| {
@@ -348,7 +449,12 @@ pub(crate) fn top_by_turnover_within(rows: &[RadarRow], subset: &[usize], n: usi
 }
 
 /// 一格的文本与颜色。
-pub(crate) fn cell_text(r: &RadarRow, k: SortKey, p: Palette) -> (String, Color) {
+pub(crate) fn cell_text(
+    r: &RadarRow,
+    k: SortKey,
+    cat: &Catalog,
+    p: Palette,
+) -> (String, Color) {
     let trusted = r.trustworthy();
     match k {
         SortKey::Symbol => (
@@ -371,6 +477,28 @@ pub(crate) fn cell_text(r: &RadarRow, k: SortKey, p: Palette) -> (String, Color)
             if r.mcap > 0.0 { usd(r.mcap) } else { "—".into() },
             C_DIM,
         ),
+        SortKey::Metric(key) => {
+            let v = r.m.get(key).copied();
+            let txt = match v {
+                None => "—".to_string(),
+                // 量纲由目录标注：百分数带 %、金额缩写并加 $、其余原样
+                Some(x) if cat.pct_keys.contains(key) => format!("{x:+.2}%"),
+                Some(x) if cat.money_keys.contains(key) => money_cell(x),
+                Some(x) if x.abs() >= 1e6 => usd(x),
+                Some(x) => format!("{x:.2}"),
+            };
+            // 只有涨跌类着色，估值/比率类保持中性——把 P/E 按涨跌上色是误导
+            let col = if cat.pct_keys.contains(key) && key.contains("chang")
+                || key.starts_with("Perf.")
+                || key == "change"
+                || key == "gap"
+            {
+                scale_text(v, "change", p, true)
+            } else {
+                C_TXT
+            };
+            (txt, col)
+        }
         SortKey::Price => (price(r.price), C_TXT),
         SortKey::Turnover => (usd(r.quote_vol_24h), C_DIM),
         SortKey::Ret(i) => (opt_pct(r.ret[i]), scale_text(r.ret[i].map(|x| (x.exp() - 1.0) * 100.0), "change", p, trusted)),
@@ -661,6 +789,8 @@ fn is_numeric(k: SortKey) -> bool {
         SortKey::Symbol | SortKey::Venue | SortKey::Tier | SortKey::Country | SortKey::Sector
     )
 }
+
+use super::radar_readout::Catalog;
 
 /// 可点排序的列头。箭头**前置**且只出现在活动列上（同 TradingView 的 `↓ Mkt cap`）——
 /// 后置箭头会把列标题推离它对齐的那列数字。
@@ -1155,7 +1285,6 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     }
 
     // ── 树图 ──
-    let idx = order(&st.rows, v);
     // 树图选行**按体量**，不按当前排序：热图要回答「整个市场此刻什么样」，
     // 取排序前 N 会让整张图只剩涨幅榜（实测就是满屏一片蓝，看不到任何下跌）。
     // 排序只管下面的 Screener。超过 180 格就小于可辨识尺寸，只会拖慢绘制。
@@ -1264,15 +1393,28 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     );
 
     // ── Screener ──
+    let cols = columns(v, &st.catalog);
+    // 切到 TV 列组后，原排序键（如 5m 速度z）可能不在显示的列里——表头上就没有
+    // 排序指示，用户看不出表是按什么排的。退到该列组的第一个数值列。
+    let mut ev = v;
+    if !cols.iter().any(|c| c.key == v.sort) {
+        if let Some(c) = cols.iter().find(|c| is_numeric(c.key)) {
+            ev.sort = c.key;
+            ev.desc = true;
+        }
+    }
+    let idx = order(&st.rows, ev);
     let mut cs = row![text("列组 ").size(11).color(C_DIM)].spacing(3);
     for (c, l) in [
-        (ColumnSet::Overview, "概览"),
-        (ColumnSet::Performance, "表现"),
-        (ColumnSet::Speed, "速度"),
-        (ColumnSet::Volume, "量"),
+        (ColumnSet::Speed, "涨跌幅"),
+        (ColumnSet::SpeedZ, "速度 z"),
         (ColumnSet::Reference, "参考"),
     ] {
         cs = cs.push(chip(l, c == v.cols, RadarMsg::SetColumns(c)));
+    }
+    for (i, t) in st.catalog.tabs.iter().enumerate() {
+        let c = ColumnSet::Tv(i);
+        cs = cs.push(chip(&t.label, c == v.cols, RadarMsg::SetColumns(c)));
     }
     let shown = idx.len().min(80);
     cs = cs.push(
@@ -1290,10 +1432,9 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     }
     body = body.push(cs.align_y(iced::Alignment::Center));
 
-    let cols = columns(v);
     let mut hdr = row![].spacing(3);
     for c in &cols {
-        hdr = hdr.push(head_cell(c, v));
+        hdr = hdr.push(head_cell(c, ev));
     }
     body = body.push(hdr);
 
@@ -1301,7 +1442,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         let r = &st.rows[i];
         let mut tr = row![].spacing(3);
         for c in &cols {
-            let (s, col) = cell_text(r, c.key, v.palette);
+            let (s, col) = cell_text(r, c.key, &st.catalog, v.palette);
             tr = tr.push(cell(s, c.width, col, is_numeric(c.key)));
         }
         let flag = if !r.sigma_ok && r.z_provisional {
@@ -1406,45 +1547,134 @@ mod tests {
         assert_eq!(base_asset("FOO"), "FOO");
     }
 
+    /// 目录夹具：两个 TV 列组 + 量纲标注。
+    fn cat() -> Catalog {
+        Catalog {
+            tabs: vec![
+                super::super::radar_readout::ColumnTab {
+                    key: "overview".into(),
+                    label: "概览".into(),
+                    cols: vec!["close".into(), "change".into(), "market_cap_basic".into()],
+                },
+                super::super::radar_readout::ColumnTab {
+                    key: "valuation".into(),
+                    label: "估值".into(),
+                    cols: vec!["price_earnings_ttm".into(), "price_book_fq".into()],
+                },
+            ],
+            pct_keys: ["change", "Perf.YTD"].iter().map(|s| s.to_string()).collect(),
+            money_keys: ["close", "market_cap_basic"].iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn column_sets_differ_and_always_lead_with_symbol() {
+        let c = cat();
         let mut v = ViewState::DEFAULT;
         for cs in [
-            ColumnSet::Overview,
-            ColumnSet::Performance,
             ColumnSet::Speed,
-            ColumnSet::Volume,
+            ColumnSet::SpeedZ,
+            ColumnSet::Reference,
+            ColumnSet::Tv(0),
+            ColumnSet::Tv(1),
         ] {
             v.cols = cs;
-            let c = columns(v);
-            assert_eq!(c[0].key, SortKey::Symbol, "{cs:?} 首列应是标的");
-            assert!(c.len() >= 5, "{cs:?} 列太少");
+            let cols = columns(v, &c);
+            assert_eq!(cols[0].key, SortKey::Symbol, "{cs:?} 首列应是标的");
+            assert!(cols.len() >= 4, "{cs:?} 列太少");
         }
-        v.cols = ColumnSet::Speed;
-        let speed = columns(v);
+        v.cols = ColumnSet::SpeedZ;
         assert_eq!(
-            speed.iter().filter(|c| matches!(c.key, SortKey::Z(_))).count(),
+            columns(v, &c).iter().filter(|c| matches!(c.key, SortKey::Z(_))).count(),
             WINDOWS.len(),
             "速度列组应给出全部窗口的 z"
         );
     }
 
     #[test]
-    fn overview_columns_follow_selected_window() {
+    fn tv_tabs_come_from_the_catalog_not_hardcoded() {
+        // 列名由快照下发；加列只改守护侧一处
+        let c = cat();
         let mut v = ViewState::DEFAULT;
-        v.win = 4;
-        v.cols = ColumnSet::Overview;
-        let c = columns(v);
-        assert!(c.iter().any(|x| x.key == SortKey::Z(4)));
-        assert!(c.iter().any(|x| x.title.contains("4h")));
+        v.cols = ColumnSet::Tv(1);
+        let keys: Vec<_> = columns(v, &c)
+            .into_iter()
+            .filter_map(|x| match x.key {
+                SortKey::Metric(k) => Some(k),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, vec!["price_earnings_ttm", "price_book_fq"]);
+        // 越界的下标不该 panic，只是没有指标列
+        v.cols = ColumnSet::Tv(99);
+        assert!(columns(v, &c).iter().all(|x| !matches!(x.key, SortKey::Metric(_))));
+    }
+
+    #[test]
+    fn per_share_amounts_keep_decimals() {
+        // usd() 从千位就缩写，会把 MELI 的 $1963.49 显示成 `2K`
+        assert_eq!(money_cell(1963.49), "1963.49");
+        assert_eq!(money_cell(29.43), "29.43");
+        assert_eq!(money_cell(0.0), "0.00");
+        // 大额聚合量仍然缩写
+        assert_eq!(money_cell(99.5e9), "99.5B");
+        assert_eq!(money_cell(1.092e12), "1.09T");
+    }
+
+    #[test]
+    fn usd_scales_up_to_trillions() {
+        // 没有 T 档的话 NVDA 的 5.24 万亿会显示成 5240.0B
+        // 全表不带 $ 前缀（金额列已统一换算成美元，列头说明口径即可）
+        assert_eq!(usd(5.24e12), "5.24T");
+        assert_eq!(usd(2.9e9), "2.9B");
+        assert_eq!(usd(1.5e6), "1.5M");
+        assert_eq!(usd(-3.1e12), "-3.10T", "负值也要走 T 档");
+    }
+
+    #[test]
+    fn metric_cells_respect_the_declared_unit() {
+        let c = cat();
+        let mut r = row_of("NVDA", Some(1.0));
+        r.m.insert("change".into(), -4.57);
+        r.m.insert("market_cap_basic".into(), 5.24e12);
+        r.m.insert("price_earnings_ttm".into(), 27.5);
+
+        assert_eq!(cell_text(&r, SortKey::Metric("change"), &c, P).0, "-4.57%");
+        assert_eq!(cell_text(&r, SortKey::Metric("market_cap_basic"), &c, P).0, "5.24T");
+        r.m.insert("close".into(), 1963.49);
+        assert_eq!(
+            cell_text(&r, SortKey::Metric("close"), &c, P).0,
+            "1963.49",
+            "每股价格不该被缩写成 2K"
+        );
+        assert_eq!(
+            cell_text(&r, SortKey::Metric("price_earnings_ttm"), &c, P).0,
+            "27.50",
+            "比率既不是百分数也不是金额"
+        );
+        assert_eq!(cell_text(&r, SortKey::Metric("gross_margin"), &c, P).0, "—");
+    }
+
+    #[test]
+    fn only_change_like_metrics_get_sign_colour() {
+        // 把 P/E 按涨跌上色是误导
+        let c = cat();
+        let mut r = row_of("X", Some(1.0));
+        r.m.insert("change".into(), -4.0);
+        r.m.insert("price_earnings_ttm".into(), 27.5);
+        let neutral = cell_text(&r, SortKey::Metric("price_earnings_ttm"), &c, P).1;
+        assert!((neutral.r - C_TXT.r).abs() < 1e-6, "估值类应保持中性色");
+        let chg = cell_text(&r, SortKey::Metric("change"), &c, P).1;
+        assert!(chg.r > chg.b, "跌应偏橙");
     }
 
     #[test]
     fn cell_text_marks_missing_as_dash_not_zero() {
         let r = row_of("XUSDT", None);
-        assert_eq!(cell_text(&r, SortKey::Z(1), P).0, "—");
-        assert_eq!(cell_text(&r, SortKey::Ret(1), P).0, "—");
-        assert_eq!(cell_text(&r, SortKey::VolZ, P).0, "—");
+        assert_eq!(cell_text(&r, SortKey::Z(1), &cat(), P).0, "—");
+        assert_eq!(cell_text(&r, SortKey::Ret(1), &cat(), P).0, "—");
+        assert_eq!(cell_text(&r, SortKey::VolZ, &cat(), P).0, "—");
     }
 
     #[test]
