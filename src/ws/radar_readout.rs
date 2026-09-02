@@ -33,6 +33,9 @@ pub struct RadarRow {
     /// TradingView 口径的全量指标（键见 docs/22 §4.3）。缺的指标**不在表里**，
     /// 不是 0——面板据此显示「—」并把格子置中性。
     pub m: std::collections::HashMap<String, f64>,
+    /// 文本值的指标列（评级 / 财务期间 / K 线形态）。与 `m` 分开是因为它们
+    /// 不是数字——混进 `m` 会让排序和着色拿到没法比较的值。
+    pub t: std::collections::HashMap<String, String>,
     /// 加密分类（TradingView `crypto_common_categories`）。「来源」下拉据此过滤。
     pub cats: Vec<String>,
     pub price: f64,
@@ -418,6 +421,17 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    t: o
+                        .get("t")
+                        .and_then(|x| x.as_object())
+                        .map(|mm| {
+                            mm.iter()
+                                .filter_map(|(k, v)| {
+                                    v.as_str().filter(|s| !s.is_empty()).map(|s| (k.clone(), s.to_string()))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     price: o.get("price").and_then(|x| x.as_f64()).unwrap_or(0.0),
                     quote_vol_24h: o
                         .get("quote_vol_24h")
@@ -582,6 +596,29 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn text_valued_columns_parse_into_their_own_map() {
+        // 评级返回 "StrongBuy"、财务期间返回 "2026-Q2"；当数字解析会整列「—」
+        let j = r#"{"stamp":"s","source":"tv","rows":[{"symbol":"NVDA","venue":"tv:america:stock",
+          "m":{"close":217.4},"t":{"AnalystRating":"StrongBuy","fiscal_period_current":"2026-Q2","x":""}}]}"#;
+        let r = parse_board(&serde_json::from_str(j).unwrap());
+        let row = &r.rows[0];
+        assert_eq!(row.t.get("AnalystRating").map(String::as_str), Some("StrongBuy"));
+        assert_eq!(row.t.get("fiscal_period_current").map(String::as_str), Some("2026-Q2"));
+        assert!(row.t.get("x").is_none(), "空串等于没有，不该占一格");
+        assert_eq!(row.m.get("close").copied(), Some(217.4));
+        assert!(row.m.get("AnalystRating").is_none());
+    }
+
+    #[test]
+    fn a_snapshot_without_the_text_map_still_parses() {
+        // 守护可能是旧版本，没有 `t` 段——不能因此整份快照解析失败
+        let j = r#"{"stamp":"s","source":"tv","rows":[{"symbol":"A","venue":"v","m":{"close":1.0}}]}"#;
+        let r = parse_board(&serde_json::from_str(j).unwrap());
+        assert_eq!(r.rows.len(), 1);
+        assert!(r.rows[0].t.is_empty());
+    }
 
     #[test]
     fn request_body_carries_the_pushdown_filters() {

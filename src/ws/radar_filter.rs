@@ -252,7 +252,7 @@ pub const FILTERS: [FilterDef; 20] = [
     f("Perf.YTD", "表现 YTD", FKind::Num, &PERF, Some("Perf.YTD")),
     f("total_revenue_yoy_growth_ttm", "营收增速", FKind::Num, &GROWTH, Some("total_revenue_yoy_growth_ttm")),
     f("price_earnings_growth_ttm", "PEG", FKind::Num, &PEG, Some("price_earnings_growth_ttm")),
-    f("return_on_equity", "ROE", FKind::Num, &ROE, Some("return_on_equity")),
+    f("return_on_equity_fq", "ROE", FKind::Num, &ROE, Some("return_on_equity_fq")),
     f("beta_1_year", "Beta", FKind::Num, &BETA, Some("beta_1_year")),
     f("earnings_release_date", "近期财报", FKind::Days, &PAST_EARN, Some("earnings_release_date")),
     f("earnings_release_next_date", "未来财报", FKind::Days, &NEXT_EARN, Some("earnings_release_next_date")),
@@ -582,9 +582,9 @@ mod tests {
         // scanner 的 ROE/股息率/增速已经是百分数（NVDA 的 ROE 是 117.2 不是 1.172）。
         // 阈值写成小数的话，这个筛选会安静地筛不出任何东西
         let mut v = ViewState::DEFAULT;
-        set(&mut v, "return_on_equity", "高于 20%");
-        assert!(passes(&with("return_on_equity", 117.2), &v, 0), "NVDA 实测值该通过");
-        assert!(!passes(&with("return_on_equity", 0.25), &v, 0), "0.25% 不是 25%");
+        set(&mut v, "return_on_equity_fq", "高于 20%");
+        assert!(passes(&with("return_on_equity_fq", 117.2), &v, 0), "NVDA 实测值该通过");
+        assert!(!passes(&with("return_on_equity_fq", 0.25), &v, 0), "0.25% 不是 25%");
     }
 
     #[test]
@@ -732,7 +732,7 @@ mod tests {
             "earnings_per_share_diluted_yoy_growth_ttm", "dividends_yield_current",
             "earnings_per_share_diluted_ttm",
             "recommendation_mark", "Perf.YTD", "total_revenue_yoy_growth_ttm",
-            "price_earnings_growth_ttm", "return_on_equity", "beta_1_year",
+            "price_earnings_growth_ttm", "return_on_equity_fq", "beta_1_year",
             "earnings_release_date", "earnings_release_next_date",
             "relative_volume_10d_calc", "Volatility.D",
         ]
