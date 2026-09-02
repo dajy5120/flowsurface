@@ -309,12 +309,28 @@ pub(crate) fn columns(v: ViewState) -> Vec<Col> {
     out
 }
 
+/// 树图去重键。
+///
+/// 同一个币在 `binance:spot` 与 `binance:linear` 各有一行、市值相同——
+/// 按市值铺图时两者各占一个满格，**面积被重复计算，半张图是冗余的**
+/// （实测 BTC/ETH/XRP/SOL 各出现两次）。加密按基础币去重。
+///
+/// 股票不能只按代号去重：不同市场会有同名代号（港股 `700` 与别处的 `700`
+/// 不是一回事），故带上市场段。
+pub(crate) fn dedup_key(r: &RadarRow) -> String {
+    if r.asset == "crypto" {
+        format!("crypto:{}", base_asset(&r.symbol))
+    } else {
+        format!("{}:{}", r.venue, r.symbol)
+    }
+}
+
 /// 按 24h 成交额取前 n 个（树图选行）。同额按标的定序，避免刷新抖动。
 pub(crate) fn top_by_turnover(rows: &[RadarRow], n: usize) -> Vec<usize> {
     top_by_turnover_within(rows, &(0..rows.len()).collect::<Vec<_>>(), n)
 }
 
-/// 只在给定子集里取前 n（资产类过滤后用）。
+/// 只在给定子集里取前 n（资产类过滤后用）。**同一标的只保留成交额最大的那条挂牌**。
 pub(crate) fn top_by_turnover_within(rows: &[RadarRow], subset: &[usize], n: usize) -> Vec<usize> {
     let mut idx: Vec<usize> = subset.to_vec();
     idx.sort_by(|&a, &b| {
@@ -324,6 +340,9 @@ pub(crate) fn top_by_turnover_within(rows: &[RadarRow], subset: &[usize], n: usi
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| rows[a].symbol.cmp(&rows[b].symbol))
     });
+    // 已按成交额降序，去重时天然保留最活跃的那条挂牌
+    let mut seen = std::collections::HashSet::new();
+    idx.retain(|&i| seen.insert(dedup_key(&rows[i])));
     idx.truncate(n);
     idx
 }
@@ -1141,6 +1160,35 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // 取排序前 N 会让整张图只剩涨幅榜（实测就是满屏一片蓝，看不到任何下跌）。
     // 排序只管下面的 Screener。超过 180 格就小于可辨识尺寸，只会拖慢绘制。
     let picked = top_by_turnover_within(&st.rows, &vis, 180);
+    // 选中的大小口径对当前这批行没有数据 → 权重全 0 → 树图整个是空的。
+    // 空白且无提示是最难排查的一种坏（实测：切到加密后图没了，因为默认口径是
+    // 市值而 Binance 不给市值）。这里说清楚缺的是哪个口径，并给出可用的替代。
+    let sized = picked
+        .iter()
+        .filter(|&&i| metric_value(&st.rows[i], v.size.key, v.win).is_some_and(|x| x > 0.0))
+        .count();
+    if sized == 0 {
+        let alt = SIZE_OPTS.iter().find(|o| {
+            o.key != v.size.key
+                && picked.iter().any(|&i| {
+                    metric_value(&st.rows[i], o.key, v.win).is_some_and(|x| x > 0.0)
+                })
+        });
+        body = body.push(
+            text(match alt {
+                Some(a) => format!(
+                    "⚠ 当前「大小」口径「{}」在这批标的上没有数据，树图无法绘制——改用「{}」",
+                    v.size.label, a.label
+                ),
+                None => format!(
+                    "⚠ 当前「大小」口径「{}」在这批标的上没有数据，树图无法绘制",
+                    v.size.label
+                ),
+            })
+            .size(11)
+            .color(C_GOLD),
+        );
+    }
     let mk_tile = |i: usize| {
         let r = &st.rows[i];
         let m = metric_value(r, v.color.key, v.win);
@@ -1420,6 +1468,61 @@ mod tests {
         let rows = vec![small, big];
         let top = top_by_turnover(&rows, 1);
         assert_eq!(rows[top[0]].symbol, "BIG", "体量最大的必须进图，哪怕它 z 最低");
+    }
+
+    #[test]
+    fn treemap_deduplicates_the_same_coin_across_venues() {
+        // 同一个币在 spot 与 linear 各一行、市值相同——按市值铺图时各占一个满格，
+        // 面积被重复计算（实测 BTC/ETH/XRP/SOL 各出现两次，半张图是冗余的）
+        let mk = |venue: &str, vol: f64| {
+            let mut r = row_of("BTCUSDT", Some(1.0));
+            r.asset = "crypto".into();
+            r.venue = venue.into();
+            r.quote_vol_24h = vol;
+            r
+        };
+        let rows = vec![mk("binance:spot", 1e8), mk("binance:linear", 9e8)];
+        let top = top_by_turnover_within(&rows, &[0, 1], 10);
+        assert_eq!(top.len(), 1, "同一个币只该占一格");
+        assert_eq!(rows[top[0]].venue, "binance:linear", "保留成交额最大的挂牌");
+    }
+
+    #[test]
+    fn different_markets_may_share_a_ticker_without_being_merged() {
+        // 港股 700 与别处的 700 不是一回事；股票去重必须带市场段
+        let mk = |venue: &str| {
+            let mut r = row_of("700", Some(1.0));
+            r.asset = "equity".into();
+            r.venue = venue.into();
+            r.quote_vol_24h = 1e8;
+            r
+        };
+        let rows = vec![mk("tv:hongkong:stock"), mk("tv:japan:stock")];
+        assert_eq!(top_by_turnover_within(&rows, &[0, 1], 10).len(), 2);
+    }
+
+    #[test]
+    fn missing_size_metric_is_detectable_not_a_blank_map() {
+        // 切到加密后树图整个空掉，因为默认口径是市值而 Binance 不给市值。
+        // 空白且无提示是最难排查的一种坏——面板必须能判定这个状态。
+        let mut r = row_of("BTCUSDT", Some(1.0));
+        r.asset = "crypto".into();
+        r.quote_vol_24h = 5e8;
+        let mut v = ViewState::DEFAULT;
+        v.size = *SIZE_OPTS.iter().find(|o| o.key == "market_cap_basic").unwrap();
+        assert!(
+            metric_value(&r, v.size.key, v.win).is_none(),
+            "构造有误：这行不该有市值"
+        );
+        // 存在可用的替代口径
+        let alt = SIZE_OPTS
+            .iter()
+            .find(|o| o.key != v.size.key && metric_value(&r, o.key, v.win).is_some_and(|x| x > 0.0));
+        assert!(alt.is_some(), "应能找到有数据的替代口径");
+
+        // 有市值时恢复正常
+        r.m.insert("market_cap_basic".into(), 1.5e12);
+        assert_eq!(metric_value(&r, "market_cap_basic", v.win), Some(1.5e12));
     }
 
     #[test]
