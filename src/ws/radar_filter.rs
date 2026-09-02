@@ -41,6 +41,13 @@ pub struct FilterDef {
     pub label: &'static str,
     pub kind: FKind,
     pub presets: &'static [Preset],
+    /// 能下推到服务端时，对应的 scanner 字段名；`None` = **只能本地筛**。
+    ///
+    /// 这个区分必须显示给用户看。本地筛只在「守护已抓回的按市值前 N 只」里
+    /// 找，而服务端筛是在整个市场里找——实测全美「P/E<10 且 息>4%」命中 87 只，
+    /// 本地样本里只有 2 只。不标出来的话，用户会以为「涨跌速度 > 3σ」也是
+    /// 全市场扫描，而它其实只扫了几千行样本。
+    pub server: Option<&'static str>,
 }
 
 const fn f(
@@ -48,8 +55,9 @@ const fn f(
     label: &'static str,
     kind: FKind,
     presets: &'static [Preset],
+    server: Option<&'static str>,
 ) -> FilterDef {
-    FilterDef { key, label, kind, presets }
+    FilterDef { key, label, kind, presets, server }
 }
 
 /// TradingView 的固定板块分类（20 项，实测自 america/japan/germany/india
@@ -232,26 +240,26 @@ const VOLAT: [Preset; 4] = [
 /// 全部筛选器。前 15 项对齐 TradingView 筛选栏（其「自选表」我没有、
 /// 「指数」已经由「来源」下拉覆盖），后 4 项是雷达自有。
 pub const FILTERS: [FilterDef; 20] = [
-    f("own:price", "价格", FKind::Num, &PRICE),
-    f("change", "涨跌 %", FKind::Num, &CHG),
-    f("market_cap_basic", "市值", FKind::Num, &MCAP),
-    f("price_earnings_ttm", "市盈率", FKind::Num, &PE),
-    f("earnings_per_share_diluted_ttm", "每股收益", FKind::Num, &EPS),
-    f("earnings_per_share_diluted_yoy_growth_ttm", "EPS 增速", FKind::Num, &GROWTH),
-    f("dividends_yield_current", "股息率", FKind::Num, &DIV),
-    f("sector", "板块", FKind::Sector, &[]),
-    f("recommendation_mark", "分析师评级", FKind::Num, &RATING),
-    f("Perf.YTD", "表现 YTD", FKind::Num, &PERF),
-    f("total_revenue_yoy_growth_ttm", "营收增速", FKind::Num, &GROWTH),
-    f("price_earnings_growth_ttm", "PEG", FKind::Num, &PEG),
-    f("return_on_equity", "ROE", FKind::Num, &ROE),
-    f("beta_1_year", "Beta", FKind::Num, &BETA),
-    f("earnings_release_date", "近期财报", FKind::Days, &PAST_EARN),
-    f("earnings_release_next_date", "未来财报", FKind::Days, &NEXT_EARN),
-    f("own:speed_z", "涨跌速度", FKind::Num, &SPEED),
-    f("relative_volume_10d_calc", "相对成交量", FKind::Num, &RVOL),
-    f("own:turnover", "成交额", FKind::Num, &TURNOVER),
-    f("Volatility.D", "日波动率", FKind::Num, &VOLAT),
+    f("own:price", "价格", FKind::Num, &PRICE, Some("close")),
+    f("change", "涨跌 %", FKind::Num, &CHG, Some("change")),
+    f("market_cap_basic", "市值", FKind::Num, &MCAP, Some("market_cap_basic")),
+    f("price_earnings_ttm", "市盈率", FKind::Num, &PE, Some("price_earnings_ttm")),
+    f("earnings_per_share_diluted_ttm", "每股收益", FKind::Num, &EPS, Some("earnings_per_share_diluted_ttm")),
+    f("earnings_per_share_diluted_yoy_growth_ttm", "EPS 增速", FKind::Num, &GROWTH, Some("earnings_per_share_diluted_yoy_growth_ttm")),
+    f("dividends_yield_current", "股息率", FKind::Num, &DIV, Some("dividends_yield_current")),
+    f("sector", "板块", FKind::Sector, &[], Some("sector")),
+    f("recommendation_mark", "分析师评级", FKind::Num, &RATING, Some("recommendation_mark")),
+    f("Perf.YTD", "表现 YTD", FKind::Num, &PERF, Some("Perf.YTD")),
+    f("total_revenue_yoy_growth_ttm", "营收增速", FKind::Num, &GROWTH, Some("total_revenue_yoy_growth_ttm")),
+    f("price_earnings_growth_ttm", "PEG", FKind::Num, &PEG, Some("price_earnings_growth_ttm")),
+    f("return_on_equity", "ROE", FKind::Num, &ROE, Some("return_on_equity")),
+    f("beta_1_year", "Beta", FKind::Num, &BETA, Some("beta_1_year")),
+    f("earnings_release_date", "近期财报", FKind::Days, &PAST_EARN, Some("earnings_release_date")),
+    f("earnings_release_next_date", "未来财报", FKind::Days, &NEXT_EARN, Some("earnings_release_next_date")),
+    f("own:speed_z", "涨跌速度", FKind::Num, &SPEED, None),
+    f("relative_volume_10d_calc", "相对成交量", FKind::Num, &RVOL, Some("relative_volume_10d_calc")),
+    f("own:turnover", "成交额", FKind::Num, &TURNOVER, None),
+    f("Volatility.D", "日波动率", FKind::Num, &VOLAT, Some("Volatility.D")),
 ];
 
 pub const N_FILTERS: usize = FILTERS.len();
@@ -330,6 +338,69 @@ pub fn active_count(v: &ViewState) -> usize {
     v.filters.iter().filter(|&&pi| pi != 0).count()
 }
 
+/// 一条要下发给守护的筛选（对应 tvscreener 的 `{left, operation, right}`）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Wire {
+    pub field: &'static str,
+    pub op: &'static str,
+    pub right: Vec<f64>,
+    pub text: Option<&'static str>,
+}
+
+/// 把当前筛选转成下发给守护的形式（只含能下推的那些）。
+///
+/// 日期档在本地是「距今天数」，下推时必须换成**绝对 Unix 秒**——
+/// scanner 存的是时间戳，发天数过去会匹配到 1970 年。
+pub fn wire(v: &ViewState, now_s: i64) -> Vec<Wire> {
+    let mut out = Vec::new();
+    for (fi, &pi) in v.filters.iter().enumerate() {
+        if pi == 0 {
+            continue;
+        }
+        let d = &FILTERS[fi];
+        let Some(field) = d.server else { continue };
+        let i = pi as usize - 1;
+        if d.kind == FKind::Sector {
+            if let Some(sec) = SECTORS.get(i) {
+                out.push(Wire { field, op: "equal", right: vec![], text: Some(sec.0) });
+            }
+            continue;
+        }
+        let Some(p) = d.presets.get(i) else { continue };
+        let (mut lo, mut hi) = (p.lo, p.hi);
+        if d.kind == FKind::Days {
+            // 天数 → 绝对秒。整天边界按当天 00:00/23:59:59 展开，
+            // 否则「今天」（[0,0]）会退化成「此刻这一秒」
+            let day = 86_400.0;
+            let midnight = (now_s as f64 / day).floor() * day;
+            let (a, b) = (lo, hi);
+            lo = midnight + a * day;
+            hi = midnight + (b + 1.0) * day - 1.0;
+        }
+        let w = match (lo.is_finite(), hi.is_finite()) {
+            (true, true) => Wire { field, op: "in_range", right: vec![lo, hi], text: None },
+            // 本地是闭区间，所以用「小于等于 / 大于等于」而不是严格不等
+            (false, true) => Wire { field, op: "eless", right: vec![hi], text: None },
+            (true, false) => Wire { field, op: "egreater", right: vec![lo], text: None },
+            (false, false) => continue,
+        };
+        out.push(w);
+    }
+    out
+}
+
+/// 已设的筛选里，有几条只能本地筛（服务端下推不了）。
+///
+/// 面板要把这个数显示出来：本地筛只覆盖守护已抓回的样本，不是全市场。
+pub fn local_only(v: &ViewState) -> Vec<&'static str> {
+    v.filters
+        .iter()
+        .enumerate()
+        .filter(|(fi, pi)| **pi != 0 && FILTERS[*fi].server.is_none())
+        .map(|(fi, _)| FILTERS[fi].label)
+        .collect()
+}
+
 pub fn now_s() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -339,6 +410,110 @@ pub fn now_s() -> i64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn open_ended_presets_become_inequalities_closed_ones_a_range() {
+        let mut v = ViewState::DEFAULT;
+        set(&mut v, "price_earnings_ttm", "高于 50");
+        let w = wire(&v, 0);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].op, "egreater");
+        assert_eq!(w[0].right, vec![50.0]);
+
+        let mut v = ViewState::DEFAULT;
+        set(&mut v, "market_cap_basic", "中盘 $20亿 – $100亿");
+        let w = wire(&v, 0);
+        assert_eq!(w[0].op, "in_range");
+        assert_eq!(w[0].right, vec![2e9, 1e10]);
+    }
+
+    #[test]
+    fn wire_never_emits_infinity() {
+        // f64::INFINITY 序列化成 JSON 是 null，守护会整条丢弃 → 筛选静默失效
+        let mut v = ViewState::DEFAULT;
+        for fi in 0..N_FILTERS {
+            for pi in 1..=n_presets(fi) as u8 {
+                v.filters = [0; N_FILTERS];
+                v.filters[fi] = pi;
+                for w in wire(&v, 1_800_000_000) {
+                    assert!(
+                        w.right.iter().all(|x| x.is_finite()),
+                        "{}／{} 发出了非有限值",
+                        FILTERS[fi].label,
+                        preset_label(fi, pi)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn date_filters_are_sent_as_absolute_seconds_not_day_offsets() {
+        // scanner 存的是时间戳；发「-7」过去会匹配到 1970 年
+        let now = 1_800_000_000_i64;
+        let mut v = ViewState::DEFAULT;
+        set(&mut v, "earnings_release_next_date", "未来一周");
+        let w = wire(&v, now);
+        assert_eq!(w[0].op, "in_range");
+        assert!(w[0].right[0] > 1.7e9, "下界不是绝对秒：{:?}", w[0].right);
+        // 覆盖今天 00:00 到七天后 23:59:59
+        assert!(w[0].right[1] - w[0].right[0] > 7.0 * 86_400.0 - 1.0);
+        assert!(w[0].right[1] - w[0].right[0] < 9.0 * 86_400.0);
+    }
+
+    #[test]
+    fn today_expands_to_a_whole_day_not_one_second() {
+        // 「今天」本地是 [0,0] 天；直接换成秒会退化成「此刻这一秒」，命中恒为 0
+        let mut v = ViewState::DEFAULT;
+        set(&mut v, "earnings_release_date", "今天");
+        let w = wire(&v, 1_800_000_000);
+        let span = w[0].right[1] - w[0].right[0];
+        assert!(span > 86_000.0 && span < 86_400.0, "「今天」跨度是 {span}s");
+    }
+
+    #[test]
+    fn sector_is_sent_as_the_english_code() {
+        let mut v = ViewState::DEFAULT;
+        set(&mut v, "sector", "科技服务");
+        let w = wire(&v, 0);
+        assert_eq!(w[0].op, "equal");
+        assert_eq!(w[0].text, Some("Technology Services"), "发中文标签服务端一行都匹配不到");
+        assert!(w[0].right.is_empty());
+    }
+
+    #[test]
+    fn radar_native_filters_stay_local_and_are_reported() {
+        // 雷达自有的指标服务端没有；不报出来的话用户会以为它也是全市场扫描
+        let mut v = ViewState::DEFAULT;
+        set(&mut v, "own:speed_z", "急涨 > 3σ");
+        assert!(wire(&v, 0).is_empty(), "服务端没有这个指标，不该下推");
+        assert_eq!(local_only(&v), vec!["涨跌速度"]);
+
+        set(&mut v, "price_earnings_ttm", "10 – 15");
+        assert_eq!(wire(&v, 0).len(), 1, "能下推的照常下推");
+        assert_eq!(local_only(&v).len(), 1);
+    }
+
+    #[test]
+    fn every_server_field_is_a_real_scanner_column() {
+        // 下推一个守护不认识的字段，会被白名单挡掉 → 筛选静默失效
+        let known = wealthspring_radar_keys();
+        for d in &FILTERS {
+            if let Some(f) = d.server {
+                assert!(
+                    f == "sector" || known.contains(&f),
+                    "{} 下推的字段 {f} 不在 scanner 列里",
+                    d.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_set_sends_nothing() {
+        assert!(wire(&ViewState::DEFAULT, 0).is_empty());
+        assert!(local_only(&ViewState::DEFAULT).is_empty());
+    }
     use super::*;
 
     fn row() -> RadarRow {

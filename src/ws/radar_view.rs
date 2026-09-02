@@ -831,6 +831,22 @@ fn filter_bar<'a>(v: ViewState) -> Element<'a, RadarMsg> {
     }
     if n > 0 {
         head = head.push(chip("清空", false, RadarMsg::ClearFilters));
+        // 下推到服务端的条件在**整个市场**上筛，本地条件只在守护已抓回的样本里筛。
+        // 不区分的话，用户会以为「涨跌速度 > 3σ」也扫了全市场——实测全美
+        // 「P/E<10 且 息>4%」命中 87 只，本地样本里只有 2 只。
+        let local = radar_filter::local_only(&v);
+        let pushed = n - local.len();
+        head = head.push(
+            text(if local.is_empty() {
+                format!("　{pushed} 条全市场筛选")
+            } else if pushed == 0 {
+                format!("　仅本地样本：{}", local.join("、"))
+            } else {
+                format!("　{pushed} 条全市场 · {} 仅本地样本", local.join("、"))
+            })
+            .size(10)
+            .color(if local.is_empty() { C_DIM } else { C_GOLD }),
+        );
     }
 
     let mut col = column![head].spacing(3);
@@ -841,7 +857,12 @@ fn filter_bar<'a>(v: ViewState) -> Element<'a, RadarMsg> {
             let opts: Vec<FSel> = (0..=radar_filter::n_presets(fi) as u8)
                 .map(|pi| FSel { fi, pi })
                 .collect();
-            r = r.push(text(format!("{} ", d.label)).size(11).color(C_DIM));
+            // ⓢ = 能下推到服务端（全市场），无标记 = 只在已加载的行里筛
+            r = r.push(
+                text(format!("{}{} ", d.label, if d.server.is_some() { "ⓢ" } else { "" }))
+                    .size(11)
+                    .color(C_DIM),
+            );
             r = r.push(
                 pick_list(opts, Some(FSel { fi, pi: v.filters[fi] }), |o: FSel| {
                     RadarMsg::SetFilter { fi: o.fi, pi: o.pi }
@@ -858,9 +879,12 @@ fn filter_bar<'a>(v: ViewState) -> Element<'a, RadarMsg> {
             }
         }
         col = col.push(
-            text("筛选只对已加载的行生效；基本面类指标加密没有，设了会把加密行全筛掉")
-                .size(10)
-                .color(C_DIM),
+            text(
+                "带 ⓢ 的下推到服务端、在整个市场上筛（生效有一轮延迟）；\
+                 其余只在已加载的行里筛。基本面类指标加密没有，设了会把加密行全筛掉",
+            )
+            .size(10)
+            .color(C_DIM),
         );
     }
     col.into()
@@ -1314,7 +1338,13 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
     // 把选中的来源写给守护——选了没在拉的市场，下一轮就会去取
     if !crypto_mode {
-        super::radar_readout::write_request(v.source, &["stock", "fund"]);
+        // 筛选一并下发：能下推的那些由服务端在**整个市场**上筛，
+        // 而不是在守护已抓回的样本里筛
+        super::radar_readout::write_request(
+            v.source,
+            &["stock", "fund"],
+            &radar_filter::wire(&v, radar_filter::now_s()),
+        );
     }
     ar = ar.push(text("　来源 ").size(11).color(C_DIM));
     ar = ar.push(

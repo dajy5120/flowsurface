@@ -250,7 +250,11 @@ fn request_path() -> PathBuf {
 ///
 /// 只带**当前选中项**，不累积：累积会让守护的请求数随用户点击单调增长，
 /// 最后把非官方接口打爆。配置里的默认市场恒在，选中的额外加一个。
-pub fn request_body(source: &str, security_types: &[&str]) -> String {
+pub fn request_body(
+    source: &str,
+    security_types: &[&str],
+    filters: &[super::radar_filter::Wire],
+) -> String {
     let sources: Vec<serde_json::Value> = if source.is_empty() {
         Vec::new()
     } else {
@@ -259,15 +263,28 @@ pub fn request_body(source: &str, security_types: &[&str]) -> String {
             .map(|t| serde_json::json!({"market": source, "security_type": t}))
             .collect()
     };
-    serde_json::json!({ "sources": sources }).to_string()
+    // 筛选必须**下推到服务端**：只在守护抓回的样本里筛，等于只在按市值前 N 只
+    // 里找。实测全美「P/E<10 且 息>4%」命中 87 只，样本里只有 2 只。
+    let f: Vec<serde_json::Value> = filters
+        .iter()
+        .map(|w| match w.text {
+            Some(t) => serde_json::json!({"field": w.field, "op": w.op, "text": t}),
+            None => serde_json::json!({"field": w.field, "op": w.op, "right": w.right}),
+        })
+        .collect();
+    serde_json::json!({ "sources": sources, "filters": f }).to_string()
 }
 
 /// 把选中的来源写给守护（原子写，同快照）。
 ///
 /// 内容没变就不写：面板每帧都会走到这里，每帧重写文件既浪费也会让守护看到抖动。
-pub fn write_request(source: &str, security_types: &[&str]) {
+pub fn write_request(
+    source: &str,
+    security_types: &[&str],
+    filters: &[super::radar_filter::Wire],
+) {
     static LAST: Mutex<String> = Mutex::new(String::new());
-    let body = request_body(source, security_types);
+    let body = request_body(source, security_types, filters);
     if let Ok(mut g) = LAST.lock() {
         if *g == body {
             return;
@@ -566,6 +583,32 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
 #[cfg(test)]
 mod tests {
 
+    #[test]
+    fn request_body_carries_the_pushdown_filters() {
+        use super::super::radar_filter::Wire;
+        let f = vec![
+            Wire { field: "price_earnings_ttm", op: "eless", right: vec![10.0], text: None },
+            Wire { field: "sector", op: "equal", right: vec![], text: Some("Finance") },
+        ];
+        let v: serde_json::Value =
+            serde_json::from_str(&request_body("america", &["stock"], &f)).unwrap();
+        let a = v["filters"].as_array().unwrap();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0]["field"], "price_earnings_ttm");
+        assert_eq!(a[0]["right"][0], 10.0);
+        // 文本条件走 text 字段，不塞进 right——守护按字段名分派算子
+        assert_eq!(a[1]["text"], "Finance");
+        assert!(a[1].get("right").is_none());
+    }
+
+    #[test]
+    fn request_body_always_has_a_filters_key() {
+        // 缺键的话守护那边 serde 用 default 也能过，但显式写出来才看得出「就是没筛」
+        let v: serde_json::Value =
+            serde_json::from_str(&request_body("america", &["stock"], &[])).unwrap();
+        assert!(v["filters"].as_array().unwrap().is_empty());
+    }
+
     // ── 快照落点（与守护侧 runtime.rs 逐字相同的行为，两边同名单测钉住）──
 
     #[test]
@@ -755,7 +798,7 @@ mod tests {
     #[test]
     fn request_body_carries_only_the_current_selection() {
         // 累积式请求会让守护的请求数随点击单调增长，最后把非官方接口打爆
-        let b = request_body("japan", &["stock", "fund"]);
+        let b = request_body("japan", &["stock", "fund"], &[]);
         let v: serde_json::Value = serde_json::from_str(&b).unwrap();
         let s = v["sources"].as_array().unwrap();
         assert_eq!(s.len(), 2);
@@ -767,7 +810,7 @@ mod tests {
     #[test]
     fn request_body_carries_index_source_ids() {
         let v: serde_json::Value =
-            serde_json::from_str(&request_body("america@SPX", &["stock"])).unwrap();
+            serde_json::from_str(&request_body("america@SPX", &["stock"], &[])).unwrap();
         assert_eq!(v["sources"][0]["market"], "america@SPX");
     }
 
@@ -775,7 +818,7 @@ mod tests {
     fn empty_selection_requests_nothing() {
         // 选「全部市场」时不该请求任何额外来源——那等于要求守护拉全世界
         let v: serde_json::Value =
-            serde_json::from_str(&request_body("", &["stock"])).unwrap();
+            serde_json::from_str(&request_body("", &["stock"], &[])).unwrap();
         assert!(v["sources"].as_array().unwrap().is_empty());
     }
 
