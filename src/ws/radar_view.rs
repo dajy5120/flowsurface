@@ -23,6 +23,7 @@ use iced::widget::{
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use super::radar::{
+    Form,
     order, scale_kind, visible, AssetFilter, ColumnSet, GroupBy, Palette, RadarMsg,
     ScaleKind, SortKey, ViewMode, ViewState, COLOR_OPTS, SIZE_OPTS,
 };
@@ -1394,15 +1395,24 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // ── 视图切换 ──
     let mut mr = row![text("视图 ").size(11).color(C_DIM)].spacing(3);
     for (m, l) in [
-        (ViewMode::Heatmap, "热图 · Screener"),
+        (ViewMode::Heatmap, "热图"),
+        (ViewMode::Screener, "筛选器"),
         (ViewMode::Overview, "全球总览"),
         (ViewMode::Breadth, "市场宽度"),
     ] {
         mr = mr.push(chip(l, m == v.mode, RadarMsg::SetMode(m)));
     }
+    // 筛选器的表达形式（官方页面左上角那三个小图标）。热图页没有这个选择——
+    // 它本来就是热图。
+    if v.mode == ViewMode::Screener {
+        mr = mr.push(text("　形式 ").size(11).color(C_DIM));
+        for (f, l) in [(Form::Table, "表格"), (Form::Heatmap, "热图")] {
+            mr = mr.push(chip(l, f == v.form, RadarMsg::SetForm(f)));
+        }
+    }
     body = body.push(mr.align_y(iced::Alignment::Center));
 
-    if v.mode != ViewMode::Heatmap {
+    if !matches!(v.mode, ViewMode::Heatmap | ViewMode::Screener) {
         let inner = match v.mode {
             ViewMode::Overview => overview_view(&st.overview, v),
             _ => breadth_view(&st.breadth, v),
@@ -1425,18 +1435,20 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // 股票的成交额远大于加密，同图时加密会被挤到几乎看不见（实测 BTC 只剩一个小格）。
     let vis = memo_visible(st.generation, v, &st.rows);
     let mut ar = row![text("资产 ").size(11).color(C_DIM)].spacing(3);
-    for (a, l) in [
-        (AssetFilter::All, "全部"),
-        (AssetFilter::Crypto, "加密货币"),
-        (AssetFilter::Equity, "股票"),
-        (AssetFilter::Etf, "ETF"),
-    ] {
-        ar = ar.push(chip(l, a == v.asset, RadarMsg::SetAsset(a)));
+    // 每个视图允许的资产类不同：官方热图只有 股票/ETF/加密，筛选器有六类。
+    // 把两套混在一起就是原来「下拉一半无效」的根源。
+    let kinds: &[AssetFilter] = if v.mode == ViewMode::Screener {
+        &AssetFilter::SCREENER
+    } else {
+        &AssetFilter::HEATMAP
+    };
+    for &a in kinds {
+        ar = ar.push(chip(a.label(), a == v.asset, RadarMsg::SetAsset(a)));
     }
     // 「来源」下拉（TV 的「来源」）。列的是**全部可选项**（随快照下发的目录），
     // 不是已加载的 venue——只列已加载的话，用户永远只能在守护恰好在拉的
     // 那几个市场里打转。选了没在拉的市场会通过 radar_request.json 通知守护去拉。
-    let crypto_mode = v.asset == AssetFilter::Crypto;
+    let crypto_mode = matches!(v.asset, AssetFilter::Coin | AssetFilter::Cex | AssetFilter::Dex);
     let mut opts: Vec<MarketOpt> = vec![MarketOpt::all(crypto_mode)];
     if crypto_mode {
         for it in &st.catalog.crypto_cats {
@@ -1521,7 +1533,20 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
 
-    // ── 热图控制条 ──
+    // 是否要画热图：热图页恒画；筛选器页只有选了「热图」形式才画。
+    let draw_map = v.mode == ViewMode::Heatmap || v.form == Form::Heatmap;
+
+    // 「窗口」两种形式都要：表格里雷达自有的涨跌幅/速度 z 列组也按它取值。
+    // 其余（大小/分组/颜色）只对热图有意义。
+    if !draw_map {
+        let mut wr = row![text("窗口 ").size(11).color(C_DIM)].spacing(3);
+        for (i, w) in WINDOWS.iter().enumerate() {
+            wr = wr.push(chip(w, i == v.win, RadarMsg::SetWindow(i)));
+        }
+        body = body.push(wr.align_y(iced::Alignment::Center));
+    }
+
+    // ── 热图控制条 ──（只在真要画热图时才出，否则一排无效下拉）
     let mut r1 = row![text("窗口 ").size(11).color(C_DIM)].spacing(3);
     for (i, w) in WINDOWS.iter().enumerate() {
         r1 = r1.push(chip(w, i == v.win, RadarMsg::SetWindow(i)));
@@ -1541,7 +1566,9 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     ] {
         r1 = r1.push(chip(l, g == v.group_by, RadarMsg::SetGroupBy(g)));
     }
-    body = body.push(r1.align_y(iced::Alignment::Center));
+    if draw_map {
+        body = body.push(r1.align_y(iced::Alignment::Center));
+    }
 
     let mut r2 = row![text("颜色 ").size(11).color(C_DIM)].spacing(3);
     r2 = r2.push(
@@ -1551,7 +1578,9 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     );
     r2 = r2.push(text("　").size(11));
     r2 = r2.push(legend(v.color.key, v.palette));
-    body = body.push(r2.align_y(iced::Alignment::Center));
+    if draw_map {
+        body = body.push(r2.align_y(iced::Alignment::Center));
+    }
 
     let hint = match v.color.key {
         "own:ret_pct" => Some("⚠ 裸涨跌幅跨标的不可比——小市值/低流动标的会占满深色档，对照用"),
@@ -1561,7 +1590,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         "premarket_change" | "postmarket_change" => Some("ⓘ 盘前/盘后只有股票有；加密与休市市场会是空值"),
         _ => None,
     };
-    if let Some(h) = hint {
+    if let Some(h) = hint.filter(|_| draw_map) {
         body = body.push(text(h).size(10).color(C_GOLD));
     }
 
@@ -1662,6 +1691,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             (gs, GROUP_HEADER_H)
         }
     };
+    if draw_map {
     body = body.push(
         canvas_widget(TreemapCanvas {
             groups,
@@ -1678,8 +1708,14 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         .width(Length::Fill)
         .height(Length::Fixed(340.0)),
     );
+    }
 
-    // ── Screener ──
+    // ── Screener（表格）──
+    if v.mode == ViewMode::Heatmap {
+        // 热图页不带表格。原来两者挤在一个视图里，控制条上一半的下拉
+        // 对当前内容无效——那正是「乱」的来源。
+        return scrollable(body).width(Length::Fill).height(Length::Fill).into();
+    }
     let cols = columns(v, &st.catalog);
     // 切到 TV 列组后，原排序键（如 5m 速度z）可能不在显示的列里——表头上就没有
     // 排序指示，用户看不出表是按什么排的。退到该列组的第一个数值列。
@@ -2194,7 +2230,7 @@ mod tests {
         cr.quote_vol_24h = 1e6;
         cr.asset = "crypto".into();
         let rows = vec![eq, cr];
-        let sub = super::visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Crypto; v });
+        let sub = super::visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Coin; v });
         let top = top_by_turnover_within(&rows, &sub, 5);
         assert_eq!(top.len(), 1);
         assert_eq!(rows[top[0]].symbol, "BTCUSDT");

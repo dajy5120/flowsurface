@@ -108,35 +108,101 @@ pub enum Palette {
     RedUp,
 }
 
-/// 资产类过滤。股票的成交额远大于加密，同图时加密会被挤到看不见——
-/// 想专看某一类就用这个，而不是靠分组去找。
+/// 资产类。**对齐 TradingView 的组织方式：先选资产类，下面的一切才跟着它走。**
+///
+/// 官方的热图只有 股票 / ETF / 加密 三种，筛选器有 股票 / ETF / 债券 /
+/// 加密货币 / CEX / DEX 六种；每一类的字段集完全不同（股票 `market_cap_basic`
+/// vs 加密 `market_cap_calc` vs DEX `dex_total_liquidity`），可选项也不同。
+///
+/// `All` 是雷达自有的额外项，不是官方分类——它是「一眼看整个市场」这个
+/// 初衷所需，只在热图里给。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetFilter {
     All,
-    Crypto,
-    Equity,
+    Stock,
     Etf,
+    Coin,
+    Cex,
+    Dex,
+    Bond,
 }
 
 impl AssetFilter {
+    /// 目录里的资产类 id（`assets[].kind`）。`All` 没有对应的类。
+    pub fn kind(self) -> &'static str {
+        match self {
+            AssetFilter::All => "",
+            AssetFilter::Stock => "stock",
+            AssetFilter::Etf => "etf",
+            AssetFilter::Coin => "coin",
+            AssetFilter::Cex => "cex",
+            AssetFilter::Dex => "dex",
+            AssetFilter::Bond => "bond",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AssetFilter::All => "全部",
+            AssetFilter::Stock => "股票",
+            AssetFilter::Etf => "ETF",
+            AssetFilter::Coin => "加密货币",
+            AssetFilter::Cex => "CEX",
+            AssetFilter::Dex => "DEX",
+            AssetFilter::Bond => "债券",
+        }
+    }
+
     /// 该行是否通过。`All` 恒通过。
+    ///
+    /// 行上的 `asset` 是**数据源**声明的（加密源写 `crypto`、股票源写
+    /// `equity`），与这里的 id 不是同一套字符串，必须显式映射——直接比
+    /// `kind()` 的话「股票」会一行都匹配不到。
     pub fn keeps(self, asset: &str) -> bool {
         match self {
             AssetFilter::All => true,
-            AssetFilter::Crypto => asset == "crypto",
-            AssetFilter::Equity => asset == "equity",
+            AssetFilter::Stock => asset == "equity",
             AssetFilter::Etf => asset == "etf",
+            AssetFilter::Coin => asset == "crypto",
+            AssetFilter::Cex => asset == "cex",
+            AssetFilter::Dex => asset == "dex",
+            AssetFilter::Bond => asset == "bond",
         }
     }
+
+    /// 热图页可选的资产类（官方三种 + 雷达自有的「全部」）。
+    pub const HEATMAP: [AssetFilter; 4] =
+        [AssetFilter::All, AssetFilter::Stock, AssetFilter::Etf, AssetFilter::Coin];
+
+    /// 筛选器页可选的资产类（官方六种）。
+    pub const SCREENER: [AssetFilter; 6] = [
+        AssetFilter::Stock,
+        AssetFilter::Etf,
+        AssetFilter::Coin,
+        AssetFilter::Cex,
+        AssetFilter::Dex,
+        AssetFilter::Bond,
+    ];
 }
 
 /// 面板视图。三块回答的是不同问题（docs/22 §2）：
 /// 热图=「谁在动」、总览=「哪个国家最强」、宽度=「整个市场什么状态」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
+    /// 热图页（对齐 tradingview.com/heatmap/）。
     Heatmap,
+    /// 筛选器页（对齐 tradingview.com/screener/）。**与热图分开**——
+    /// 原来两者挤在一个视图里，控制条上一半的下拉对当前内容无效。
+    Screener,
     Overview,
     Breadth,
+}
+
+/// 筛选器的表达形式。官方页面左上角那三个小图标就是这个。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Form {
+    Table,
+    Heatmap,
 }
 
 /// Screener 的列组（对应 TradingView 筛选器顶部的 Overview/Performance/… 标签）。
@@ -181,6 +247,8 @@ pub struct ViewState {
     pub palette: Palette,
     pub mode: ViewMode,
     pub asset: AssetFilter,
+    /// 筛选器页的表达形式（表格/热图）。热图页不用这个。
+    pub form: Form,
     /// 来源选择。股票/ETF 时是市场代码（如 `america`），加密时是分类
     /// （如 `defi`）。空串 = 全部。对应 TV 的「来源」下拉。
     pub source: &'static str,
@@ -204,6 +272,7 @@ impl ViewState {
         palette: Palette::BlueOrange,
         mode: ViewMode::Heatmap,
         asset: AssetFilter::All,
+        form: Form::Table,
         source: "",
         sort: SortKey::Z(1),
         desc: true,
@@ -225,6 +294,7 @@ pub enum RadarMsg {
     SetPalette(Palette),
     SetMode(ViewMode),
     SetAsset(AssetFilter),
+    SetForm(Form),
     SetSource(&'static str),
     /// 设某个筛选器的档位。`pi = 0` 为不限。
     SetFilter { fi: usize, pi: u8 },
@@ -265,7 +335,22 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
         RadarMsg::SetGroupBy(g) => v.group_by = g,
         RadarMsg::SetColumns(c) => v.cols = c,
         RadarMsg::SetPalette(p) => v.palette = p,
-        RadarMsg::SetMode(m) => v.mode = m,
+        RadarMsg::SetMode(m) => {
+            v.mode = m;
+            // 每个视图允许的资产类不同：热图没有 CEX/DEX/债券，筛选器没有「全部」。
+            // 不收敛的话切过去会是一张空表，看起来像数据没了
+            let allowed: &[AssetFilter] = match m {
+                ViewMode::Heatmap => &AssetFilter::HEATMAP,
+                ViewMode::Screener => &AssetFilter::SCREENER,
+                _ => &[],
+            };
+            if !allowed.is_empty() && !allowed.contains(&v.asset) {
+                v.asset = allowed[0];
+                v.source = "";
+                v.filters = [0; N_FILTERS];
+            }
+        }
+        RadarMsg::SetForm(f) => v.form = f,
         RadarMsg::SetAsset(a) => {
             v.asset = a;
             // 换资产类时清掉来源：加密选的是分类、股票选的是市场，
@@ -410,6 +495,69 @@ pub fn order_within(rows: &[RadarRow], subset: &[usize], v: ViewState) -> Vec<us
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn each_view_only_offers_the_asset_kinds_it_supports() {
+        // 官方热图只有 股票/ETF/加密；筛选器六类且没有「全部」。
+        // 混成一套是原来「下拉一半无效」的根源。
+        assert!(!AssetFilter::HEATMAP.contains(&AssetFilter::Bond));
+        assert!(!AssetFilter::HEATMAP.contains(&AssetFilter::Cex));
+        assert!(!AssetFilter::SCREENER.contains(&AssetFilter::All));
+        assert_eq!(AssetFilter::SCREENER.len(), 6);
+    }
+
+    #[test]
+    fn switching_view_pulls_the_asset_kind_into_range() {
+        // 在热图选了「全部」再切到筛选器：筛选器没有「全部」，
+        // 不收敛的话会是一张空表，看起来像数据没了
+        let mut v = ViewState::DEFAULT;
+        v.asset = AssetFilter::All;
+        let v = apply(v, RadarMsg::SetMode(ViewMode::Screener));
+        assert!(AssetFilter::SCREENER.contains(&v.asset));
+
+        // 反向：筛选器选了债券再切回热图，热图没有债券
+        let mut v = ViewState::DEFAULT;
+        v.mode = ViewMode::Screener;
+        v.asset = AssetFilter::Bond;
+        let v = apply(v, RadarMsg::SetMode(ViewMode::Heatmap));
+        assert!(AssetFilter::HEATMAP.contains(&v.asset));
+    }
+
+    #[test]
+    fn switching_view_keeps_a_still_valid_asset_kind() {
+        // 两个视图都支持股票，切过去不该被重置
+        let mut v = ViewState::DEFAULT;
+        v.asset = AssetFilter::Stock;
+        v.source = "japan";
+        let v = apply(v, RadarMsg::SetMode(ViewMode::Screener));
+        assert_eq!(v.asset, AssetFilter::Stock);
+        assert_eq!(v.source, "japan", "还合法就不该顺手清掉来源");
+    }
+
+    #[test]
+    fn asset_kind_ids_match_the_catalog_and_row_labels() {
+        // kind() 是目录里的 id，keeps() 比的是数据源写在行上的 asset——
+        // 两套字符串不同（stock vs equity、coin vs crypto），直接比 kind 会一行都匹配不到
+        assert_eq!(AssetFilter::Stock.kind(), "stock");
+        assert!(AssetFilter::Stock.keeps("equity") && !AssetFilter::Stock.keeps("stock"));
+        assert_eq!(AssetFilter::Coin.kind(), "coin");
+        assert!(AssetFilter::Coin.keeps("crypto") && !AssetFilter::Coin.keeps("coin"));
+        // 每个类的 id 唯一
+        let mut k: Vec<_> = AssetFilter::SCREENER.iter().map(|a| a.kind()).collect();
+        let n = k.len();
+        k.sort();
+        k.dedup();
+        assert_eq!(k.len(), n);
+    }
+
+    #[test]
+    fn form_toggle_is_independent_of_the_view() {
+        let v = apply(ViewState::DEFAULT, RadarMsg::SetForm(Form::Heatmap));
+        assert_eq!(v.form, Form::Heatmap);
+        assert_eq!(v.mode, ViewState::DEFAULT.mode, "换表达形式不该动视图");
+        let v = apply(v, RadarMsg::SetMode(ViewMode::Screener));
+        assert_eq!(v.form, Form::Heatmap, "切视图不该重置表达形式");
+    }
     use super::*;
 
     fn row(sym: &str, venue: &str, z5: Option<f64>, ret5: Option<f64>, tv: f64) -> RadarRow {
@@ -428,13 +576,13 @@ mod tests {
     #[test]
     fn asset_filter_keeps_only_the_selected_class() {
         assert!(AssetFilter::All.keeps("crypto") && AssetFilter::All.keeps("equity"));
-        assert!(AssetFilter::Crypto.keeps("crypto"));
-        assert!(!AssetFilter::Crypto.keeps("equity"));
-        assert!(AssetFilter::Equity.keeps("equity"));
-        assert!(!AssetFilter::Equity.keeps("crypto"));
+        assert!(AssetFilter::Coin.keeps("crypto"));
+        assert!(!AssetFilter::Coin.keeps("equity"));
+        assert!(AssetFilter::Stock.keeps("equity"));
+        assert!(!AssetFilter::Stock.keeps("crypto"));
         // 未声明资产类的行不该被任何具体过滤器意外收进来
-        assert!(!AssetFilter::Crypto.keeps(""));
-        assert!(!AssetFilter::Equity.keeps("other"));
+        assert!(!AssetFilter::Coin.keeps(""));
+        assert!(!AssetFilter::Stock.keeps("other"));
     }
 
     #[test]
@@ -447,11 +595,11 @@ mod tests {
 
         let mut v = ViewState::DEFAULT;
         assert_eq!(order(&rows, v).len(), 2);
-        v.asset = AssetFilter::Equity;
+        v.asset = AssetFilter::Stock;
         let o = order(&rows, v);
         assert_eq!(o.len(), 1, "过滤后只该剩股票");
         assert_eq!(rows[o[0]].symbol, "NVDA");
-        v.asset = AssetFilter::Crypto;
+        v.asset = AssetFilter::Coin;
         assert_eq!(rows[order(&rows, v)[0]].symbol, "BTCUSDT");
     }
 
@@ -525,7 +673,7 @@ mod tests {
         // 加密选分类、股票选市场；留着旧值会得到一张空表，看起来像数据没了
         let mut v = ViewState::DEFAULT;
         v.source = "america";
-        let v = apply(v, RadarMsg::SetAsset(AssetFilter::Crypto));
+        let v = apply(v, RadarMsg::SetAsset(AssetFilter::Coin));
         assert_eq!(v.source, "");
     }
 
@@ -556,7 +704,7 @@ mod tests {
         b.asset = "crypto".into();
         b.cats = vec!["defi".into()];
         let rows = vec![a, b];
-        let v = visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Crypto; v.source = "defi"; v });
+        let v = visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Coin; v.source = "defi"; v });
         assert_eq!(v.len(), 1);
         assert_eq!(rows[v[0]].symbol, "UNIUSDT");
         // 没打上分类的不该被任何具体分类收进来
@@ -570,7 +718,7 @@ mod tests {
     fn asset_filter_covers_etf() {
         assert!(AssetFilter::Etf.keeps("etf"));
         assert!(!AssetFilter::Etf.keeps("equity"));
-        assert!(!AssetFilter::Equity.keeps("etf"), "ETF 不该混进股票");
+        assert!(!AssetFilter::Stock.keeps("etf"), "ETF 不该混进股票");
         assert!(AssetFilter::All.keeps("etf"));
     }
 
