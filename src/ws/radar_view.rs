@@ -1160,14 +1160,15 @@ impl MarketOpt {
     /// 目录来自快照、生命周期不是 `'static`；泄漏一份短字符串换取 `pick_list`
     /// 需要的 `'static`。目录是固定的 71 个市场 + 22 个分类，不会无界增长
     /// （同一项重复泄漏由 `INTERN` 去重）。
-    fn of(code: &str, label: &str, region: &str, loaded: bool) -> Self {
-        let shown = if region.is_empty() {
+    /// `group` 是**国家名**（官方按国家分组，不是按地区）。
+    /// 「所有 X 公司」里已经含国名，不再重复前缀。
+    fn of(code: &str, label: &str, group: &str, loaded: bool) -> Self {
+        let base = if group.is_empty() || label.starts_with("所有") {
             label.to_string()
-        } else if loaded {
-            format!("{region} · {label}")
         } else {
-            format!("{region} · {label} ＋")
+            format!("{group} · {label}")
         };
+        let shown = if loaded { base } else { format!("{base} ＋") };
         MarketOpt {
             key: intern(code),
             label: intern(&shown),
@@ -1691,24 +1692,26 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         // ETF 只列官方覆盖的那 24 个市场——用股票那 71 个会列出一堆
         // 根本没有 ETF 的国家
         let etf_only = v.asset == AssetFilter::Etf && !st.catalog.etf_markets.is_empty();
+        // 官方来源下拉的组织：**按国家分组**（不是按地区），组内**指数在前、
+        // 「所有 X 公司」在后**，国家之间按英文名 A→Z、本地区置顶。
+        // pick_list 是平铺的，所以用「国家 · 项」来体现分组。
         for m in st.catalog.markets.iter().filter(|m| {
             !etf_only || st.catalog.etf_markets.iter().any(|k| k == &m.code)
         }) {
-            // 「所有 X 公司」+ 该市场下的每个指数（同 TradingView 的来源分组）
-            opts.push(MarketOpt::of(
-                &m.code,
-                &format!("所有{}公司", m.label),
-                &m.region,
-                loaded.contains(m.code.as_str()),
-            ));
             for ix in st.catalog.indices.iter().filter(|i| i.region == m.code) {
                 opts.push(MarketOpt::of(
                     &ix.code,
                     &ix.label,
-                    &m.region,
+                    &m.label,
                     loaded.contains(ix.code.as_str()),
                 ));
             }
+            opts.push(MarketOpt::of(
+                &m.code,
+                &format!("所有{}公司", m.label),
+                &m.label,
+                loaded.contains(m.code.as_str()),
+            ));
         }
     }
 
@@ -1975,7 +1978,12 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             cache: treemap_cache(st.generation, v),
         })
         .width(Length::Fill)
-        .height(Length::Fixed(340.0)),
+        // 热图页把剩余空间全部铺满；筛选器的热图形式下面还有表格，给固定高度
+        .height(if v.mode == ViewMode::Heatmap {
+            Length::Fill
+        } else {
+            Length::Fixed(340.0)
+        }),
     );
     }
 
@@ -1983,7 +1991,10 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     if v.mode == ViewMode::Heatmap {
         // 热图页不带表格。原来两者挤在一个视图里，控制条上一半的下拉
         // 对当前内容无效——那正是「乱」的来源。
-        return scrollable(body).width(Length::Fill).height(Length::Fill).into();
+        //
+        // **不套 scrollable**：滚动容器只给子元素自然高度，`Length::Fill`
+        // 在里面不生效，热图会被压成固定的一小条、下面一大片空白。
+        return body.width(Length::Fill).height(Length::Fill).into();
     }
     let cols = columns(v, &st.catalog);
     // 切到 TV 列组后，原排序键（如 5m 速度z）可能不在显示的列里——表头上就没有

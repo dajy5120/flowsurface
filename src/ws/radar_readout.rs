@@ -531,20 +531,10 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
             })
             .unwrap_or_default()
     };
-    let index_items: Vec<CatalogItem> = v
-        .get("catalog")
-        .and_then(|c| c.get("indices"))
-        .and_then(|x| x.as_array())
-        .map(|a| {
-            a.iter()
-                .map(|o| CatalogItem {
-                    code: s(o, "id"),
-                    label: s(o, "label"),
-                    region: s(o, "market"),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // 指数与市场用**同一套键**（code/label/region），共用 `items` 解析器。
+    // 原来指数走的是 id/market 一套单独的键——两边都对，但多一套就多一处
+    // 会漂移的地方（改守护时就把它改漂了一次，指数来源整个消失）。
+    let index_items: Vec<CatalogItem> = items("indices");
     let cat = |k: &str| v.get("catalog").and_then(|c| c.get(k));
     let tabs: Vec<ColumnTab> = cat("tabs")
         .and_then(|x| x.as_array())
@@ -733,6 +723,22 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
 mod tests {
 
     #[test]
+    fn indices_and_markets_share_one_key_shape() {
+        // 两者用同一套 code/label/region。多一套键就多一处会漂移的地方——
+        // 实测漂过一次：守护改成 code/region 而面板还读 id/market，
+        // 指数来源整个消失且不报错
+        let j = r#"{"stamp":"s","source":"tv","rows":[],"catalog":{
+          "markets":[{"code":"america","label":"美国","region":"美洲"}],
+          "indices":[{"code":"america@SPX","label":"标准普尔500指数","region":"america"}]}}"#;
+        let r = parse_board(&serde_json::from_str(j).unwrap());
+        assert_eq!(r.catalog.indices.len(), 1);
+        let ix = &r.catalog.indices[0];
+        assert_eq!(ix.code, "america@SPX");
+        assert_eq!(ix.region, "america", "region 要能挂到市场的 code 上");
+        assert!(r.catalog.markets.iter().any(|m| m.code == ix.region), "挂不上就不会显示");
+    }
+
+    #[test]
     fn text_valued_columns_parse_into_their_own_map() {
         // 评级返回 "StrongBuy"、财务期间返回 "2026-Q2"；当数字解析会整列「—」
         let j = r#"{"stamp":"s","source":"tv","rows":[{"symbol":"NVDA","venue":"tv:america:stock",
@@ -857,8 +863,8 @@ mod tests {
                  "tabs":[{"key":"overview","label":"概览","cols":["close","change","volume"]},
                          {"key":"valuation","label":"估值","cols":["price_earnings_ttm","price_book_fq"]}],
                  "units":{"pct":["change","Perf.YTD"],"money":["close","market_cap_basic"]},
-                 "indices":[{"market":"america","id":"america@SPX","label":"标准普尔500指数"},
-                            {"market":"japan","id":"japan@NI225","label":"日经225指数"}],
+                 "indices":[{"region":"america","code":"america@SPX","label":"标准普尔500指数"},
+                            {"region":"japan","code":"japan@NI225","label":"日经225指数"}],
                  "crypto_cats":[{"code":"","label":"全部加密货币"},{"code":"defi","label":"DeFi"}]},
       "breadth":[{"market":"japan","n":300,"adv":194,"dec":103,"unch":3,
                   "new_high":1,"new_low":0,"net_new_high":1,"above_ma200":231,"ma200_n":300,
