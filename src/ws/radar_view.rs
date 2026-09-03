@@ -24,11 +24,13 @@ use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use super::radar::{
     Form,
-    order, scale_kind, visible, AssetFilter, ColumnSet, GroupBy, Palette, RadarMsg,
+    order, scale_kind, Opt, visible, AssetFilter, ColumnSet, GroupBy, Palette, RadarMsg,
     ScaleKind, SortKey, ViewMode, ViewState, COLOR_OPTS, SIZE_OPTS,
 };
 use super::radar_filter::{self, FILTERS, N_FILTERS};
-use super::radar_readout::{BreadthRow, OverviewRow, RadarRow, OV_WINDOWS, WINDOWS};
+use super::radar_readout::{
+    Catalog, CatalogItem, ColumnTab, BreadthRow, OverviewRow, RadarRow, OV_WINDOWS, WINDOWS,
+};
 use super::treemap::{squarify_nested, Rect};
 
 const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
@@ -261,6 +263,19 @@ fn date_cell(secs: f64) -> String {
     }
 }
 
+/// `YYYYMMDD` 整数 → `YYYY-MM-DD`。债券到期日用。
+///
+/// 与 `date_cell`（Unix 秒）分开：不区分的话 20290214 会被当成秒、
+/// 显示成 1970 年；完全不标注则被当成数量、显示成 `20.3M`。
+fn ymd_cell(v: f64) -> String {
+    let n = v as i64;
+    let (y, m, d) = (n / 10_000, (n / 100) % 100, n % 100);
+    if !(1900..=2999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return "—".into();
+    }
+    format!("{y}-{m:02}-{d:02}")
+}
+
 fn price(v: f64) -> String {
     if v >= 1000.0 {
         format!("{v:.1}")
@@ -331,7 +346,9 @@ pub(crate) fn columns(v: ViewState, cat: &Catalog) -> Vec<Col> {
             out.push(c(SortKey::Price, "价格", 88.0));
         }
         ColumnSet::Tv(i) => {
-            if let Some(t) = cat.tabs.get(i) {
+            // **用当前资产类的列组**，不是股票那套。债券没有市盈率、
+            // DEX 没有板块——拿股票的列去取，整表都是「—」
+            if let Some(t) = asset_tabs(cat, v.asset).get(i) {
                 for k in &t.cols {
                     out.push(Col {
                         key: SortKey::Metric(intern(k)),
@@ -481,6 +498,36 @@ pub(crate) fn metric_title(k: &str) -> &str {
         "book_value_per_share_fq" => "每股账面价值",
         "total_debt_per_share_fq" => "每股总债务",
         "cash_per_share_fq" => "每股现金",
+        "name" => "名称",
+        "value_traded_10d" => "价格×量 ~1周",
+        "value_traded_30d" => "价格×量 ~1月",
+        "close_pct" => "净价%",
+        "close_net" => "应计利息",
+        "yield_to_worst" => "最差收益率%",
+        "current_coupon" => "当期票息%",
+        "maturity_date" => "到期日",
+        "bond_snp_rating_lt.tr" => "标普评级",
+        "bond_fitch_rating_lt.tr" => "惠誉评级",
+        "bond_issuer_type.tr" => "发行人类型",
+        "redemption_type.tr" => "赎回类型",
+        "24h_close_change|5" => "涨跌 24h%",
+        "market_cap_calc" => "市值",
+        "24h_vol_cmc" => "24h成交量",
+        "24h_vol_to_market_cap" => "量/市值",
+        "circulating_supply" => "流通量",
+        "crypto_total_rank" => "排名",
+        "socialdominance" => "社交热度",
+        "24h_vol|5" => "24h成交额",
+        "24h_vol_change|5" => "24h量变化%",
+        "exchange" => "交易所",
+        "dex_txs_count_24h" => "24h笔数",
+        "dex_trading_volume_24h" => "24h成交额",
+        "dex_txs_count_uniq_24h" => "24h独立地址",
+        "dex_total_liquidity" => "流动性",
+        "fully_diluted_value" => "完全稀释市值",
+        "crypto_category" => "分类",
+        "country" => "国别",
+        "no_group" => "无分组",
         "earnings_release_date" => "上次财报",
         "earnings_release_next_date" => "下次财报",
         "beta_1_year" => "Beta",
@@ -578,6 +625,7 @@ pub(crate) fn cell_text(
                 Some(x) if cat.pct_keys.contains(key) => format!("{x:+.2}%"),
                 Some(x) if cat.money_keys.contains(key) => money_cell(x),
                 Some(x) if cat.date_keys.contains(key) => date_cell(x),
+                Some(x) if cat.ymd_keys.contains(key) => ymd_cell(x),
                 Some(x) if x.abs() >= 1e6 => usd(x),
                 Some(x) => format!("{x:.2}"),
             };
@@ -984,7 +1032,6 @@ fn is_numeric(k: SortKey) -> bool {
     )
 }
 
-use super::radar_readout::Catalog;
 
 /// 可点排序的列头。箭头**前置**且只出现在活动列上（同 TradingView 的 `↓ Mkt cap`）——
 /// 后置箭头会把列标题推离它对齐的那列数字。
@@ -1053,6 +1100,31 @@ impl MarketOpt {
 }
 
 /// 字符串驻留：同一份文本只泄漏一次，避免每帧重建下拉时无界泄漏。
+/// 当前资产类的列组。目录里没有这一类（旧守护）就退回全局那套。
+pub(crate) fn asset_tabs<'a>(cat: &'a Catalog, a: AssetFilter) -> &'a [ColumnTab] {
+    cat.assets
+        .iter()
+        .find(|x| x.kind == a.kind())
+        .map(|x| x.tabs.as_slice())
+        .filter(|t| !t.is_empty())
+        .unwrap_or(&cat.tabs)
+}
+
+/// 当前资产类的热图「大小/颜色」可选项。
+///
+/// 每类的字段名不同（股票 `market_cap_basic`、加密 `market_cap_calc`、
+/// DEX `dex_total_liquidity`）——共用一套的话下拉里一半取不到值。
+pub(crate) fn asset_opts<'a>(
+    cat: &'a Catalog,
+    a: AssetFilter,
+) -> Option<(&'a [CatalogItem], &'a [CatalogItem])> {
+    cat.assets
+        .iter()
+        .find(|x| x.kind == a.kind())
+        .filter(|x| !x.size.is_empty() && !x.color.is_empty())
+        .map(|x| (x.size.as_slice(), x.color.as_slice()))
+}
+
 /// 记忆化「只依赖数据版本 + 当前口径」的行下标集合。
 ///
 /// 视图每帧都会重建——上游用 `iced::window::frames()` 驱动图表动画，整个应用
@@ -1546,6 +1618,24 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         body = body.push(wr.align_y(iced::Alignment::Center));
     }
 
+    // 「大小/颜色」的可选项**跟着资产类走**：股票 market_cap_basic、
+    // 加密 market_cap_calc、DEX dex_total_liquidity——共用一套的话
+    // 下拉里一半取不到值。目录没给这一类就退回雷达自有的那套。
+    let (size_list, color_list) = match asset_opts(&st.catalog, v.asset) {
+        Some((sz, cl)) => (
+            sz.iter().map(|i| Opt { key: intern(&i.code), label: intern(&i.label) }).collect::<Vec<_>>(),
+            std::iter::once(Opt { key: "own:speed_z", label: "涨跌速度 z（雷达）" })
+                .chain(cl.iter().map(|i| Opt { key: intern(&i.code), label: intern(&i.label) }))
+                .collect::<Vec<_>>(),
+        ),
+        None => (SIZE_OPTS.to_vec(), COLOR_OPTS.to_vec()),
+    };
+    // 换资产类后原来选中的项可能不在新清单里——不回退的话下拉会显示空白
+    let cur_size = size_list.iter().find(|o| o.key == v.size.key).copied()
+        .unwrap_or_else(|| size_list[0]);
+    let cur_color = color_list.iter().find(|o| o.key == v.color.key).copied()
+        .unwrap_or_else(|| color_list[0]);
+
     // ── 热图控制条 ──（只在真要画热图时才出，否则一排无效下拉）
     let mut r1 = row![text("窗口 ").size(11).color(C_DIM)].spacing(3);
     for (i, w) in WINDOWS.iter().enumerate() {
@@ -1553,7 +1643,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     }
     r1 = r1.push(text("　大小 ").size(11).color(C_DIM));
     r1 = r1.push(
-        pick_list(SIZE_OPTS.to_vec(), Some(v.size), RadarMsg::SetSize)
+        pick_list(size_list.clone(), Some(cur_size), RadarMsg::SetSize)
             .text_size(11)
             .padding([2, 6]),
     );
@@ -1572,7 +1662,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
     let mut r2 = row![text("颜色 ").size(11).color(C_DIM)].spacing(3);
     r2 = r2.push(
-        pick_list(COLOR_OPTS.to_vec(), Some(v.color), RadarMsg::SetColor)
+        pick_list(color_list.clone(), Some(cur_color), RadarMsg::SetColor)
             .text_size(11)
             .padding([2, 6]),
     );
@@ -1606,8 +1696,9 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         .iter()
         .filter(|&&i| metric_value(&st.rows[i], v.size.key, v.win).is_some_and(|x| x > 0.0))
         .count();
-    if sized == 0 {
-        let alt = SIZE_OPTS.iter().find(|o| {
+    // 只有真要画树图时才提示口径不对——表格模式下这条提示牛头不对马嘴
+    if sized == 0 && draw_map {
+        let alt = size_list.iter().find(|o| {
             o.key != v.size.key
                 && picked.iter().any(|&i| {
                     metric_value(&st.rows[i], o.key, v.win).is_some_and(|x| x > 0.0)
@@ -1735,7 +1826,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     ] {
         cs = cs.push(chip(l, c == v.cols, RadarMsg::SetColumns(c)));
     }
-    for (i, t) in st.catalog.tabs.iter().enumerate() {
+    for (i, t) in asset_tabs(&st.catalog, v.asset).iter().enumerate() {
         let c = ColumnSet::Tv(i);
         cs = cs.push(chip(&t.label, c == v.cols, RadarMsg::SetColumns(c)));
     }
@@ -1795,6 +1886,182 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
 #[cfg(test)]
 mod tests {
+
+    /// **所有资产类**会下发的列键（不只是股票那 12 组）。上一版的
+    /// `ALL_TAB_COLS` 只覆盖股票，于是债券/DEX 那批列漏了中文名、
+    /// 表头直接显示 `yield_to_worst`。
+    const ALL_ASSET_COLS: [&str; 149] = [
+            "close",
+            "change",
+            "volume",
+            "relative_volume_10d_calc",
+            "market_cap_basic",
+            "price_earnings_ttm",
+            "earnings_per_share_diluted_ttm",
+            "earnings_per_share_diluted_yoy_growth_ttm",
+            "dividends_yield_current",
+            "sector",
+            "AnalystRating",
+            "Perf.W",
+            "Perf.1M",
+            "Perf.3M",
+            "Perf.6M",
+            "Perf.YTD",
+            "Perf.Y",
+            "Perf.5Y",
+            "Perf.10Y",
+            "Perf.All",
+            "Volatility.W",
+            "Volatility.M",
+            "TechRating_1D",
+            "MARating_1D",
+            "OsRating_1D",
+            "RSI",
+            "Mom",
+            "AO",
+            "CCI20",
+            "Stoch.K",
+            "Stoch.D",
+            "candlestick_patterns_1D",
+            "premarket_close",
+            "premarket_change",
+            "premarket_gap",
+            "premarket_volume",
+            "gap",
+            "volume_change",
+            "postmarket_close",
+            "postmarket_change",
+            "postmarket_volume",
+            "earnings_per_share_forecast_next_fy",
+            "revenue_forecast_next_fy",
+            "net_income_estimate_ntm",
+            "free_cash_flow_estimate_ntm",
+            "price_earnings_fwd",
+            "enterprise_value_ebitda_fwd",
+            "price_sales_fwd",
+            "total_debt_estimate_fy",
+            "book_value_per_share_estimate_fy",
+            "dps_estimate_ntm",
+            "earnings_release_date",
+            "earnings_release_next_date",
+            "Perf.1Y.MarketCap",
+            "price_earnings_growth_ttm",
+            "price_sales_current",
+            "price_book_fq",
+            "price_to_cash_f_operating_activities_ttm",
+            "price_free_cash_flow_ttm",
+            "price_to_cash_ratio",
+            "enterprise_value_current",
+            "enterprise_value_to_revenue_ttm",
+            "enterprise_value_to_ebit_ttm",
+            "enterprise_value_ebitda_ttm",
+            "dps_common_stock_prim_issue_fy",
+            "dps_common_stock_prim_issue_fq",
+            "dividends_yield",
+            "dividend_payout_ratio_ttm",
+            "dps_common_stock_prim_issue_yoy_growth_fy",
+            "continuous_dividend_payout",
+            "continuous_dividend_growth",
+            "gross_margin_ttm",
+            "operating_margin_ttm",
+            "pre_tax_margin_ttm",
+            "net_margin_ttm",
+            "free_cash_flow_margin_ttm",
+            "return_on_assets_fq",
+            "return_on_equity_fq",
+            "return_on_invested_capital_fq",
+            "research_and_dev_ratio_ttm",
+            "sell_gen_admin_exp_other_ratio_ttm",
+            "fiscal_period_current",
+            "fiscal_period_end_current",
+            "total_revenue_ttm",
+            "total_revenue_yoy_growth_ttm",
+            "gross_profit_ttm",
+            "oper_income_ttm",
+            "net_income_ttm",
+            "ebitda_ttm",
+            "total_assets_fq",
+            "total_current_assets_fq",
+            "cash_n_short_term_invest_fq",
+            "total_liabilities_fq",
+            "total_debt_fq",
+            "net_debt_fq",
+            "total_equity_fq",
+            "current_ratio_fq",
+            "quick_ratio_fq",
+            "debt_to_equity_fq",
+            "cash_n_short_term_invest_to_total_debt_fq",
+            "cash_f_operating_activities_ttm",
+            "cash_f_investing_activities_ttm",
+            "cash_f_financing_activities_ttm",
+            "free_cash_flow_ttm",
+            "neg_capital_expenditures_ttm",
+            "revenue_per_share_ttm",
+            "earnings_per_share_basic_ttm",
+            "operating_cash_flow_per_share_ttm",
+            "free_cash_flow_per_share_ttm",
+            "ebit_per_share_ttm",
+            "ebitda_per_share_ttm",
+            "book_value_per_share_fq",
+            "total_debt_per_share_fq",
+            "cash_per_share_fq",
+            "average_volume_10d_calc",
+            "average_volume_30d_calc",
+            "Value.Traded",
+            "value_traded_10d",
+            "value_traded_30d",
+            "change|60",
+            "change|240",
+            "Volatility.D",
+            "no_group",
+            "country",
+            "24h_close_change|5",
+            "market_cap_calc",
+            "24h_vol_cmc",
+            "24h_vol_to_market_cap",
+            "circulating_supply",
+            "crypto_total_rank",
+            "socialdominance",
+            "crypto_category",
+            "24h_vol|5",
+            "24h_vol_change|5",
+            "exchange",
+            "dex_txs_count_24h",
+            "dex_trading_volume_24h",
+            "dex_txs_count_uniq_24h",
+            "dex_total_liquidity",
+            "fully_diluted_value",
+            "close_pct",
+            "close_net",
+            "yield_to_worst",
+            "current_coupon",
+            "maturity_date",
+            "bond_snp_rating_lt.tr",
+            "bond_fitch_rating_lt.tr",
+            "bond_issuer_type.tr",
+            "redemption_type.tr",
+    ];
+
+    #[test]
+    fn every_asset_class_column_has_a_chinese_title() {
+        let miss: Vec<_> = ALL_ASSET_COLS
+            .iter()
+            .filter(|k| metric_title(k) == **k && !KEEP_AS_IS.contains(k))
+            .copied()
+            .collect();
+        assert!(miss.is_empty(), "这些列没有中文名: {miss:?}");
+    }
+
+    #[test]
+    fn ymd_dates_render_as_dates_not_numbers() {
+        // 债券到期日是 20290214；不单列一类会显示成 20.3M
+        assert_eq!(ymd_cell(20290214.0), "2029-02-14");
+        assert_eq!(ymd_cell(20261015.0), "2026-10-15");
+        // 明显不是日期的值不能硬凑出一个
+        assert_eq!(ymd_cell(0.0), "—");
+        assert_eq!(ymd_cell(1785456000.0), "—", "Unix 秒不是 YYYYMMDD");
+        assert_eq!(ymd_cell(20291345.0), "—", "13 月 45 日");
+    }
 
     fn memo_row(sym: &str, tv: f64) -> RadarRow {
         RadarRow {
@@ -2230,7 +2497,8 @@ mod tests {
         cr.quote_vol_24h = 1e6;
         cr.asset = "crypto".into();
         let rows = vec![eq, cr];
-        let sub = super::visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Coin; v });
+        // Binance 交易对归 CEX（「加密货币」是 coin 端点的币）
+        let sub = super::visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Cex; v });
         let top = top_by_turnover_within(&rows, &sub, 5);
         assert_eq!(top.len(), 1);
         assert_eq!(rows[top[0]].symbol, "BTCUSDT");

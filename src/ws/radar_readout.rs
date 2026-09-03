@@ -131,6 +131,22 @@ pub struct CatalogItem {
     pub region: String,
 }
 
+/// 一个资产类的可选项（目录下发，面板不硬编码任何一类的选项）。
+///
+/// **每类的字段集完全不同**：股票 `market_cap_basic`、加密 `market_cap_calc`、
+/// DEX `dex_total_liquidity`。共用一套扁平选项的话，下拉里一半取不到值。
+#[derive(Clone, Default)]
+pub struct AssetSpec {
+    pub kind: String,
+    pub label: String,
+    /// 官方只有 股票 / ETF / 加密 三种热图。
+    pub heatmap: bool,
+    pub tabs: Vec<ColumnTab>,
+    pub size: Vec<CatalogItem>,
+    pub color: Vec<CatalogItem>,
+    pub group: Vec<CatalogItem>,
+}
+
 /// 来源目录（docs/22 §6.5）：面板「来源」下拉的**全部可选项**，随快照下发。
 /// 只列已加载的 venue 的话，用户永远只能在守护恰好在拉的那几个市场里打转。
 #[derive(Default, Clone)]
@@ -138,11 +154,18 @@ pub struct Catalog {
     /// Screener 的列组（对齐 TV 的 Overview/Performance/…）。随快照下发，
     /// 面板不硬编码列名——加列只改守护侧一处。
     pub tabs: Vec<ColumnTab>,
+    /// 每个资产类自己的列组与热图选项（docs/22 §6.13）。面板据此组织界面——
+    /// 先选资产类，下面的选项才跟着走。
+    pub assets: Vec<AssetSpec>,
     /// 百分数口径的指标键。
     pub pct_keys: std::collections::HashSet<String>,
     /// 本币金额口径的指标键（已换算成美元）。
     /// 值是 Unix 秒的指标（财报日期）——不单列一类会显示成十位整数。
     pub date_keys: std::collections::HashSet<String>,
+    /// 值是 **YYYYMMDD 整数**的指标（债券到期日）。与 `date_keys` 分开：
+    /// 两者都叫日期但解码方式不同，混用会把 2029-02-14 显示成 1970 年，
+    /// 不标注则显示成 `20.3M`。
+    pub ymd_keys: std::collections::HashSet<String>,
     pub money_keys: std::collections::HashSet<String>,
     pub markets: Vec<CatalogItem>,
     /// 指数成分股来源。`code` 是来源 id（`america@SPX`），`region` 借用为所属市场。
@@ -538,11 +561,60 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default()
     };
+    let parse_items = |v: Option<&serde_json::Value>| -> Vec<CatalogItem> {
+        v.and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|o| CatalogItem {
+                        code: o.get("key").and_then(|x| x.as_str()).unwrap_or_default().into(),
+                        label: o.get("label").and_then(|x| x.as_str()).unwrap_or_default().into(),
+                        region: String::new(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let parse_tabs = |v: Option<&serde_json::Value>| -> Vec<ColumnTab> {
+        v.and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|o| ColumnTab {
+                        key: o.get("key").and_then(|x| x.as_str()).unwrap_or_default().into(),
+                        label: o.get("label").and_then(|x| x.as_str()).unwrap_or_default().into(),
+                        cols: o
+                            .get("cols")
+                            .and_then(|x| x.as_array())
+                            .map(|c| c.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                            .unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let assets: Vec<AssetSpec> = cat("assets")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|o| AssetSpec {
+                    kind: o.get("kind").and_then(|x| x.as_str()).unwrap_or_default().into(),
+                    label: o.get("label").and_then(|x| x.as_str()).unwrap_or_default().into(),
+                    heatmap: o.get("heatmap").and_then(|x| x.as_bool()).unwrap_or(false),
+                    tabs: parse_tabs(o.get("tabs")),
+                    size: parse_items(o.get("size")),
+                    color: parse_items(o.get("color")),
+                    group: parse_items(o.get("group")),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let catalog = Catalog {
+        assets,
         tabs,
         pct_keys: keys("pct"),
         money_keys: keys("money"),
         date_keys: keys("date"),
+        ymd_keys: keys("ymd"),
         markets: items("markets"),
         indices: index_items,
         types: items("types"),

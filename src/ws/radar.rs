@@ -163,16 +163,28 @@ impl AssetFilter {
             AssetFilter::All => true,
             AssetFilter::Stock => asset == "equity",
             AssetFilter::Etf => asset == "etf",
-            AssetFilter::Coin => asset == "crypto",
-            AssetFilter::Cex => asset == "cex",
+            // 官方的「加密货币」筛选器就是 coin 端点（CoinMarketCap 口径的币）
+            AssetFilter::Coin => asset == "coin",
+            // Binance 直连给的是**交易对**，归 CEX；它是 A 档实时，
+            // 与 TradingView 的 CEX（C 档延迟）同表并存，靠 tier 列区分
+            AssetFilter::Cex => asset == "cex" || asset == "crypto",
             AssetFilter::Dex => asset == "dex",
             AssetFilter::Bond => asset == "bond",
         }
     }
 
-    /// 热图页可选的资产类（官方三种 + 雷达自有的「全部」）。
-    pub const HEATMAP: [AssetFilter; 4] =
-        [AssetFilter::All, AssetFilter::Stock, AssetFilter::Etf, AssetFilter::Coin];
+    /// 热图页可选的资产类。
+    ///
+    /// 官方三种（股票/ETF/加密货币）+ 两个雷达扩展：「全部」是「一眼看整个
+    /// 市场」这个初衷所需；CEX 是因为 Binance 直连（A 档实时）产出的就是
+    /// 交易对、归在 CEX，不给热图的话实时加密热图只能从「全部」进。
+    pub const HEATMAP: [AssetFilter; 5] = [
+        AssetFilter::All,
+        AssetFilter::Stock,
+        AssetFilter::Etf,
+        AssetFilter::Coin,
+        AssetFilter::Cex,
+    ];
 
     /// 筛选器页可选的资产类（官方六种）。
     pub const SCREENER: [AssetFilter; 6] = [
@@ -501,7 +513,7 @@ mod tests {
         // 官方热图只有 股票/ETF/加密；筛选器六类且没有「全部」。
         // 混成一套是原来「下拉一半无效」的根源。
         assert!(!AssetFilter::HEATMAP.contains(&AssetFilter::Bond));
-        assert!(!AssetFilter::HEATMAP.contains(&AssetFilter::Cex));
+        assert!(!AssetFilter::HEATMAP.contains(&AssetFilter::Dex));
         assert!(!AssetFilter::SCREENER.contains(&AssetFilter::All));
         assert_eq!(AssetFilter::SCREENER.len(), 6);
     }
@@ -541,7 +553,9 @@ mod tests {
         assert_eq!(AssetFilter::Stock.kind(), "stock");
         assert!(AssetFilter::Stock.keeps("equity") && !AssetFilter::Stock.keeps("stock"));
         assert_eq!(AssetFilter::Coin.kind(), "coin");
-        assert!(AssetFilter::Coin.keeps("crypto") && !AssetFilter::Coin.keeps("coin"));
+        assert!(AssetFilter::Coin.keeps("coin") && !AssetFilter::Coin.keeps("crypto"));
+        // Binance 直连是交易对，归 CEX（A 档实时，与 TV 的 C 档并存）
+        assert!(AssetFilter::Cex.keeps("crypto") && AssetFilter::Cex.keeps("cex"));
         // 每个类的 id 唯一
         let mut k: Vec<_> = AssetFilter::SCREENER.iter().map(|a| a.kind()).collect();
         let n = k.len();
@@ -576,7 +590,9 @@ mod tests {
     #[test]
     fn asset_filter_keeps_only_the_selected_class() {
         assert!(AssetFilter::All.keeps("crypto") && AssetFilter::All.keeps("equity"));
-        assert!(AssetFilter::Coin.keeps("crypto"));
+        // 「加密货币」= coin 端点的币；Binance 直连给的是**交易对**，归 CEX
+        assert!(AssetFilter::Coin.keeps("coin") && !AssetFilter::Coin.keeps("crypto"));
+        assert!(AssetFilter::Cex.keeps("crypto") && AssetFilter::Cex.keeps("cex"));
         assert!(!AssetFilter::Coin.keeps("equity"));
         assert!(AssetFilter::Stock.keeps("equity"));
         assert!(!AssetFilter::Stock.keeps("crypto"));
@@ -599,8 +615,8 @@ mod tests {
         let o = order(&rows, v);
         assert_eq!(o.len(), 1, "过滤后只该剩股票");
         assert_eq!(rows[o[0]].symbol, "NVDA");
-        v.asset = AssetFilter::Coin;
-        assert_eq!(rows[order(&rows, v)[0]].symbol, "BTCUSDT");
+        v.asset = AssetFilter::Cex;
+        assert_eq!(rows[order(&rows, v)[0]].symbol, "BTCUSDT", "Binance 交易对归 CEX");
     }
 
     #[test]
@@ -704,7 +720,7 @@ mod tests {
         b.asset = "crypto".into();
         b.cats = vec!["defi".into()];
         let rows = vec![a, b];
-        let v = visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Coin; v.source = "defi"; v });
+        let v = visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Cex; v.source = "defi"; v });
         assert_eq!(v.len(), 1);
         assert_eq!(rows[v[0]].symbol, "UNIUSDT");
         // 没打上分类的不该被任何具体分类收进来
