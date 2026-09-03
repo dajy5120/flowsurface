@@ -41,6 +41,11 @@ pub struct FilterDef {
     pub label: &'static str,
     pub kind: FKind,
     pub presets: &'static [Preset],
+    /// 适用的资产类（目录里的 kind）。空 = 只适用于股票与 ETF。
+    ///
+    /// **筛选必须按资产类分**：把「市盈率 10–15」摆给债券，用户设了会得到
+    /// 一张空表；把「最差收益率」摆给股票同理。字段在那一类里根本不存在。
+    pub kinds: &'static [&'static str],
     /// 能下推到服务端时，对应的 scanner 字段名；`None` = **只能本地筛**。
     ///
     /// 这个区分必须显示给用户看。本地筛只在「守护已抓回的按市值前 N 只」里
@@ -50,6 +55,8 @@ pub struct FilterDef {
     pub server: Option<&'static str>,
 }
 
+const EQ: [&str; 2] = ["stock", "etf"];
+
 const fn f(
     key: &'static str,
     label: &'static str,
@@ -57,8 +64,24 @@ const fn f(
     presets: &'static [Preset],
     server: Option<&'static str>,
 ) -> FilterDef {
-    FilterDef { key, label, kind, presets, server }
+    FilterDef { key, label, kind, presets, server, kinds: &EQ }
 }
+
+/// 同 `f`，但显式给出适用的资产类。
+const fn fk(
+    key: &'static str,
+    label: &'static str,
+    kind: FKind,
+    presets: &'static [Preset],
+    server: Option<&'static str>,
+    kinds: &'static [&'static str],
+) -> FilterDef {
+    FilterDef { key, label, kind, presets, server, kinds }
+}
+
+/// 各类通用的（价格、涨跌、成交额、速度 z 这些每类都有）。
+const ALL_KINDS: [&str; 6] = ["stock", "etf", "coin", "cex", "dex", "bond"];
+const CRYPTO_KINDS: [&str; 3] = ["coin", "cex", "dex"];
 
 /// TradingView 的固定板块分类（20 项，实测自 america/japan/germany/india
 /// 一万七千只股票的 distinct 值，不是猜的）。
@@ -239,8 +262,75 @@ const VOLAT: [Preset; 4] = [
 
 /// 全部筛选器。前 15 项对齐 TradingView 筛选栏（其「自选表」我没有、
 /// 「指数」已经由「来源」下拉覆盖），后 4 项是雷达自有。
-pub const FILTERS: [FilterDef; 20] = [
-    f("own:price", "价格", FKind::Num, &PRICE, Some("close")),
+// ── 加密专属 ────────────────────────────────────────────────────
+const CHG24: [Preset; 6] = [
+    p("跌超 10%", NEG, -10.0),
+    p("跌 3 – 10%", -10.0, -3.0),
+    p("横盘 ±3%", -3.0, 3.0),
+    p("涨 3 – 10%", 3.0, 10.0),
+    p("涨超 10%", 10.0, POS),
+    p("涨超 30%", 30.0, POS),
+];
+const CMCAP: [Preset; 5] = [
+    p("微型 < $1000万", NEG, 1e7),
+    p("$1000万 – $1亿", 1e7, 1e8),
+    p("$1亿 – $10亿", 1e8, 1e9),
+    p("$10亿 – $100亿", 1e9, 1e10),
+    p("巨型 > $100亿", 1e10, POS),
+];
+const CRANK: [Preset; 4] = [
+    p("前 100", 1.0, 100.0),
+    p("前 500", 1.0, 500.0),
+    p("前 1000", 1.0, 1000.0),
+    p("1000 名以后", 1000.0, POS),
+];
+/// 量/市值：换手强度。>1 说明一天的成交额超过整个市值——多半是异动。
+const VOL2CAP: [Preset; 4] = [
+    p("低于 0.05", NEG, 0.05),
+    p("0.05 – 0.2", 0.05, 0.2),
+    p("0.2 – 1", 0.2, 1.0),
+    p("高于 1（异动）", 1.0, POS),
+];
+
+// ── DEX 专属 ────────────────────────────────────────────────────
+const LIQ: [Preset; 4] = [
+    p("高于 $1万", 1e4, POS),
+    p("高于 $10万", 1e5, POS),
+    p("高于 $100万", 1e6, POS),
+    p("高于 $1000万", 1e7, POS),
+];
+const TXS: [Preset; 4] = [
+    p("高于 100", 100.0, POS),
+    p("高于 1000", 1000.0, POS),
+    p("高于 1万", 1e4, POS),
+    p("高于 10万", 1e5, POS),
+];
+
+// ── 债券专属 ────────────────────────────────────────────────────
+const YTW: [Preset; 6] = [
+    p("低于 2%", NEG, 2.0),
+    p("2 – 4%", 2.0, 4.0),
+    p("4 – 6%", 4.0, 6.0),
+    p("6 – 10%", 6.0, 10.0),
+    p("高于 10%", 10.0, POS),
+    p("高于 20%（高危）", 20.0, POS),
+];
+const COUPON: [Preset; 4] = [
+    p("零息", NEG, 0.001),
+    p("0 – 3%", 0.001, 3.0),
+    p("3 – 6%", 3.0, 6.0),
+    p("高于 6%", 6.0, POS),
+];
+/// 净价（占票面 %）。低于 100 是折价、高于 100 是溢价。
+const NETPX: [Preset; 4] = [
+    p("深度折价 < 80", NEG, 80.0),
+    p("折价 80 – 100", 80.0, 100.0),
+    p("溢价 100 – 110", 100.0, 110.0),
+    p("高溢价 > 110", 110.0, POS),
+];
+
+pub const FILTERS: [FilterDef; 31] = [
+    fk("own:price", "价格", FKind::Num, &PRICE, Some("close"), &ALL_KINDS),
     f("change", "涨跌 %", FKind::Num, &CHG, Some("change")),
     f("market_cap_basic", "市值", FKind::Num, &MCAP, Some("market_cap_basic")),
     f("price_earnings_ttm", "市盈率", FKind::Num, &PE, Some("price_earnings_ttm")),
@@ -256,11 +346,33 @@ pub const FILTERS: [FilterDef; 20] = [
     f("beta_1_year", "Beta", FKind::Num, &BETA, Some("beta_1_year")),
     f("earnings_release_date", "近期财报", FKind::Days, &PAST_EARN, Some("earnings_release_date")),
     f("earnings_release_next_date", "未来财报", FKind::Days, &NEXT_EARN, Some("earnings_release_next_date")),
-    f("own:speed_z", "涨跌速度", FKind::Num, &SPEED, None),
+    fk("own:speed_z", "涨跌速度", FKind::Num, &SPEED, None, &ALL_KINDS),
     f("relative_volume_10d_calc", "相对成交量", FKind::Num, &RVOL, Some("relative_volume_10d_calc")),
-    f("own:turnover", "成交额", FKind::Num, &TURNOVER, None),
+    fk("own:turnover", "成交额", FKind::Num, &TURNOVER, None, &ALL_KINDS),
     f("Volatility.D", "日波动率", FKind::Num, &VOLAT, Some("Volatility.D")),
+    // ── 加密 ──
+    fk("24h_close_change|5", "涨跌 24h", FKind::Num, &CHG24, Some("24h_close_change|5"), &CRYPTO_KINDS),
+    fk("market_cap_calc", "市值", FKind::Num, &CMCAP, Some("market_cap_calc"), &["coin", "cex"]),
+    fk("crypto_total_rank", "排名", FKind::Num, &CRANK, Some("crypto_total_rank"), &["coin"]),
+    fk("24h_vol_to_market_cap", "量/市值", FKind::Num, &VOL2CAP, Some("24h_vol_to_market_cap"), &["coin"]),
+    fk("24h_vol|5", "24h 成交额", FKind::Num, &TURNOVER, Some("24h_vol|5"), &["cex"]),
+    // ── DEX ──
+    fk("dex_total_liquidity", "流动性", FKind::Num, &LIQ, Some("dex_total_liquidity"), &["dex"]),
+    fk("dex_txs_count_24h", "24h 笔数", FKind::Num, &TXS, Some("dex_txs_count_24h"), &["dex"]),
+    fk("dex_trading_volume_24h", "24h 成交额", FKind::Num, &TURNOVER, Some("dex_trading_volume_24h"), &["dex"]),
+    // ── 债券 ──
+    fk("yield_to_worst", "最差收益率", FKind::Num, &YTW, Some("yield_to_worst"), &["bond"]),
+    fk("current_coupon", "当期票息", FKind::Num, &COUPON, Some("current_coupon"), &["bond"]),
+    fk("close_pct", "净价", FKind::Num, &NETPX, Some("close_pct"), &["bond"]),
 ];
+
+/// 某个资产类可用的筛选器下标。
+///
+/// 不区分的话，把「市盈率 10–15」摆给债券、把「最差收益率」摆给股票——
+/// 用户设了会得到一张空表，而且不会有任何提示说明为什么。
+pub fn for_kind(kind: &str) -> Vec<usize> {
+    (0..N_FILTERS).filter(|&i| FILTERS[i].kinds.contains(&kind)).collect()
+}
 
 pub const N_FILTERS: usize = FILTERS.len();
 
@@ -412,6 +524,70 @@ pub fn now_s() -> i64 {
 mod tests {
 
     #[test]
+    fn each_asset_kind_only_offers_filters_that_apply_to_it() {
+        // 把「市盈率」摆给债券，用户设了会得到一张空表且没有任何提示
+        let bond = for_kind("bond");
+        let names = |v: &[usize]| v.iter().map(|&i| FILTERS[i].label).collect::<Vec<_>>();
+        assert!(!names(&bond).contains(&"市盈率"), "债券没有市盈率");
+        assert!(names(&bond).contains(&"最差收益率"));
+        let stock = for_kind("stock");
+        assert!(names(&stock).contains(&"市盈率"));
+        assert!(!names(&stock).contains(&"最差收益率"), "股票没有到期收益率");
+        assert!(!names(&stock).contains(&"流动性"), "流动性是 DEX 的");
+        // DEX 有自己的三条
+        let dex = for_kind("dex");
+        for k in ["流动性", "24h 笔数"] {
+            assert!(names(&dex).contains(&k), "DEX 缺 {k}");
+        }
+    }
+
+    #[test]
+    fn universal_filters_show_up_for_every_kind() {
+        // 价格/速度 z/成交额每类都有，缺了就等于那一类没法按体量筛
+        for k in ["stock", "etf", "coin", "cex", "dex", "bond"] {
+            let names: Vec<_> = for_kind(k).iter().map(|&i| FILTERS[i].label).collect();
+            assert!(!names.is_empty(), "{k} 一个筛选都没有");
+            for want in ["价格", "涨跌速度", "成交额"] {
+                assert!(names.contains(&want), "{k} 缺通用筛选 {want}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_filter_declares_at_least_one_kind() {
+        // 空的话该筛选任何视图都不会出现——写了等于没写
+        for d in &FILTERS {
+            assert!(!d.kinds.is_empty(), "{} 没声明适用资产类", d.label);
+            for k in d.kinds {
+                assert!(
+                    ["stock", "etf", "coin", "cex", "dex", "bond"].contains(k),
+                    "{} 声明了未知资产类 {k}",
+                    d.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_kinds_server_fields_exist_in_that_kinds_columns() {
+        // 下推一个该类根本不请求的字段 = 服务端筛完返回 0 行。
+        // 加密的字段名与股票完全不同，这条最容易踩
+        let crypto_only = ["24h_close_change|5", "market_cap_calc", "crypto_total_rank",
+                           "24h_vol_to_market_cap", "24h_vol|5"];
+        for d in &FILTERS {
+            let Some(sf) = d.server else { continue };
+            if crypto_only.contains(&sf) {
+                assert!(
+                    d.kinds.iter().all(|k| ["coin", "cex", "dex"].contains(k)),
+                    "{} 用的是加密字段却声明给了 {:?}",
+                    d.label,
+                    d.kinds
+                );
+            }
+        }
+    }
+
+    #[test]
     fn open_ended_presets_become_inequalities_closed_ones_a_range() {
         let mut v = ViewState::DEFAULT;
         set(&mut v, "price_earnings_ttm", "高于 50");
@@ -495,14 +671,17 @@ mod tests {
     }
 
     #[test]
-    fn every_server_field_is_a_real_scanner_column() {
-        // 下推一个守护不认识的字段，会被白名单挡掉 → 筛选静默失效
-        let known = wealthspring_radar_keys();
+    fn every_server_field_is_a_real_column_of_its_kinds() {
+        // 下推一个该类不请求的字段，服务端筛完会返回 0 行 → 筛选静默失效
         for d in &FILTERS {
-            if let Some(f) = d.server {
+            let Some(f) = d.server else { continue };
+            if f == "sector" {
+                continue;
+            }
+            for k in d.kinds {
                 assert!(
-                    f == "sector" || known.contains(&f),
-                    "{} 下推的字段 {f} 不在 scanner 列里",
+                    kind_columns(k).contains(&f),
+                    "{} 下推的 {f} 不在 {k} 的列里",
                     d.label
                 );
             }
@@ -709,24 +888,64 @@ mod tests {
     }
 
     #[test]
-    fn every_filter_key_is_actually_fetched() {
-        // 筛选一个没被请求的指标 = 该筛选永远返回空表。
-        // `own:` 是面板自算的，`sector` 是行上的字段，其余必须在 scanner 列里。
+    fn every_filter_key_is_actually_fetched_for_its_own_kinds() {
+        // 筛选一个该类没请求的指标 = 该筛选永远返回空表。
+        // `own:` 是面板自算的，`sector` 是行上的字段，其余必须在**那一类**的列里。
         for d in &FILTERS {
             if d.key.starts_with("own:") || d.key == "sector" {
                 continue;
             }
-            assert!(
-                wealthspring_radar_keys().contains(&d.key),
-                "{} 不在 scanner 请求的列里",
-                d.key
-            );
+            for k in d.kinds {
+                assert!(
+                    kind_columns(k).contains(&d.key),
+                    "{}（{}）不在 {k} 请求的列里",
+                    d.label,
+                    d.key
+                );
+            }
         }
     }
 
-    /// 与守护侧 `metricdef::scanner_columns()` 对齐的键清单。
-    /// 面板不依赖守护的 crate，所以这里手抄一份，靠上面那条单测钉住。
-    fn wealthspring_radar_keys() -> Vec<&'static str> {
+    /// 某个资产类实际会请求的列（镜像守护侧 `assets.rs`）。
+    ///
+    /// 面板不依赖守护的 crate，只能手抄一份，靠下面的单测钉住。
+    /// **必须按类分**：加密的字段名与股票完全不同，用一份股票清单去校验
+    /// 加密的筛选，只会得到「不在列里」这种假失败——或者反过来放过真错误。
+    fn kind_columns(kind: &str) -> Vec<&'static str> {
+        let mut v = match kind {
+            "coin" => vec![
+                "close", "24h_close_change|5", "market_cap_calc", "24h_vol_cmc",
+                "24h_vol_to_market_cap", "circulating_supply", "crypto_total_rank",
+                "socialdominance", "altrank", "total_shares_diluted",
+                "circulating_to_max_supply_ratio", "24h_vol_change_cmc",
+            ],
+            "cex" => vec![
+                "close", "24h_close_change|5", "24h_vol|5", "24h_vol_change|5",
+                "market_cap_calc", "market_cap_diluted_calc", "high", "low",
+                "change|60", "Volatility.D", "relative_volume_10d_calc",
+            ],
+            "dex" => vec![
+                "close", "24h_close_change|5", "dex_txs_count_24h",
+                "dex_trading_volume_24h", "dex_txs_count_uniq_24h",
+                "dex_total_liquidity", "fully_diluted_value",
+            ],
+            "bond" => vec![
+                "close", "close_pct", "close_net", "yield_to_worst", "current_coupon",
+                "maturity_date", "accrued_coupon_interest", "coupon_date_next",
+                "coupon_date_prev", "coupon_currency",
+            ],
+            _ => equity_keys(),
+        };
+        // 各类都有的（Perf.* 那套加密也有）
+        for k in ["Perf.W", "Perf.1M", "Perf.3M", "Perf.6M", "Perf.YTD", "Perf.Y", "Perf.All"] {
+            if !v.contains(&k) {
+                v.push(k);
+            }
+        }
+        v
+    }
+
+    fn equity_keys() -> Vec<&'static str> {
         vec![
             "close", "change", "market_cap_basic", "price_earnings_ttm",
             "earnings_per_share_diluted_yoy_growth_ttm", "dividends_yield_current",

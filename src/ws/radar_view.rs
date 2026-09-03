@@ -964,9 +964,13 @@ fn filter_bar<'a>(v: ViewState) -> Element<'a, RadarMsg> {
 
     let mut col = column![head].spacing(3);
     if v.show_filters {
-        // 每行 4 个：19 个下拉铺成 5 行，比横向滚动好找
+        // 每行 4 个，比横向滚动好找
+        let mut n_shown = 0usize;
         let mut r = row![].spacing(6).align_y(iced::Alignment::Center);
-        for (fi, d) in FILTERS.iter().enumerate() {
+        // **只列当前资产类适用的筛选**：把「市盈率」摆给债券、把「最差收益率」
+        // 摆给股票，用户设了会得到一张空表而且没有任何提示
+        for fi in radar_filter::for_kind(v.asset.kind()) {
+            let d = &FILTERS[fi];
             let opts: Vec<FSel> = (0..=radar_filter::n_presets(fi) as u8)
                 .map(|pi| FSel { fi, pi })
                 .collect();
@@ -984,17 +988,21 @@ fn filter_bar<'a>(v: ViewState) -> Element<'a, RadarMsg> {
                 .padding([2, 6])
                 .width(Length::Fixed(132.0)),
             );
-            if fi % 4 == 3 || fi == N_FILTERS - 1 {
+            n_shown += 1;
+            if n_shown % 4 == 0 {
                 col = col.push(std::mem::replace(
                     &mut r,
                     row![].spacing(6).align_y(iced::Alignment::Center),
                 ));
             }
         }
+        if n_shown % 4 != 0 {
+            col = col.push(r);
+        }
         col = col.push(
             text(
                 "带 ⓢ 的下推到服务端、在整个市场上筛（生效有一轮延迟）；\
-                 其余只在已加载的行里筛。基本面类指标加密没有，设了会把加密行全筛掉",
+                 其余只在已加载的行里筛。列出的都是当前资产类适用的——换一类会换一批",
             )
             .size(10)
             .color(C_DIM),
