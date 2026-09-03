@@ -101,6 +101,15 @@ pub(crate) fn ramp(p: Palette) -> Ramp {
 /// 按指标的**量纲**分族：百分数类用 %，z 类用 σ，相对成交量是倍数。
 /// 混用一套边界的话，`Perf.YTD` 那种动辄 ±30% 的指标会全档饱和，
 /// 而 `change|60` 那种 ±0.5% 的会全落中性。
+/// 该口径的色阶边界。百分数类用资产类下发的官方边界；
+/// 其余（相对成交量、雷达自有的 σ）保留原有量纲。
+pub(crate) fn scale_edges(key: &str, scale: [f64; 3]) -> [f64; 3] {
+    if key.starts_with("own:") || key == "relative_volume_10d_calc" {
+        return edges(key);
+    }
+    scale
+}
+
 pub(crate) fn edges(key: &str) -> [f64; 3] {
     match key {
         "own:speed_z" | "own:zvol" => [0.4, 1.2, 2.5],
@@ -920,9 +929,12 @@ impl<M> canvas::Program<M> for TreemapCanvas {
 /// 图例：7 格色块，标签**居中压在各自色块上方**表示该档代表值（同 TradingView：
 /// `−13% −8% −3% 0 3% 8% 13%`）。第一版在色块**之间**标边界值，导致标签和色块
 /// 一一对不上，读起来要在心里错半格。
-fn legend<'a>(key: &'static str, p: Palette) -> Element<'a, RadarMsg> {
+/// 色阶图例。`scale` 是**按资产类下发的**三个正向边界（百分数）——
+/// 官方股票热图是 −3/−2/−1/0/1/2/3 %，加密是 −13/−8/−3/0/3/8/13 %。
+/// 共用一套的话，加密那种日内动辄 ±10% 的品种会整片顶到最深档。
+fn legend<'a>(key: &'static str, p: Palette, scale: [f64; 3]) -> Element<'a, RadarMsg> {
     const SW: f32 = 34.0;
-    let e = edges(key);
+    let e = scale_edges(key, scale);
     let r = ramp(p);
     let cells: [(Color, String); 7] = [
         (r.down[2], format!("-{}", edge_label(key, e[2]))),
@@ -1178,6 +1190,34 @@ pub(crate) fn asset_tabs<'a>(cat: &'a Catalog, a: AssetFilter) -> &'a [ColumnTab
 ///
 /// 每类的字段名不同（股票 `market_cap_basic`、加密 `market_cap_calc`、
 /// DEX `dex_total_liquidity`）——共用一套的话下拉里一半取不到值。
+/// 该资产类的分组维度（目录下发）。官方股票只有「没有分组/板块」、
+/// ETF 是「没有分组/资产类别」、加密**没有分组下拉**。
+pub(crate) fn asset_groups<'a>(cat: &'a Catalog, a: AssetFilter) -> &'a [CatalogItem] {
+    cat.assets
+        .iter()
+        .find(|x| x.kind == a.kind())
+        .map(|x| x.group.as_slice())
+        .unwrap_or(&[])
+}
+
+/// 该资产类的色阶边界。
+pub(crate) fn asset_scale(cat: &Catalog, a: AssetFilter) -> [f64; 3] {
+    cat.assets
+        .iter()
+        .find(|x| x.kind == a.kind())
+        .map(|x| x.scale)
+        .unwrap_or([1.0, 2.0, 3.0])
+}
+
+/// 目录里的分组 key → 面板的分组枚举。
+pub(crate) fn group_of(key: &str) -> GroupBy {
+    match key {
+        "sector" => GroupBy::Sector,
+        "asset_class" => GroupBy::AssetClass,
+        _ => GroupBy::None,
+    }
+}
+
 pub(crate) fn asset_opts<'a>(
     cat: &'a Catalog,
     a: AssetFilter,
@@ -1538,15 +1578,16 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     ] {
         mr = mr.push(chip(l, m == v.mode, RadarMsg::SetMode(m)));
     }
-    // 筛选器的表达形式（官方页面左上角那三个小图标）。热图页没有这个选择——
-    // 它本来就是热图。
-    if v.mode == ViewMode::Screener {
-        mr = mr.push(text("　形式 ").size(11).color(C_DIM));
-        for (f, l) in [(Form::Table, "表格"), (Form::Heatmap, "热图")] {
-            mr = mr.push(chip(l, f == v.form, RadarMsg::SetForm(f)));
-        }
-    }
     body = body.push(mr.align_y(iced::Alignment::Center));
+    // 表达形式**单独一行**（官方页面左上角那三个小图标）。热图页没有这个
+    // 选择——它本来就是热图。
+    if v.mode == ViewMode::Screener {
+        let mut fr = row![text("形式 ").size(11).color(C_DIM)].spacing(3);
+        for (f, l) in [(Form::Table, "表格"), (Form::Heatmap, "热图")] {
+            fr = fr.push(chip(l, f == v.form, RadarMsg::SetForm(f)));
+        }
+        body = body.push(fr.align_y(iced::Alignment::Center));
+    }
 
     if !matches!(v.mode, ViewMode::Heatmap | ViewMode::Screener) {
         let inner = match v.mode {
@@ -1646,8 +1687,11 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             .color(C_DIM),
     );
     body = body.push(ar.align_y(iced::Alignment::Center));
-    // 筛选栏放在空表判断**之前**——被筛空时也得有清除的入口
-    body = body.push(filter_bar(v));
+    // 筛选栏放在空表判断**之前**——被筛空时也得有清除的入口。
+    // 热图页不出筛选：官方热图没有筛选栏，靠「来源」选范围
+    if v.mode != ViewMode::Heatmap {
+        body = body.push(filter_bar(v));
+    }
     if vis.is_empty() {
         let nf = radar_filter::active_count(&v);
         body = body.push(
@@ -1672,9 +1716,9 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // 是否要画热图：热图页恒画；筛选器页只有选了「热图」形式才画。
     let draw_map = v.mode == ViewMode::Heatmap || v.form == Form::Heatmap;
 
-    // 「窗口」两种形式都要：表格里雷达自有的涨跌幅/速度 z 列组也按它取值。
-    // 其余（大小/分组/颜色）只对热图有意义。
-    if !draw_map {
+    // 「窗口」只服务表格里雷达自有的涨跌幅/速度 z 列组；热图按官方口径
+    // 上色，用不到它。
+    if !draw_map && v.mode != ViewMode::Heatmap {
         let mut wr = row![text("窗口 ").size(11).color(C_DIM)].spacing(3);
         for (i, w) in WINDOWS.iter().enumerate() {
             wr = wr.push(chip(w, i == v.win, RadarMsg::SetWindow(i)));
@@ -1688,9 +1732,9 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     let (size_list, color_list) = match asset_opts(&st.catalog, v.asset) {
         Some((sz, cl)) => (
             sz.iter().map(|i| Opt { key: intern(&i.code), label: intern(&i.label) }).collect::<Vec<_>>(),
-            std::iter::once(Opt { key: "own:speed_z", label: "涨跌速度 z（雷达）" })
-                .chain(cl.iter().map(|i| Opt { key: intern(&i.code), label: intern(&i.label) }))
-                .collect::<Vec<_>>(),
+            // **不再插入雷达自有的「涨跌速度 z」**：颜色口径按官方原样。
+            // 速度 z 仍在表格的「速度 z」列组里，那才是它该在的地方。
+            cl.iter().map(|i| Opt { key: intern(&i.code), label: intern(&i.label) }).collect::<Vec<_>>(),
         ),
         None => (SIZE_OPTS.to_vec(), COLOR_OPTS.to_vec()),
     };
@@ -1700,39 +1744,48 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     let cur_color = color_list.iter().find(|o| o.key == v.color.key).copied()
         .unwrap_or_else(|| color_list[0]);
 
-    // ── 热图控制条 ──（只在真要画热图时才出，否则一排无效下拉）
-    let mut r1 = row![text("窗口 ").size(11).color(C_DIM)].spacing(3);
-    for (i, w) in WINDOWS.iter().enumerate() {
-        r1 = r1.push(chip(w, i == v.win, RadarMsg::SetWindow(i)));
-    }
-    r1 = r1.push(text("　大小 ").size(11).color(C_DIM));
-    r1 = r1.push(
-        pick_list(size_list.clone(), Some(cur_size), RadarMsg::SetSize)
-            .text_size(11)
-            .padding([2, 6]),
-    );
-    r1 = r1.push(text("　分组 ").size(11).color(C_DIM));
-    for (g, l) in [
-        (GroupBy::None, "无"),
-        (GroupBy::Venue, "venue"),
-        (GroupBy::Country, "国别"),
-        (GroupBy::Sector, "板块"),
-    ] {
-        r1 = r1.push(chip(l, g == v.group_by, RadarMsg::SetGroupBy(g)));
-    }
+    // ── 热图控制条 ──
+    //
+    // **四个下拉一排**，顺序同官方页面：来源 / 大小 / 颜色 / 分组。
+    // 「来源」已在上面的资产行里（它同时兼作资产类的范围选择）。
+    // 分组维度由目录按资产类下发——官方股票只有「没有分组 / 板块」，
+    // ETF 是「没有分组 / 资产类别」，加密**根本没有分组下拉**。
     if draw_map {
+        let mut r1 = row![text("大小 ").size(11).color(C_DIM)].spacing(3);
+        r1 = r1.push(
+            pick_list(size_list.clone(), Some(cur_size), RadarMsg::SetSize)
+                .text_size(11)
+                .padding([2, 6])
+                .width(Length::Fixed(190.0)),
+        );
+        r1 = r1.push(text("　颜色 ").size(11).color(C_DIM));
+        r1 = r1.push(
+            pick_list(color_list.clone(), Some(cur_color), RadarMsg::SetColor)
+                .text_size(11)
+                .padding([2, 6])
+                .width(Length::Fixed(210.0)),
+        );
+        let groups = asset_groups(&st.catalog, v.asset);
+        if !groups.is_empty() {
+            r1 = r1.push(text("　分组 ").size(11).color(C_DIM));
+            for g in groups {
+                let gb = group_of(&g.code);
+                r1 = r1.push(chip(&g.label, gb == v.group_by, RadarMsg::SetGroupBy(gb)));
+            }
+        }
         body = body.push(r1.align_y(iced::Alignment::Center));
-    }
 
-    let mut r2 = row![text("颜色 ").size(11).color(C_DIM)].spacing(3);
-    r2 = r2.push(
-        pick_list(color_list.clone(), Some(cur_color), RadarMsg::SetColor)
-            .text_size(11)
-            .padding([2, 6]),
-    );
-    r2 = r2.push(text("　").size(11));
-    r2 = r2.push(legend(v.color.key, v.palette));
-    if draw_map {
+        // 色板与色阶**单独一排**
+        let mut r2 = row![text("色板 ").size(11).color(C_DIM)].spacing(3);
+        for (pal, l) in [
+            (Palette::BlueOrange, "蓝橙"),
+            (Palette::GreenUp, "绿涨红跌"),
+            (Palette::RedUp, "红涨绿跌"),
+        ] {
+            r2 = r2.push(chip(l, pal == v.palette, RadarMsg::SetPalette(pal)));
+        }
+        r2 = r2.push(text("　").size(11));
+        r2 = r2.push(legend(v.color.key, v.palette, asset_scale(&st.catalog, v.asset)));
         body = body.push(r2.align_y(iced::Alignment::Center));
     }
 
@@ -1812,10 +1865,13 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         };
         match g {
             GroupBy::None => String::new(),
-            GroupBy::Venue => r.venue.trim_start_matches("binance:").to_string(),
-            // 加密没有国别/板块，单独成组而不是混进「其他」
-            GroupBy::Country => pick(&r.country, if r.tier == "A" { "加密" } else { "其他" }),
+            // 加密没有板块，单独成组而不是混进「其他」
             GroupBy::Sector => pick(&r.sector, if r.tier == "A" { "加密" } else { "其他" }),
+            // ETF 的资产类别（Equity / Fixed income / Commodity…）走文本段
+            GroupBy::AssetClass => pick(
+                r.t.get("asset_class.tr").map(String::as_str).unwrap_or(""),
+                "其他",
+            ),
         }
     }
 

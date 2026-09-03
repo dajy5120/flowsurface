@@ -87,13 +87,14 @@ pub fn scale_kind(key: &str) -> ScaleKind {
 /// 树图分组（对应 TradingView 股票热图按板块分组）。加密没有板块，
 /// 能用的是 venue——顺带解决同一标的在 spot/linear 各出一格、面积算重的问题。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 树图分组维度。**官方只有这三种**：没有分组 / 板块（股票）/ 资产类别（ETF）。
+/// venue 与国别是我自己加的，官方热图的分组下拉里没有——已去掉。
 pub enum GroupBy {
     None,
-    Venue,
-    /// 按国别（股票层才有；加密行归入「加密」一组）。
-    Country,
-    /// 按板块，同 TradingView 股票热图的默认分组。
+    /// 按板块，官方股票热图的默认分组。
     Sector,
+    /// 按资产类别，官方 ETF 热图的默认分组。
+    AssetClass,
 }
 
 /// 色板。TradingView 用绿涨红跌；但树图上格子多且小，红绿对红绿色盲不可分辨，
@@ -182,12 +183,15 @@ impl AssetFilter {
     /// 官方三种（股票/ETF/加密货币）+ 两个雷达扩展：「全部」是「一眼看整个
     /// 市场」这个初衷所需；CEX 是因为 Binance 直连（A 档实时）产出的就是
     /// 交易对、归在 CEX，不给热图的话实时加密热图只能从「全部」进。
-    pub const HEATMAP: [AssetFilter; 5] = [
+    /// 官方三种（股票/ETF/加密货币）+ 雷达自有的「全部」。
+    ///
+    /// **不含 CEX**：官方 CEX 只有筛选器、没有热图。Binance 直连的实时
+    /// 交易对可以从「全部」里看到。
+    pub const HEATMAP: [AssetFilter; 4] = [
         AssetFilter::All,
         AssetFilter::Stock,
         AssetFilter::Etf,
         AssetFilter::Coin,
-        AssetFilter::Cex,
     ];
 
     /// 筛选器页可选的资产类。
@@ -286,7 +290,9 @@ impl ViewState {
     pub const DEFAULT: Self = Self {
         win: 1, // 5m
         size: SIZE_OPTS[0],
-        color: COLOR_OPTS[0],
+        // 默认按官方的「涨跌 1天, %」；速度 z 在表格的列组里，不占颜色口径。
+        // 用 find 而不是写下标——插一项就会静默指到别的口径上
+        color: COLOR_OPTS[5],
         group_by: GroupBy::None,
         cols: ColumnSet::Tv(0),
         palette: Palette::BlueOrange,
@@ -517,11 +523,30 @@ pub fn order_within(rows: &[RadarRow], subset: &[usize], v: ViewState) -> Vec<us
 mod tests {
 
     #[test]
+    fn the_default_colour_metric_is_the_official_daily_change() {
+        // 用下标指口径很脆：插一项就会静默指到别的上面（改这条时就指错过一次，
+        // COLOR_OPTS[2] 是「量异常 z」）
+        assert_eq!(ViewState::DEFAULT.color.key, "change");
+        assert!(!ViewState::DEFAULT.color.key.starts_with("own:"), "默认口径要用官方的");
+    }
+
+    #[test]
+    fn heatmap_grouping_has_only_the_official_dimensions() {
+        // 官方热图的分组只有 没有分组 / 板块 / 资产类别
+        let all = [GroupBy::None, GroupBy::Sector, GroupBy::AssetClass];
+        for g in all {
+            assert_eq!(apply(ViewState::DEFAULT, RadarMsg::SetGroupBy(g)).group_by, g);
+        }
+        assert_eq!(all.len(), 3, "venue 与国别是我自己加的，官方没有");
+    }
+
+    #[test]
     fn each_view_only_offers_the_asset_kinds_it_supports() {
         // 官方热图只有 股票/ETF/加密；筛选器六类且没有「全部」。
         // 混成一套是原来「下拉一半无效」的根源。
         assert!(!AssetFilter::HEATMAP.contains(&AssetFilter::Bond));
         assert!(!AssetFilter::HEATMAP.contains(&AssetFilter::Dex));
+        assert!(!AssetFilter::HEATMAP.contains(&AssetFilter::Cex), "官方 CEX 没有热图");
         assert!(!AssetFilter::SCREENER.contains(&AssetFilter::All));
         assert_eq!(AssetFilter::SCREENER.len(), 7, "官方七类");
     }
@@ -638,8 +663,9 @@ mod tests {
 
     #[test]
     fn group_by_covers_reference_data_dimensions() {
-        // 股票层进来后，venue 分组不够用了——板块/国别才是股票的自然维度
-        for g in [GroupBy::None, GroupBy::Venue, GroupBy::Country, GroupBy::Sector] {
+        // **官方只有这三种分组**：没有分组 / 板块（股票）/ 资产类别（ETF）。
+        // venue 与国别是我自己加的，官方热图的分组下拉里没有
+        for g in [GroupBy::None, GroupBy::Sector, GroupBy::AssetClass] {
             let v = apply(ViewState::DEFAULT, RadarMsg::SetGroupBy(g));
             assert_eq!(v.group_by, g);
         }

@@ -145,6 +145,9 @@ pub struct AssetSpec {
     pub size: Vec<CatalogItem>,
     pub color: Vec<CatalogItem>,
     pub group: Vec<CatalogItem>,
+    /// 色阶的三个正向边界（百分数）。**每类不同**（股票 ±1/2/3%、
+    /// 加密 ±3/8/13%），共用一套的话加密会整片顶到最深档。
+    pub scale: [f64; 3],
 }
 
 /// 来源目录（docs/22 §6.5）：面板「来源」下拉的**全部可选项**，随快照下发。
@@ -603,6 +606,15 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                     size: parse_items(o.get("size")),
                     color: parse_items(o.get("color")),
                     group: parse_items(o.get("group")),
+                    scale: o
+                        .get("scale")
+                        .and_then(|x| x.as_array())
+                        .filter(|a| a.len() == 3)
+                        .map(|a| {
+                            let g = |i: usize| a[i].as_f64().unwrap_or(0.0);
+                            [g(0), g(1), g(2)]
+                        })
+                        .unwrap_or([1.0, 2.0, 3.0]),
                 })
                 .collect()
         })
