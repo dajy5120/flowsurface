@@ -1689,15 +1689,26 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             .iter()
             .filter_map(|r| r.venue.split(':').nth(1))
             .collect();
-        // ETF 只列官方覆盖的那 24 个市场——用股票那 71 个会列出一堆
-        // 根本没有 ETF 的国家
-        let etf_only = v.asset == AssetFilter::Etf && !st.catalog.etf_markets.is_empty();
+        // 来源清单**按资产类与视图限定**，与官网一致：
+        //   ETF   官方 24 个市场（用股票那 71 个会列出一堆根本没有 ETF 的国家）
+        //   热图  官方 60 个（我的表有 71 个，不限制会比官网多出一截）
+        //   筛选器 不限——我验证过的市场都能选，是官方的超集
+        let allow: Option<&Vec<String>> = if v.asset == AssetFilter::Etf {
+            Some(&st.catalog.etf_markets).filter(|x| !x.is_empty())
+        } else if v.mode == ViewMode::Heatmap {
+            Some(&st.catalog.heatmap_markets).filter(|x| !x.is_empty())
+        } else {
+            None
+        };
         // 官方来源下拉的组织：**按国家分组**（不是按地区），组内**指数在前、
-        // 「所有 X 公司」在后**，国家之间按英文名 A→Z、本地区置顶。
-        // pick_list 是平铺的，所以用「国家 · 项」来体现分组。
-        for m in st.catalog.markets.iter().filter(|m| {
-            !etf_only || st.catalog.etf_markets.iter().any(|k| k == &m.code)
-        }) {
+        // 「所有 X 公司」在后**，国家之间按**英文国名** A→Z、本地区置顶
+        //（顺序由守护下发时已排好）。pick_list 平铺，用「国家 · 项」体现分组。
+        for m in st
+            .catalog
+            .markets
+            .iter()
+            .filter(|m| allow.is_none_or(|a| a.iter().any(|k| k == &m.code)))
+        {
             for ix in st.catalog.indices.iter().filter(|i| i.region == m.code) {
                 opts.push(MarketOpt::of(
                     &ix.code,

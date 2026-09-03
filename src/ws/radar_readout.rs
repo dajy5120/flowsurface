@@ -180,6 +180,9 @@ pub struct Catalog {
     /// 官方 ETF 覆盖的市场代码（24 个，按英文国名字母序，美国置顶）。
     /// 用股票那 71 个的话，会列出一堆根本没有 ETF 的国家。
     pub etf_markets: Vec<String>,
+    /// 官方**热图**来源覆盖的市场（60 个）。我的表有 71 个，不限制的话
+    /// 热图的来源下拉会比官网多出一截。
+    pub heatmap_markets: Vec<String>,
 }
 
 #[derive(Default, Clone)]
@@ -647,6 +650,10 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
             })
             .unwrap_or_default(),
         etf_markets: cat("etf_markets")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        heatmap_markets: cat("heatmap_markets")
             .and_then(|x| x.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default(),
