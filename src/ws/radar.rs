@@ -454,28 +454,76 @@ pub fn key_value(r: &RadarRow, k: SortKey) -> Option<f64> {
 /// 股票/ETF 按**市场代码**匹配 venue（`tv:america:stock` 含 `america`）；
 /// 加密按**分类**匹配。两者语义不同，不能共用一个字符串相等判断。
 pub fn matches_source(r: &RadarRow, source: &str) -> bool {
-    if source.is_empty() {
+    matches_source_with(r, source, &[])
+}
+
+/// 同 `matches_source`，但带上目录下发的加密来源预设。
+///
+/// 官方的加密「来源」**不是分类码本身**：13 项里有三项是全域变体
+/// （全部 / 不含比特币 / 不含稳定币），「游戏和元宇宙」对应**两个**分类，
+/// 「Meme」也是（memecoins + animal-memes）。按单个分类码去比会漏掉一半。
+pub fn matches_source_with(r: &RadarRow, source: &str, presets: &[CoinPreset]) -> bool {
+    if source.is_empty() || source == "all" {
         return true;
     }
-    if r.asset == "crypto" {
-        r.cats.iter().any(|c| c == source)
-    } else {
+    if r.asset == "coin" || r.asset == "crypto" {
+        if let Some(p) = presets.iter().find(|p| p.code == source) {
+            if p.exclude_base.iter().any(|b| base_of(&r.symbol) == *b) {
+                return false;
+            }
+            if p.exclude.iter().any(|x| r.cats.iter().any(|c| c == x)) {
+                return false;
+            }
+            // 分类为空 = 全域（已过完排除项）
+            return p.cats.is_empty() || p.cats.iter().any(|x| r.cats.iter().any(|c| c == x));
+        }
+        return r.cats.iter().any(|c| c == source);
+    }
+    {
         // venue 形如 `tv:{market}:{type}`
         r.venue.split(':').nth(1).is_some_and(|m| m == source)
     }
 }
 
-pub fn visible(rows: &[RadarRow], v: ViewState) -> Vec<usize> {
-    visible_at(rows, v, radar_filter::now_s())
+/// 交易对/币的基础币（`BTCUSDT` → `BTC`、`BTCUSD` → `BTC`）。
+/// 「不包括比特币」这类排除按它判断。
+fn base_of(sym: &str) -> &str {
+    for q in ["USDT", "USDC", "USD", "BUSD", "FDUSD"] {
+        if let Some(b) = sym.strip_suffix(q) {
+            if !b.is_empty() {
+                return b;
+            }
+        }
+    }
+    sym
+}
+
+/// 目录下发的加密来源预设（面板侧的镜像）。
+#[derive(Debug, Clone, Default)]
+pub struct CoinPreset {
+    pub code: String,
+    pub label: String,
+    pub cats: Vec<String>,
+    pub exclude: Vec<String>,
+    pub exclude_base: Vec<String>,
+}
+
+pub fn visible(rows: &[RadarRow], v: ViewState, presets: &[CoinPreset]) -> Vec<usize> {
+    visible_at(rows, v, radar_filter::now_s(), presets)
 }
 
 /// 同 `visible`，但「现在」由调用方给——日期类筛选要用，单测也要用。
-pub fn visible_at(rows: &[RadarRow], v: ViewState, now_s: i64) -> Vec<usize> {
+pub fn visible_at(
+    rows: &[RadarRow],
+    v: ViewState,
+    now_s: i64,
+    presets: &[CoinPreset],
+) -> Vec<usize> {
     (0..rows.len())
         .filter(|&i| {
             let r = &rows[i];
             v.asset.keeps(&r.asset)
-                && matches_source(r, v.source)
+                && matches_source_with(r, v.source, presets)
                 && radar_filter::passes(r, &v, now_s)
         })
         .collect()
@@ -484,8 +532,8 @@ pub fn visible_at(rows: &[RadarRow], v: ViewState, now_s: i64) -> Vec<usize> {
 /// 按当前口径排序，返回行下标。
 ///
 /// 缺值恒沉底：把「还没热身」排在榜首等于用空数据占据最显眼的位置。
-pub fn order(rows: &[RadarRow], v: ViewState) -> Vec<usize> {
-    order_within(rows, &visible(rows, v), v)
+pub fn order(rows: &[RadarRow], v: ViewState, presets: &[CoinPreset]) -> Vec<usize> {
+    order_within(rows, &visible(rows, v, presets), v)
 }
 
 /// 只对给定子集排序（资产类过滤后用）。
@@ -521,6 +569,73 @@ pub fn order_within(rows: &[RadarRow], subset: &[usize], v: ViewState) -> Vec<us
 
 #[cfg(test)]
 mod tests {
+
+    fn preset(code: &str, cats: &[&str], ex: &[&str], exb: &[&str]) -> CoinPreset {
+        CoinPreset {
+            code: code.into(),
+            label: code.into(),
+            cats: cats.iter().map(|s| s.to_string()).collect(),
+            exclude: ex.iter().map(|s| s.to_string()).collect(),
+            exclude_base: exb.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_source_preset_can_cover_several_categories() {
+        // 官方的「游戏和元宇宙代币」对应 gaming + metaverse **两个**分类，
+        // 「Meme」对应 memecoins + animal-memes。按单个分类码比会漏掉一半
+        let ps = vec![preset("gaming_meta", &["gaming", "metaverse"], &[], &[])];
+        let mut meta = row("SANDUSD", "tv:coin", None, None, 1.0);
+        meta.asset = "coin".into();
+        meta.cats = vec!["metaverse".into()];
+        assert!(matches_source_with(&meta, "gaming_meta", &ps), "纯元宇宙项目不该被漏掉");
+        let mut other = row("XUSD", "tv:coin", None, None, 1.0);
+        other.asset = "coin".into();
+        other.cats = vec!["defi".into()];
+        assert!(!matches_source_with(&other, "gaming_meta", &ps));
+    }
+
+    #[test]
+    fn whole_universe_presets_exclude_instead_of_select() {
+        // 「不包括稳定币」是**排除**，不是选某个分类——按分类选会一个都选不出来
+        let ps = vec![preset("no_stable", &[], &["stablecoins", "fiat-stablecoins"], &[])];
+        let mut usdt = row("USDTUSD", "tv:coin", None, None, 1.0);
+        usdt.asset = "coin".into();
+        usdt.cats = vec!["stablecoins".into()];
+        assert!(!matches_source_with(&usdt, "no_stable", &ps));
+        let mut eth = row("ETHUSD", "tv:coin", None, None, 1.0);
+        eth.asset = "coin".into();
+        eth.cats = vec!["layer-1".into()];
+        assert!(matches_source_with(&eth, "no_stable", &ps), "非稳定币该留下");
+        // 连分类都没打上的也该留下（排除型不能变成「必须有分类」）
+        let mut bare = row("YUSD", "tv:coin", None, None, 1.0);
+        bare.asset = "coin".into();
+        assert!(matches_source_with(&bare, "no_stable", &ps));
+    }
+
+    #[test]
+    fn excluding_bitcoin_matches_on_the_base_asset() {
+        // 「不包括比特币」要按**基础币**判断：BTCUSD / BTCUSDT 都是比特币，
+        // 而 BTCDOMUSDT 不是
+        let ps = vec![preset("no_btc", &[], &[], &["BTC"])];
+        for sym in ["BTCUSD", "BTCUSDT"] {
+            let mut r = row(sym, "tv:coin", None, None, 1.0);
+            r.asset = "coin".into();
+            assert!(!matches_source_with(&r, "no_btc", &ps), "{sym} 该被排除");
+        }
+        let mut eth = row("ETHUSD", "tv:coin", None, None, 1.0);
+        eth.asset = "coin".into();
+        assert!(matches_source_with(&eth, "no_btc", &ps));
+    }
+
+    #[test]
+    fn the_all_preset_keeps_everything() {
+        let ps = vec![preset("all", &[], &[], &[])];
+        let mut r = row("XUSD", "tv:coin", None, None, 1.0);
+        r.asset = "coin".into();
+        assert!(matches_source_with(&r, "all", &ps));
+        assert!(matches_source_with(&r, "", &ps));
+    }
 
     #[test]
     fn the_default_colour_metric_is_the_official_daily_change() {
@@ -643,13 +758,13 @@ mod tests {
         let rows = vec![c, e];
 
         let mut v = ViewState::DEFAULT;
-        assert_eq!(order(&rows, v).len(), 2);
+        assert_eq!(order(&rows, v, &[]).len(), 2);
         v.asset = AssetFilter::Stock;
-        let o = order(&rows, v);
+        let o = order(&rows, v, &[]);
         assert_eq!(o.len(), 1, "过滤后只该剩股票");
         assert_eq!(rows[o[0]].symbol, "NVDA");
         v.asset = AssetFilter::Cex;
-        assert_eq!(rows[order(&rows, v)[0]].symbol, "BTCUSDT", "Binance 交易对归 CEX");
+        assert_eq!(rows[order(&rows, v, &[])[0]].symbol, "BTCUSDT", "Binance 交易对归 CEX");
     }
 
     #[test]
@@ -734,15 +849,15 @@ mod tests {
         let mut b = row("7203", "tv:japan:stock", Some(1.0), None, 1.0);
         b.asset = "equity".into();
         let rows = vec![a, b];
-        assert_eq!(visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::All; v.source = ""; v }).len(), 2);
-        let v = visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::All; v.source = "japan"; v });
+        assert_eq!(visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::All; v.source = ""; v }, &[]).len(), 2);
+        let v = visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::All; v.source = "japan"; v }, &[]);
         assert_eq!(v.len(), 1);
         assert_eq!(rows[v[0]].symbol, "7203");
         // 同一市场的股票与 ETF 都该匹配
         let mut c = row("SPY", "tv:america:fund", Some(1.0), None, 1.0);
         c.asset = "etf".into();
         let rows = vec![rows[0].clone(), c];
-        assert_eq!(visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::All; v.source = "america"; v }).len(), 2);
+        assert_eq!(visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::All; v.source = "america"; v }, &[]).len(), 2);
     }
 
     #[test]
@@ -754,7 +869,7 @@ mod tests {
         b.asset = "crypto".into();
         b.cats = vec!["defi".into()];
         let rows = vec![a, b];
-        let v = visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Cex; v.source = "defi"; v });
+        let v = visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Cex; v.source = "defi"; v }, &[]);
         assert_eq!(v.len(), 1);
         assert_eq!(rows[v[0]].symbol, "UNIUSDT");
         // 没打上分类的不该被任何具体分类收进来
@@ -829,10 +944,10 @@ mod tests {
         let mut v = ViewState::DEFAULT;
         v.sort = SortKey::Z(1);
         v.desc = true;
-        assert_eq!(rows[order(&rows, v)[2]].symbol, "A", "降序时缺值该沉底");
+        assert_eq!(rows[order(&rows, v, &[])[2]].symbol, "A", "降序时缺值该沉底");
         v.desc = false;
         assert_eq!(
-            rows[order(&rows, v)[2]].symbol,
+            rows[order(&rows, v, &[])[2]].symbol,
             "A",
             "升序时缺值也该沉底，不能冒到最前"
         );
@@ -849,9 +964,9 @@ mod tests {
         let mut v = ViewState::DEFAULT;
         v.sort = SortKey::Z(1);
         v.desc = true;
-        assert_eq!(rows[order(&rows, v)[0]].symbol, "UP");
+        assert_eq!(rows[order(&rows, v, &[])[0]].symbol, "UP");
         v.desc = false;
-        assert_eq!(rows[order(&rows, v)[0]].symbol, "DOWN");
+        assert_eq!(rows[order(&rows, v, &[])[0]].symbol, "DOWN");
     }
 
     #[test]
@@ -860,7 +975,7 @@ mod tests {
             row("ZZZ", "v", Some(1.0), None, 5.0),
             row("AAA", "v", Some(1.0), None, 5.0),
         ];
-        let o = order(&rows, ViewState::DEFAULT);
+        let o = order(&rows, ViewState::DEFAULT, &[]);
         assert_eq!(rows[o[0]].symbol, "AAA", "同分应按标的定序，避免刷新抖动");
     }
 
@@ -874,7 +989,7 @@ mod tests {
         let mut v = ViewState::DEFAULT;
         v.sort = SortKey::Symbol;
         v.desc = false;
-        let o = order(&rows, v);
+        let o = order(&rows, v, &[]);
         assert_eq!(rows[o[0]].symbol, "AAAUSDT");
         assert_eq!(rows[o[1]].venue, "binance:linear", "同名按 venue 定序");
     }

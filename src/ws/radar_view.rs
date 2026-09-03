@@ -1190,6 +1190,32 @@ pub(crate) fn asset_tabs<'a>(cat: &'a Catalog, a: AssetFilter) -> &'a [ColumnTab
 ///
 /// 每类的字段名不同（股票 `market_cap_basic`、加密 `market_cap_calc`、
 /// DEX `dex_total_liquidity`）——共用一套的话下拉里一半取不到值。
+/// 板块英文名 → 中文。表来自 `radar_filter::SECTORS`（实测自一万七千只股票
+/// 的 distinct 值，20 个固定分类），共用一份避免两处漂移。
+fn zh_sector(en: &str) -> Option<String> {
+    super::radar_filter::SECTORS
+        .iter()
+        .find(|(a, _)| *a == en)
+        .map(|(_, zh)| (*zh).to_string())
+}
+
+/// ETF 资产类别英文名 → 中文。
+fn zh_asset_class(en: &str) -> Option<String> {
+    let zh = match en {
+        "Equity" => "股票",
+        "Fixed income" => "固定收益",
+        "Commodity" | "Commodities" => "商品",
+        "Currency" => "货币",
+        "Multi-asset" | "Mixed allocation" => "多元资产",
+        "Alternative" | "Alternatives" => "另类",
+        "Real estate" => "房地产",
+        "Preferred stock" => "优先股",
+        "Digital assets" | "Cryptocurrency" => "数字资产",
+        _ => return None,
+    };
+    Some(zh.to_string())
+}
+
 /// 该资产类的分组维度（目录下发）。官方股票只有「没有分组/板块」、
 /// ETF 是「没有分组/资产类别」、加密**没有分组下拉**。
 pub(crate) fn asset_groups<'a>(cat: &'a Catalog, a: AssetFilter) -> &'a [CatalogItem] {
@@ -1239,7 +1265,12 @@ pub(crate) fn asset_opts<'a>(
 /// `thread_local` 是因为 `Rc` 不是 `Send`，而视图只在主线程构建。
 macro_rules! memo_idx {
     ($name:ident, $make:expr) => {
-        fn $name(generation: u64, v: ViewState, rows: &[RadarRow]) -> std::rc::Rc<Vec<usize>> {
+        fn $name(
+            generation: u64,
+            v: ViewState,
+            rows: &[RadarRow],
+            presets: &[super::radar::CoinPreset],
+        ) -> std::rc::Rc<Vec<usize>> {
             thread_local! {
                 static CELL: std::cell::RefCell<Option<(u64, ViewState, std::rc::Rc<Vec<usize>>)>> =
                     const { std::cell::RefCell::new(None) };
@@ -1249,8 +1280,9 @@ macro_rules! memo_idx {
                 match &*g {
                     Some((g0, vs, rc)) if *g0 == generation && *vs == v => rc.clone(),
                     _ => {
-                        let f: fn(&[RadarRow], ViewState) -> Vec<usize> = $make;
-                        let rc = std::rc::Rc::new(f(rows, v));
+                        let f: fn(&[RadarRow], ViewState, &[super::radar::CoinPreset]) -> Vec<usize> =
+                            $make;
+                        let rc = std::rc::Rc::new(f(rows, v, presets));
                         *g = Some((generation, v, rc.clone()));
                         rc
                     }
@@ -1260,11 +1292,16 @@ macro_rules! memo_idx {
     };
 }
 
-memo_idx!(memo_visible, |r, v| visible(r, v));
-memo_idx!(memo_order, |r, v| order(r, v));
+memo_idx!(memo_visible, |r, v, p| visible(r, v, p));
+memo_idx!(memo_order, |r, v, p| order(r, v, p));
 
 /// 树图取的那 180 格。同样只依赖数据版本 + 口径，不必每帧重挑一遍。
-fn memo_picked(generation: u64, v: ViewState, rows: &[RadarRow]) -> std::rc::Rc<Vec<usize>> {
+fn memo_picked(
+    generation: u64,
+    v: ViewState,
+    rows: &[RadarRow],
+    presets: &[super::radar::CoinPreset],
+) -> std::rc::Rc<Vec<usize>> {
     thread_local! {
         static CELL: std::cell::RefCell<Option<(u64, ViewState, std::rc::Rc<Vec<usize>>)>> =
             const { std::cell::RefCell::new(None) };
@@ -1274,7 +1311,7 @@ fn memo_picked(generation: u64, v: ViewState, rows: &[RadarRow]) -> std::rc::Rc<
         match &*g {
             Some((g0, vs, rc)) if *g0 == generation && *vs == v => rc.clone(),
             _ => {
-                let vis = memo_visible(generation, v, rows);
+                let vis = memo_visible(generation, v, rows, presets);
                 let rc = std::rc::Rc::new(top_by_turnover_within(rows, &vis, 180));
                 *g = Some((generation, v, rc.clone()));
                 rc
@@ -1610,7 +1647,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
     // ── 资产类过滤 ──
     // 股票的成交额远大于加密，同图时加密会被挤到几乎看不见（实测 BTC 只剩一个小格）。
-    let vis = memo_visible(st.generation, v, &st.rows);
+    let vis = memo_visible(st.generation, v, &st.rows, &st.catalog.coin_presets);
     let mut ar = row![text("资产 ").size(11).color(C_DIM)].spacing(3);
     // 每个视图允许的资产类不同：官方热图只有 股票/ETF/加密，筛选器有六类。
     // 把两套混在一起就是原来「下拉一半无效」的根源。
@@ -1628,9 +1665,20 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     let crypto_mode = matches!(v.asset, AssetFilter::Coin | AssetFilter::Cex | AssetFilter::Dex);
     let mut opts: Vec<MarketOpt> = vec![MarketOpt::all(crypto_mode)];
     if crypto_mode {
-        for it in &st.catalog.crypto_cats {
+        // **加密用官方那 13 项精选来源**，不是原始分类码。官方给的是
+        // 「加密货币 / 不含比特币 / 不含稳定币 / DeFi 币 / Layer 1 代币…」，
+        // 其中三项是全域变体、「游戏和元宇宙」还对应两个分类。
+        for it in &st.catalog.coin_presets {
             if !it.code.is_empty() {
                 opts.push(MarketOpt::of(&it.code, &it.label, "", true));
+            }
+        }
+        // 目录没给（旧守护）才退回原始分类码
+        if st.catalog.coin_presets.is_empty() {
+            for it in &st.catalog.crypto_cats {
+                if !it.code.is_empty() {
+                    opts.push(MarketOpt::of(&it.code, &it.label, "", true));
+                }
             }
         }
     } else {
@@ -1640,7 +1688,12 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             .iter()
             .filter_map(|r| r.venue.split(':').nth(1))
             .collect();
-        for m in &st.catalog.markets {
+        // ETF 只列官方覆盖的那 24 个市场——用股票那 71 个会列出一堆
+        // 根本没有 ETF 的国家
+        let etf_only = v.asset == AssetFilter::Etf && !st.catalog.etf_markets.is_empty();
+        for m in st.catalog.markets.iter().filter(|m| {
+            !etf_only || st.catalog.etf_markets.iter().any(|k| k == &m.code)
+        }) {
             // 「所有 X 公司」+ 该市场下的每个指数（同 TradingView 的来源分组）
             opts.push(MarketOpt::of(
                 &m.code,
@@ -1805,7 +1858,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // 树图选行**按体量**，不按当前排序：热图要回答「整个市场此刻什么样」，
     // 取排序前 N 会让整张图只剩涨幅榜（实测就是满屏一片蓝，看不到任何下跌）。
     // 排序只管下面的 Screener。超过 180 格就小于可辨识尺寸，只会拖慢绘制。
-    let picked = memo_picked(st.generation, v, &st.rows);
+    let picked = memo_picked(st.generation, v, &st.rows, &st.catalog.coin_presets);
     // 选中的大小口径对当前这批行没有数据 → 权重全 0 → 树图整个是空的。
     // 空白且无提示是最难排查的一种坏（实测：切到加密后图没了，因为默认口径是
     // 市值而 Binance 不给市值）。这里说清楚缺的是哪个口径，并给出可用的替代。
@@ -1863,15 +1916,20 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         let pick = |s: &str, fallback: &str| {
             if s.is_empty() { fallback.to_string() } else { s.to_string() }
         };
+        // **分组名要中文**：快照里的 sector / asset_class 是英文原值
+        //（`Technology Services`、`Fixed income`），直接拿来当组标题
+        // 会在中文界面上突兀，而且宽度也对不上
         match g {
             GroupBy::None => String::new(),
             // 加密没有板块，单独成组而不是混进「其他」
-            GroupBy::Sector => pick(&r.sector, if r.tier == "A" { "加密" } else { "其他" }),
+            GroupBy::Sector => {
+                zh_sector(&r.sector).unwrap_or_else(|| pick(&r.sector, if r.tier == "A" { "加密" } else { "其他" }))
+            }
             // ETF 的资产类别（Equity / Fixed income / Commodity…）走文本段
-            GroupBy::AssetClass => pick(
-                r.t.get("asset_class.tr").map(String::as_str).unwrap_or(""),
-                "其他",
-            ),
+            GroupBy::AssetClass => {
+                let raw = r.t.get("asset_class.tr").map(String::as_str).unwrap_or("");
+                zh_asset_class(raw).unwrap_or_else(|| pick(raw, "其他"))
+            }
         }
     }
 
@@ -1937,7 +1995,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             ev.desc = true;
         }
     }
-    let idx = memo_order(st.generation, ev, &st.rows);
+    let idx = memo_order(st.generation, ev, &st.rows, &st.catalog.coin_presets);
     let mut cs = row![text("列组 ").size(11).color(C_DIM)].spacing(3);
     for (c, l) in [
         (ColumnSet::Speed, "涨跌幅"),
@@ -2262,15 +2320,15 @@ mod tests {
         v.sort = SortKey::Turnover;
         v.desc = true;
 
-        let first = memo_order(1, v, &rows);
+        let first = memo_order(1, v, &rows, &[]);
         assert_eq!(rows[first[0]].symbol, "B");
-        assert!(std::rc::Rc::ptr_eq(&first, &memo_order(1, v, &rows)), "同键该命中缓存");
+        assert!(std::rc::Rc::ptr_eq(&first, &memo_order(1, v, &rows, &[])), "同键该命中缓存");
 
         v.desc = false;
-        assert_eq!(rows[memo_order(1, v, &rows)[0]].symbol, "A", "改了排序方向却没重算");
+        assert_eq!(rows[memo_order(1, v, &rows, &[])[0]].symbol, "A", "改了排序方向却没重算");
 
         let rows2 = vec![memo_row("C", 9.0)];
-        assert_eq!(rows2[memo_order(2, v, &rows2)[0]].symbol, "C", "数据换了一轮却没重算");
+        assert_eq!(rows2[memo_order(2, v, &rows2, &[])[0]].symbol, "C", "数据换了一轮却没重算");
     }
 
     /// 守护会下发的全部列键（对齐 `metricdef::TABS`）。加列时要同步这里——
@@ -2676,7 +2734,7 @@ mod tests {
         cr.asset = "crypto".into();
         let rows = vec![eq, cr];
         // Binance 交易对归 CEX（「加密货币」是 coin 端点的币）
-        let sub = super::visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Cex; v });
+        let sub = super::visible(&rows, { let mut v = ViewState::DEFAULT; v.asset = AssetFilter::Cex; v }, &[]);
         let top = top_by_turnover_within(&rows, &sub, 5);
         assert_eq!(top.len(), 1);
         assert_eq!(rows[top[0]].symbol, "BTCUSDT");

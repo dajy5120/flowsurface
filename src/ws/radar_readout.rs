@@ -175,6 +175,11 @@ pub struct Catalog {
     pub indices: Vec<CatalogItem>,
     pub types: Vec<CatalogItem>,
     pub crypto_cats: Vec<CatalogItem>,
+    /// 加密热图「来源」的 13 项官方预设（含分类映射与排除规则）。
+    pub coin_presets: Vec<super::radar::CoinPreset>,
+    /// 官方 ETF 覆盖的市场代码（24 个，按英文国名字母序，美国置顶）。
+    /// 用股票那 71 个的话，会列出一堆根本没有 ETF 的国家。
+    pub etf_markets: Vec<String>,
 }
 
 #[derive(Default, Clone)]
@@ -631,6 +636,30 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
         indices: index_items,
         types: items("types"),
         crypto_cats: items("crypto_cats"),
+        coin_presets: cat("coin_presets")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                let strs = |o: &serde_json::Value, k: &str| -> Vec<String> {
+                    o.get(k)
+                        .and_then(|x| x.as_array())
+                        .map(|c| c.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .unwrap_or_default()
+                };
+                a.iter()
+                    .map(|o| super::radar::CoinPreset {
+                        code: o.get("code").and_then(|x| x.as_str()).unwrap_or_default().into(),
+                        label: o.get("label").and_then(|x| x.as_str()).unwrap_or_default().into(),
+                        cats: strs(o, "cats"),
+                        exclude: strs(o, "exclude"),
+                        exclude_base: strs(o, "exclude_base"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        etf_markets: cat("etf_markets")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
     };
     let breadth = v
         .get("breadth")
