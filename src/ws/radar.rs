@@ -125,6 +125,7 @@ pub enum AssetFilter {
     Cex,
     Dex,
     Bond,
+    Forex,
 }
 
 impl AssetFilter {
@@ -138,6 +139,7 @@ impl AssetFilter {
             AssetFilter::Cex => "cex",
             AssetFilter::Dex => "dex",
             AssetFilter::Bond => "bond",
+            AssetFilter::Forex => "forex",
         }
     }
 
@@ -150,6 +152,7 @@ impl AssetFilter {
             AssetFilter::Cex => "CEX",
             AssetFilter::Dex => "DEX",
             AssetFilter::Bond => "债券",
+            AssetFilter::Forex => "外汇",
         }
     }
 
@@ -170,6 +173,7 @@ impl AssetFilter {
             AssetFilter::Cex => asset == "cex" || asset == "crypto",
             AssetFilter::Dex => asset == "dex",
             AssetFilter::Bond => asset == "bond",
+            AssetFilter::Forex => asset == "forex",
         }
     }
 
@@ -186,13 +190,17 @@ impl AssetFilter {
         AssetFilter::Cex,
     ];
 
-    /// 筛选器页可选的资产类（官方六种）。
-    pub const SCREENER: [AssetFilter; 6] = [
+    /// 筛选器页可选的资产类。
+    ///
+    /// 官方 `/screener/` `/etf-` `/bond-` `/crypto-` `/cex-` `/dex-` `/forex-`
+    /// 共**七类**（futures / cfd / coin 的 screener 路径实测 404）。
+    pub const SCREENER: [AssetFilter; 7] = [
         AssetFilter::Stock,
         AssetFilter::Etf,
         AssetFilter::Coin,
         AssetFilter::Cex,
         AssetFilter::Dex,
+        AssetFilter::Forex,
         AssetFilter::Bond,
     ];
 }
@@ -515,7 +523,7 @@ mod tests {
         assert!(!AssetFilter::HEATMAP.contains(&AssetFilter::Bond));
         assert!(!AssetFilter::HEATMAP.contains(&AssetFilter::Dex));
         assert!(!AssetFilter::SCREENER.contains(&AssetFilter::All));
-        assert_eq!(AssetFilter::SCREENER.len(), 6);
+        assert_eq!(AssetFilter::SCREENER.len(), 7, "官方七类");
     }
 
     #[test]

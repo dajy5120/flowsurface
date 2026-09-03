@@ -80,7 +80,7 @@ const fn fk(
 }
 
 /// 各类通用的（价格、涨跌、成交额、速度 z 这些每类都有）。
-const ALL_KINDS: [&str; 6] = ["stock", "etf", "coin", "cex", "dex", "bond"];
+const ALL_KINDS: [&str; 7] = ["stock", "etf", "coin", "cex", "dex", "bond", "forex"];
 const CRYPTO_KINDS: [&str; 3] = ["coin", "cex", "dex"];
 
 /// TradingView 的固定板块分类（20 项，实测自 america/japan/germany/india
@@ -329,7 +329,7 @@ const NETPX: [Preset; 4] = [
     p("高溢价 > 110", 110.0, POS),
 ];
 
-pub const FILTERS: [FilterDef; 31] = [
+pub const FILTERS: [FilterDef; 33] = [
     fk("own:price", "价格", FKind::Num, &PRICE, Some("close"), &ALL_KINDS),
     f("change", "涨跌 %", FKind::Num, &CHG, Some("change")),
     f("market_cap_basic", "市值", FKind::Num, &MCAP, Some("market_cap_basic")),
@@ -364,6 +364,9 @@ pub const FILTERS: [FilterDef; 31] = [
     fk("yield_to_worst", "最差收益率", FKind::Num, &YTW, Some("yield_to_worst"), &["bond"]),
     fk("current_coupon", "当期票息", FKind::Num, &COUPON, Some("current_coupon"), &["bond"]),
     fk("close_pct", "净价", FKind::Num, &NETPX, Some("close_pct"), &["bond"]),
+    // ── 外汇 ──
+    fk("change", "涨跌 %", FKind::Num, &CHG, Some("change"), &["forex"]),
+    fk("Volatility.D", "日波动率", FKind::Num, &VOLAT, Some("Volatility.D"), &["forex"]),
 ];
 
 /// 某个资产类可用的筛选器下标。
@@ -544,7 +547,7 @@ mod tests {
     #[test]
     fn universal_filters_show_up_for_every_kind() {
         // 价格/速度 z/成交额每类都有，缺了就等于那一类没法按体量筛
-        for k in ["stock", "etf", "coin", "cex", "dex", "bond"] {
+        for k in ["stock", "etf", "coin", "cex", "dex", "bond", "forex"] {
             let names: Vec<_> = for_kind(k).iter().map(|&i| FILTERS[i].label).collect();
             assert!(!names.is_empty(), "{k} 一个筛选都没有");
             for want in ["价格", "涨跌速度", "成交额"] {
@@ -560,7 +563,7 @@ mod tests {
             assert!(!d.kinds.is_empty(), "{} 没声明适用资产类", d.label);
             for k in d.kinds {
                 assert!(
-                    ["stock", "etf", "coin", "cex", "dex", "bond"].contains(k),
+                    ["stock", "etf", "coin", "cex", "dex", "bond", "forex"].contains(k),
                     "{} 声明了未知资产类 {k}",
                     d.label
                 );
@@ -933,6 +936,10 @@ mod tests {
                 "close", "close_pct", "close_net", "yield_to_worst", "current_coupon",
                 "maturity_date", "accrued_coupon_interest", "coupon_date_next",
                 "coupon_date_prev", "coupon_currency",
+            ],
+            "forex" => vec![
+                "close", "change", "change|60", "bid", "ask", "high", "low", "volume",
+                "Volatility.D",
             ],
             _ => equity_keys(),
         };
