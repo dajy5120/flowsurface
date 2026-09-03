@@ -55,7 +55,11 @@ pub struct FilterDef {
     pub server: Option<&'static str>,
 }
 
-const EQ: [&str; 2] = ["stock", "etf"];
+/// 股票专属。**ETF 不在里面**——它没有市盈率/EPS/PEG/ROE 这些基本面，
+/// 官方 ETF 筛选器的筛选也完全是另一套（规模、费率、资产类别、发行人…）。
+const EQ: [&str; 1] = ["stock"];
+/// 股票与 ETF 都有的（价格行为类）。
+const EQ_ETF: [&str; 2] = ["stock", "etf"];
 
 const fn f(
     key: &'static str,
@@ -306,6 +310,29 @@ const TXS: [Preset; 4] = [
     p("高于 10万", 1e5, POS),
 ];
 
+// ── ETF 专属 ────────────────────────────────────────────────────
+const AUM: [Preset; 5] = [
+    p("低于 $1亿", NEG, 1e8),
+    p("$1亿 – $10亿", 1e8, 1e9),
+    p("$10亿 – $100亿", 1e9, 1e10),
+    p("$100亿 – $1000亿", 1e10, 1e11),
+    p("高于 $1000亿", 1e11, POS),
+];
+/// 费率是百分数（实测 SPY = 0.0945，即 0.0945%）。
+const EXPENSE: [Preset; 4] = [
+    p("低于 0.1%", NEG, 0.1),
+    p("0.1 – 0.3%", 0.1, 0.3),
+    p("0.3 – 0.75%", 0.3, 0.75),
+    p("高于 0.75%", 0.75, POS),
+];
+/// 折溢价：净值与市价之差，正为溢价。
+const PREM: [Preset; 4] = [
+    p("折价 < −0.5%", NEG, -0.5),
+    p("接近净值 ±0.5%", -0.5, 0.5),
+    p("溢价 > 0.5%", 0.5, POS),
+    p("溢价 > 2%", 2.0, POS),
+];
+
 // ── 债券专属 ────────────────────────────────────────────────────
 const YTW: [Preset; 6] = [
     p("低于 2%", NEG, 2.0),
@@ -329,9 +356,9 @@ const NETPX: [Preset; 4] = [
     p("高溢价 > 110", 110.0, POS),
 ];
 
-pub const FILTERS: [FilterDef; 33] = [
+pub const FILTERS: [FilterDef; 37] = [
     fk("own:price", "价格", FKind::Num, &PRICE, Some("close"), &ALL_KINDS),
-    f("change", "涨跌 %", FKind::Num, &CHG, Some("change")),
+    fk("change", "涨跌 %", FKind::Num, &CHG, Some("change"), &EQ_ETF),
     f("market_cap_basic", "市值", FKind::Num, &MCAP, Some("market_cap_basic")),
     f("price_earnings_ttm", "市盈率", FKind::Num, &PE, Some("price_earnings_ttm")),
     f("earnings_per_share_diluted_ttm", "每股收益", FKind::Num, &EPS, Some("earnings_per_share_diluted_ttm")),
@@ -339,17 +366,17 @@ pub const FILTERS: [FilterDef; 33] = [
     f("dividends_yield_current", "股息率", FKind::Num, &DIV, Some("dividends_yield_current")),
     f("sector", "板块", FKind::Sector, &[], Some("sector")),
     f("recommendation_mark", "分析师评级", FKind::Num, &RATING, Some("recommendation_mark")),
-    f("Perf.YTD", "表现 YTD", FKind::Num, &PERF, Some("Perf.YTD")),
+    fk("Perf.YTD", "表现 YTD", FKind::Num, &PERF, Some("Perf.YTD"), &EQ_ETF),
     f("total_revenue_yoy_growth_ttm", "营收增速", FKind::Num, &GROWTH, Some("total_revenue_yoy_growth_ttm")),
     f("price_earnings_growth_ttm", "PEG", FKind::Num, &PEG, Some("price_earnings_growth_ttm")),
     f("return_on_equity_fq", "ROE", FKind::Num, &ROE, Some("return_on_equity_fq")),
-    f("beta_1_year", "Beta", FKind::Num, &BETA, Some("beta_1_year")),
+    fk("beta_1_year", "Beta", FKind::Num, &BETA, Some("beta_1_year"), &EQ_ETF),
     f("earnings_release_date", "近期财报", FKind::Days, &PAST_EARN, Some("earnings_release_date")),
     f("earnings_release_next_date", "未来财报", FKind::Days, &NEXT_EARN, Some("earnings_release_next_date")),
     fk("own:speed_z", "涨跌速度", FKind::Num, &SPEED, None, &ALL_KINDS),
-    f("relative_volume_10d_calc", "相对成交量", FKind::Num, &RVOL, Some("relative_volume_10d_calc")),
+    fk("relative_volume_10d_calc", "相对成交量", FKind::Num, &RVOL, Some("relative_volume_10d_calc"), &EQ_ETF),
     fk("own:turnover", "成交额", FKind::Num, &TURNOVER, None, &ALL_KINDS),
-    f("Volatility.D", "日波动率", FKind::Num, &VOLAT, Some("Volatility.D")),
+    fk("Volatility.D", "日波动率", FKind::Num, &VOLAT, Some("Volatility.D"), &EQ_ETF),
     // ── 加密 ──
     fk("24h_close_change|5", "涨跌 24h", FKind::Num, &CHG24, Some("24h_close_change|5"), &CRYPTO_KINDS),
     fk("market_cap_calc", "市值", FKind::Num, &CMCAP, Some("market_cap_calc"), &["coin", "cex"]),
@@ -364,6 +391,11 @@ pub const FILTERS: [FilterDef; 33] = [
     fk("yield_to_worst", "最差收益率", FKind::Num, &YTW, Some("yield_to_worst"), &["bond"]),
     fk("current_coupon", "当期票息", FKind::Num, &COUPON, Some("current_coupon"), &["bond"]),
     fk("close_pct", "净价", FKind::Num, &NETPX, Some("close_pct"), &["bond"]),
+    // ── ETF（官方 ETF 筛选器的口径）──
+    fk("aum", "规模", FKind::Num, &AUM, Some("aum"), &["etf"]),
+    fk("expense_ratio", "费率", FKind::Num, &EXPENSE, Some("expense_ratio"), &["etf"]),
+    fk("dividends_yield", "股息率", FKind::Num, &DIV, Some("dividends_yield"), &["etf"]),
+    fk("nav_discount_premium", "折溢价", FKind::Num, &PREM, Some("nav_discount_premium"), &["etf"]),
     // ── 外汇 ──
     fk("change", "涨跌 %", FKind::Num, &CHG, Some("change"), &["forex"]),
     fk("Volatility.D", "日波动率", FKind::Num, &VOLAT, Some("Volatility.D"), &["forex"]),
@@ -936,6 +968,11 @@ mod tests {
                 "close", "close_pct", "close_net", "yield_to_worst", "current_coupon",
                 "maturity_date", "accrued_coupon_interest", "coupon_date_next",
                 "coupon_date_prev", "coupon_currency",
+            ],
+            "etf" => vec![
+                "close", "change", "Value.Traded", "relative_volume_10d_calc", "aum",
+                "expense_ratio", "dividends_yield", "nav_discount_premium",
+                "beta_1_year", "Volatility.D", "Perf.YTD",
             ],
             "forex" => vec![
                 "close", "change", "change|60", "bid", "ask", "high", "low", "volume",
