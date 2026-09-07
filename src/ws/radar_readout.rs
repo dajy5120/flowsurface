@@ -373,6 +373,17 @@ pub struct MacroBoard {
     pub sources: Vec<MacroSource>,
 }
 
+/// 各块的抓取时刻（Unix 毫秒）。名字避开已有的 `Fetched`（进度里那个）。
+#[derive(Default, Clone, Copy, PartialEq)]
+pub struct FetchedAt {
+    pub panorama: i64,
+    pub prediction: i64,
+    pub equity: i64,
+    pub macros: i64,
+    pub breadth: i64,
+    pub overview: i64,
+}
+
 /// 预测市场整块。
 #[derive(Default, Clone, PartialEq)]
 pub struct Prediction {
@@ -561,6 +572,10 @@ pub struct RadarReadout {
     pub prediction: Prediction,
     pub equity: EquityPanorama,
     pub macros: MacroBoard,
+    /// 各块**各自**的抓取时刻（Unix 毫秒，0 = 还没抓过）。
+    /// 三个节拍差着两个数量级，拿一个总的快照时间当每块的时间，
+    /// 会把一小时前的宏观数据标成「刚刚更新」。
+    pub fetched: FetchedAt,
     pub refreshed: String,
     /// 慢层快照的时间戳（股票 60s 一刷，与热层不同步——面板要分别标注，
     /// 否则会拿热层的时间当成股票数据的时间）。
@@ -730,6 +745,21 @@ pub fn write_request(
     flush_request();
 }
 
+/// 各块「立即刷新」的计数。只增不减——守护比对**变没变**，不解释值。
+///
+/// 不用布尔：布尔要守护读完清掉，那就得由守护写回请求文件，
+/// 于是面板和守护同时写一个文件，先写的那个会被冲掉。
+static FORCE: Mutex<Option<std::collections::BTreeMap<String, i64>>> = Mutex::new(None);
+
+/// 请求守护立刻重取某一块。
+pub fn force_block(block: &str) {
+    if let Ok(mut g) = FORCE.lock() {
+        let m = g.get_or_insert_with(Default::default);
+        *m.entry(block.to_string()).or_insert(0) += 1;
+    }
+    flush_request();
+}
+
 /// 设新股日历要查的月份。与来源/筛选走同一个文件，故只改这一项、其余保留。
 pub fn set_ipo_month(month: &str) {
     if let Ok(mut g) = IPO_MONTH.lock() {
@@ -750,12 +780,18 @@ fn flush_request() {
         .and_then(|g| g.as_ref().map(|(_, _, b)| b.clone()))
         .unwrap_or_else(|| request_body("", &[], &[]));
     let month = IPO_MONTH.lock().map(|g| g.clone()).unwrap_or_default();
+    let force = FORCE.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
     let body = match serde_json::from_str::<serde_json::Value>(&base) {
-        Ok(mut v) if !month.is_empty() => {
-            v["ipo_month"] = serde_json::json!(month);
+        Ok(mut v) => {
+            if !month.is_empty() {
+                v["ipo_month"] = serde_json::json!(month);
+            }
+            if !force.is_empty() {
+                v["force"] = serde_json::json!(force);
+            }
             v.to_string()
         }
-        _ => base,
+        Err(_) => base,
     };
     if let Ok(mut g) = LAST.lock() {
         if *g == body {
@@ -931,6 +967,7 @@ fn poll_once() -> RadarReadout {
         st.prediction = s.prediction;
         st.equity = s.equity;
         st.macros = s.macros;
+        st.fetched = s.fetched;
         // 标的总数是两层之和；单层的 n_symbols 只算自己那部分
         st.n_symbols += s.n_symbols;
         st.slow_stamp = s.stamp;
@@ -1512,6 +1549,17 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
             })
             .collect(),
     };
+    let fe = |k: &str| {
+        v.get("fetched").and_then(|x| x.get(k)).and_then(|x| x.as_i64()).unwrap_or(0)
+    };
+    let fetched = FetchedAt {
+        panorama: fe("panorama"),
+        prediction: fe("prediction"),
+        equity: fe("equity"),
+        macros: fe("macros"),
+        breadth: fe("breadth"),
+        overview: fe("overview"),
+    };
     RadarReadout {
         stamp: s(v, "stamp"),
         source: s(v, "source"),
@@ -1526,6 +1574,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
         prediction,
         equity,
         macros,
+        fetched,
         backfill: BackfillView {
             done: bi("done"),
             total: bi("total"),

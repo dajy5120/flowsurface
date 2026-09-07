@@ -1621,7 +1621,7 @@ fn pct_log(v: Option<f64>) -> String {
 /// 分五块，每块回答一个问题：交易所横向=「量在谁那儿、价差多大」、
 /// 热门/涨跌=「今天谁在动」、永续=「杠杆那边什么姿势」、
 /// 期权=「隐波和未平仓」、新上市=「有什么新东西」。
-fn crypto_view<'a>(p: &Panorama, v: ViewState) -> Element<'a, RadarMsg> {
+fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, RadarMsg> {
     let mut col = column![].spacing(3);
     if p.venues.is_empty() {
         return text("暂无加密全景数据——守护还没跑完第一轮（默认 30s）")
@@ -1634,11 +1634,13 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState) -> Element<'a, RadarMsg> {
     let sign = |x: f64| if x >= 0.0 { up } else { dn };
     let money = |x: Option<f64>| x.map(usd).unwrap_or_else(|| "—".into());
 
-    col = col.push(
-        text("八家交易所公开 REST · 无 key · 只读。成交额只统计美元计价的对——非美元对的量不是美元，加不到一起。")
-            .size(10)
-            .color(C_DIM),
-    );
+    col = col.push(fresh_bar(
+        Tier::Live,
+        "八家交易所公开 REST 直连 · 无 key · 只读。成交额只统计美元计价的对",
+        fetched,
+        "30 秒",
+        Some(blk::CRYPTO),
+    ));
 
     col = col.push(crypto_listings(p));
 
@@ -1900,7 +1902,7 @@ fn crypto_listings<'a>(p: &Panorama) -> Element<'a, RadarMsg> {
 }
 
 /// 预测市场（docs/22 §7）：Polymarket + Kalshi。
-fn prediction_view<'a>(p: &Prediction, v: ViewState) -> Element<'a, RadarMsg> {
+fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a, RadarMsg> {
     let mut col = column![].spacing(3);
     if p.sources.is_empty() {
         return text("暂无预测市场数据——守护还没跑完第一轮（默认 30s）")
@@ -1911,21 +1913,37 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState) -> Element<'a, RadarMsg> {
     let up = ramp(v.palette).up[2];
     let dn = ramp(v.palette).down[2];
 
+    // 报价本身是当前值，但成交额那一列带窗口（一家 24h、一家「近期」），
+    // 所以不是「实时」而是「准实时」
+    col = col.push(fresh_bar(
+        Tier::NearLive,
+        "Polymarket Gamma + Kalshi 公开接口 · 无 key。报价即当前值；成交额带窗口，见「窗口」列",
+        fetched,
+        "30 秒",
+        Some(blk::PREDICTION),
+    ));
     col = col.push(
-        text("Polymarket Gamma + Kalshi 公开接口 · 无 key · 只读。价格就是概率；涨跌是**概率点**，不是收益率。")
+        text("价格就是概率；涨跌是**概率点**，不是收益率。")
             .size(10)
             .color(C_DIM),
     );
     let mut sr = row![text("来源 ").size(10).color(C_DIM)].spacing(6);
     for s in &p.sources {
         sr = sr.push(
-            text(if s.err.is_empty() {
-                format!("{} {} 条", s.label, s.rows)
-            } else {
-                format!("{} ⚠ {}", s.label, s.err)
+            // 同宏观那边：有数据就把条数一起显示，别让部分失败看着像整块挂了
+            text(match (s.rows, s.err.is_empty()) {
+                (_, true) => format!("{} {} 条", s.label, s.rows),
+                (0, false) => format!("{} ⚠ {}", s.label, clip(&s.err, 42)),
+                (n, false) => format!("{} {n} 条 ⚠ {}", s.label, clip(&s.err, 34)),
             })
             .size(10)
-            .color(if s.err.is_empty() { C_DIM } else { C_GOLD }),
+            .color(if s.err.is_empty() {
+                C_DIM
+            } else if s.rows > 0 {
+                C_GOLD
+            } else {
+                C_BAD
+            }),
         );
     }
     col = col.push(sr);
@@ -2040,6 +2058,118 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState) -> Element<'a, RadarMsg> {
         NO_SORT,
     ));
     col.into()
+}
+
+/// 块号。与 `radar::block_name` 一一对应。
+mod blk {
+    pub const CRYPTO: u8 = 1;
+    pub const PREDICTION: u8 = 2;
+    pub const EQUITY: u8 = 3;
+    pub const MACROS: u8 = 4;
+    /// 股票慢层（总览 + 宽度）。它由股票线程刷，与四个新看板不是一条线。
+    pub const SLOW: u8 = 5;
+}
+
+/// 数据等级（docs/22 §0）。**每一屏都要标**——不标等级就是自欺：
+/// 延迟 15 分钟的价格和实时价在表格里长得一模一样。
+#[derive(Clone, Copy, PartialEq)]
+enum Tier {
+    /// 交易所直连，真实时。
+    Live,
+    /// 准实时：接口本身是当前值，但更新有节拍或口径带窗口。
+    NearLive,
+    /// 延迟约 15 分钟。
+    Delayed,
+    /// 只有收盘价。
+    Close,
+    /// 按期公布（月频/年频/事件驱动），没有「实时」一说。
+    Periodic,
+}
+
+impl Tier {
+    fn badge(self) -> &'static str {
+        match self {
+            Tier::Live => "A 实时",
+            Tier::NearLive => "B 准实时",
+            Tier::Delayed => "C 延迟",
+            Tier::Close => "D 收盘价",
+            Tier::Periodic => "E 按期公布",
+        }
+    }
+    /// 颜色分档：实时用常态色，延迟/收盘价发暗或标黄——扫一眼就知道
+    /// 这一屏能不能当实时用。
+    fn color(self) -> Color {
+        match self {
+            Tier::Live => C_OK,
+            Tier::NearLive => C_HEAD,
+            Tier::Delayed | Tier::Close => C_GOLD,
+            Tier::Periodic => C_DIM,
+        }
+    }
+}
+
+/// 一屏（或一块）顶部的数据说明条：等级 · 口径 · 上次更新 · 手动刷新。
+///
+/// `fetched_ms` 是**这一块自己的**抓取时刻，不是快照时间：这些块跑在
+/// 三个节拍上（30s / 5min / 1h），共用快照时间会把一小时前的宏观数据
+/// 标成「刚刚更新」。`0` = 还没抓过。
+fn fresh_bar<'a>(
+    tier: Tier,
+    note: &str,
+    fetched_ms: i64,
+    period: &str,
+    block: Option<u8>,
+) -> Element<'a, RadarMsg> {
+    let mut r = row![].spacing(6).align_y(iced::Alignment::Center);
+    r = r.push(
+        container(text(tier.badge().to_string()).size(10).color(tier.color()))
+            .padding([1, 5])
+            .style(move |_: &Theme| container::Style {
+                border: iced::Border { color: tier.color(), width: 1.0, radius: 3.0.into() },
+                ..Default::default()
+            }),
+    );
+    r = r.push(text(note.to_string()).size(10).color(C_DIM));
+    r = r.push(text(format!("· 自动 {period}")).size(10).color(C_DIM));
+    r = r.push(text(format!("· {}", ago(fetched_ms))).size(10).color(age_color(fetched_ms)));
+    if let Some(b) = block {
+        r = r.push(chip("⟳ 立即刷新", false, RadarMsg::ForceBlock(b)));
+    }
+    r.into()
+}
+
+/// 「更新于 HH:MM:SS（N 秒前）」。`0` = 还没抓过。
+fn ago(ms: i64) -> String {
+    use chrono::TimeZone;
+    if ms <= 0 {
+        return "尚未抓取".into();
+    }
+    let Some(t) = chrono::Local.timestamp_millis_opt(ms).single() else {
+        return "尚未抓取".into();
+    };
+    let d = (chrono::Local::now().timestamp_millis() - ms).max(0) / 1000;
+    let human = if d < 60 {
+        format!("{d} 秒前")
+    } else if d < 3600 {
+        format!("{} 分钟前", d / 60)
+    } else {
+        format!("{} 小时前", d / 3600)
+    };
+    format!("更新于 {}（{human}）", t.format("%H:%M:%S"))
+}
+
+/// 数据放久了要变色。**多久算久按块的节拍来**是做不到的（这里只有一个时间戳），
+/// 故用一个统一的粗阈值：超过十分钟就标黄，超过一小时标红。
+/// 宏观那种一小时一刷的块因此常年是黄的——那正是实情。
+fn age_color(ms: i64) -> Color {
+    if ms <= 0 {
+        return C_GOLD;
+    }
+    match (chrono::Local::now().timestamp_millis() - ms).max(0) / 1000 {
+        0..=599 => C_DIM,
+        600..=3599 => C_GOLD,
+        _ => C_BAD,
+    }
 }
 
 /// 四个新看板里各张表的编号。用来给排序/时间范围的注册表做键——
@@ -2194,7 +2324,7 @@ fn within_days(ts_ms: i64, days: u16) -> bool {
 ///
 /// 这一屏最要紧的一行在最上面：**数据是哪个交易日的收盘**。休市时它是几天前的
 /// 数字，而收盘价和实时价在表格里长得一模一样。
-fn equity_view<'a>(p: &EquityPanorama, v: ViewState) -> Element<'a, RadarMsg> {
+fn equity_view<'a>(p: &EquityPanorama, v: ViewState, fetched: i64) -> Element<'a, RadarMsg> {
     let mut col = column![].spacing(3);
     if p.universe == 0 && p.indices.is_empty() {
         return text("暂无股票全景数据——守护还没跑完第一轮（默认 5 分钟）")
@@ -2206,18 +2336,24 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState) -> Element<'a, RadarMsg> {
     let dn = ramp(v.palette).down[2];
     let sign = |x: f64| if x >= 0.0 { up } else { dn };
 
-    // 口径行**放最上面且标黄**：整屏的解释都在这一句里
-    col = col.push(
-        text(format!(
-            "⚠ {} · 全表价格是 {} 的收盘，不是实时价（{}｜下一交易日 {}）",
-            if p.status.indicator.is_empty() { "纳斯达克公开接口" } else { &p.status.indicator },
-            if p.status.previous_trade_date.is_empty() { "上一交易日" } else { &p.status.previous_trade_date },
-            p.status.countdown,
+    // **这一屏里有两种新鲜度**：全表是上一交易日收盘（D），Cboe 指数是延迟
+    // 15 分钟（C）。只标一个会让人把另一半也当成同档
+    col = col.push(fresh_bar(
+        Tier::Close,
+        &format!(
+            "纳斯达克全表：{} 的收盘价，不是实时价（{}｜下一交易日 {}）",
+            if p.status.previous_trade_date.is_empty() {
+                "上一交易日"
+            } else {
+                &p.status.previous_trade_date
+            },
+            if p.status.indicator.is_empty() { "—" } else { &p.status.indicator },
             p.status.next_trade_date,
-        ))
-        .size(10)
-        .color(C_GOLD),
-    );
+        ),
+        fetched,
+        "5 分钟",
+        Some(blk::EQUITY),
+    ));
     for (what, err) in &p.errors {
         col = col.push(text(format!("⚠ {what}：{err}")).size(10).color(C_GOLD));
     }
@@ -2226,7 +2362,15 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState) -> Element<'a, RadarMsg> {
 
     // ── 指数 ──
     if !p.indices.is_empty() {
-        col = col.push(section("指数（Cboe 延迟报价）", "「最后成交」就是这份数据延迟多少的证据"));
+        col = col.push(section("指数（Cboe）", "「最后成交」就是这份数据延迟多少的证据"));
+        // 与上面那条不同档：指数是延迟报价，不是收盘价
+        col = col.push(fresh_bar(
+            Tier::Delayed,
+            "Cboe 公开延迟报价，约 15 分钟",
+            fetched,
+            "5 分钟",
+            None,
+        ));
         let mut h = row![].spacing(3);
         for (t, w, n) in [
             ("指数", 116.0, false),
@@ -2474,7 +2618,7 @@ fn mdy_num(s: &str) -> SortVal {
 }
 
 /// 宏观 + 新闻（docs/22 §7 第二批）。
-fn macro_view<'a>(m: &MacroBoard, v: ViewState) -> Element<'a, RadarMsg> {
+fn macro_view<'a>(m: &MacroBoard, v: ViewState, fetched: i64) -> Element<'a, RadarMsg> {
     let mut col = column![].spacing(3);
     if m.sources.is_empty() {
         return text("暂无宏观数据——守护还没跑完第一轮（默认 1 小时）")
@@ -2485,27 +2629,44 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState) -> Element<'a, RadarMsg> {
     let up = ramp(v.palette).up[2];
     let dn = ramp(v.palette).down[2];
 
+    // 「抓取时刻」与「观测日期」是两回事：这里一小时抓一次，但抓回来的
+    // 通胀数据本身可能是九个月前公布的。两个都要显示，只显示前者更误导
+    col = col.push(fresh_bar(
+        Tier::Periodic,
+        "央行/统计局按期公布，不是行情。**抓取时刻 ≠ 观测日期**——见每行的「观测」列",
+        fetched,
+        "1 小时",
+        Some(blk::MACROS),
+    ));
     col = col.push(
-        text("⚠ 每行的**观测日期**都不一样：政策利率是当天、通胀是上个月、世行数据是去年。不看「观测」列就会把去年的数当今天的。")
+        text("⚠ 每行的观测日期都不一样：政策利率是当天、通胀是上个月、世行数据是去年。不看「观测」列就会把去年的数当今天的。")
             .size(10)
             .color(C_GOLD),
     );
     let mut sr = row![text("来源 ").size(10).color(C_DIM)].spacing(8);
     for s in &m.sources {
         sr = sr.push(
-            text(if s.err.is_empty() {
-                format!("{} {}", s.label, s.rows)
-            } else {
-                format!("{} · {}", s.label, s.err)
+            // **条数和错误都要显示**：欧央行五条序列里超时一条时，只显示错误
+            // 会让人以为整个来源挂了，其实四条都在表里。
+            // 错误文案要截断——接口返回的长英文原样铺开会把整行挤出屏幕，
+            // 把后面几个来源的状态一起顶没
+            text(match (s.rows, s.err.is_empty()) {
+                (_, true) => format!("{} {}", s.label, s.rows),
+                (0, false) => format!("{} · {}", s.label, clip(&s.err, 42)),
+                (n, false) => format!("{} {n} · 部分失败：{}", s.label, clip(&s.err, 34)),
             })
             .size(10)
             // 「未配置」是等用户去配，不是故障——用暗色，别拿警告色喊
             .color(if s.err.is_empty() {
                 C_DIM
             } else if s.err.starts_with("未配置") {
+                // 「未配置」是等用户去配，不是故障
                 C_NEUTRAL
-            } else {
+            } else if s.rows > 0 {
+                // 部分失败：还有数据，别用整块失败那个颜色喊
                 C_GOLD
+            } else {
+                C_BAD
             }),
         );
     }
@@ -2631,7 +2792,7 @@ fn clip(s: &str, n: usize) -> String {
 }
 
 /// World Overview（docs/22 §2 ②）：各国指数横向对比，本币 vs 美元并列。
-fn overview_view<'a>(rows: &[OverviewRow], v: ViewState) -> Element<'a, RadarMsg> {
+fn overview_view<'a>(rows: &[OverviewRow], v: ViewState, fetched: i64) -> Element<'a, RadarMsg> {
     let mut col = column![].spacing(3);
     if rows.is_empty() {
         return text("暂无总览数据——需开启股票层（radar.toml 的 [equities]）")
@@ -2639,6 +2800,14 @@ fn overview_view<'a>(rows: &[OverviewRow], v: ViewState) -> Element<'a, RadarMsg
             .color(C_DIM)
             .into();
     }
+    // TradingView 的指数报价是延迟档（docs/22 §0）。总览一屏全是它
+    col = col.push(fresh_bar(
+        Tier::Delayed,
+        "TradingView 指数报价 · 各国指数按美元归一化",
+        fetched,
+        "60 秒",
+        Some(blk::SLOW),
+    ));
     col = col.push(
         text("各国指数 · 本币 / 美元并列。本币计价的国家横比是假的——指数涨而本币贬，对美元投资者可能是亏的。")
             .size(10)
@@ -2678,7 +2847,7 @@ fn overview_view<'a>(rows: &[OverviewRow], v: ViewState) -> Element<'a, RadarMsg
 }
 
 /// 市场宽度（docs/22 §2 ③）。
-fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState) -> Element<'a, RadarMsg> {
+fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState, fetched: i64) -> Element<'a, RadarMsg> {
     let mut col = column![].spacing(3);
     if rows.is_empty() {
         return text("暂无宽度数据——需开启股票层（radar.toml 的 [equities]）")
@@ -2686,6 +2855,13 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState) -> Element<'a, RadarMsg> 
             .color(C_DIM)
             .into();
     }
+    col = col.push(fresh_bar(
+        Tier::Delayed,
+        "TradingView 全市场扫描 · 每市场独立取前 N 只，不带用户筛选",
+        fetched,
+        "60 秒",
+        Some(blk::SLOW),
+    ));
     // 覆盖率**逐行显示**（下面「样本」那一列），不再笼统说「是前 N 只」——
     // 澳大利亚 100% 与美国 28% 的可信度完全不同，一句话概括不了
     col = col.push(
@@ -2824,10 +3000,44 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         .map(|(t, n)| format!("{t}×{n}"))
         .collect::<Vec<_>>()
         .join(" ");
+    // 这一屏**一张表里混着两档**：加密是交易所直连的实时价，股票是
+    // TradingView 的延迟报价。只标一个等级会让人把整张表当成同一档，
+    // 故徽章按行数分档列出来，两层的更新时间也分开显示
+    let mut tr = row![].spacing(6).align_y(iced::Alignment::Center);
+    for (t, n) in &tiers {
+        let tier = match t.as_str() {
+            "A" => Tier::Live,
+            "B" => Tier::NearLive,
+            "D" => Tier::Close,
+            _ => Tier::Delayed,
+        };
+        tr = tr.push(
+            container(
+                text(format!("{} ×{n}", tier.badge())).size(10).color(tier.color()),
+            )
+            .padding([1, 5])
+            .style(move |_: &Theme| container::Style {
+                border: iced::Border { color: tier.color(), width: 1.0, radius: 3.0.into() },
+                ..Default::default()
+            }),
+        );
+    }
+    tr = tr.push(
+        text(format!(
+            "加密层 {}{} · 股票层 {}{}",
+            if st.stamp.is_empty() { "—" } else { &st.stamp },
+            super::staleness::suffix(&st.stamp),
+            if st.slow_stamp.is_empty() { "—" } else { &st.slow_stamp },
+            super::staleness::suffix(&st.slow_stamp),
+        ))
+        .size(10)
+        .color(C_DIM),
+    );
+    tr = tr.push(chip("⟳ 立即刷新", false, RadarMsg::Refresh));
+    body = body.push(tr);
     body = body.push(
         text(format!(
-            "等级 {} （A=交易所直连·真实时 C=延迟约15分钟）· {} 标的 · 单轮 {}ms · z 可信 {}/{}{}",
-            tier_txt,
+            "{} 标的 · 单轮 {}ms · z 可信 {}/{}{}",
             st.n_symbols,
             st.refreshed_ms,
             warm,
@@ -2900,20 +3110,21 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             body = body.push(text(am).size(10).color(if bad { C_BAD } else { C_OK }));
         }
         let inner = match v.mode {
-            ViewMode::Overview => overview_view(&st.overview, v),
-            ViewMode::Crypto => crypto_view(&st.panorama, v),
-            ViewMode::Prediction => prediction_view(&st.prediction, v),
-            ViewMode::Equity => equity_view(&st.equity, v),
-            ViewMode::Macro => macro_view(&st.macros, v),
-            _ => breadth_view(&st.breadth, v),
+            ViewMode::Overview => overview_view(&st.overview, v, st.fetched.overview),
+            ViewMode::Crypto => crypto_view(&st.panorama, v, st.fetched.panorama),
+            ViewMode::Prediction => prediction_view(&st.prediction, v, st.fetched.prediction),
+            ViewMode::Equity => equity_view(&st.equity, v, st.fetched.equity),
+            ViewMode::Macro => macro_view(&st.macros, v, st.fetched.macros),
+            _ => breadth_view(&st.breadth, v, st.fetched.breadth),
         };
         body = body.push(inner);
+        // 用**慢层**的快照时间：这几屏的数据都来自慢层文件，
+        // 显示热层时间（5 秒一刷）会让人以为它们也那么快
         body = body.push(
             text(format!(
-                "源 {} · 快照 {}{}",
-                st.source,
-                st.stamp,
-                super::staleness::suffix(&st.stamp),
+                "慢层快照 {}{}",
+                if st.slow_stamp.is_empty() { "—" } else { &st.slow_stamp },
+                super::staleness::suffix(&st.slow_stamp),
             ))
             .size(10)
             .color(C_DIM),
@@ -4426,5 +4637,66 @@ mod board_table_tests {
         let now = chrono::Local::now().timestamp_millis();
         assert!(within_days(now - 86_400_000, 7));
         assert!(!within_days(now - 30 * 86_400_000, 7));
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+
+    #[test]
+    fn every_block_id_maps_to_a_name_the_daemon_accepts() {
+        // 块号与守护的白名单对不上的话，按钮点了守护完全不理，
+        // 而界面上什么都不会说
+        const DAEMON_WHITELIST: [&str; 5] =
+            ["crypto", "prediction", "equity", "macros", "slow"];
+        for b in [blk::CRYPTO, blk::PREDICTION, blk::EQUITY, blk::MACROS, blk::SLOW] {
+            let name = super::super::radar::block_name(b);
+            assert!(DAEMON_WHITELIST.contains(&name), "{b} → {name} 不在守护白名单里");
+            assert!(!super::super::radar::block_label(b).is_empty());
+        }
+        // 五个块号互不相同，否则「刷新加密」会去刷别的块
+        let mut ns: Vec<&str> = [blk::CRYPTO, blk::PREDICTION, blk::EQUITY, blk::MACROS, blk::SLOW]
+            .iter()
+            .map(|b| super::super::radar::block_name(*b))
+            .collect();
+        ns.sort();
+        ns.dedup();
+        assert_eq!(ns.len(), 5);
+    }
+
+    #[test]
+    fn a_never_fetched_block_says_so_instead_of_showing_1970() {
+        assert_eq!(ago(0), "尚未抓取");
+        assert_eq!(ago(-1), "尚未抓取");
+        let now = chrono::Local::now().timestamp_millis();
+        assert!(ago(now).contains("秒前"));
+        assert!(ago(now - 300_000).contains("分钟前"));
+        assert!(ago(now - 7_200_000).contains("小时前"));
+    }
+
+    #[test]
+    fn stale_data_changes_color() {
+        // 一屏数据放了一小时还显示成常态色，等于没标
+        let now = chrono::Local::now().timestamp_millis();
+        assert_eq!(age_color(now), C_DIM);
+        assert_eq!(age_color(now - 1_200_000), C_GOLD);
+        assert_eq!(age_color(now - 7_200_000), C_BAD);
+        // 没抓过也要显眼
+        assert_eq!(age_color(0), C_GOLD);
+    }
+
+    #[test]
+    fn each_tier_has_a_distinct_badge() {
+        // 五档的文案必须能一眼分开——「延迟」和「收盘价」是两件事
+        let all = [Tier::Live, Tier::NearLive, Tier::Delayed, Tier::Close, Tier::Periodic];
+        let mut b: Vec<&str> = all.iter().map(|t| t.badge()).collect();
+        assert!(b.iter().all(|x| !x.is_empty()));
+        b.sort();
+        b.dedup();
+        assert_eq!(b.len(), 5);
+        // 实时与非实时的颜色必须不同，否则扫一眼分不出
+        assert_ne!(Tier::Live.color(), Tier::Delayed.color());
+        assert_ne!(Tier::Delayed.color(), Tier::Periodic.color());
     }
 }

@@ -365,6 +365,9 @@ pub enum RadarMsg {
     SortTable { table: u8, col: u8 },
     /// 设某张表的时间范围（天）。`0` = 不限。
     SetDays { table: u8, days: u16 },
+    /// 请求守护立刻重取某一块。参数是块号（见 `radar_view::blk`）——
+    /// `RadarMsg` 是 `Copy` 的，装不下块名的串。
+    ForceBlock(u8),
     /// 新股日历翻月。参数是**相对当前月的偏移量**，不是绝对月份——
     /// 存偏移量的话跨月那天会自动跟着走，存绝对值则会停在旧月份上。
     IpoMonth(i32),
@@ -401,6 +404,29 @@ pub fn table_days(table: u8, default_days: u16) -> u16 {
         .ok()
         .and_then(|g| g.as_ref().and_then(|m| m.get(&table).copied()))
         .unwrap_or(default_days)
+}
+
+/// 块号 → 守护认的块名。**必须与 `request::parse_force` 的白名单一致**，
+/// 对不上的话按钮点了守护完全不理，而界面上什么都不会说。
+pub fn block_name(b: u8) -> &'static str {
+    match b {
+        1 => "crypto",
+        2 => "prediction",
+        3 => "equity",
+        4 => "macros",
+        _ => "slow",
+    }
+}
+
+/// 块号 → 给人看的名字。
+pub fn block_label(b: u8) -> &'static str {
+    match b {
+        1 => "加密全景",
+        2 => "预测市场",
+        3 => "股票全景",
+        4 => "宏观新闻",
+        _ => "股票慢层",
+    }
 }
 
 /// 新股日历要查的月份（`YYYY-MM`）。
@@ -532,6 +558,7 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
             }
         }
         RadarMsg::Start
+        | RadarMsg::ForceBlock(_)
         | RadarMsg::Stop
         | RadarMsg::Refresh
         | RadarMsg::ManualEdited
@@ -549,6 +576,12 @@ pub fn handle(msg: RadarMsg) {
         RadarMsg::Stop => ro::radar_stop(),
         // 打开浏览器是个副作用，走这一路而不是 `apply`——`apply` 是纯函数
         RadarMsg::OpenLink(id) => ro::open_link(id),
+        // 写请求文件也是副作用
+        RadarMsg::ForceBlock(b) => {
+            let name = block_name(b);
+            ro::force_block(name);
+            format!("已请求守护重取「{}」", block_label(b))
+        }
         RadarMsg::Refresh => {
             // 只叫醒面板自己是不够的——那只是重读快照。要让守护**去取**，
             // 得让请求文件的内容变一下：`bump_nonce` 改变下一份请求体，
