@@ -225,6 +225,138 @@ pub struct PredSource {
     pub err: String,
 }
 
+/// 美股市场状态。
+#[derive(Default, Clone, PartialEq)]
+pub struct MarketStatus {
+    pub country: String,
+    pub indicator: String,
+    pub countdown: String,
+    /// **上一交易日**。全表的价格就是这一天的收盘——休市日那是几天前的数，
+    /// 不显示出来它和实时价长得一模一样。
+    pub previous_trade_date: String,
+    pub next_trade_date: String,
+}
+
+/// 一只股票。
+#[derive(Default, Clone, PartialEq)]
+pub struct StockRow {
+    pub symbol: String,
+    pub name: String,
+    pub price: f64,
+    pub net_change: f64,
+    pub chg_pct: f64,
+    pub volume: f64,
+    /// 成交额 = 价 × 量（原表没有这一列）。
+    pub turnover: f64,
+    /// 0 = 原表为空（多为 ETF），**不是市值为零**。
+    pub mcap: f64,
+    pub sector: String,
+    pub industry: String,
+    pub country: String,
+    pub ipo_year: i64,
+}
+
+/// 一个板块。
+#[derive(Default, Clone, PartialEq)]
+pub struct SectorRow {
+    pub sector: String,
+    pub n: i64,
+    pub adv: i64,
+    pub dec: i64,
+    /// 市值加权涨跌（%）。只用有市值的那些算。
+    pub wtd_chg: Option<f64>,
+    /// 加权覆盖了几只。与 `n` 差很多时这个数代表性就差。
+    pub wtd_n: i64,
+    /// 中位涨跌（%）。等权口径，不受几只权重股绑架。
+    pub median_chg: Option<f64>,
+    pub turnover: f64,
+}
+
+/// 一条新股。
+#[derive(Default, Clone, PartialEq)]
+pub struct IpoRow {
+    pub symbol: String,
+    pub company: String,
+    pub exchange: String,
+    pub status: String,
+    pub price: String,
+    pub shares: String,
+    pub value: String,
+    pub date: String,
+}
+
+/// 一条指数报价（Cboe 延迟）。
+#[derive(Default, Clone, PartialEq)]
+pub struct IndexQuote {
+    pub symbol: String,
+    pub label: String,
+    pub price: f64,
+    pub chg: f64,
+    pub chg_pct: f64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub prev_close: f64,
+    /// 最后成交时间——Cboe 是延迟数据，这就是延迟多少的证据。
+    pub last_trade: String,
+}
+
+/// 股票全景整块。
+#[derive(Default, Clone, PartialEq)]
+pub struct EquityPanorama {
+    pub status: MarketStatus,
+    pub indices: Vec<IndexQuote>,
+    pub universe: i64,
+    pub hot: Vec<StockRow>,
+    pub gainers: Vec<StockRow>,
+    pub losers: Vec<StockRow>,
+    pub sectors: Vec<SectorRow>,
+    pub ipos: Vec<IpoRow>,
+    pub errors: Vec<(String, String)>,
+}
+
+/// 一个宏观读数。
+#[derive(Default, Clone, PartialEq)]
+pub struct MacroRow {
+    pub source: String,
+    pub area: String,
+    pub label: String,
+    pub value: f64,
+    pub unit: String,
+    /// **观测日期**。同一张表里能差近一年（政策利率是当天、世行 GDP 是去年），
+    /// 缺了这一列整张表就没法读。
+    pub obs: String,
+    pub chg: Option<f64>,
+}
+
+/// 一条新闻。
+#[derive(Default, Clone, PartialEq)]
+pub struct NewsRow {
+    pub source: String,
+    pub title: String,
+    pub link: String,
+    pub published: String,
+    pub ts_ms: i64,
+}
+
+/// 宏观来源状态。
+#[derive(Default, Clone, PartialEq)]
+pub struct MacroSource {
+    pub key: String,
+    pub label: String,
+    pub rows: i64,
+    /// 空 = 正常。「未配置 …」与抓取失败都走这里，但文案不同。
+    pub err: String,
+}
+
+/// 宏观 + 新闻整块。
+#[derive(Default, Clone, PartialEq)]
+pub struct MacroBoard {
+    pub rows: Vec<MacroRow>,
+    pub news: Vec<NewsRow>,
+    pub sources: Vec<MacroSource>,
+}
+
 /// 预测市场整块。
 #[derive(Default, Clone, PartialEq)]
 pub struct Prediction {
@@ -411,6 +543,8 @@ pub struct RadarReadout {
     pub overview: Vec<OverviewRow>,
     pub panorama: Panorama,
     pub prediction: Prediction,
+    pub equity: EquityPanorama,
+    pub macros: MacroBoard,
     pub refreshed: String,
     /// 慢层快照的时间戳（股票 60s 一刷，与热层不同步——面板要分别标注，
     /// 否则会拿热层的时间当成股票数据的时间）。
@@ -672,6 +806,8 @@ fn poll_once() -> RadarReadout {
         st.overview = s.overview;
         st.panorama = s.panorama;
         st.prediction = s.prediction;
+        st.equity = s.equity;
+        st.macros = s.macros;
         // 标的总数是两层之和；单层的 n_symbols 只算自己那部分
         st.n_symbols += s.n_symbols;
         st.slow_stamp = s.stamp;
@@ -1136,6 +1272,113 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
         movers: preds(sub("prediction", "movers")),
         fresh: preds(sub("prediction", "fresh")),
     };
+    let stocks = |a: Vec<serde_json::Value>| -> Vec<StockRow> {
+        a.iter()
+            .map(|o| StockRow {
+                symbol: s(o, "symbol"),
+                name: s(o, "name"),
+                price: f_of(o, "price"),
+                net_change: f_of(o, "net_change"),
+                chg_pct: f_of(o, "chg_pct"),
+                volume: f_of(o, "volume"),
+                turnover: f_of(o, "turnover"),
+                mcap: f_of(o, "mcap"),
+                sector: s(o, "sector"),
+                industry: s(o, "industry"),
+                country: s(o, "country"),
+                ipo_year: i64_of(o, "ipo_year"),
+            })
+            .collect()
+    };
+    let est = |k: &str| v.get("equity").and_then(|x| x.get("status")).map(|x| s(x, k)).unwrap_or_default();
+    let equity = EquityPanorama {
+        status: MarketStatus {
+            country: est("country"),
+            indicator: est("indicator"),
+            countdown: est("countdown"),
+            previous_trade_date: est("previous_trade_date"),
+            next_trade_date: est("next_trade_date"),
+        },
+        indices: sub("equity", "indices")
+            .iter()
+            .map(|o| IndexQuote {
+                symbol: s(o, "symbol"),
+                label: s(o, "label"),
+                price: f_of(o, "price"),
+                chg: f_of(o, "chg"),
+                chg_pct: f_of(o, "chg_pct"),
+                open: f_of(o, "open"),
+                high: f_of(o, "high"),
+                low: f_of(o, "low"),
+                prev_close: f_of(o, "prev_close"),
+                last_trade: s(o, "last_trade"),
+            })
+            .collect(),
+        universe: v.get("equity").and_then(|x| x.get("universe")).and_then(|x| x.as_i64()).unwrap_or(0),
+        hot: stocks(sub("equity", "hot")),
+        gainers: stocks(sub("equity", "gainers")),
+        losers: stocks(sub("equity", "losers")),
+        sectors: sub("equity", "sectors")
+            .iter()
+            .map(|o| SectorRow {
+                sector: s(o, "sector"),
+                n: i64_of(o, "n"),
+                adv: i64_of(o, "adv"),
+                dec: i64_of(o, "dec"),
+                wtd_chg: optf_of(o, "wtd_chg"),
+                wtd_n: i64_of(o, "wtd_n"),
+                median_chg: optf_of(o, "median_chg"),
+                turnover: f_of(o, "turnover"),
+            })
+            .collect(),
+        ipos: sub("equity", "ipos")
+            .iter()
+            .map(|o| IpoRow {
+                symbol: s(o, "symbol"),
+                company: s(o, "company"),
+                exchange: s(o, "exchange"),
+                status: s(o, "status"),
+                price: s(o, "price"),
+                shares: s(o, "shares"),
+                value: s(o, "value"),
+                date: s(o, "date"),
+            })
+            .collect(),
+        errors: sub("equity", "errors").iter().map(|o| (s(o, "what"), s(o, "err"))).collect(),
+    };
+    let macros = MacroBoard {
+        rows: sub("macros", "rows")
+            .iter()
+            .map(|o| MacroRow {
+                source: s(o, "source"),
+                area: s(o, "area"),
+                label: s(o, "label"),
+                value: f_of(o, "value"),
+                unit: s(o, "unit"),
+                obs: s(o, "obs"),
+                chg: optf_of(o, "chg"),
+            })
+            .collect(),
+        news: sub("macros", "news")
+            .iter()
+            .map(|o| NewsRow {
+                source: s(o, "source"),
+                title: s(o, "title"),
+                link: s(o, "link"),
+                published: s(o, "published"),
+                ts_ms: i64_of(o, "ts_ms"),
+            })
+            .collect(),
+        sources: sub("macros", "sources")
+            .iter()
+            .map(|o| MacroSource {
+                key: s(o, "key"),
+                label: s(o, "label"),
+                rows: i64_of(o, "rows"),
+                err: s(o, "err"),
+            })
+            .collect(),
+    };
     RadarReadout {
         stamp: s(v, "stamp"),
         source: s(v, "source"),
@@ -1148,6 +1391,8 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
         overview,
         panorama,
         prediction,
+        equity,
+        macros,
         backfill: BackfillView {
             done: bi("done"),
             total: bi("total"),
@@ -1255,11 +1500,74 @@ mod tests {
     }
 
     #[test]
+    fn the_equity_table_keeps_the_trade_date_and_the_missing_caps_apart() {
+        let j = r#"{"stamp":"s","rows":[],"equity":{
+          "status":{"country":"U.S.","indicator":"Market Closed",
+                    "countdown":"Market Opens in 1D","previous_trade_date":"Sep 3, 2026",
+                    "next_trade_date":"Sep 8, 2026"},
+          "indices":[{"symbol":"^VIX","label":"VIX 波动率","price":14.53,"chg":0.21,
+                      "chg_pct":1.4453,"open":14.08,"high":14.58,"low":13.93,
+                      "prev_close":14.53,"last_trade":"2026-09-04T16:15:01"}],
+          "universe":7131,
+          "hot":[{"symbol":"MU","name":"Micron","price":1016.59,"chg_pct":6.1,
+                  "volume":3.5e7,"turnover":3.57e10,"mcap":1.1e12,"sector":"Technology"},
+                 {"symbol":"SPY","name":"SPDR","price":700.0,"chg_pct":-0.4,
+                  "volume":1e7,"turnover":7e9,"mcap":0.0,"sector":""}],
+          "gainers":[],"losers":[],
+          "sectors":[{"sector":"Technology","n":784,"adv":378,"dec":372,
+                      "wtd_chg":0.44,"wtd_n":781,"median_chg":0.0,"turnover":3.16e11}],
+          "ipos":[{"symbol":"TRBG","company":"Turbogen Ltd.","status":"已定价",
+                   "date":"9/03/2026","value":""}],
+          "errors":[{"what":"新股日历","err":"超时"}]}}"#;
+        let r = parse_board(&serde_json::from_str(j).unwrap());
+        let e = &r.equity;
+        // 全表是收盘价。不带这个日期，休市日的几天前数据和实时价长得一样
+        assert_eq!(e.status.previous_trade_date, "Sep 3, 2026");
+        assert_eq!(e.universe, 7131);
+        // 0 市值是「原表没给」（ETF），不是市值为零——面板据此显示「—」
+        assert_eq!(e.hot[1].mcap, 0.0);
+        assert_eq!(e.hot[0].turnover, 3.57e10);
+        // 加权覆盖了几只要能看见
+        assert_eq!((e.sectors[0].wtd_n, e.sectors[0].n), (781, 784));
+        assert_eq!(e.errors[0].0, "新股日历");
+        assert_eq!(e.ipos[0].status, "已定价");
+        // Cboe 的延迟证据
+        assert_eq!(e.indices[0].last_trade, "2026-09-04T16:15:01");
+    }
+
+    #[test]
+    fn every_macro_row_carries_its_own_observation_date() {
+        // 同一张表里政策利率是当天、HICP 是九个月前、世行 GDP 是去年
+        let j = r#"{"stamp":"s","rows":[],"macros":{
+          "rows":[{"source":"ECB","area":"欧元区","label":"主要再融资利率","value":2.4,
+                   "unit":"%","obs":"2026-09-07","chg":0.0},
+                  {"source":"WorldBank","area":"United States","label":"GDP 增速",
+                   "value":2.16,"unit":"%","obs":"2025","chg":null}],
+          "news":[{"source":"美联储","title":"Federal Reserve Board announces X",
+                   "link":"https://x","published":"Fri, 4 Sep 2026 15:00:00 GMT",
+                   "ts_ms":1788534000000}],
+          "sources":[{"key":"fred","label":"FRED","rows":0,
+                      "err":"未配置 api_key（[panorama] fred_api_key）"},
+                     {"key":"ecb","label":"欧洲央行","rows":5,"err":""}]}}"#;
+        let r = parse_board(&serde_json::from_str(j).unwrap());
+        let m = &r.macros;
+        assert_eq!(m.rows[0].obs, "2026-09-07");
+        assert_eq!(m.rows[1].obs, "2025", "年频的必须能看出是去年");
+        assert_eq!(m.rows[1].chg, None, "年频没有上一期，不能变成 0");
+        // 「未配置」要能和抓取失败分开——面板据此用不同颜色
+        assert!(m.sources[0].err.starts_with("未配置"));
+        assert!(m.sources[1].err.is_empty());
+        assert!(m.news[0].ts_ms > 0, "CDATA 包着的时间也要能解析出来");
+    }
+
+    #[test]
     fn a_snapshot_from_a_daemon_without_these_sections_still_parses() {
         // 守护可能是旧版本。整份快照不能因为少两段就解析失败
         let j = r#"{"stamp":"s","rows":[]}"#;
         let r = parse_board(&serde_json::from_str(j).unwrap());
         assert!(r.panorama.venues.is_empty() && r.prediction.hot.is_empty());
+        assert!(r.equity.hot.is_empty() && r.macros.rows.is_empty());
+        assert_eq!(r.equity.universe, 0);
         assert!(r.present);
     }
 

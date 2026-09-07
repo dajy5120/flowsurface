@@ -211,7 +211,8 @@ impl AssetFilter {
 
 /// 面板视图。每块回答的是不同问题（docs/22 §2、§7）：
 /// 热图=「谁在动」、总览=「哪个国家最强」、宽度=「整个市场什么状态」、
-/// 加密全景=「八家所合起来是什么盘面」、预测市场=「市场认为会发生什么」。
+/// 加密全景=「八家所合起来是什么盘面」、预测市场=「市场认为会发生什么」、
+/// 股票全景=「美股昨收谁在动、谁要上市」、宏观新闻=「利率通胀走到哪、央行说了什么」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     /// 热图页（对齐 tradingview.com/heatmap/）。
@@ -225,6 +226,10 @@ pub enum ViewMode {
     Crypto,
     /// 预测市场（docs/22 §7）：Polymarket + Kalshi。
     Prediction,
+    /// 股票全景（docs/22 §7）：纳斯达克全表 + Cboe + 新股日历。
+    Equity,
+    /// 宏观新闻（docs/22 §7）：央行数据 + 央行 RSS。
+    Macro,
 }
 
 /// 筛选器的表达形式。官方页面左上角那三个小图标就是这个。

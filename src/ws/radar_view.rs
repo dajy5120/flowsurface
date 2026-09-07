@@ -30,8 +30,8 @@ use super::radar::{
 };
 use super::radar_filter::{self, FILTERS};
 use super::radar_readout::{
-    Catalog, CatalogItem, CoinRow, ColumnTab, BreadthRow, OverviewRow, Panorama, PredRow,
-    Prediction, RadarRow, OV_WINDOWS, WINDOWS,
+    Catalog, CatalogItem, CoinRow, ColumnTab, BreadthRow, EquityPanorama, MacroBoard,
+    OverviewRow, Panorama, PredRow, Prediction, RadarRow, StockRow, OV_WINDOWS, WINDOWS,
 };
 use super::treemap::{squarify_nested, Rect};
 
@@ -1952,6 +1952,310 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState) -> Element<'a, RadarMsg> {
     col.into()
 }
 
+/// 股票全景（docs/22 §7 第二批）：纳斯达克全表 + Cboe 延迟指数。
+///
+/// 这一屏最要紧的一行在最上面：**数据是哪个交易日的收盘**。休市时它是几天前的
+/// 数字，而收盘价和实时价在表格里长得一模一样。
+fn equity_view<'a>(p: &EquityPanorama, v: ViewState) -> Element<'a, RadarMsg> {
+    let mut col = column![].spacing(3);
+    if p.universe == 0 && p.indices.is_empty() {
+        return text("暂无股票全景数据——守护还没跑完第一轮（默认 5 分钟）")
+            .size(11)
+            .color(C_DIM)
+            .into();
+    }
+    let up = ramp(v.palette).up[2];
+    let dn = ramp(v.palette).down[2];
+    let sign = |x: f64| if x >= 0.0 { up } else { dn };
+
+    // 口径行**放最上面且标黄**：整屏的解释都在这一句里
+    col = col.push(
+        text(format!(
+            "⚠ {} · 全表价格是 {} 的收盘，不是实时价（{}｜下一交易日 {}）",
+            if p.status.indicator.is_empty() { "纳斯达克公开接口" } else { &p.status.indicator },
+            if p.status.previous_trade_date.is_empty() { "上一交易日" } else { &p.status.previous_trade_date },
+            p.status.countdown,
+            p.status.next_trade_date,
+        ))
+        .size(10)
+        .color(C_GOLD),
+    );
+    for (what, err) in &p.errors {
+        col = col.push(text(format!("⚠ {what}：{err}")).size(10).color(C_GOLD));
+    }
+
+    // ── 指数 ──
+    if !p.indices.is_empty() {
+        col = col.push(section("指数（Cboe 延迟报价）", "「最后成交」就是这份数据延迟多少的证据"));
+        let mut h = row![].spacing(3);
+        for (t, w, n) in [
+            ("指数", 116.0, false),
+            ("现价", 104.0, true),
+            ("涨跌", 88.0, true),
+            ("涨跌幅", 80.0, true),
+            ("开", 96.0, true),
+            ("高", 96.0, true),
+            ("低", 108.0, true),
+            ("最后成交", 160.0, false),
+        ] {
+            h = h.push(cell(t.into(), w, C_HEAD, n));
+        }
+        col = col.push(h);
+        for q in &p.indices {
+            col = col.push(
+                row![
+                    cell(q.label.clone(), 116.0, C_TXT, false),
+                    cell(format!("{:.2}", q.price), 104.0, C_TXT, true),
+                    cell(format!("{:+.2}", q.chg), 88.0, sign(q.chg), true),
+                    cell(format!("{:+.2}%", q.chg_pct), 80.0, sign(q.chg), true),
+                    cell(format!("{:.2}", q.open), 96.0, C_DIM, true),
+                    cell(format!("{:.2}", q.high), 96.0, C_DIM, true),
+                    cell(format!("{:.2}", q.low), 108.0, C_DIM, true),
+                    cell(q.last_trade.clone(), 160.0, C_DIM, false),
+                ]
+                .spacing(3),
+            );
+        }
+    }
+
+    // ── 三张榜 ──
+    let stock_table = |title: &str, note: &str, rows: &[StockRow]| {
+        let mut c = column![].spacing(3);
+        c = c.push(section(title, note));
+        let mut h = row![].spacing(3);
+        for (t, w, n) in [
+            ("代号", 76.0, false),
+            ("名称", 250.0, false),
+            ("板块", 150.0, false),
+            ("价格", 96.0, true),
+            ("涨跌幅", 76.0, true),
+            ("成交额", 96.0, true),
+            ("市值", 96.0, true),
+        ] {
+            h = h.push(cell(t.into(), w, C_HEAD, n));
+        }
+        c = c.push(h);
+        for r in rows {
+            c = c.push(
+                row![
+                    cell(r.symbol.clone(), 76.0, C_TXT, false),
+                    cell(clip(&r.name, 32), 250.0, C_DIM, false),
+                    cell(clip(&r.sector, 18), 150.0, C_DIM, false),
+                    cell(money_cell(r.price), 96.0, C_TXT, true),
+                    cell(format!("{:+.2}%", r.chg_pct), 76.0, sign(r.chg_pct), true),
+                    cell(usd(r.turnover), 96.0, C_TXT, true),
+                    // 0 是「原表没给」（多为 ETF），不是市值为零
+                    cell(
+                        if r.mcap > 0.0 { usd(r.mcap) } else { "—".into() },
+                        96.0,
+                        C_DIM,
+                        true
+                    ),
+                ]
+                .spacing(3),
+            );
+        }
+        c
+    };
+    col = col.push(stock_table(
+        &format!("热门榜（全表 {} 只）", p.universe),
+        "按**成交额**排，不按成交股数——1.7 美元的票成交 2.7 亿股，钱远不如 1016 美元那只多",
+        &p.hot,
+    ));
+    col = col.push(stock_table(
+        "涨幅榜",
+        "价格与成交额**两个地板都设了**：不设价格地板，榜首永远是 $0.016 涨 1130% 的仙股",
+        &p.gainers,
+    ));
+    col = col.push(stock_table("跌幅榜", "", &p.losers));
+
+    // ── 板块 ──
+    col = col.push(section(
+        "板块表现",
+        "加权说「钱的方向」、中位说「多数成分股的方向」。两者背离就是几只权重股在扛",
+    ));
+    let mut h = row![].spacing(3);
+    for (t, w, n) in [
+        ("板块", 190.0, false),
+        ("只数", 60.0, true),
+        ("涨", 60.0, true),
+        ("跌", 72.0, true),
+        ("上涨占比", 150.0, false),
+        ("市值加权", 88.0, true),
+        ("加权覆盖", 76.0, true),
+        ("中位", 80.0, true),
+        ("成交额", 96.0, true),
+    ] {
+        h = h.push(cell(t.into(), w, C_HEAD, n));
+    }
+    col = col.push(h);
+    for sr in &p.sectors {
+        let frac = (sr.n > 0).then(|| sr.adv as f64 / sr.n as f64);
+        col = col.push(
+            row![
+                cell(clip(&sr.sector, 22), 190.0, C_TXT, false),
+                cell(sr.n.to_string(), 60.0, C_DIM, true),
+                cell(sr.adv.to_string(), 60.0, up, true),
+                cell(sr.dec.to_string(), 72.0, dn, true),
+                container(bar(frac, 14, up)).width(Length::Fixed(150.0)),
+                cell(
+                    sr.wtd_chg.map(|x| format!("{x:+.2}%")).unwrap_or_else(|| "—".into()),
+                    88.0,
+                    sr.wtd_chg.map_or(C_DIM, sign),
+                    true
+                ),
+                // 加权只覆盖了几只——与「只数」差很多时那个加权值代表性就差
+                cell(
+                    format!("{}/{}", sr.wtd_n, sr.n),
+                    76.0,
+                    if sr.n > 0 && sr.wtd_n * 4 < sr.n * 3 { C_GOLD } else { C_DIM },
+                    true
+                ),
+                cell(
+                    sr.median_chg.map(|x| format!("{x:+.2}%")).unwrap_or_else(|| "—".into()),
+                    80.0,
+                    sr.median_chg.map_or(C_DIM, sign),
+                    true
+                ),
+                cell(usd(sr.turnover), 96.0, C_TXT, true),
+            ]
+            .spacing(3),
+        );
+    }
+
+    // ── 新股 ──
+    if !p.ipos.is_empty() {
+        col = col.push(section("新股上市", "纳斯达克新股日历：已定价 / 待上市 / 已申报 / 已撤回"));
+        let mut h = row![].spacing(3);
+        for (t, w, n) in [
+            ("代号", 76.0, false),
+            ("公司", 280.0, false),
+            ("状态", 76.0, false),
+            ("交易所", 150.0, false),
+            ("发行价", 88.0, true),
+            ("股数", 116.0, true),
+            ("募资额", 130.0, true),
+            ("日期", 104.0, true),
+        ] {
+            h = h.push(cell(t.into(), w, C_HEAD, n));
+        }
+        col = col.push(h);
+        for r in &p.ipos {
+            col = col.push(
+                row![
+                    cell(r.symbol.clone(), 76.0, C_TXT, false),
+                    cell(clip(&r.company, 34), 280.0, C_TXT, false),
+                    cell(r.status.clone(), 76.0, C_GOLD, false),
+                    cell(clip(&r.exchange, 18), 150.0, C_DIM, false),
+                    cell(dash(&r.price), 88.0, C_DIM, true),
+                    cell(dash(&r.shares), 116.0, C_DIM, true),
+                    cell(dash(&r.value), 130.0, C_TXT, true),
+                    cell(dash(&r.date), 104.0, C_DIM, true),
+                ]
+                .spacing(3),
+            );
+        }
+    }
+    col.into()
+}
+
+/// 宏观 + 新闻（docs/22 §7 第二批）。
+fn macro_view<'a>(m: &MacroBoard, v: ViewState) -> Element<'a, RadarMsg> {
+    let mut col = column![].spacing(3);
+    if m.sources.is_empty() {
+        return text("暂无宏观数据——守护还没跑完第一轮（默认 1 小时）")
+            .size(11)
+            .color(C_DIM)
+            .into();
+    }
+    let up = ramp(v.palette).up[2];
+    let dn = ramp(v.palette).down[2];
+
+    col = col.push(
+        text("⚠ 每行的**观测日期**都不一样：政策利率是当天、通胀是上个月、世行数据是去年。不看「观测」列就会把去年的数当今天的。")
+            .size(10)
+            .color(C_GOLD),
+    );
+    let mut sr = row![text("来源 ").size(10).color(C_DIM)].spacing(8);
+    for s in &m.sources {
+        sr = sr.push(
+            text(if s.err.is_empty() {
+                format!("{} {}", s.label, s.rows)
+            } else {
+                format!("{} · {}", s.label, s.err)
+            })
+            .size(10)
+            // 「未配置」是等用户去配，不是故障——用暗色，别拿警告色喊
+            .color(if s.err.is_empty() {
+                C_DIM
+            } else if s.err.starts_with("未配置") {
+                C_NEUTRAL
+            } else {
+                C_GOLD
+            }),
+        );
+    }
+    col = col.push(sr);
+
+    col = col.push(section("宏观指标", "变化列是与上一期之差；世行是年频，没有上一期"));
+    let mut h = row![].spacing(3);
+    for (t, w, n) in [
+        ("来源", 96.0, false),
+        ("地区", 130.0, false),
+        ("指标", 200.0, false),
+        ("数值", 128.0, true),
+        ("单位", 60.0, false),
+        ("较上期", 96.0, true),
+        ("观测", 104.0, true),
+    ] {
+        h = h.push(cell(t.into(), w, C_HEAD, n));
+    }
+    col = col.push(h);
+    for r in &m.rows {
+        col = col.push(
+            row![
+                cell(r.source.clone(), 96.0, C_DIM, false),
+                cell(clip(&r.area, 14), 130.0, C_TXT, false),
+                cell(clip(&r.label, 22), 200.0, C_TXT, false),
+                cell(format!("{:.3}", r.value), 128.0, C_TXT, true),
+                cell(r.unit.clone(), 60.0, C_DIM, false),
+                cell(
+                    r.chg.map(|x| format!("{x:+.3}")).unwrap_or_else(|| "—".into()),
+                    96.0,
+                    r.chg.map_or(C_DIM, |x| if x >= 0.0 { up } else { dn }),
+                    true
+                ),
+                // 这一列是整张表能不能读的关键，用高亮色
+                cell(r.obs.clone(), 104.0, C_HEAD, true),
+            ]
+            .spacing(3),
+        );
+    }
+
+    col = col.push(section("央行与市场新闻", "欧洲央行 / 美联储 RSS 无需 key；EODHD 需配 token"));
+    let mut h = row![].spacing(3);
+    for (t, w, n) in [("来源", 116.0, false), ("标题", 820.0, false), ("时间", 220.0, false)] {
+        h = h.push(cell(t.into(), w, C_HEAD, n));
+    }
+    col = col.push(h);
+    for n in &m.news {
+        col = col.push(
+            row![
+                cell(n.source.clone(), 116.0, C_DIM, false),
+                cell(clip(&n.title, 96), 820.0, C_TXT, false),
+                cell(n.published.clone(), 220.0, C_DIM, false),
+            ]
+            .spacing(3),
+        );
+    }
+    col.into()
+}
+
+/// 空串显示成「—」。新股日历里发行价/募资额常年为空，留白会让人以为是渲染坏了。
+fn dash(s: &str) -> String {
+    if s.trim().is_empty() { "—".into() } else { s.to_string() }
+}
+
 /// 小节标题 + 一句口径说明。口径写在标题旁边而不是文档里——
 /// 看板上的数字要能自己解释自己。
 fn section<'a>(title: &str, note: &str) -> Element<'a, RadarMsg> {
@@ -2228,6 +2532,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         (ViewMode::Breadth, "市场宽度"),
         (ViewMode::Crypto, "加密全景"),
         (ViewMode::Prediction, "预测市场"),
+        (ViewMode::Equity, "股票全景"),
+        (ViewMode::Macro, "宏观新闻"),
     ] {
         mr = mr.push(chip(l, m == v.mode, RadarMsg::SetMode(m)));
     }
@@ -2247,6 +2553,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             ViewMode::Overview => overview_view(&st.overview, v),
             ViewMode::Crypto => crypto_view(&st.panorama, v),
             ViewMode::Prediction => prediction_view(&st.prediction, v),
+            ViewMode::Equity => equity_view(&st.equity, v),
+            ViewMode::Macro => macro_view(&st.macros, v),
             _ => breadth_view(&st.breadth, v),
         };
         body = body.push(inner);
