@@ -3,7 +3,7 @@
 //! **纯几何，不依赖 iced**——布局是这个面板唯一会算错的地方，独立出来全单测。
 //!
 //! ⚠ 命名：本项目的 `chart/heatmap.rs` 与 `widget/chart/heatmap/` 已经是**订单簿深度热图**
-//! （价格×时间）。市场树图叫 `treemap`，别混（docs/22 §9 坑 1）。
+//! （价格×时间）。市场树图叫 `treemap`，别混（docs/22 §10 坑 1）。
 
 /// 布局矩形（左上原点，与 iced canvas 一致）。
 #[derive(Clone, Copy, Debug, PartialEq)]

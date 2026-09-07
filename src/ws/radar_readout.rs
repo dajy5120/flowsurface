@@ -94,6 +94,11 @@ pub struct BreadthRow {
     pub new_high: i64,
     pub new_low: i64,
     pub net_new_high: i64,
+    /// 该市场的股票**总数**。宽度只覆盖其中前 N 只。
+    pub total: i64,
+    /// 样本占全市场的比例。**必须显示出来**——覆盖 28% 与覆盖 100% 是两个
+    /// 不同的结论（实测美国前 200 只上涨占比 34%、前 2000 只 49%，相反）。
+    pub coverage: Option<f64>,
     /// 比值一律 `Option`——分母为 0 时给 `None`，面板显示「—」而不是 inf。
     pub adv_pct: Option<f64>,
     pub ad_ratio: Option<f64>,
@@ -114,6 +119,121 @@ pub struct OverviewRow {
 
 pub const OV_WINDOWS: [&str; 4] = ["日", "周", "月", "YTD"];
 
+/// 一家交易所（某个类型）的汇总（docs/22 §7）。
+#[derive(Default, Clone, PartialEq)]
+pub struct VenueRow {
+    pub venue: String,
+    pub label: String,
+    /// `spot` / `perp` / `option`。
+    pub kind: String,
+    pub pairs: i64,
+    pub vol_usd: f64,
+    pub btc: Option<f64>,
+    /// 抓取失败的原因。**有值就说明这行的数字不可信**——一家挂掉只表现为
+    /// 成交额变 0 的话，和「今天没人交易」在面板上一模一样。
+    pub err: String,
+}
+
+/// 一行加密行情（热门/涨/跌共用）。
+#[derive(Default, Clone, PartialEq)]
+pub struct CoinRow {
+    pub symbol: String,
+    pub venue: String,
+    pub kind: String,
+    pub price: f64,
+    pub chg_pct: f64,
+    pub vol_usd: Option<f64>,
+}
+
+/// 一行永续。
+#[derive(Default, Clone, PartialEq)]
+pub struct PerpRow {
+    pub symbol: String,
+    pub venue: String,
+    pub price: f64,
+    pub chg_pct: f64,
+    /// 单期费率。
+    pub funding: f64,
+    /// **年化**费率。各所结算间隔不同（HL 1h、其余 8h），只有这个能横比。
+    pub funding_apr: f64,
+    pub oi_usd: Option<f64>,
+    pub vol_usd: Option<f64>,
+}
+
+/// 期权链汇总（Deribit 按币种）。
+#[derive(Default, Clone, PartialEq)]
+pub struct OptionRow {
+    pub venue: String,
+    pub currency: String,
+    pub n: i64,
+    pub oi_usd: f64,
+    /// **权利金**成交额，不是名义值——两者差两个数量级。
+    pub vol_usd: f64,
+    pub vol_notional_usd: f64,
+    pub iv: Option<f64>,
+    pub underlying: Option<f64>,
+}
+
+/// 新上市。
+#[derive(Default, Clone, PartialEq)]
+pub struct ListingRow {
+    pub symbol: String,
+    pub venue: String,
+    pub listed_ms: i64,
+}
+
+/// 加密全景整块。
+#[derive(Default, Clone, PartialEq)]
+pub struct Panorama {
+    pub venues: Vec<VenueRow>,
+    pub hot: Vec<CoinRow>,
+    pub gainers: Vec<CoinRow>,
+    pub losers: Vec<CoinRow>,
+    pub perps: Vec<PerpRow>,
+    pub options: Vec<OptionRow>,
+    pub listings: Vec<ListingRow>,
+}
+
+/// 一行预测市场。
+#[derive(Default, Clone, PartialEq)]
+pub struct PredRow {
+    pub platform: String,
+    pub category: String,
+    pub title: String,
+    pub outcome: String,
+    /// 概率（0~1）。
+    pub prob: Option<f64>,
+    /// 24h **概率点**变化（0.10 = 十个点），不是收益率。
+    pub chg_24h: Option<f64>,
+    pub vol_usd: f64,
+    /// 成交额窗口：`24h`（Polymarket）或 `近期`（Kalshi）。
+    /// **两家口径不同，必须跟着数字一起显示**。
+    pub vol_window: String,
+    pub liquidity_usd: Option<f64>,
+    pub spread: Option<f64>,
+    pub close_ms: Option<i64>,
+    pub start_ms: Option<i64>,
+    pub slug: String,
+}
+
+/// 预测市场平台状态。
+#[derive(Default, Clone, PartialEq)]
+pub struct PredSource {
+    pub platform: String,
+    pub label: String,
+    pub rows: i64,
+    pub err: String,
+}
+
+/// 预测市场整块。
+#[derive(Default, Clone, PartialEq)]
+pub struct Prediction {
+    pub sources: Vec<PredSource>,
+    pub hot: Vec<PredRow>,
+    pub movers: Vec<PredRow>,
+    pub fresh: Vec<PredRow>,
+}
+
 /// 一个列组标签。
 #[derive(Default, Clone, PartialEq)]
 pub struct ColumnTab {
@@ -129,6 +249,9 @@ pub struct CatalogItem {
     pub label: String,
     /// 市场才有；类型/分类为空。
     pub region: String,
+    /// 「所有 X 公司」那一项的显示名。空 = 由 `label` 拼。
+    /// 欧洲组下有两项（所有欧盟公司 / 所有欧洲公司）共用组名「欧洲」，拼不出来。
+    pub all_label: String,
 }
 
 /// 一个资产类的可选项（目录下发，面板不硬编码任何一类的选项）。
@@ -177,12 +300,93 @@ pub struct Catalog {
     pub crypto_cats: Vec<CatalogItem>,
     /// 加密热图「来源」的 13 项官方预设（含分类映射与排除规则）。
     pub coin_presets: Vec<super::radar::CoinPreset>,
-    /// 官方 ETF 覆盖的市场代码（24 个，按英文国名字母序，美国置顶）。
-    /// 用股票那 71 个的话，会列出一堆根本没有 ETF 的国家。
+    /// 列键 → 中文标题。**由守护下发**，面板不再维护平行表。
+    pub titles: std::collections::HashMap<String, String>,
+    /// ETF「来源」覆盖的市场代码（24 个，**已按官方顺序排好**：英文国名
+    /// A→Z、不置顶，美国落在 U 段）。股票那份是 60 个、且中国置顶，两份不能共用。
     pub etf_markets: Vec<String>,
-    /// 官方**热图**来源覆盖的市场（60 个）。我的表有 71 个，不限制的话
-    /// 热图的来源下拉会比官网多出一截。
-    pub heatmap_markets: Vec<String>,
+    /// **筛选器**的「市场」下拉（71 国 + 全球，拼音序）。
+    /// 与 `markets`（热图的「来源」，60 国 + 指数）**是两个控件**，不能互相替代。
+    pub screener_markets: Vec<CatalogItem>,
+    /// **每类的筛选清单**（守护下发，逐类抄自官方筛选栏）。
+    /// 每类完全不同——共用一套的话，一半筛选在另一半类上是空表。
+    pub filters: Vec<(String, Vec<FilterItem>)>,
+    /// 枚举型筛选的取值（抄自官方 `enum/ordered`）。按 `field` 与 `filters` 关联。
+    pub enums: Vec<EnumItem>,
+}
+
+/// 一条筛选（目录下发）。
+#[derive(Default, Clone, PartialEq, Debug)]
+pub struct FilterItem {
+    pub field: String,
+    pub label: String,
+    /// `num` / `days` / `enum` / `index`。
+    pub kind: String,
+}
+
+/// 一个枚举字段的取值表。
+#[derive(Default, Clone, PartialEq, Debug)]
+pub struct EnumItem {
+    pub field: String,
+    pub label: String,
+    /// 匹配算子：多数 `equal`；数组型（加密分类）必须 `has`。
+    pub op: String,
+    /// `(发给服务端的 id, 中文显示名)`。
+    pub values: Vec<(String, String)>,
+}
+
+impl Catalog {
+    /// 某一类的筛选清单。目录没给（旧守护）时返回空。
+    pub fn filters_for(&self, kind: &str) -> &[FilterItem] {
+        self.filters.iter().find(|(k, _)| k == kind).map(|(_, v)| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// 某个枚举字段的取值。
+    pub fn enum_of(&self, field: &str) -> Option<&EnumItem> {
+        self.enums.iter().find(|e| e.field == field)
+    }
+}
+
+/// 守护的抓取进度（面板进度条）。
+#[derive(Default, Clone, PartialEq, Debug)]
+pub struct FetchProgress {
+    pub done: usize,
+    pub total: usize,
+    /// 正在抓的来源（`spain/stock`）。空 = 本轮跑完了。
+    pub cur: String,
+    pub eta_s: u64,
+    /// 面板点名要的来源里还没抓到的个数。
+    pub pending: usize,
+    /// 点名来源各自的结果。有它才分得清「还在抓」和「抓完了一行都没有」。
+    pub wanted: Vec<Fetched>,
+}
+
+/// 一个点名来源这一轮的结果。
+#[derive(Default, Clone, PartialEq, Debug)]
+pub struct Fetched {
+    pub src: String,
+    pub sec: String,
+    pub rows: usize,
+    /// 本轮是否已经抓过。false = 还在队列里等。
+    pub done: bool,
+    /// 失败原因；空 = 没失败。**抓失败与抓到 0 行是两回事**。
+    pub err: String,
+}
+
+impl FetchProgress {
+    /// 某个来源这一轮的结果。`None` = 守护还没把它列进来。
+    pub fn of(&self, src: &str) -> Option<&Fetched> {
+        self.wanted.iter().find(|w| w.src == src)
+    }
+
+    /// 0~1。`total` 为 0 时是 1（没活干 = 已完成），不是 0——
+    /// 否则空闲时进度条停在最左边，看着像卡住。
+    pub fn frac(&self) -> f32 {
+        if self.total == 0 {
+            return 1.0;
+        }
+        (self.done as f32 / self.total as f32).clamp(0.0, 1.0)
+    }
 }
 
 #[derive(Default, Clone)]
@@ -191,6 +395,8 @@ pub struct RadarReadout {
     /// 树图的 canvas 缓存据此决定要不要重画（见 radar_view 的 TREEMAP_CACHE）。
     pub generation: u64,
     pub stamp: String,
+    /// 守护的抓取进度。选了一个还没拉的来源时，面板用它画进度条 + 倒计时。
+    pub progress: FetchProgress,
     pub source: String,
     /// 数据等级（docs/22 §0）：加密直连 = "A"。面板**必须**把它显示出来。
     pub tier: String,
@@ -203,6 +409,8 @@ pub struct RadarReadout {
     pub catalog: Catalog,
     pub breadth: Vec<BreadthRow>,
     pub overview: Vec<OverviewRow>,
+    pub panorama: Panorama,
+    pub prediction: Prediction,
     pub refreshed: String,
     /// 慢层快照的时间戳（股票 60s 一刷，与热层不同步——面板要分别标注，
     /// 否则会拿热层的时间当成股票数据的时间）。
@@ -250,6 +458,13 @@ fn runtime_dir() -> PathBuf {
         std::env::var("USER").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     )
+}
+
+/// 抓取进度文件。守护每抓完一个来源就更新一次（文件很小，在 tmpfs 上）。
+fn progress_path() -> PathBuf {
+    let b = board_path();
+    let stem = b.file_stem().and_then(|x| x.to_str()).unwrap_or("radar_board");
+    b.with_file_name(format!("{stem}_progress.json"))
 }
 
 fn board_path() -> PathBuf {
@@ -313,12 +528,33 @@ pub fn request_body(
     // 里找。实测全美「P/E<10 且 息>4%」命中 87 只，样本里只有 2 只。
     let f: Vec<serde_json::Value> = filters
         .iter()
-        .map(|w| match w.text {
-            Some(t) => serde_json::json!({"field": w.field, "op": w.op, "text": t}),
-            None => serde_json::json!({"field": w.field, "op": w.op, "right": w.right}),
+        .map(|w| {
+            if !w.texts.is_empty() {
+                // 枚举多选：文本的 in_range（OR）
+                serde_json::json!({"field": w.field, "op": w.op, "texts": w.texts})
+            } else if let Some(t) = w.text {
+                serde_json::json!({"field": w.field, "op": w.op, "text": t})
+            } else {
+                serde_json::json!({"field": w.field, "op": w.op, "right": w.right})
+            }
         })
         .collect();
-    serde_json::json!({ "sources": sources, "filters": f }).to_string()
+    // `nonce`：**只为让内容变化**。守护是靠「请求文件内容变了」判断要不要
+    // 提前抓的，而 `write_request` 又会把内容相同的写入去重掉——没有它的话，
+    // 「立即获取」按钮在选择没变时是个空操作。
+    serde_json::json!({ "sources": sources, "filters": f, "nonce": nonce() }).to_string()
+}
+
+/// 「立即获取」的计数器。加一次就让下一份请求体与上一份不同。
+static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn nonce() -> u64 {
+    NONCE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 点「立即获取」时调用：改变请求体内容，逼守护中断当前一轮去抓。
+pub fn bump_nonce() {
+    NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 把选中的来源写给守护（原子写，同快照）。
@@ -416,17 +652,58 @@ fn poll_once() -> RadarReadout {
         return RadarReadout { refreshed, ..Default::default() };
     };
     let mut st = RadarReadout { refreshed, ..parse_board(&hot) };
+    // 枚举取值灌进筛选模块的注册表：`preset_label` 用在 `Display` 里，
+    // 塞不进目录引用，只能走注册表（见 radar_filter::ENUM_VALUES）
+    if !st.catalog.enums.is_empty() {
+        let mut reg = super::radar_filter::EnumReg::default();
+        for e in &st.catalog.enums {
+            reg.by_field.insert(e.field.clone(), (e.op.clone(), e.values.clone()));
+        }
+        super::radar_filter::set_enums(reg);
+    }
+    // 抓取进度：单独一个小文件，守护每个来源更新一次。读不到就当没有进度条，
+    // 不影响其余显示
+    st.progress = read_json(progress_path()).map(|v| parse_progress(&v)).unwrap_or_default();
     // 慢层可缺（股票层没开、或还没写第一轮）——热层照常显示，不整个作废
     if let Some(slow) = read_json(slow_path()) {
         let s = parse_board(&slow);
         st.rows.extend(s.rows);
         st.breadth = s.breadth;
         st.overview = s.overview;
+        st.panorama = s.panorama;
+        st.prediction = s.prediction;
         // 标的总数是两层之和；单层的 n_symbols 只算自己那部分
         st.n_symbols += s.n_symbols;
         st.slow_stamp = s.stamp;
     }
     st
+}
+
+/// 纯解析（可单测）：进度文件 → [`FetchProgress`]。
+fn parse_progress(v: &serde_json::Value) -> FetchProgress {
+    let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    FetchProgress {
+        done: n("done") as usize,
+        total: n("total") as usize,
+        cur: v.get("cur").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        eta_s: n("eta_s"),
+        pending: n("pending") as usize,
+        wanted: v
+            .get("wanted")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|o| Fetched {
+                        src: o.get("src").and_then(|x| x.as_str()).unwrap_or("").into(),
+                        sec: o.get("sec").and_then(|x| x.as_str()).unwrap_or("").into(),
+                        rows: o.get("rows").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+                        done: o.get("done").and_then(|x| x.as_bool()).unwrap_or(false),
+                        err: o.get("err").and_then(|x| x.as_str()).unwrap_or("").into(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
 }
 
 /// 从窗口字典里按 [`WINDOWS`] 顺序取值。**缺席即 `None`，不补 0**——
@@ -529,6 +806,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                         code: s(o, "code"),
                         label: s(o, "label"),
                         region: s(o, "region"),
+                        all_label: s(o, "all_label"),
                     })
                     .collect()
             })
@@ -570,6 +848,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                         code: o.get("key").and_then(|x| x.as_str()).unwrap_or_default().into(),
                         label: o.get("label").and_then(|x| x.as_str()).unwrap_or_default().into(),
                         region: String::new(),
+                        all_label: String::new(),
                     })
                     .collect()
             })
@@ -629,6 +908,19 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
         indices: index_items,
         types: items("types"),
         crypto_cats: items("crypto_cats"),
+        titles: cat("titles")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| {
+                        Some((
+                            o.get("key")?.as_str()?.to_string(),
+                            o.get("title")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         coin_presets: cat("coin_presets")
             .and_then(|x| x.as_array())
             .map(|a| {
@@ -649,11 +941,44 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                     .collect()
             })
             .unwrap_or_default(),
-        etf_markets: cat("etf_markets")
+        screener_markets: items("screener_markets"),
+        filters: cat("filters")
             .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| {
+                        let k = o.get("kind")?.as_str()?.to_string();
+                        let its = o.get("items")?.as_array()?.iter()
+                            .map(|i| FilterItem {
+                                field: i.get("field").and_then(|x| x.as_str()).unwrap_or("").into(),
+                                label: i.get("label").and_then(|x| x.as_str()).unwrap_or("").into(),
+                                kind: i.get("kind").and_then(|x| x.as_str()).unwrap_or("num").into(),
+                            })
+                            .collect();
+                        Some((k, its))
+                    })
+                    .collect()
+            })
             .unwrap_or_default(),
-        heatmap_markets: cat("heatmap_markets")
+        enums: cat("enums")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|o| EnumItem {
+                        field: o.get("field").and_then(|x| x.as_str()).unwrap_or("").into(),
+                        label: o.get("label").and_then(|x| x.as_str()).unwrap_or("").into(),
+                        op: o.get("op").and_then(|x| x.as_str()).unwrap_or("equal").into(),
+                        values: o.get("values").and_then(|x| x.as_array())
+                            .map(|vs| vs.iter().filter_map(|v| Some((
+                                v.get("id")?.as_str()?.to_string(),
+                                v.get("name")?.as_str()?.to_string(),
+                            ))).collect())
+                            .unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        etf_markets: cat("etf_markets")
             .and_then(|x| x.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default(),
@@ -672,6 +997,8 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                     new_high: i64_of(o, "new_high"),
                     new_low: i64_of(o, "new_low"),
                     net_new_high: i64_of(o, "net_new_high"),
+                    total: i64_of(o, "total"),
+                    coverage: optf_of(o, "coverage"),
                     adv_pct: optf_of(o, "adv_pct"),
                     ad_ratio: optf_of(o, "ad_ratio"),
                     above_ma200_pct: optf_of(o, "above_ma200_pct"),
@@ -703,6 +1030,112 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 .collect()
         })
         .unwrap_or_default();
+    let f_of = |o: &serde_json::Value, k: &str| o.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let arr = |k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let sub = |root: &str, k: &str| {
+        v.get(root)
+            .and_then(|x| x.get(k))
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let _ = &arr;
+    let coins = |a: Vec<serde_json::Value>| -> Vec<CoinRow> {
+        a.iter()
+            .map(|o| CoinRow {
+                symbol: s(o, "symbol"),
+                venue: s(o, "venue"),
+                kind: s(o, "kind"),
+                price: f_of(o, "price"),
+                chg_pct: f_of(o, "chg_pct"),
+                vol_usd: optf_of(o, "vol_usd"),
+            })
+            .collect()
+    };
+    let panorama = Panorama {
+        venues: sub("panorama", "venues")
+            .iter()
+            .map(|o| VenueRow {
+                venue: s(o, "venue"),
+                label: s(o, "label"),
+                kind: s(o, "kind"),
+                pairs: i64_of(o, "pairs"),
+                vol_usd: f_of(o, "vol_usd"),
+                btc: optf_of(o, "btc"),
+                err: s(o, "err"),
+            })
+            .collect(),
+        hot: coins(sub("panorama", "hot")),
+        gainers: coins(sub("panorama", "gainers")),
+        losers: coins(sub("panorama", "losers")),
+        perps: sub("panorama", "perps")
+            .iter()
+            .map(|o| PerpRow {
+                symbol: s(o, "symbol"),
+                venue: s(o, "venue"),
+                price: f_of(o, "price"),
+                chg_pct: f_of(o, "chg_pct"),
+                funding: f_of(o, "funding"),
+                funding_apr: f_of(o, "funding_apr"),
+                oi_usd: optf_of(o, "oi_usd"),
+                vol_usd: optf_of(o, "vol_usd"),
+            })
+            .collect(),
+        options: sub("panorama", "options")
+            .iter()
+            .map(|o| OptionRow {
+                venue: s(o, "venue"),
+                currency: s(o, "currency"),
+                n: i64_of(o, "n"),
+                oi_usd: f_of(o, "oi_usd"),
+                vol_usd: f_of(o, "vol_usd"),
+                vol_notional_usd: f_of(o, "vol_notional_usd"),
+                iv: optf_of(o, "iv"),
+                underlying: optf_of(o, "underlying"),
+            })
+            .collect(),
+        listings: sub("panorama", "listings")
+            .iter()
+            .map(|o| ListingRow {
+                symbol: s(o, "symbol"),
+                venue: s(o, "venue"),
+                listed_ms: i64_of(o, "listed_ms"),
+            })
+            .collect(),
+    };
+    let preds = |a: Vec<serde_json::Value>| -> Vec<PredRow> {
+        a.iter()
+            .map(|o| PredRow {
+                platform: s(o, "platform"),
+                category: s(o, "category"),
+                title: s(o, "title"),
+                outcome: s(o, "outcome"),
+                prob: optf_of(o, "prob"),
+                chg_24h: optf_of(o, "chg_24h"),
+                vol_usd: f_of(o, "vol_usd"),
+                vol_window: s(o, "vol_window"),
+                liquidity_usd: optf_of(o, "liquidity_usd"),
+                spread: optf_of(o, "spread"),
+                close_ms: o.get("close_ms").and_then(|x| x.as_i64()),
+                start_ms: o.get("start_ms").and_then(|x| x.as_i64()),
+                slug: s(o, "slug"),
+            })
+            .collect()
+    };
+    let prediction = Prediction {
+        sources: sub("prediction", "sources")
+            .iter()
+            .map(|o| PredSource {
+                platform: s(o, "platform"),
+                label: s(o, "label"),
+                rows: i64_of(o, "rows"),
+                err: s(o, "err"),
+            })
+            .collect(),
+        hot: preds(sub("prediction", "hot")),
+        movers: preds(sub("prediction", "movers")),
+        fresh: preds(sub("prediction", "fresh")),
+    };
     RadarReadout {
         stamp: s(v, "stamp"),
         source: s(v, "source"),
@@ -713,6 +1146,8 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
         catalog,
         breadth,
         overview,
+        panorama,
+        prediction,
         backfill: BackfillView {
             done: bi("done"),
             total: bi("total"),
@@ -769,11 +1204,132 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn the_panorama_keeps_the_caveats_attached_to_the_numbers() {
+        let j = r#"{"stamp":"s","rows":[],"panorama":{
+          "venues":[{"venue":"kraken","label":"Kraken","kind":"spot","pairs":731,
+                     "vol_usd":8.2e8,"btc":79637.0,"err":null},
+                    {"venue":"okx","label":"欧易","kind":"spot","pairs":0,
+                     "vol_usd":0.0,"btc":null,"err":"超时"}],
+          "hot":[{"symbol":"BTCUSDT","base":"BTC","venue":"binance","kind":"spot",
+                  "price":79643.0,"chg_pct":-0.49,"vol_usd":7.6e8}],
+          "perps":[{"symbol":"BTC","venue":"hyperliquid","price":79609.0,"chg_pct":-0.5,
+                    "funding":0.0000125,"funding_apr":0.1095,"oi_usd":null,"vol_usd":9.3e8}],
+          "options":[{"venue":"deribit","currency":"BTC","n":964,"oi_usd":3.35e10,
+                      "vol_usd":3.7e6,"vol_notional_usd":3.27e8,"iv":40.9,"underlying":79632.0}],
+          "listings":[{"symbol":"BYDUSDT","venue":"binance-perp","listed_ms":1788746400000}]}}"#;
+        let r = parse_board(&serde_json::from_str(j).unwrap());
+        let p = &r.panorama;
+        // 抓取失败要能看出来。只表现为成交额 0 的话，和「今天没人交易」一模一样
+        assert_eq!(p.venues[1].err, "超时");
+        assert!(p.venues[0].err.is_empty());
+        // 币安永续的未平仓要逐对再请求，这里天生拿不到——`None` 才对，0 是假的
+        assert_eq!(p.perps[0].oi_usd, None);
+        assert_eq!(p.perps[0].vol_usd, Some(9.3e8));
+        // 权利金成交额和名义成交额差两个数量级，两个都要有
+        assert!(p.options[0].vol_notional_usd > p.options[0].vol_usd * 50.0);
+        assert_eq!(p.listings[0].symbol, "BYDUSDT");
+        // `base` 只在守护侧用来剔稳定币互换对，面板不需要
+        assert_eq!(p.hot[0].symbol, "BTCUSDT");
+    }
+
+    #[test]
+    fn prediction_rows_carry_the_window_their_volume_was_measured_over() {
+        // Polymarket 是严格 24h、Kalshi 是「近期」。窗口不跟着数字走的话，
+        // 这一列在混排下就是在比两个不同的量
+        let j = r#"{"stamp":"s","rows":[],"prediction":{
+          "sources":[{"platform":"kalshi","label":"Kalshi","rows":50,"err":null}],
+          "hot":[{"platform":"kalshi","category":"Sports","title":"谁赢","outcome":"A",
+                  "prob":0.81,"chg_24h":0.1,"vol_usd":2.6e7,"vol_window":"近期",
+                  "liquidity_usd":null,"spread":0.01,"close_ms":1788746400000,
+                  "start_ms":null,"slug":"KX-1"}],
+          "movers":[],"fresh":[]}}"#;
+        let r = parse_board(&serde_json::from_str(j).unwrap());
+        let h = &r.prediction.hot[0];
+        assert_eq!(h.vol_window, "近期");
+        assert_eq!(h.prob, Some(0.81));
+        // 概率**点**，不是收益率
+        assert_eq!(h.chg_24h, Some(0.1));
+        assert_eq!(h.liquidity_usd, None, "缺就是缺，不能变成 0");
+        assert_eq!(r.prediction.sources[0].rows, 50);
+    }
+
+    #[test]
+    fn a_snapshot_from_a_daemon_without_these_sections_still_parses() {
+        // 守护可能是旧版本。整份快照不能因为少两段就解析失败
+        let j = r#"{"stamp":"s","rows":[]}"#;
+        let r = parse_board(&serde_json::from_str(j).unwrap());
+        assert!(r.panorama.venues.is_empty() && r.prediction.hot.is_empty());
+        assert!(r.present);
+    }
+
+    #[test]
+    fn breadth_carries_its_coverage() {
+        // 覆盖率必须到面板：覆盖 28% 与 100% 是两个不同的结论
+        // （实测美国前 200 只上涨占比 34%、前 2000 只 49%——相反）
+        let v = serde_json::json!({"stamp":"t","rows":[],"breadth":[
+            {"market":"america","n":2000,"total":7190,"coverage":0.278,
+             "adv":970,"dec":1011,"unch":19,"new_high":5,"new_low":3,"net_new_high":2,
+             "adv_pct":0.49,"ad_ratio":0.96,"above_ma200_pct":0.66}]});
+        let b = &parse_board(&v).breadth[0];
+        assert_eq!((b.n, b.total), (2000, 7190));
+        assert!((b.coverage.unwrap() - 0.278).abs() < 1e-9);
+        // 旧守护没给这两个字段时不能崩，也不该显示成 0%
+        let old = serde_json::json!({"stamp":"t","rows":[],"breadth":[
+            {"market":"x","n":10,"adv":5,"dec":5,"unch":0,"new_high":0,"new_low":0,"net_new_high":0}]});
+        let o = &parse_board(&old).breadth[0];
+        assert_eq!(o.total, 0);
+        assert!(o.coverage.is_none(), "缺字段要给 None，面板才会退回只显示样本数");
+    }
+
+    #[test]
+    fn a_settled_empty_source_is_not_the_same_as_still_fetching() {
+        // 面板据此决定「显示进度条」还是「这个来源本来就没有标的」。
+        // 不区分的话 0 行的来源会一直转进度条，看着像永远在循环抓取
+        let p = super::parse_progress(&serde_json::json!({
+            "done": 5, "total": 5, "pending": 0,
+            "wanted": [
+                {"src": "belgium", "sec": "fund", "rows": 0, "done": true},
+                {"src": "spain", "sec": "stock", "rows": 0, "done": false},
+                {"src": "italy", "sec": "stock", "rows": 0, "done": true, "err": "429 限流"}
+            ]
+        }));
+        assert!(p.of("belgium").unwrap().done, "抓完了，只是空的");
+        assert!(!p.of("spain").unwrap().done, "还在队列里等");
+        assert_eq!(p.of("italy").unwrap().err, "429 限流", "抓失败≠抓到 0 行");
+        assert!(p.of("france").is_none(), "没点名的来源不该出现");
+    }
+
+    #[test]
+    fn progress_parses_and_idle_reads_as_complete() {
+        // 进度条要能表达三种状态：还没开始 / 抓到一半 / 跑完
+        let p = super::parse_progress(&serde_json::json!({
+            "done": 3, "total": 28, "cur": "spain/stock", "eta_s": 12, "pending": 1
+        }));
+        assert_eq!((p.done, p.total, p.pending, p.eta_s), (3, 28, 1, 12));
+        assert_eq!(p.cur, "spain/stock");
+        assert!((p.frac() - 3.0 / 28.0).abs() < 1e-6);
+        // 字段缺失不该 panic，也不该显示成「0%」卡住的样子
+        let empty = super::parse_progress(&serde_json::json!({}));
+        assert_eq!(empty.frac(), 1.0, "没活干应显示为已完成，不是停在最左");
+    }
+
+    #[test]
+    fn bumping_the_nonce_changes_the_body() {
+        // 「立即获取」靠内容变化触发：守护比对请求文件内容、`write_request`
+        // 又对相同内容去重——没有 nonce 的话，选择不变时按钮是个空操作
+        let a = super::request_body("america", &["stock"], &[]);
+        super::bump_nonce();
+        let b = super::request_body("america", &["stock"], &[]);
+        assert_ne!(a, b, "nonce 没让请求体变化，按钮就不会触发抓取");
+    }
+
+    #[test]
     fn request_body_carries_the_pushdown_filters() {
         use super::super::radar_filter::Wire;
         let f = vec![
-            Wire { field: "price_earnings_ttm", op: "eless", right: vec![10.0], text: None },
-            Wire { field: "sector", op: "equal", right: vec![], text: Some("Finance") },
+            Wire { field: "price_earnings_ttm", op: "eless", right: vec![10.0], text: None , texts: vec![]},
+            Wire { field: "sector", op: "equal", right: vec![], text: Some("Finance") , texts: vec![]},
         ];
         let v: serde_json::Value =
             serde_json::from_str(&request_body("america", &["stock"], &f)).unwrap();

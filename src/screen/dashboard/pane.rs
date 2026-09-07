@@ -2108,7 +2108,7 @@ pub enum Content {
     /// 预测市场 Polymarket（docs/19）：无行情流，渲染走 `ws::prediction_readout` 旁路快照。
     PredictionBoard,
     /// 全市场雷达（docs/22 P0）：无行情流，渲染走 `ws::radar_readout` 旁路快照。
-    /// ⚠ 与 `Content::Heatmap`（订单簿深度热图）无关，别混（docs/22 §9 坑 1）。
+    /// ⚠ 与 `Content::Heatmap`（订单簿深度热图）无关，别混（docs/22 §10 坑 1）。
     MarketMap,
     /// 录制驾驶舱（docs/08 F6-P3）：交互式控制中心，携带可编辑配置状态。
     Recorder(crate::ws::recorder::RecorderPaneState),

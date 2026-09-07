@@ -18,7 +18,8 @@
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Text};
 use iced::widget::{
-    button, canvas as canvas_widget, column, container, pick_list, row, scrollable, text,
+    button, canvas as canvas_widget, column, container, pick_list, progress_bar, row, scrollable,
+    text,
 };
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
@@ -27,9 +28,10 @@ use super::radar::{
     order, scale_kind, Opt, visible, AssetFilter, ColumnSet, GroupBy, Palette, RadarMsg,
     ScaleKind, SortKey, ViewMode, ViewState, COLOR_OPTS, SIZE_OPTS,
 };
-use super::radar_filter::{self, FILTERS, N_FILTERS};
+use super::radar_filter::{self, FILTERS};
 use super::radar_readout::{
-    Catalog, CatalogItem, ColumnTab, BreadthRow, OverviewRow, RadarRow, OV_WINDOWS, WINDOWS,
+    Catalog, CatalogItem, CoinRow, ColumnTab, BreadthRow, OverviewRow, Panorama, PredRow,
+    Prediction, RadarRow, OV_WINDOWS, WINDOWS,
 };
 use super::treemap::{squarify_nested, Rect};
 
@@ -103,6 +105,10 @@ pub(crate) fn ramp(p: Palette) -> Ramp {
 /// 而 `change|60` 那种 ±0.5% 的会全落中性。
 /// 该口径的色阶边界。百分数类用资产类下发的官方边界；
 /// 其余（相对成交量、雷达自有的 σ）保留原有量纲。
+/// 总览（指数）与市场宽度用的色阶。这两处是**指数与汇率**，不属于任何一个
+/// 资产类，目录里也没有它们的条目，所以取股票那档（官方指数热图同口径）。
+pub(crate) const STOCK_SCALE: [f64; 3] = [1.0, 2.0, 3.0];
+
 pub(crate) fn scale_edges(key: &str, scale: [f64; 3]) -> [f64; 3] {
     if key.starts_with("own:") || key == "relative_volume_10d_calc" {
         return edges(key);
@@ -140,11 +146,20 @@ pub(crate) fn bucket(v: f64, e: &[f64; 3]) -> usize {
     e.iter().filter(|x| a >= **x).count()
 }
 
-fn pick(v: Option<f64>, key: &str, r: &Ramp, bright: bool, zero: Color) -> Color {
+fn pick(
+    v: Option<f64>,
+    key: &str,
+    scale: [f64; 3],
+    r: &Ramp,
+    bright: bool,
+    zero: Color,
+) -> Color {
     match v {
         Some(v) if v.is_finite() => {
             let d = v - center(key);
-            let b = bucket(d, &edges(key));
+            // **与图例同一条 `scale_edges`**：分开走两套刻度的话，图例说 ±13%
+            // 而格子在 ±3% 就顶满，看图的人无从察觉（加密实测整片深色）
+            let b = bucket(d, &scale_edges(key, scale));
             if b == 0 {
                 return zero;
             }
@@ -165,15 +180,30 @@ fn fade(c: Color, toward: Color, t: f32) -> Color {
     )
 }
 
-/// 值 → 树图填充色。`trusted=false`（未热身 / 借横截面基线）向中性去饱和，视觉上就弱一等。
-pub(crate) fn scale_color(v: Option<f64>, key: &str, p: Palette, trusted: bool) -> Color {
-    let c = pick(v, key, &ramp(p), false, C_NEUTRAL);
+/// 值 → 树图填充色。`scale` 是**该资产类**的色阶（目录下发，见 `asset_scale`）——
+/// 每类不同：股票 ±1/2/3%、加密 ±3/8/13%。共用一套的话加密整片顶到最深档。
+///
+/// `trusted=false`（未热身 / 借横截面基线）向中性去饱和，视觉上就弱一等。
+pub(crate) fn scale_color(
+    v: Option<f64>,
+    key: &str,
+    scale: [f64; 3],
+    p: Palette,
+    trusted: bool,
+) -> Color {
+    let c = pick(v, key, scale, &ramp(p), false, C_NEUTRAL);
     if trusted { c } else { fade(c, C_NEUTRAL, 0.6) }
 }
 
 /// 值 → 表格文字色（同一分档，更高亮度）。
-pub(crate) fn scale_text(v: Option<f64>, key: &str, p: Palette, trusted: bool) -> Color {
-    let c = pick(v, key, &ramp(p), true, C_DIM);
+pub(crate) fn scale_text(
+    v: Option<f64>,
+    key: &str,
+    scale: [f64; 3],
+    p: Palette,
+    trusted: bool,
+) -> Color {
+    let c = pick(v, key, scale, &ramp(p), true, C_DIM);
     if trusted { c } else { fade(c, C_DIM, 0.55) }
 }
 
@@ -361,8 +391,8 @@ pub(crate) fn columns(v: ViewState, cat: &Catalog) -> Vec<Col> {
                 for k in &t.cols {
                     out.push(Col {
                         key: SortKey::Metric(intern(k)),
-                        title: metric_title(k).to_string(),
-                        width: metric_width(k),
+                        title: title_of(cat, k).to_string(),
+                        width: metric_width(cat, k),
                     });
                 }
             }
@@ -373,6 +403,14 @@ pub(crate) fn columns(v: ViewState, cat: &Catalog) -> Vec<Col> {
 
 /// 指标键 → 列头中文名。未收录的键直接显示原键——比显示空白强，
 /// 也让「加了列但忘了配名字」这件事一眼看得见。
+/// 列的中文标题。**优先用守护下发的**（`catalog.titles`）——
+/// 列在守护侧定义，标题也该在那边，两边各留一份必然漂移。
+///
+/// [`metric_title`] 只作为旧守护的回退，不再是唯一来源。
+pub(crate) fn title_of<'a>(cat: &'a Catalog, k: &'a str) -> &'a str {
+    cat.titles.get(k).map(String::as_str).unwrap_or_else(|| metric_title(k))
+}
+
 pub(crate) fn metric_title(k: &str) -> &str {
     match k {
         "close" => "价格",
@@ -609,8 +647,8 @@ pub(crate) fn metric_title(k: &str) -> &str {
 /// 原来按 `chars().count()` 判断长短：中文标题都短，看不出问题；一旦某个键
 /// 漏了中文名而回退到原始键（`earnings_release_date` 折合 13 个单位 ≈143px），
 /// 就会算出 78px 然后和右边一列叠在一起。
-fn metric_width(k: &str) -> f32 {
-    ((text_units(metric_title(k)) + 2.0) * 11.0 + 8.0).clamp(78.0, 132.0)
+fn metric_width(cat: &Catalog, k: &str) -> f32 {
+    ((text_units(title_of(cat, k)) + 2.0) * 11.0 + 8.0).clamp(78.0, 132.0)
 }
 
 /// 树图去重键。
@@ -656,6 +694,7 @@ pub(crate) fn cell_text(
     p: Palette,
 ) -> (String, Color) {
     let trusted = r.trustworthy();
+    let sc = row_scale(cat, r);
     match k {
         SortKey::Symbol => (
             r.symbol.clone(),
@@ -700,7 +739,7 @@ pub(crate) fn cell_text(
                 || key == "change"
                 || key == "gap"
             {
-                scale_text(v, "change", p, true)
+                scale_text(v, "change", sc, p, true)
             } else {
                 C_TXT
             };
@@ -708,10 +747,10 @@ pub(crate) fn cell_text(
         }
         SortKey::Price => (price(r.price), C_TXT),
         SortKey::Turnover => (usd(r.quote_vol_24h), C_DIM),
-        SortKey::Ret(i) => (opt_pct(r.ret[i]), scale_text(r.ret[i].map(|x| (x.exp() - 1.0) * 100.0), "change", p, trusted)),
-        SortKey::Z(i) => (opt_z(r.z_ret[i]), scale_text(r.z_ret[i], "own:speed_z", p, trusted)),
-        SortKey::VolZ => (opt_z(r.z_vol), scale_text(r.z_vol, "own:zvol", p, trusted)),
-        SortKey::CntZ => (opt_z(r.z_cnt), scale_text(r.z_cnt, "own:zvol", p, trusted)),
+        SortKey::Ret(i) => (opt_pct(r.ret[i]), scale_text(r.ret[i].map(|x| (x.exp() - 1.0) * 100.0), "change", sc, p, trusted)),
+        SortKey::Z(i) => (opt_z(r.z_ret[i]), scale_text(r.z_ret[i], "own:speed_z", sc, p, trusted)),
+        SortKey::VolZ => (opt_z(r.z_vol), scale_text(r.z_vol, "own:zvol", sc, p, trusted)),
+        SortKey::CntZ => (opt_z(r.z_cnt), scale_text(r.z_cnt, "own:zvol", sc, p, trusted)),
     }
 }
 
@@ -978,6 +1017,23 @@ pub(crate) struct FSel {
     pub pi: u8,
 }
 
+/// 枚举下拉的一项。索引用 `usize`——`FSel.pi` 是 `u8`，装不下债券发行人
+/// 那 16897 个取值。`i == usize::MAX` 是「不限」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ESel {
+    pub fi: usize,
+    pub i: usize,
+}
+
+impl std::fmt::Display for ESel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.i == usize::MAX {
+            return f.write_str("不限");
+        }
+        f.write_str(&radar_filter::enum_display(self.fi, self.i))
+    }
+}
+
 impl std::fmt::Display for FSel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(radar_filter::preset_label(self.fi, self.pi))
@@ -988,7 +1044,7 @@ impl std::fmt::Display for FSel {
 ///
 /// 收起时只显示已设的几个（点一下即清除），展开才铺开全部 19 个——
 /// 一直铺着的话热图就没地方了。
-fn filter_bar<'a>(v: ViewState) -> Element<'a, RadarMsg> {
+fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
     let n = radar_filter::active_count(&v);
     let mut head = row![chip(
         &if n > 0 { format!("筛选 {n}") } else { "筛选".into() },
@@ -1037,17 +1093,84 @@ fn filter_bar<'a>(v: ViewState) -> Element<'a, RadarMsg> {
         let mut r = row![].spacing(6).align_y(iced::Alignment::Center);
         // **只列当前资产类适用的筛选**：把「市盈率」摆给债券、把「最差收益率」
         // 摆给股票，用户设了会得到一张空表而且没有任何提示
-        for fi in radar_filter::for_kind(v.asset.kind()) {
+        for fi in radar_filter::for_kind_ordered(v.asset.kind(), cat.filters_for(v.asset.kind())) {
             let d = &FILTERS[fi];
-            let opts: Vec<FSel> = (0..=radar_filter::n_presets(fi) as u8)
+            let is_enum = d.kind == radar_filter::FKind::Enum;
+            // 官方**每个数值下拉末尾都有「手动设置」**；债券的数值筛选更是只有它
+            let mut opts: Vec<FSel> = (0..=radar_filter::n_presets(fi) as u8)
                 .map(|pi| FSel { fi, pi })
                 .collect();
+            if !is_enum && d.kind != radar_filter::FKind::Sector {
+                opts.push(FSel { fi, pi: radar_filter::PI_MANUAL });
+            }
             // ⓢ = 能下推到服务端（全市场），无标记 = 只在已加载的行里筛
             r = r.push(
                 text(format!("{}{} ", d.label, if d.server.is_some() { "ⓢ" } else { "" }))
                     .size(11)
                     .color(C_DIM),
             );
+            if is_enum {
+                // 官方枚举下拉 = **搜索框 + 多选复选框列表 + 虚拟滚动**
+                // （债券发行人 16897 项、货币 46628 项，没有搜索根本没法用）。
+                // iced 没有现成的可搜下拉，拆成「搜索框 + 过滤后的 pick_list」。
+                let q = radar_filter::enum_query(fi);
+                if radar_filter::n_presets(fi) > 20 {
+                    r = r.push(
+                        iced::widget::text_input("搜索", &q)
+                            .on_input(move |t| {
+                                radar_filter::set_enum_query(fi, t);
+                                RadarMsg::ManualEdited
+                            })
+                            .size(11)
+                            .padding([2, 6])
+                            .width(Length::Fixed(90.0)),
+                    );
+                }
+                // 一次至多列 200 项：再多 pick_list 会卡，而官方靠虚拟滚动。
+                // 搜索框就是用来把范围收窄到这 200 项以内的。
+                const CAP: usize = 200;
+                let mut opts: Vec<ESel> = vec![ESel { fi, i: usize::MAX }];
+                opts.extend(
+                    radar_filter::enum_matching(fi, CAP).into_iter().map(|i| ESel { fi, i }),
+                );
+                let sel = radar_filter::enum_selection(fi);
+                r = r.push(
+                    pick_list(opts, None::<ESel>, move |o: ESel| {
+                        if o.i == usize::MAX {
+                            RadarMsg::ClearEnum { fi: o.fi }
+                        } else {
+                            RadarMsg::ToggleEnum { fi: o.fi, i: o.i }
+                        }
+                    })
+                    .placeholder(if sel.is_empty() {
+                        "不限".to_string()
+                    } else {
+                        format!("已选 {}", sel.len())
+                    })
+                    .text_size(11)
+                    .padding([2, 6])
+                    .width(Length::Fixed(132.0)),
+                );
+                // 已选的列出来，点 ✕ 去掉——只显示「已选 N」看不出选了什么
+                for &j in sel.iter().take(3) {
+                    r = r.push(chip(
+                        &format!("{} ✕", radar_filter::enum_display(fi, j)),
+                        true,
+                        RadarMsg::ToggleEnum { fi, i: j },
+                    ));
+                }
+                if sel.len() > 3 {
+                    r = r.push(text(format!("+{}", sel.len() - 3)).size(10).color(C_DIM));
+                }
+                n_shown += 1;
+                if n_shown % 4 == 0 {
+                    col = col.push(std::mem::replace(
+                        &mut r,
+                        row![].spacing(6).align_y(iced::Alignment::Center),
+                    ));
+                }
+                continue;
+            }
             r = r.push(
                 pick_list(opts, Some(FSel { fi, pi: v.filters[fi] }), |o: FSel| {
                     RadarMsg::SetFilter { fi: o.fi, pi: o.pi }
@@ -1056,6 +1179,22 @@ fn filter_bar<'a>(v: ViewState) -> Element<'a, RadarMsg> {
                 .padding([2, 6])
                 .width(Length::Fixed(132.0)),
             );
+            // 选了「手动设置」就地出两个输入框（下界 / 上界，空 = 该侧不限）
+            if v.filters[fi] == radar_filter::PI_MANUAL {
+                let (lo, hi) = radar_filter::manual_text(fi);
+                for (is_lo, cur, ph) in [(true, lo, "下界"), (false, hi, "上界")] {
+                    r = r.push(
+                        iced::widget::text_input(ph, &cur)
+                            .on_input(move |t| {
+                                radar_filter::set_manual(fi, is_lo, t);
+                                RadarMsg::ManualEdited
+                            })
+                            .size(11)
+                            .padding([2, 6])
+                            .width(Length::Fixed(72.0)),
+                    );
+                }
+            }
             n_shown += 1;
             if n_shown % 4 == 0 {
                 col = col.push(std::mem::replace(
@@ -1135,6 +1274,79 @@ fn head_cell<'a>(col: &Col, v: ViewState) -> Element<'a, RadarMsg> {
         iced::Alignment::Start
     })
     .into()
+}
+
+/// 抓取进度条：进度条本体 + `已抓 n/m` + 倒计时。
+///
+/// 数字和倒计时都给，是因为只有一条进度条时，人无法判断「它到底有没有在动」。
+fn fetch_progress<'a>(p: &super::radar_readout::FetchProgress) -> Element<'a, RadarMsg> {
+    let pct = (p.frac() * 100.0).round() as u32;
+    let line = if p.total == 0 {
+        "守护正在启动本轮抓取…".to_string()
+    } else if p.pending > 0 {
+        // 面板点名要的来源排在队首，所以这里的倒计时通常只有几秒
+        format!(
+            "已抓 {}/{} 个来源（{pct}%）· 你选的还差 {} 个 · 约 {}s",
+            p.done, p.total, p.pending, p.eta_s
+        )
+    } else {
+        format!("已抓 {}/{} 个来源（{pct}%）· 约 {}s 跑完本轮", p.done, p.total, p.eta_s)
+    };
+    let cur = if p.cur.is_empty() { String::new() } else { format!("　正在抓 {}", p.cur) };
+    column![
+        progress_bar(0.0..=1.0, p.frac()),
+        text(format!("{line}{cur}")).size(10).color(C_DIM),
+    ]
+    .spacing(3)
+    .into()
+}
+
+/// 当前资产类下真正生效的来源。对不上就返回空串（＝全部）。
+///
+/// 视图状态是一份，来源却是**按资产类分域**的：股票选市场码、加密选分类预设。
+/// 换资产类的路径不止一条（点资产、切视图、恢复上次状态），只要有一条没清掉
+/// 旧来源，就会得到一张空表——而下拉因为找不到它会回退显示「全部」，
+/// 看起来一切正常。所以这里按目录**重新判定一次**，而不是指望每条路径都记得清。
+pub(crate) fn effective_source(cat: &Catalog, v: ViewState) -> &'static str {
+    if v.source.is_empty() {
+        return "";
+    }
+    let ok = match v.asset {
+        AssetFilter::Coin | AssetFilter::Cex | AssetFilter::Dex => {
+            v.source == "all"
+                || cat.coin_presets.iter().any(|p| p.code == v.source)
+                || cat.crypto_cats.iter().any(|c| c.code == v.source)
+        }
+        AssetFilter::Etf => cat.etf_markets.iter().any(|c| c == v.source),
+        AssetFilter::Stock | AssetFilter::All => {
+            // `markets` 只含热图那 60 国；筛选器的 11 个国家与「全球」在
+            // `screener_markets` 里——只查前者的话，筛选器选了它们会被判成无效
+            cat.markets.iter().any(|m| m.code == v.source)
+                || cat.screener_markets.iter().any(|m| m.code == v.source)
+                || cat.indices.iter().any(|i| i.code == v.source)
+        }
+        // 债券/外汇没有来源下拉
+        AssetFilter::Bond | AssetFilter::Forex => false,
+    };
+    if ok { v.source } else { "" }
+}
+
+/// 市场那一项（不是指数）的显示名。
+///
+/// 三条规则，都来自官方下拉：
+/// - ETF 的条目**就是国名本身**，不是「所有 X 公司」
+/// - 一般市场拼成「所有{国名}公司」
+/// - 「欧洲」组下面有**两项**（所有欧盟公司 / 所有欧洲公司）共用组名「欧洲」，
+///   拼不出来，只能用守护下发的 `all_label`——不用它的话两项会同名，
+///   下拉里看起来就是「所有欧洲公司」重复了一遍。
+fn all_entry_label(etf: bool, m: &CatalogItem) -> String {
+    if etf {
+        m.label.clone()
+    } else if m.all_label.is_empty() {
+        format!("所有{}公司", m.label)
+    } else {
+        m.all_label.clone()
+    }
 }
 
 /// 来源市场下拉的一项。`key` 是快照里的 venue（空串 = 全部）。
@@ -1228,6 +1440,23 @@ pub(crate) fn asset_groups<'a>(cat: &'a Catalog, a: AssetFilter) -> &'a [Catalog
 }
 
 /// 该资产类的色阶边界。
+/// **该行**所属资产类的色阶。表格里各类是混排的（「全部」视图下股票和加密同表），
+/// 按「当前选中的资产类」取会给加密行套上股票的 ±1/2/3%，整片顶到最深档。
+pub(crate) fn row_scale(cat: &Catalog, r: &RadarRow) -> [f64; 3] {
+    // 行上的 asset 是数据侧的键（`equity`/`crypto`/`coin`…），
+    // 目录里的 kind 是资产类的键——`crypto` 是 Binance 直连的交易对，归 CEX
+    let kind = match r.asset.as_str() {
+        "equity" => "stock",
+        "crypto" => "cex",
+        k => k,
+    };
+    cat.assets
+        .iter()
+        .find(|x| x.kind == kind)
+        .map(|x| x.scale)
+        .unwrap_or([1.0, 2.0, 3.0])
+}
+
 pub(crate) fn asset_scale(cat: &Catalog, a: AssetFilter) -> [f64; 3] {
     cat.assets
         .iter()
@@ -1342,7 +1571,7 @@ fn treemap_cache(generation: u64, v: ViewState) -> std::rc::Rc<Cache> {
     })
 }
 
-fn intern(s: &str) -> &'static str {
+pub(crate) fn intern(s: &str) -> &'static str {
     use std::sync::Mutex;
     static POOL: Mutex<Option<std::collections::HashSet<&'static str>>> = Mutex::new(None);
     let mut g = match POOL.lock() {
@@ -1383,6 +1612,377 @@ fn pct_log(v: Option<f64>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+/// 加密全景（docs/22 §7）：八家交易所的公开 REST 汇成一屏。
+///
+/// 分五块，每块回答一个问题：交易所横向=「量在谁那儿、价差多大」、
+/// 热门/涨跌=「今天谁在动」、永续=「杠杆那边什么姿势」、
+/// 期权=「隐波和未平仓」、新上市=「有什么新东西」。
+fn crypto_view<'a>(p: &Panorama, v: ViewState) -> Element<'a, RadarMsg> {
+    let mut col = column![].spacing(3);
+    if p.venues.is_empty() {
+        return text("暂无加密全景数据——守护还没跑完第一轮（默认 30s）")
+            .size(11)
+            .color(C_DIM)
+            .into();
+    }
+    let up = ramp(v.palette).up[2];
+    let dn = ramp(v.palette).down[2];
+    let sign = |x: f64| if x >= 0.0 { up } else { dn };
+    let money = |x: Option<f64>| x.map(usd).unwrap_or_else(|| "—".into());
+
+    col = col.push(
+        text("八家交易所公开 REST · 无 key · 只读。成交额只统计美元计价的对——非美元对的量不是美元，加不到一起。")
+            .size(10)
+            .color(C_DIM),
+    );
+
+    // ── 交易所横向 ──
+    // 跨所价差用**中位价**做基准而不是某一家：拿一家当基准的话，
+    // 那家自己抽风时会显示成「其余七家一起偏了」
+    let mut btcs: Vec<f64> = p.venues.iter().filter_map(|x| x.btc).collect();
+    btcs.sort_by(f64::total_cmp);
+    let med = (!btcs.is_empty()).then(|| btcs[btcs.len() / 2]);
+    col = col.push(section("交易所横向", "价差以各所 BTC 现价对中位价的偏离计，单位基点"));
+    let mut hdr = row![].spacing(3);
+    for (t, w, n) in [
+        ("场所", 150.0, false),
+        ("类型", 52.0, false),
+        ("交易对", 62.0, true),
+        ("24h 成交额", 104.0, true),
+        ("BTC", 96.0, true),
+        ("对中位价差", 104.0, true),
+        ("状态", 320.0, false),
+    ] {
+        hdr = hdr.push(cell(t.into(), w, C_HEAD, n));
+    }
+    col = col.push(hdr);
+    for x in &p.venues {
+        let bp = match (x.btc, med) {
+            (Some(b), Some(m)) if m > 0.0 => Some((b / m - 1.0) * 10_000.0),
+            _ => None,
+        };
+        col = col.push(
+            row![
+                cell(x.label.clone(), 150.0, C_TXT, false),
+                cell(
+                    match x.kind.as_str() {
+                        "spot" => "现货",
+                        "perp" => "永续",
+                        _ => "期权",
+                    }
+                    .into(),
+                    52.0,
+                    C_DIM,
+                    false
+                ),
+                cell(x.pairs.to_string(), 62.0, C_DIM, true),
+                // 抓取失败时成交额是 0；直接显示 0 和「今天没人交易」一模一样，
+                // 故失败行的数值列一律显示「—」
+                cell(
+                    if x.err.is_empty() { usd(x.vol_usd) } else { "—".into() },
+                    104.0,
+                    C_TXT,
+                    true
+                ),
+                cell(
+                    x.btc.map(|b| format!("{b:.0}")).unwrap_or_else(|| "—".into()),
+                    96.0,
+                    C_TXT,
+                    true
+                ),
+                cell(
+                    bp.map(|b| format!("{b:+.1}")).unwrap_or_else(|| "—".into()),
+                    104.0,
+                    bp.map_or(C_DIM, |b| if b.abs() > 20.0 { C_GOLD } else { C_DIM }),
+                    true
+                ),
+                cell(
+                    if x.err.is_empty() { String::new() } else { format!("⚠ {}", x.err) },
+                    320.0,
+                    C_GOLD,
+                    false
+                ),
+            ]
+            .spacing(3),
+        );
+    }
+
+    // ── 三张榜 ──
+    let coin_table = |title: &str, note: &str, rows: &[CoinRow]| {
+        let mut c = column![].spacing(3);
+        c = c.push(section(title, note));
+        let mut h = row![].spacing(3);
+        for (t, w, n) in [
+            ("代号", 150.0, false),
+            ("场所", 92.0, false),
+            ("价格", 104.0, true),
+            ("24h", 72.0, true),
+            ("24h 成交额", 104.0, true),
+        ] {
+            h = h.push(cell(t.into(), w, C_HEAD, n));
+        }
+        c = c.push(h);
+        for r in rows {
+            c = c.push(
+                row![
+                    cell(r.symbol.clone(), 150.0, C_TXT, false),
+                    cell(r.venue.clone(), 92.0, C_DIM, false),
+                    cell(money_cell(r.price), 104.0, C_TXT, true),
+                    cell(format!("{:+.2}%", r.chg_pct), 72.0, sign(r.chg_pct), true),
+                    cell(money(r.vol_usd), 104.0, C_TXT, true),
+                ]
+                .spacing(3),
+            );
+        }
+        c
+    };
+    col = col.push(coin_table(
+        "热门榜",
+        "跨所按 24h 成交额。已剔除稳定币互换对——USDC/USDT 常年霸榜第一，但那不是行情",
+        &p.hot,
+    ));
+    col = col.push(coin_table("涨幅榜", "已设成交额地板，否则榜首永远是几百美元成交的空气币", &p.gainers));
+    col = col.push(coin_table("跌幅榜", "", &p.losers));
+
+    // ── 永续 ──
+    col = col.push(section(
+        "永续 · 资金费",
+        "按**年化**费率绝对值排。各所结算间隔不同（Hyperliquid 每小时、其余 8 小时），只有年化能横比",
+    ));
+    let mut h = row![].spacing(3);
+    for (t, w, n) in [
+        ("合约", 150.0, false),
+        ("场所", 92.0, false),
+        ("价格", 104.0, true),
+        ("24h", 72.0, true),
+        ("单期费率", 84.0, true),
+        ("年化", 84.0, true),
+        ("未平仓", 104.0, true),
+        ("24h 成交额", 104.0, true),
+    ] {
+        h = h.push(cell(t.into(), w, C_HEAD, n));
+    }
+    col = col.push(h);
+    for r in &p.perps {
+        col = col.push(
+            row![
+                cell(r.symbol.clone(), 150.0, C_TXT, false),
+                cell(r.venue.clone(), 92.0, C_DIM, false),
+                cell(money_cell(r.price), 104.0, C_TXT, true),
+                cell(format!("{:+.2}%", r.chg_pct), 72.0, sign(r.chg_pct), true),
+                cell(format!("{:+.4}%", r.funding * 100.0), 84.0, sign(r.funding), true),
+                cell(format!("{:+.0}%", r.funding_apr * 100.0), 84.0, sign(r.funding_apr), true),
+                // 币安要逐对再请求一次才有未平仓，这里给不出——显示「—」而不是 0
+                cell(money(r.oi_usd), 104.0, C_TXT, true),
+                cell(money(r.vol_usd), 104.0, C_TXT, true),
+            ]
+            .spacing(3),
+        );
+    }
+
+    // ── 期权 ──
+    if !p.options.is_empty() {
+        col = col.push(section(
+            "期权（Deribit）",
+            "权利金成交额是付出去的钱，名义成交额是标的口径——两者差两个数量级，别混着看",
+        ));
+        let mut h = row![].spacing(3);
+        for (t, w, n) in [
+            ("币种", 92.0, false),
+            ("挂牌", 62.0, true),
+            ("标的价", 96.0, true),
+            ("未平仓名义", 116.0, true),
+            ("权利金成交", 116.0, true),
+            ("名义成交", 116.0, true),
+            ("隐波", 72.0, true),
+        ] {
+            h = h.push(cell(t.into(), w, C_HEAD, n));
+        }
+        col = col.push(h);
+        for r in &p.options {
+            col = col.push(
+                row![
+                    cell(r.currency.clone(), 92.0, C_TXT, false),
+                    cell(r.n.to_string(), 62.0, C_DIM, true),
+                    cell(
+                        r.underlying.map(|x| format!("{x:.0}")).unwrap_or_else(|| "—".into()),
+                        96.0,
+                        C_TXT,
+                        true
+                    ),
+                    cell(usd(r.oi_usd), 116.0, C_TXT, true),
+                    cell(usd(r.vol_usd), 116.0, C_DIM, true),
+                    cell(usd(r.vol_notional_usd), 116.0, C_TXT, true),
+                    cell(
+                        r.iv.map(|x| format!("{x:.1}%")).unwrap_or_else(|| "—".into()),
+                        72.0,
+                        C_GOLD,
+                        true
+                    ),
+                ]
+                .spacing(3),
+            );
+        }
+    }
+
+    // ── 新上市 ──
+    if !p.listings.is_empty() {
+        col = col.push(section(
+            "新上市",
+            "口径是币安期货的 onboardDate——公开接口里**只有它**给上市时间，故这一栏只覆盖币安永续",
+        ));
+        let mut h = row![].spacing(3);
+        for (t, w, n) in [("合约", 150.0, false), ("场所", 116.0, false), ("上市", 116.0, true)] {
+            h = h.push(cell(t.into(), w, C_HEAD, n));
+        }
+        col = col.push(h);
+        for r in &p.listings {
+            col = col.push(
+                row![
+                    cell(r.symbol.clone(), 150.0, C_TXT, false),
+                    cell(r.venue.clone(), 116.0, C_DIM, false),
+                    cell(day_cell(r.listed_ms), 116.0, C_TXT, true),
+                ]
+                .spacing(3),
+            );
+        }
+    }
+    col.into()
+}
+
+/// 预测市场（docs/22 §7）：Polymarket + Kalshi。
+fn prediction_view<'a>(p: &Prediction, v: ViewState) -> Element<'a, RadarMsg> {
+    let mut col = column![].spacing(3);
+    if p.sources.is_empty() {
+        return text("暂无预测市场数据——守护还没跑完第一轮（默认 30s）")
+            .size(11)
+            .color(C_DIM)
+            .into();
+    }
+    let up = ramp(v.palette).up[2];
+    let dn = ramp(v.palette).down[2];
+
+    col = col.push(
+        text("Polymarket Gamma + Kalshi 公开接口 · 无 key · 只读。价格就是概率；涨跌是**概率点**，不是收益率。")
+            .size(10)
+            .color(C_DIM),
+    );
+    let mut sr = row![text("来源 ").size(10).color(C_DIM)].spacing(6);
+    for s in &p.sources {
+        sr = sr.push(
+            text(if s.err.is_empty() {
+                format!("{} {} 条", s.label, s.rows)
+            } else {
+                format!("{} ⚠ {}", s.label, s.err)
+            })
+            .size(10)
+            .color(if s.err.is_empty() { C_DIM } else { C_GOLD }),
+        );
+    }
+    col = col.push(sr);
+
+    let table = |title: &str, note: &str, rows: &[PredRow]| {
+        let mut c = column![].spacing(3);
+        c = c.push(section(title, note));
+        let mut h = row![].spacing(3);
+        for (t, w, n) in [
+            ("平台", 88.0, false),
+            ("分类", 84.0, false),
+            ("问题", 340.0, false),
+            ("结果", 150.0, false),
+            ("概率", 62.0, true),
+            ("24h 变化", 78.0, true),
+            ("成交额", 96.0, true),
+            ("窗口", 52.0, false),
+            ("到期", 88.0, true),
+        ] {
+            h = h.push(cell(t.into(), w, C_HEAD, n));
+        }
+        c = c.push(h);
+        for r in rows {
+            let chg = r.chg_24h;
+            c = c.push(
+                row![
+                    cell(r.platform.clone(), 88.0, C_DIM, false),
+                    cell(r.category.clone(), 84.0, C_DIM, false),
+                    cell(clip(&r.title, 46), 340.0, C_TXT, false),
+                    cell(clip(&r.outcome, 20), 150.0, C_TXT, false),
+                    cell(
+                        r.prob.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "—".into()),
+                        62.0,
+                        C_TXT,
+                        true
+                    ),
+                    // 「+10pt」不是「+10%」：0.45→0.55 是十个概率点，
+                    // 写成百分比会被读成 22% 的收益率
+                    cell(
+                        chg.map(|x| format!("{:+.0}pt", x * 100.0)).unwrap_or_else(|| "—".into()),
+                        78.0,
+                        chg.map_or(C_DIM, |x| if x >= 0.0 { up } else { dn }),
+                        true
+                    ),
+                    cell(usd(r.vol_usd), 96.0, C_TXT, true),
+                    // 两家的窗口不是同一个：Polymarket 严格 24h、Kalshi 是「近期」。
+                    // 口径必须跟着数字走，否则这一列在混排下就是在比两个不同的量
+                    cell(r.vol_window.clone(), 52.0, C_GOLD, false),
+                    cell(
+                        r.close_ms.map(day_cell).unwrap_or_else(|| "—".into()),
+                        88.0,
+                        C_DIM,
+                        true
+                    ),
+                ]
+                .spacing(3),
+            );
+        }
+        c
+    };
+
+    col = col.push(table(
+        "热门榜",
+        "两家**各自排序后交错**，不跨平台比大小——成交额的窗口和单位都不同，直接混排会让一家整体压过另一家",
+        &p.hot,
+    ));
+    col = col.push(table(
+        "概率异动",
+        "已剔除首次成交（前价为 0 的盘，第一笔打在 97 分会报成「涨了 97 点」）；5% 冲到 99% 的结算行情保留",
+        &p.movers,
+    ));
+    col = col.push(table("新上市", "只收已有成交的新盘——纯按开盘时间排，全是每分钟机器生成的五分钟制小盘", &p.fresh));
+    col.into()
+}
+
+/// 小节标题 + 一句口径说明。口径写在标题旁边而不是文档里——
+/// 看板上的数字要能自己解释自己。
+fn section<'a>(title: &str, note: &str) -> Element<'a, RadarMsg> {
+    let mut r = row![text(format!("▍{title}")).size(12).color(C_HEAD)].spacing(8);
+    if !note.is_empty() {
+        r = r.push(text(note.to_string()).size(10).color(C_DIM));
+    }
+    container(r).padding([6, 0]).into()
+}
+
+/// 毫秒 → `MM-DD HH:MM`。0 或负数当没有。
+fn day_cell(ms: i64) -> String {
+    use chrono::TimeZone;
+    if ms <= 0 {
+        return "—".into();
+    }
+    chrono::Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|t| t.format("%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "—".into())
+}
+
+/// 按**字符数**截断（不是字节）：中文标题按字节切会切出半个字。
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    s.chars().take(n.saturating_sub(1)).collect::<String>() + "…"
+}
+
 /// World Overview（docs/22 §2 ②）：各国指数横向对比，本币 vs 美元并列。
 fn overview_view<'a>(rows: &[OverviewRow], v: ViewState) -> Element<'a, RadarMsg> {
     let mut col = column![].spacing(3);
@@ -1414,14 +2014,14 @@ fn overview_view<'a>(rows: &[OverviewRow], v: ViewState) -> Element<'a, RadarMsg
             tr = tr.push(cell(
                 pct_log(r.local[i]),
                 82.0,
-                scale_text(r.local[i].map(|x| (x.exp() - 1.0) * 100.0), "change", v.palette, true),
+                scale_text(r.local[i].map(|x| (x.exp() - 1.0) * 100.0), "change", STOCK_SCALE, v.palette, true),
                 true,
             ));
             // 美元口径缺席就是缺席——绝不退回本币值
             tr = tr.push(cell(
                 pct_log(r.usd[i]),
                 82.0,
-                scale_text(r.usd[i].map(|x| (x.exp() - 1.0) * 100.0), "change", v.palette, true),
+                scale_text(r.usd[i].map(|x| (x.exp() - 1.0) * 100.0), "change", STOCK_SCALE, v.palette, true),
                 true,
             ));
         }
@@ -1439,8 +2039,10 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState) -> Element<'a, RadarMsg> 
             .color(C_DIM)
             .into();
     }
+    // 覆盖率**逐行显示**（下面「样本」那一列），不再笼统说「是前 N 只」——
+    // 澳大利亚 100% 与美国 28% 的可信度完全不同，一句话概括不了
     col = col.push(
-        text("⚠ 口径是各市场按市值排序的前 N 只，不是全市场——这是大盘股宽度。真正的 A/D 线要拉全部上市证券。")
+        text("⚠ 每市场按市值取前 N 只算，覆盖率见「样本」列。覆盖不足时这是大盘股宽度，不是全市场 A/D。")
             .size(10)
             .color(C_GOLD),
     );
@@ -1454,7 +2056,7 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState) -> Element<'a, RadarMsg> 
     let mut hdr = row![].spacing(3);
     for (t, w) in [
         ("市场", 92.0),
-        ("只数", 46.0),
+        ("样本", 130.0),
         ("涨", 46.0),
         ("跌", 46.0),
         ("涨跌比", 56.0),
@@ -1483,7 +2085,18 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState) -> Element<'a, RadarMsg> 
         col = col.push(
             row![
                 cell(b.market.clone(), 92.0, C_TXT, false),
-                cell(b.n.to_string(), 46.0, C_DIM, true),
+                // 「样本/总数 覆盖率」——覆盖 28% 与 100% 的可信度差得远，
+                // 只显示样本数看不出这一点
+                cell(
+                    match b.coverage {
+                        Some(c) => format!("{}/{} {:.0}%", b.n, b.total, c * 100.0),
+                        None => b.n.to_string(),
+                    },
+                    130.0,
+                    // 覆盖不足一半的标黄：那更接近「大盘股宽度」
+                    if b.coverage.is_some_and(|c| c < 0.5) { C_GOLD } else { C_DIM },
+                    true,
+                ),
                 cell(b.adv.to_string(), 46.0, up, true),
                 cell(b.dec.to_string(), 46.0, dn, true),
                 cell(ratio, 56.0, C_TXT, true),
@@ -1524,7 +2137,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
                 .size(11)
                 .color(if running { C_OK } else { C_DIM }),
             text("　").size(11),
-            button(text("⟳ 刷新").size(11)).padding([2, 7]).on_press(RadarMsg::Refresh),
+            button(text("⟳ 立即获取").size(11)).padding([2, 7]).on_press(RadarMsg::Refresh),
             text(format!("  刷新于 {}", st.refreshed)).size(10).color(C_DIM),
         ]
         .spacing(4)
@@ -1613,6 +2226,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         (ViewMode::Screener, "筛选器"),
         (ViewMode::Overview, "全球总览"),
         (ViewMode::Breadth, "市场宽度"),
+        (ViewMode::Crypto, "加密全景"),
+        (ViewMode::Prediction, "预测市场"),
     ] {
         mr = mr.push(chip(l, m == v.mode, RadarMsg::SetMode(m)));
     }
@@ -1630,6 +2245,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     if !matches!(v.mode, ViewMode::Heatmap | ViewMode::Screener) {
         let inner = match v.mode {
             ViewMode::Overview => overview_view(&st.overview, v),
+            ViewMode::Crypto => crypto_view(&st.panorama, v),
+            ViewMode::Prediction => prediction_view(&st.prediction, v),
             _ => breadth_view(&st.breadth, v),
         };
         body = body.push(inner);
@@ -1645,6 +2262,11 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         );
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
+
+    // 来源与资产类对不上时（例如从股票切过来时留下的市场码），按「全部」处理。
+    // **只在下拉里回退显示是不够的**：下拉会显示成「全部」，而过滤仍按旧值走，
+    // 于是「界面看着正常、表格一行都没有」——这是最难排查的一种坏。
+    let v = ViewState { source: effective_source(&st.catalog, v), ..v };
 
     // ── 资产类过滤 ──
     // 股票的成交额远大于加密，同图时加密会被挤到几乎看不见（实测 BTC 只剩一个小格）。
@@ -1689,40 +2311,64 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             .iter()
             .filter_map(|r| r.venue.split(':').nth(1))
             .collect();
-        // 来源清单**按资产类与视图限定**，与官网一致：
-        //   ETF   官方 24 个市场（用股票那 71 个会列出一堆根本没有 ETF 的国家）
-        //   热图  官方 60 个（我的表有 71 个，不限制会比官网多出一截）
-        //   筛选器 不限——我验证过的市场都能选，是官方的超集
-        let allow: Option<&Vec<String>> = if v.asset == AssetFilter::Etf {
-            Some(&st.catalog.etf_markets).filter(|x| !x.is_empty())
-        } else if v.mode == ViewMode::Heatmap {
-            Some(&st.catalog.heatmap_markets).filter(|x| !x.is_empty())
-        } else {
-            None
+        // 官方来源下拉的组织（用户录屏逐项核对）：
+        //   股票  **按国家分组**，组内**指数在前、「所有 X 公司」在后**
+        //   ETF   **扁平**：没有指数、条目就是国名本身（不是「所有 X 公司」）
+        //
+        // 国家之间的顺序由守护下发时排好（英文国名 A→Z，股票那份把中国置顶、
+        // ETF 那份不置顶），面板照单铺开，不自己排。
+        let etf = v.asset == AssetFilter::Etf;
+        // **筛选器与热图是两个控件**（docs/22 §6.32）：
+        //   热图「来源」  60 国 + 指数 + 欧盟/欧洲，英文国名序
+        //   筛选器「市场」 71 国 + 全球，拼音序，**没有指数**
+        // 一度共用一份清单，于是筛选器少了 11 个国家和「全球」。
+        let screener = v.mode == ViewMode::Screener && !st.catalog.screener_markets.is_empty();
+        let pick = |codes: &[String]| -> Vec<&CatalogItem> {
+            codes
+                .iter()
+                .filter_map(|c| st.catalog.markets.iter().find(|m| &m.code == c))
+                .collect()
         };
-        // 官方来源下拉的组织：**按国家分组**（不是按地区），组内**指数在前、
-        // 「所有 X 公司」在后**，国家之间按**英文国名** A→Z、本地区置顶
-        //（顺序由守护下发时已排好）。pick_list 平铺，用「国家 · 项」体现分组。
-        for m in st
-            .catalog
-            .markets
-            .iter()
-            .filter(|m| allow.is_none_or(|a| a.iter().any(|k| k == &m.code)))
-        {
-            for ix in st.catalog.indices.iter().filter(|i| i.region == m.code) {
+        let ordered: Vec<&CatalogItem> = if screener {
+            st.catalog.screener_markets.iter().collect()
+        } else if etf {
+            pick(&st.catalog.etf_markets)
+        } else {
+            st.catalog.markets.iter().collect()
+        };
+        // 官方把「欧洲」组下的两项（所有欧盟公司 / 所有欧洲公司）放在同一个组名
+        // 底下，且**指数在前、两个「所有」在后**。所以按组名切分连续段，
+        // 段内先铺完所有指数、再铺所有「所有 X 公司」——单市场的组走同一条路。
+        let mut i = 0;
+        while i < ordered.len() {
+            let mut j = i;
+            while j < ordered.len() && ordered[j].label == ordered[i].label {
+                j += 1;
+            }
+            let group = &ordered[i..j];
+            // 指数只在热图的「来源」里；筛选器的「市场」下拉没有指数
+            if !etf && !screener {
+                for m in group {
+                    for ix in st.catalog.indices.iter().filter(|x| x.region == m.code) {
+                        opts.push(MarketOpt::of(
+                            &ix.code,
+                            &ix.label,
+                            &m.label,
+                            loaded.contains(ix.code.as_str()),
+                        ));
+                    }
+                }
+            }
+            for m in group {
+                let label = all_entry_label(etf, m);
                 opts.push(MarketOpt::of(
-                    &ix.code,
-                    &ix.label,
+                    &m.code,
+                    &label,
                     &m.label,
-                    loaded.contains(ix.code.as_str()),
+                    loaded.contains(m.code.as_str()),
                 ));
             }
-            opts.push(MarketOpt::of(
-                &m.code,
-                &format!("所有{}公司", m.label),
-                &m.label,
-                loaded.contains(m.code.as_str()),
-            ));
+            i = j;
         }
     }
 
@@ -1748,6 +2394,12 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             .text_size(11)
             .padding([2, 6]),
     );
+    // 选了一个守护还没在拉的来源时，等的是守护下一次抓取。放个按钮在下拉
+    // 旁边，让「我要现在就看」有个明确的入口，而不是干等。
+    ar = ar.push(text(" ").size(11));
+    ar = ar.push(
+        button(text("⟳ 立即获取").size(11)).padding([2, 6]).on_press(RadarMsg::Refresh),
+    );
     ar = ar.push(
         text(format!("　{} / {} 行", vis.len(), st.rows.len()))
             .size(10)
@@ -1757,7 +2409,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // 筛选栏放在空表判断**之前**——被筛空时也得有清除的入口。
     // 热图页不出筛选：官方热图没有筛选栏，靠「来源」选范围
     if v.mode != ViewMode::Heatmap {
-        body = body.push(filter_bar(v));
+        body = body.push(filter_bar(v, &st.catalog));
     }
     if vis.is_empty() {
         let nf = radar_filter::active_count(&v);
@@ -1768,30 +2420,37 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             } else if v.source.is_empty() {
                 "该资产类暂无数据——股票层需在 radar.toml 的 [equities] 里开启".to_string()
             } else {
-                format!(
-                    "「{}」尚未加载——已通知守护去取，下一轮（≤{}s）出数据",
-                    cur.to_string(),
-                    60
-                )
+                // 抓完了才说结论，没抓完只说在抓——不区分的话，
+                // 一个本来就没有标的的来源会一直显示「正在抓取」
+                match st.progress.of(v.source) {
+                    Some(f) if f.done && !f.err.is_empty() => {
+                        format!("「{}」抓取失败：{}", cur.to_string(), f.err)
+                    }
+                    Some(f) if f.done => format!(
+                        "「{}」已抓取，但没有符合条件的标的（0 行）",
+                        cur.to_string()
+                    ),
+                    _ => format!("「{}」正在抓取", cur.to_string()),
+                }
             })
             .size(11)
             .color(C_GOLD),
         );
+        // 干等而没有任何反馈时，人分不清是「在抓」还是「卡住了」。
+        // 进度条 + 数字 + 倒计时，三样都给。**抓完了就不再显示**——
+        // 一直转的进度条会让「这个来源本来就是空的」看着像卡死。
+        let settled = st.progress.of(v.source).is_some_and(|f| f.done);
+        if nf == 0 && !v.source.is_empty() && !settled {
+            body = body.push(fetch_progress(&st.progress));
+        }
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
 
     // 是否要画热图：热图页恒画；筛选器页只有选了「热图」形式才画。
     let draw_map = v.mode == ViewMode::Heatmap || v.form == Form::Heatmap;
 
-    // 「窗口」只服务表格里雷达自有的涨跌幅/速度 z 列组；热图按官方口径
-    // 上色，用不到它。
-    if !draw_map && v.mode != ViewMode::Heatmap {
-        let mut wr = row![text("窗口 ").size(11).color(C_DIM)].spacing(3);
-        for (i, w) in WINDOWS.iter().enumerate() {
-            wr = wr.push(chip(w, i == v.win, RadarMsg::SetWindow(i)));
-        }
-        body = body.push(wr.align_y(iced::Alignment::Center));
-    }
+    // 「窗口」那一行去掉了：它只服务雷达自有的涨跌幅/速度 z 列组，而那三组
+    // 已按官方原样移除（官方筛选器没有窗口切换）。窗口仍在内部用于 z 值计算。
 
     // 「大小/颜色」的可选项**跟着资产类走**：股票 market_cap_basic、
     // 加密 market_cap_calc、DEX dex_total_liquidity——共用一套的话
@@ -1805,11 +2464,15 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         ),
         None => (SIZE_OPTS.to_vec(), COLOR_OPTS.to_vec()),
     };
-    // 换资产类后原来选中的项可能不在新清单里——不回退的话下拉会显示空白
+    // 换资产类后原来选中的项可能不在新清单里。**回退的结果要同时用于绘图**，
+    // 不能只用来填下拉：加密的市值键是 `market_cap_calc`、股票是
+    // `market_cap_basic`，带着股票的键切过去每个方块权重都是 0，
+    // 下拉却显示着一个正常的口径——又是「看着正常、内容是空的」。
     let cur_size = size_list.iter().find(|o| o.key == v.size.key).copied()
         .unwrap_or_else(|| size_list[0]);
     let cur_color = color_list.iter().find(|o| o.key == v.color.key).copied()
         .unwrap_or_else(|| color_list[0]);
+    let v = ViewState { size: cur_size, color: cur_color, ..v };
 
     // ── 热图控制条 ──
     //
@@ -1922,7 +2585,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
                 m.map(|x| format!("{x:+.1}")).unwrap_or_else(|| "—".into())
             },
             weight: area_weight(r, v),
-            color: scale_color(m, v.color.key, v.palette, r.trustworthy()),
+            color: scale_color(m, v.color.key, row_scale(&st.catalog, r), v.palette, r.trustworthy()),
         }
     };
     /// 一行归入哪个分组。空值统一落到「其他」，免得散成一堆无名组。
@@ -2018,14 +2681,9 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         }
     }
     let idx = memo_order(st.generation, ev, &st.rows, &st.catalog.coin_presets);
+    // **只列官方的列组**。雷达自有的三组（涨跌幅 / 速度 z / 参考）已移除——
+    // 官方筛选器没有它们，摆在一起让人以为是官方的。
     let mut cs = row![text("列组 ").size(11).color(C_DIM)].spacing(3);
-    for (c, l) in [
-        (ColumnSet::Speed, "涨跌幅"),
-        (ColumnSet::SpeedZ, "速度 z"),
-        (ColumnSet::Reference, "参考"),
-    ] {
-        cs = cs.push(chip(l, c == v.cols, RadarMsg::SetColumns(c)));
-    }
     for (i, t) in asset_tabs(&st.catalog, v.asset).iter().enumerate() {
         let c = ColumnSet::Tv(i);
         cs = cs.push(chip(&t.label, c == v.cols, RadarMsg::SetColumns(c)));
@@ -2036,14 +2694,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             .size(10)
             .color(C_DIM),
     );
-    cs = cs.push(text("　色板 ").size(11).color(C_DIM));
-    for (pal, l) in [
-        (Palette::BlueOrange, "蓝橙"),
-        (Palette::GreenUp, "绿涨红跌"),
-        (Palette::RedUp, "红涨绿跌"),
-    ] {
-        cs = cs.push(chip(l, pal == v.palette, RadarMsg::SetPalette(pal)));
-    }
+    // 色板不在这一行：官方筛选器的表格没有配色切换（热图页才有）。
     body = body.push(cs.align_y(iced::Alignment::Center));
 
     let mut hdr = row![].spacing(3);
@@ -2086,6 +2737,111 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
 #[cfg(test)]
 mod tests {
+    use super::all_entry_label;
+    use super::super::radar_readout::CatalogItem;
+
+    fn mk(code: &str, label: &str, all: &str) -> CatalogItem {
+        CatalogItem {
+            code: code.into(),
+            label: label.into(),
+            region: label.into(),
+            all_label: all.into(),
+        }
+    }
+
+    #[test]
+    fn the_catalog_title_wins_over_the_local_fallback() {
+        // 标题在守护侧定义。面板那张表只是旧守护的回退——它赢了的话，
+        // 守护改了标题面板还显示旧的，而且没人会发现
+        use super::super::radar_readout::Catalog;
+        let mut cat = Catalog::default();
+        cat.titles.insert("close".into(), "收盘价".into());
+        assert_eq!(super::title_of(&cat, "close"), "收盘价", "该用下发的");
+        assert_eq!(super::metric_title("close"), "价格", "本地那份仍在，只是不优先");
+        // 下发里没有的键回退到本地表
+        assert_eq!(super::title_of(&cat, "change"), "涨跌%");
+        // 两边都没有 → 用键名本身，不是空白
+        assert_eq!(super::title_of(&cat, "zzz_unknown"), "zzz_unknown");
+    }
+
+    #[test]
+    fn tile_colour_uses_the_same_scale_as_the_legend() {
+        // 图例走 scale_edges(读目录下发的每类色阶)，格子走 pick()→edges()(写死的表)。
+        // 两者不一致时，图例说 ±13%、格子却在 ±3% 就顶满——看图的人被骗了。
+        const CRYPTO: [f64; 3] = [3.0, 8.0, 13.0]; // 守护为加密下发的色阶
+        let key = "change|60";
+        let legend_edges = super::scale_edges(key, CRYPTO);
+        assert_eq!(legend_edges, CRYPTO, "图例用的是目录色阶");
+
+        // 一个 +5% 的加密标的：按目录色阶落在第 1 档（3~8%）。
+        // 早先格子走写死的 [0.5,1.5,3.0]，同一个数字会顶到第 3 档。
+        // 这里比的是**格子实际用的颜色**，不是再算一遍分档——
+        // 比分档只能证明我算得对，比颜色才能证明画出来的对
+        let b_legend = super::bucket(5.0, &legend_edges);
+        assert_eq!(b_legend, 1, "按加密色阶 +5% 是第 1 档");
+        let r = super::ramp(super::Palette::BlueOrange);
+        let tile = super::scale_color(Some(5.0), key, CRYPTO, super::Palette::BlueOrange, true);
+        assert_eq!(tile, r.up[0], "格子该用第 1 档的颜色");
+        assert_ne!(tile, r.up[2], "用写死的色阶就会顶到最深档");
+    }
+
+    #[test]
+    fn a_source_from_another_asset_class_is_ignored_not_obeyed() {
+        // 换资产类的路径不止一条，只要有一条没清掉旧来源，过滤就会把整张表滤空，
+        // 而下拉因为找不到它会回退显示「全部」——界面看着正常、内容却是空的
+        use super::super::radar::{AssetFilter, ViewState};
+        use super::super::radar_readout::{Catalog, CatalogItem};
+        let mut cat = Catalog::default();
+        cat.markets.push(CatalogItem {
+            code: "china".into(), label: "中国".into(), region: "亚太".into(), all_label: String::new(),
+        });
+        cat.coin_presets.push(super::super::radar::CoinPreset {
+            code: "defi".into(), label: "DeFi 币".into(), ..Default::default()
+        });
+        let with = |a, s| ViewState { asset: a, source: s, ..ViewState::DEFAULT };
+        // 股票市场码带到加密上 → 当作「全部」
+        assert_eq!(super::effective_source(&cat, with(AssetFilter::Coin, "china")), "");
+        // 加密自己的预设 → 保留
+        assert_eq!(super::effective_source(&cat, with(AssetFilter::Coin, "defi")), "defi");
+        // 加密分类带到股票上 → 当作「全部」
+        assert_eq!(super::effective_source(&cat, with(AssetFilter::Stock, "defi")), "");
+        assert_eq!(super::effective_source(&cat, with(AssetFilter::Stock, "china")), "china");
+        // 空串本来就是「全部」
+        assert_eq!(super::effective_source(&cat, with(AssetFilter::Coin, "")), "");
+        // 筛选器独有的市场（热图的 60 国里没有）也必须被认出来
+        cat.screener_markets.push(CatalogItem {
+            code: "venezuela".into(), label: "委内瑞拉".into(),
+            region: "美洲".into(), all_label: String::new(),
+        });
+        assert_eq!(super::effective_source(&cat, with(AssetFilter::Stock, "venezuela")), "venezuela");
+    }
+
+    #[test]
+    fn the_two_europe_entries_do_not_collide() {
+        // 两项共用组名「欧洲」。不用守护给的 all_label 的话，两项都会被拼成
+        // 「所有欧洲公司」——下拉里看起来就是同一项重复了一遍（实际发生过：
+        // 面板跑的是加 all_label 之前的二进制）
+        let eu = mk("eu", "欧洲", "所有欧盟公司");
+        let europe = mk("europe", "欧洲", "所有欧洲公司");
+        let a = all_entry_label(false, &eu);
+        let b = all_entry_label(false, &europe);
+        assert_eq!(a, "所有欧盟公司");
+        assert_eq!(b, "所有欧洲公司");
+        assert_ne!(a, b, "两项同名就等于下拉里重复一项");
+    }
+
+    #[test]
+    fn ordinary_markets_still_compose_their_own_label() {
+        assert_eq!(all_entry_label(false, &mk("america", "美国", "")), "所有美国公司");
+    }
+
+    #[test]
+    fn etf_entries_are_the_country_name_itself() {
+        // 官方 ETF 下拉里条目就是国名，没有「所有…公司」的措辞（录屏核对）
+        assert_eq!(all_entry_label(true, &mk("america", "美国", "")), "美国");
+        assert_eq!(all_entry_label(true, &mk("japan", "日本", "")), "日本");
+    }
+
 
     /// **所有资产类**会下发的列键（不只是股票那 12 组）。上一版的
     /// `ALL_TAB_COLS` 只覆盖股票，于是债券/DEX 那批列漏了中文名、
@@ -2451,13 +3207,15 @@ mod tests {
     fn every_column_is_wide_enough_for_its_own_header() {
         // 装不下就会和右边一列叠字。上界（132）也得真的够用，
         // 不能靠 clamp 把问题压掉
+        // 空目录 = 全部回退到本地表，正是最宽（英文原名）的那种情况
+        let cat = super::super::radar_readout::Catalog::default();
         for k in ALL_TAB_COLS {
-            let need = (text_units(metric_title(k)) + 2.0) * 11.0 + 8.0;
+            let need = (text_units(title_of(&cat, k)) + 2.0) * 11.0 + 8.0;
             assert!(
-                metric_width(k) >= need,
+                metric_width(&cat, k) >= need,
                 "{k}（{}）需要 {need:.0}px，只给了 {:.0}px",
-                metric_title(k),
-                metric_width(k)
+                title_of(&cat, k),
+                metric_width(&cat, k)
             );
         }
     }
@@ -2498,7 +3256,7 @@ mod tests {
         // 两者若各写一套，图例和格子会对不上——那比没有图例更糟。
         for cb in ["own:speed_z", "change", "Perf.YTD", "relative_volume_10d_calc"] {
             for probe in [-9.0, -3.0, -1.0, -0.1, 0.0, 0.1, 1.0, 3.0, 9.0] {
-                let c = scale_color(Some(probe), cb, P, true);
+                let c = scale_color(Some(probe), cb, STOCK_SCALE, P, true);
                 let r = ramp(P);
                 let known = std::iter::once(C_NEUTRAL)
                     .chain(r.up.iter().copied())
@@ -2512,17 +3270,17 @@ mod tests {
 
     #[test]
     fn color_is_diverging_and_desaturates_untrusted() {
-        let up = scale_color(Some(4.0), "own:speed_z", P, true);
-        let down = scale_color(Some(-4.0), "own:speed_z", P, true);
+        let up = scale_color(Some(4.0), "own:speed_z", STOCK_SCALE, P, true);
+        let down = scale_color(Some(-4.0), "own:speed_z", STOCK_SCALE, P, true);
         assert!(up.b > up.r, "涨端应偏蓝");
         assert!(down.r > down.b, "跌端应偏橙");
         let dist = |c: Color| (c.r - C_NEUTRAL.r).abs() + (c.b - C_NEUTRAL.b).abs();
-        assert!(dist(scale_color(Some(4.0), "own:speed_z", P, false)) < dist(up));
+        assert!(dist(scale_color(Some(4.0), "own:speed_z", STOCK_SCALE, P, false)) < dist(up));
     }
 
     #[test]
     fn missing_value_is_neutral() {
-        let c = scale_color(None, "own:speed_z", P, true);
+        let c = scale_color(None, "own:speed_z", STOCK_SCALE, P, true);
         assert!((c.r - C_NEUTRAL.r).abs() < 1e-6 && (c.b - C_NEUTRAL.b).abs() < 1e-6);
     }
 
@@ -2845,9 +3603,9 @@ mod tests {
         let sep = |a: Color, b: Color| {
             (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
         };
-        let up1 = scale_color(Some(0.4), "own:speed_z", P, true);
-        let dn1 = scale_color(Some(-0.4), "own:speed_z", P, true);
-        let neu = scale_color(Some(0.0), "own:speed_z", P, true);
+        let up1 = scale_color(Some(0.4), "own:speed_z", STOCK_SCALE, P, true);
+        let dn1 = scale_color(Some(-0.4), "own:speed_z", STOCK_SCALE, P, true);
+        let neu = scale_color(Some(0.0), "own:speed_z", STOCK_SCALE, P, true);
         assert!(sep(up1, neu) > 0.15, "最弱涨档与中性太接近：{:.3}", sep(up1, neu));
         assert!(sep(dn1, neu) > 0.15, "最弱跌档与中性太接近：{:.3}", sep(dn1, neu));
         assert!(up1.b > up1.r && dn1.r > dn1.b, "最弱档必须仍带方向色相");
@@ -2872,8 +3630,8 @@ mod tests {
     fn table_text_is_brighter_than_tile_fill() {
         let lum = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
         for probe in [0.6, 1.8, -0.6, -3.9] {
-            let fill = scale_color(Some(probe), "own:speed_z", P, true);
-            let txt = scale_text(Some(probe), "own:speed_z", P, true);
+            let fill = scale_color(Some(probe), "own:speed_z", STOCK_SCALE, P, true);
+            let txt = scale_text(Some(probe), "own:speed_z", STOCK_SCALE, P, true);
             assert!(
                 lum(txt) > lum(fill),
                 "z={probe} 文字色不比填充色亮：{:.3} vs {:.3}",
@@ -2885,11 +3643,11 @@ mod tests {
 
     #[test]
     fn text_scale_keeps_direction_and_neutral() {
-        let up = scale_text(Some(3.0), "own:speed_z", P, true);
-        let dn = scale_text(Some(-3.0), "own:speed_z", P, true);
+        let up = scale_text(Some(3.0), "own:speed_z", STOCK_SCALE, P, true);
+        let dn = scale_text(Some(-3.0), "own:speed_z", STOCK_SCALE, P, true);
         assert!(up.b > up.r, "涨端应偏蓝");
         assert!(dn.r > dn.b, "跌端应偏橙");
-        assert!((scale_text(None, "own:speed_z", P, true).r - C_DIM.r).abs() < 1e-6);
+        assert!((scale_text(None, "own:speed_z", STOCK_SCALE, P, true).r - C_DIM.r).abs() < 1e-6);
     }
 
     #[test]

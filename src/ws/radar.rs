@@ -209,8 +209,9 @@ impl AssetFilter {
     ];
 }
 
-/// 面板视图。三块回答的是不同问题（docs/22 §2）：
-/// 热图=「谁在动」、总览=「哪个国家最强」、宽度=「整个市场什么状态」。
+/// 面板视图。每块回答的是不同问题（docs/22 §2、§7）：
+/// 热图=「谁在动」、总览=「哪个国家最强」、宽度=「整个市场什么状态」、
+/// 加密全景=「八家所合起来是什么盘面」、预测市场=「市场认为会发生什么」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     /// 热图页（对齐 tradingview.com/heatmap/）。
@@ -220,6 +221,10 @@ pub enum ViewMode {
     Screener,
     Overview,
     Breadth,
+    /// 加密全景（docs/22 §7）：八家交易所 + 永续 + 期权 + 新上市。
+    Crypto,
+    /// 预测市场（docs/22 §7）：Polymarket + Kalshi。
+    Prediction,
 }
 
 /// 筛选器的表达形式。官方页面左上角那三个小图标就是这个。
@@ -284,6 +289,13 @@ pub struct ViewState {
     /// 各筛选器选中的档位下标，`0` = 不限（见 `radar_filter::FILTERS`）。
     /// 用定长数组而不是 Map，好让整个视图状态保持 `Copy`。
     pub filters: [u8; N_FILTERS],
+    /// 枚举多选与手动区间的**变更计数**。
+    ///
+    /// 那两样的值存在 `radar_filter` 的注册表里（`ViewState` 是 `Copy` 的定长
+    /// 结构，塞不下可变长的集合与串）。但记忆化用 `ViewState` 当键——
+    /// 只改注册表的话，键不变、缓存不失效，**改了筛选表却不刷新**。
+    /// 每次改动 +1，键就变了。
+    pub filter_epoch: u32,
 }
 
 impl ViewState {
@@ -304,6 +316,7 @@ impl ViewState {
         desc: true,
         show_filters: false,
         filters: [0; N_FILTERS],
+        filter_epoch: 0,
     };
 }
 
@@ -322,8 +335,18 @@ pub enum RadarMsg {
     SetAsset(AssetFilter),
     SetForm(Form),
     SetSource(&'static str),
-    /// 设某个筛选器的档位。`pi = 0` 为不限。
+    /// 设某个筛选器的档位。`pi = 0` 为不限，`pi = PI_MANUAL` 为手动区间。
     SetFilter { fi: usize, pi: u8 },
+    /// 手动区间被编辑。**文本不进消息也不进 `ViewState`**——
+    /// `RadarMsg` 是 `Copy`、`ViewState` 是定长，都放不下可变长的串；
+    /// 而把每次按键 `intern` 成 `&'static str` 会让驻留表随打字无界增长。
+    /// 文本在 `radar_filter` 的注册表里，`on_input` 里直接写进去，
+    /// 这条消息只用来触发重绘。
+    ManualEdited,
+    /// 切换枚举筛选里一个取值的选中状态（官方枚举下拉是**多选**的）。
+    ToggleEnum { fi: usize, i: usize },
+    /// 清空一个枚举筛选的选中集（下拉里选「不限」）。
+    ClearEnum { fi: usize },
     /// 一键清空全部筛选。
     ClearFilters,
     ToggleFilters,
@@ -387,9 +410,26 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
             v.filters = [0; N_FILTERS];
         }
         RadarMsg::SetFilter { fi, pi } => {
-            if fi < N_FILTERS && (pi as usize) <= radar_filter::n_presets(fi) {
+            if fi < N_FILTERS
+                && (pi == radar_filter::PI_MANUAL || (pi as usize) <= radar_filter::n_presets(fi))
+            {
                 v.filters[fi] = pi;
             }
+        }
+        RadarMsg::ManualEdited => v.filter_epoch = v.filter_epoch.wrapping_add(1),
+        RadarMsg::ClearEnum { fi } => {
+            radar_filter::clear_enum(fi);
+            if fi < N_FILTERS {
+                v.filters[fi] = 0;
+            }
+            v.filter_epoch = v.filter_epoch.wrapping_add(1);
+        }
+        RadarMsg::ToggleEnum { fi, i } => {
+            let any = radar_filter::toggle_enum(fi, i);
+            if fi < N_FILTERS {
+                v.filters[fi] = u8::from(any);
+            }
+            v.filter_epoch = v.filter_epoch.wrapping_add(1);
         }
         RadarMsg::ClearFilters => v.filters = [0; N_FILTERS],
         RadarMsg::ToggleFilters => v.show_filters = !v.show_filters,
@@ -405,7 +445,7 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
             );
             }
         }
-        RadarMsg::Start | RadarMsg::Stop | RadarMsg::Refresh => {}
+        RadarMsg::Start | RadarMsg::Stop | RadarMsg::Refresh | RadarMsg::ManualEdited | RadarMsg::ToggleEnum { .. } | RadarMsg::ClearEnum { .. } => {}
     }
     v
 }
@@ -416,6 +456,10 @@ pub fn handle(msg: RadarMsg) {
         RadarMsg::Start => ro::radar_start(),
         RadarMsg::Stop => ro::radar_stop(),
         RadarMsg::Refresh => {
+            // 只叫醒面板自己是不够的——那只是重读快照。要让守护**去取**，
+            // 得让请求文件的内容变一下：`bump_nonce` 改变下一份请求体，
+            // 下一帧 view 里的 `write_request` 就会真写出去，守护据此中断当轮。
+            ro::bump_nonce();
             ro::request_refresh();
             String::new()
         }
