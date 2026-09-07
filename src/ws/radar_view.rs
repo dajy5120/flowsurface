@@ -30,8 +30,9 @@ use super::radar::{
 };
 use super::radar_filter::{self, FILTERS};
 use super::radar_readout::{
-    Catalog, CatalogItem, CoinRow, ColumnTab, BreadthRow, EquityPanorama, MacroBoard,
-    OverviewRow, Panorama, PredRow, Prediction, RadarRow, StockRow, OV_WINDOWS, WINDOWS,
+    Catalog, CatalogItem, CoinRow, ColumnTab, BreadthRow, EquityPanorama, IpoRow, ListingRow,
+    MacroBoard, MacroRow, NewsRow, OverviewRow, Panorama, PerpRow, PredRow, Prediction, RadarRow,
+    SectorRow, StockRow, OV_WINDOWS, WINDOWS,
 };
 use super::treemap::{squarify_nested, Rect};
 
@@ -42,6 +43,9 @@ const C_GOLD: Color = Color::from_rgb(0.9, 0.8, 0.4);
 const C_BAD: Color = Color::from_rgb(0.9, 0.45, 0.4);
 /// 状态「正常/运行中」的提示色（与涨跌色板无关，不随色板切换）。
 const C_OK: Color = Color::from_rgb(0.35, 0.78, 0.98);
+/// 可点开原文的单元格。**必须与普通文本明显不同**——看不出哪些能点，
+/// 等于这些链接不存在。
+const C_LINK: Color = Color::from_rgb(0.47, 0.72, 1.0);
 
 // ───────────────────────── 离散色阶 ─────────────────────────
 
@@ -1636,6 +1640,8 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState) -> Element<'a, RadarMsg> {
             .color(C_DIM),
     );
 
+    col = col.push(crypto_listings(p));
+
     // ── 交易所横向 ──
     // 跨所价差用**中位价**做基准而不是某一家：拿一家当基准的话，
     // 那家自己抽风时会显示成「其余七家一起偏了」
@@ -1708,24 +1714,27 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState) -> Element<'a, RadarMsg> {
     }
 
     // ── 三张榜 ──
-    let coin_table = |title: &str, note: &str, rows: &[CoinRow]| {
+    const COIN_COLS: [Hd; 5] = [
+        ("代号", 150.0, false),
+        ("场所", 92.0, false),
+        ("价格", 104.0, true),
+        ("24h", 72.0, true),
+        ("24h 成交额", 104.0, true),
+    ];
+    let coin_table = |table: u8, title: &str, note: &str, rows: &[CoinRow], dcol: u8| {
         let mut c = column![].spacing(3);
         c = c.push(section(title, note));
-        let mut h = row![].spacing(3);
-        for (t, w, n) in [
-            ("代号", 150.0, false),
-            ("场所", 92.0, false),
-            ("价格", 104.0, true),
-            ("24h", 72.0, true),
-            ("24h 成交额", 104.0, true),
-        ] {
-            h = h.push(cell(t.into(), w, C_HEAD, n));
-        }
-        c = c.push(h);
-        for r in rows {
+        c = c.push(sort_head(table, &COIN_COLS, dcol));
+        for r in sort_rows(rows, table, dcol, |r: &CoinRow, i| match i {
+            0 => sv(&r.symbol),
+            1 => sv(&r.venue),
+            2 => n(r.price),
+            3 => n(r.chg_pct),
+            _ => on(r.vol_usd),
+        }) {
             c = c.push(
                 row![
-                    cell(r.symbol.clone(), 150.0, C_TXT, false),
+                    link_cell(r.symbol.clone(), &r.url, 150.0, C_TXT, false),
                     cell(r.venue.clone(), 92.0, C_DIM, false),
                     cell(money_cell(r.price), 104.0, C_TXT, true),
                     cell(format!("{:+.2}%", r.chg_pct), 72.0, sign(r.chg_pct), true),
@@ -1737,20 +1746,27 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState) -> Element<'a, RadarMsg> {
         c
     };
     col = col.push(coin_table(
+        tbl::CRY_HOT,
         "热门榜",
         "跨所按 24h 成交额。已剔除稳定币互换对——USDC/USDT 常年霸榜第一，但那不是行情",
         &p.hot,
+        4,
     ));
-    col = col.push(coin_table("涨幅榜", "已设成交额地板，否则榜首永远是几百美元成交的空气币", &p.gainers));
-    col = col.push(coin_table("跌幅榜", "", &p.losers));
+    col = col.push(coin_table(
+        tbl::CRY_GAIN,
+        "涨幅榜",
+        "已设成交额地板，否则榜首永远是几百美元成交的空气币",
+        &p.gainers,
+        3,
+    ));
+    col = col.push(coin_table(tbl::CRY_LOSE, "跌幅榜", "", &p.losers, 3));
 
     // ── 永续 ──
     col = col.push(section(
         "永续 · 资金费",
         "按**年化**费率绝对值排。各所结算间隔不同（Hyperliquid 每小时、其余 8 小时），只有年化能横比",
     ));
-    let mut h = row![].spacing(3);
-    for (t, w, n) in [
+    const PERP_COLS: [Hd; 8] = [
         ("合约", 150.0, false),
         ("场所", 92.0, false),
         ("价格", 104.0, true),
@@ -1759,14 +1775,22 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState) -> Element<'a, RadarMsg> {
         ("年化", 84.0, true),
         ("未平仓", 104.0, true),
         ("24h 成交额", 104.0, true),
-    ] {
-        h = h.push(cell(t.into(), w, C_HEAD, n));
-    }
-    col = col.push(h);
-    for r in &p.perps {
+    ];
+    col = col.push(sort_head(tbl::CRY_PERP, &PERP_COLS, 5));
+    for r in sort_rows(&p.perps, tbl::CRY_PERP, 5, |r: &PerpRow, i| match i {
+        0 => sv(&r.symbol),
+        1 => sv(&r.venue),
+        2 => n(r.price),
+        3 => n(r.chg_pct),
+        4 => n(r.funding),
+        // 默认按年化的**绝对值**排：极端负费率和极端正费率一样值得看
+        5 => n(r.funding_apr.abs()),
+        6 => on(r.oi_usd),
+        _ => on(r.vol_usd),
+    }) {
         col = col.push(
             row![
-                cell(r.symbol.clone(), 150.0, C_TXT, false),
+                link_cell(r.symbol.clone(), &r.url, 150.0, C_TXT, false),
                 cell(r.venue.clone(), 92.0, C_DIM, false),
                 cell(money_cell(r.price), 104.0, C_TXT, true),
                 cell(format!("{:+.2}%", r.chg_pct), 72.0, sign(r.chg_pct), true),
@@ -1802,7 +1826,7 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState) -> Element<'a, RadarMsg> {
         for r in &p.options {
             col = col.push(
                 row![
-                    cell(r.currency.clone(), 92.0, C_TXT, false),
+                    link_cell(r.currency.clone(), &r.url, 92.0, C_TXT, false),
                     cell(r.n.to_string(), 62.0, C_DIM, true),
                     cell(
                         r.underlying.map(|x| format!("{x:.0}")).unwrap_or_else(|| "—".into()),
@@ -1825,27 +1849,52 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState) -> Element<'a, RadarMsg> {
         }
     }
 
-    // ── 新上市 ──
-    if !p.listings.is_empty() {
-        col = col.push(section(
-            "新上市",
-            "口径是币安期货的 onboardDate——公开接口里**只有它**给上市时间，故这一栏只覆盖币安永续",
-        ));
-        let mut h = row![].spacing(3);
-        for (t, w, n) in [("合约", 150.0, false), ("场所", 116.0, false), ("上市", 116.0, true)] {
-            h = h.push(cell(t.into(), w, C_HEAD, n));
-        }
-        col = col.push(h);
-        for r in &p.listings {
-            col = col.push(
-                row![
-                    cell(r.symbol.clone(), 150.0, C_TXT, false),
-                    cell(r.venue.clone(), 116.0, C_DIM, false),
-                    cell(day_cell(r.listed_ms), 116.0, C_TXT, true),
-                ]
-                .spacing(3),
-            );
-        }
+    col.into()
+}
+
+/// 新上市（加密）。放在最上面：它是这一屏里**唯一带时效性**的一块，
+/// 埋在四张榜下面的话每次都得滚到底才能看到。
+fn crypto_listings<'a>(p: &Panorama) -> Element<'a, RadarMsg> {
+    let mut col = column![].spacing(3);
+    if p.listings.is_empty() {
+        return col.into();
+    }
+    col = col.push(section(
+        "新上市",
+        "口径是币安期货的 onboardDate——公开接口里**只有它**给上市时间，故这一栏只覆盖币安永续",
+    ));
+    col = col.push(days_bar(
+        tbl::CRY_LISTING,
+        30,
+        &[(7, "近 7 天"), (30, "近 30 天"), (90, "近 90 天"), (0, "全部")],
+    ));
+    let days = super::radar::table_days(tbl::CRY_LISTING, 30);
+    const COLS: [Hd; 3] = [("合约", 150.0, false), ("场所", 116.0, false), ("上市", 116.0, true)];
+    col = col.push(sort_head(tbl::CRY_LISTING, &COLS, 2));
+    let kept: Vec<ListingRow> =
+        p.listings.iter().filter(|r| within_days(r.listed_ms, days)).cloned().collect();
+    if kept.is_empty() {
+        // 筛空了要说是筛空的。空白会被当成「守护没抓到」
+        col = col.push(
+            text(format!("这段时间内没有新上市（共 {} 条，放宽时间范围看看）", p.listings.len()))
+                .size(11)
+                .color(C_DIM),
+        );
+        return col.into();
+    }
+    for r in sort_rows(&kept, tbl::CRY_LISTING, 2, |r: &ListingRow, i| match i {
+        0 => sv(&r.symbol),
+        1 => sv(&r.venue),
+        _ => n(r.listed_ms as f64),
+    }) {
+        col = col.push(
+            row![
+                link_cell(r.symbol.clone(), &r.url, 150.0, C_TXT, false),
+                cell(r.venue.clone(), 116.0, C_DIM, false),
+                cell(day_cell(r.listed_ms), 116.0, C_TXT, true),
+            ]
+            .spacing(3),
+        );
     }
     col.into()
 }
@@ -1881,31 +1930,41 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState) -> Element<'a, RadarMsg> {
     }
     col = col.push(sr);
 
-    let table = |title: &str, note: &str, rows: &[PredRow]| {
+    const PRED_COLS: [Hd; 9] = [
+        ("平台", 88.0, false),
+        ("分类", 84.0, false),
+        ("问题", 340.0, false),
+        ("结果", 150.0, false),
+        ("概率", 62.0, true),
+        ("24h 变化", 78.0, true),
+        ("成交额", 96.0, true),
+        ("窗口", 52.0, false),
+        ("到期", 88.0, true),
+    ];
+    let table = |tid: u8, title: &str, note: &str, rows: &[PredRow], dcol: u8| {
         let mut c = column![].spacing(3);
         c = c.push(section(title, note));
-        let mut h = row![].spacing(3);
-        for (t, w, n) in [
-            ("平台", 88.0, false),
-            ("分类", 84.0, false),
-            ("问题", 340.0, false),
-            ("结果", 150.0, false),
-            ("概率", 62.0, true),
-            ("24h 变化", 78.0, true),
-            ("成交额", 96.0, true),
-            ("窗口", 52.0, false),
-            ("到期", 88.0, true),
-        ] {
-            h = h.push(cell(t.into(), w, C_HEAD, n));
-        }
-        c = c.push(h);
-        for r in rows {
+        c = c.push(sort_head(tid, &PRED_COLS, dcol));
+        for r in sort_rows(rows, tid, dcol, |r: &PredRow, i| match i {
+            0 => sv(&r.platform),
+            1 => sv(&r.category),
+            2 => sv(&r.title),
+            3 => sv(&r.outcome),
+            4 => on(r.prob),
+            // 异动按**绝对值**排：跌 30 个点和涨 30 个点一样值得看
+            5 => on(r.chg_24h.map(f64::abs)),
+            6 => n(r.vol_usd),
+            7 => sv(&r.vol_window),
+            _ => on(r.close_ms.map(|x| x as f64)),
+        }) {
+            let r = &r;
             let chg = r.chg_24h;
             c = c.push(
                 row![
                     cell(r.platform.clone(), 88.0, C_DIM, false),
                     cell(r.category.clone(), 84.0, C_DIM, false),
-                    cell(clip(&r.title, 46), 340.0, C_TXT, false),
+                    // 问题本身是链接：这一列最宽、也最像人会去点的那一处
+                    link_cell(clip(&r.title, 46), &r.url, 340.0, C_TXT, false),
                     cell(clip(&r.outcome, 20), 150.0, C_TXT, false),
                     cell(
                         r.prob.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "—".into()),
@@ -1938,18 +1997,197 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState) -> Element<'a, RadarMsg> {
         c
     };
 
+    // 新上市**放最上面**：它是这一屏里时效性最强的一块
+    let days = super::radar::table_days(tbl::PRED_FRESH, 7);
+    col = col.push(days_bar(
+        tbl::PRED_FRESH,
+        7,
+        &[(1, "近 1 天"), (7, "近 7 天"), (30, "近 30 天"), (0, "全部")],
+    ));
+    let fresh: Vec<PredRow> = p
+        .fresh
+        .iter()
+        .filter(|r| within_days(r.start_ms.unwrap_or(0), days))
+        .cloned()
+        .collect();
     col = col.push(table(
+        tbl::PRED_FRESH,
+        "新上市",
+        "只收已有成交的新盘——纯按开盘时间排，全是每分钟机器生成的五分钟制小盘",
+        &fresh,
+        8,
+    ));
+    if fresh.is_empty() && !p.fresh.is_empty() {
+        col = col.push(
+            text(format!("这段时间内没有新盘（共 {} 条，放宽时间范围看看）", p.fresh.len()))
+                .size(11)
+                .color(C_DIM),
+        );
+    }
+    col = col.push(table(
+        tbl::PRED_HOT,
         "热门榜",
         "两家**各自排序后交错**，不跨平台比大小——成交额的窗口和单位都不同，直接混排会让一家整体压过另一家",
         &p.hot,
+        // 守护已经把两家各自排好再交错了，别再按某一列拍平
+        NO_SORT,
     ));
     col = col.push(table(
+        tbl::PRED_MOVE,
         "概率异动",
         "已剔除首次成交（前价为 0 的盘，第一笔打在 97 分会报成「涨了 97 点」）；5% 冲到 99% 的结算行情保留",
         &p.movers,
+        NO_SORT,
     ));
-    col = col.push(table("新上市", "只收已有成交的新盘——纯按开盘时间排，全是每分钟机器生成的五分钟制小盘", &p.fresh));
     col.into()
+}
+
+/// 四个新看板里各张表的编号。用来给排序/时间范围的注册表做键——
+/// 这些表的列各不相同，共用一套状态会让「按资金费排」跟着切到别的表上去。
+mod tbl {
+    pub const CRY_LISTING: u8 = 1;
+    pub const CRY_VENUE: u8 = 2;
+    pub const CRY_HOT: u8 = 3;
+    pub const CRY_GAIN: u8 = 4;
+    pub const CRY_LOSE: u8 = 5;
+    pub const CRY_PERP: u8 = 6;
+    pub const PRED_FRESH: u8 = 10;
+    pub const PRED_HOT: u8 = 11;
+    pub const PRED_MOVE: u8 = 12;
+    pub const EQ_IPO: u8 = 20;
+    pub const EQ_HOT: u8 = 21;
+    pub const EQ_GAIN: u8 = 22;
+    pub const EQ_LOSE: u8 = 23;
+    pub const EQ_SECTOR: u8 = 24;
+    pub const MACRO_ROWS: u8 = 30;
+    pub const MACRO_NEWS: u8 = 31;
+}
+
+/// 表头一列的定义：`(标题, 宽度, 是否数值列)`。名字避开已有的 `Col`（树图用的那个）。
+type Hd = (&'static str, f32, bool);
+
+/// 可点排序的列头行。活动列前面加箭头，同主表的做法。
+fn sort_head<'a>(table: u8, cols: &[Hd], default_col: u8) -> Element<'a, RadarMsg> {
+    let (active, desc) = super::radar::table_sort(table, default_col);
+    let mut h = row![].spacing(3);
+    for (i, (t, w, numeric)) in cols.iter().enumerate() {
+        let i = i as u8;
+        let label = if i == active {
+            format!("{} {t}", if desc { "↓" } else { "↑" })
+        } else {
+            (*t).to_string()
+        };
+        h = h.push(
+            button(
+                container(text(label).size(11).color(if i == active { C_TXT } else { C_HEAD }))
+                    .width(Length::Fixed(*w))
+                    .align_x(if *numeric {
+                        iced::Alignment::End
+                    } else {
+                        iced::Alignment::Start
+                    }),
+            )
+            .padding(0)
+            .style(|_, _| button::Style::default())
+            .on_press(RadarMsg::SortTable { table, col: i }),
+        );
+    }
+    h.into()
+}
+
+/// 「保持守护给的顺序」。有些榜的次序**不是**某一列的排序结果：
+/// 预测市场热门榜是两家各自排完再交错的，按成交额重排就把它拍回成
+/// 跨平台比大小——而两家的成交额窗口和单位根本不是一个量。
+const NO_SORT: u8 = 255;
+
+/// 按注册表里的状态给一组行排序。`key` 给出每行在某列上的可比值。
+///
+/// 文本列与数值列分开：文本按字典序、数值按大小。混在一起用字符串比会让
+/// `9` 排在 `10` 后面。
+fn sort_rows<T: Clone>(
+    rows: &[T],
+    table: u8,
+    default_col: u8,
+    key: impl Fn(&T, u8) -> SortVal,
+) -> Vec<T> {
+    let (col, desc) = super::radar::table_sort(table, default_col);
+    let mut v: Vec<T> = rows.to_vec();
+    if col == NO_SORT {
+        return v;
+    }
+    v.sort_by(|a, b| {
+        let o = match (key(a, col), key(b, col)) {
+            (SortVal::N(x), SortVal::N(y)) => x.total_cmp(&y),
+            (SortVal::S(x), SortVal::S(y)) => x.cmp(&y),
+            // 缺值一律沉底，**不论升降序**——升序时让一片「—」占满前几行
+            // 没有任何用处
+            (SortVal::None, SortVal::None) => std::cmp::Ordering::Equal,
+            (SortVal::None, _) => std::cmp::Ordering::Greater,
+            (_, SortVal::None) => std::cmp::Ordering::Less,
+            _ => std::cmp::Ordering::Equal,
+        };
+        if desc && !matches!(key(a, col), SortVal::None) && !matches!(key(b, col), SortVal::None) {
+            o.reverse()
+        } else {
+            o
+        }
+    });
+    v
+}
+
+/// 排序取值。
+enum SortVal {
+    N(f64),
+    S(String),
+    None,
+}
+
+fn n(x: f64) -> SortVal {
+    if x.is_finite() { SortVal::N(x) } else { SortVal::None }
+}
+fn on(x: Option<f64>) -> SortVal {
+    x.filter(|v| v.is_finite()).map_or(SortVal::None, SortVal::N)
+}
+fn sv(x: &str) -> SortVal {
+    SortVal::S(x.to_string())
+}
+
+/// 带链接的单元格。**没有链接就不给按钮**——一个点了没反应的按钮
+/// 比没有按钮更让人困惑。
+fn link_cell<'a>(s: String, url: &str, w: f32, c: Color, numeric: bool) -> Element<'a, RadarMsg> {
+    match super::radar_readout::register_link(url) {
+        Some(id) => button(
+            container(text(s).size(11).color(C_LINK))
+                .width(Length::Fixed(w))
+                .align_x(if numeric { iced::Alignment::End } else { iced::Alignment::Start }),
+        )
+        .padding(0)
+        .style(|_, _| button::Style::default())
+        .on_press(RadarMsg::OpenLink(id))
+        .into(),
+        None => cell(s, w, c, numeric),
+    }
+}
+
+/// 「近 N 天」选择条。
+fn days_bar<'a>(table: u8, default_days: u16, opts: &[(u16, &str)]) -> Element<'a, RadarMsg> {
+    let cur = super::radar::table_days(table, default_days);
+    let mut r = row![text("时间 ").size(10).color(C_DIM)].spacing(3);
+    for (d, l) in opts {
+        r = r.push(chip(l, *d == cur, RadarMsg::SetDays { table, days: *d }));
+    }
+    r.align_y(iced::Alignment::Center).into()
+}
+
+/// 毫秒时间戳是否落在「近 N 天」内。`days == 0` 表示不限。
+///
+/// 时间戳为 0（解析失败）时**保留**：那是数据问题，不该被时间筛静默吃掉。
+fn within_days(ts_ms: i64, days: u16) -> bool {
+    if days == 0 || ts_ms <= 0 {
+        return true;
+    }
+    let now = chrono::Local::now().timestamp_millis();
+    now - ts_ms <= days as i64 * 86_400_000
 }
 
 /// 股票全景（docs/22 §7 第二批）：纳斯达克全表 + Cboe 延迟指数。
@@ -1984,6 +2222,8 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState) -> Element<'a, RadarMsg> {
         col = col.push(text(format!("⚠ {what}：{err}")).size(10).color(C_GOLD));
     }
 
+    col = col.push(equity_ipos(p));
+
     // ── 指数 ──
     if !p.indices.is_empty() {
         col = col.push(section("指数（Cboe 延迟报价）", "「最后成交」就是这份数据延迟多少的证据"));
@@ -2004,7 +2244,7 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState) -> Element<'a, RadarMsg> {
         for q in &p.indices {
             col = col.push(
                 row![
-                    cell(q.label.clone(), 116.0, C_TXT, false),
+                    link_cell(q.label.clone(), &q.url, 116.0, C_TXT, false),
                     cell(format!("{:.2}", q.price), 104.0, C_TXT, true),
                     cell(format!("{:+.2}", q.chg), 88.0, sign(q.chg), true),
                     cell(format!("{:+.2}%", q.chg_pct), 80.0, sign(q.chg), true),
@@ -2019,27 +2259,35 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState) -> Element<'a, RadarMsg> {
     }
 
     // ── 三张榜 ──
-    let stock_table = |title: &str, note: &str, rows: &[StockRow]| {
+    const STOCK_COLS: [Hd; 7] = [
+        ("代号", 76.0, false),
+        ("名称", 250.0, false),
+        ("板块", 150.0, false),
+        ("价格", 96.0, true),
+        ("涨跌幅", 76.0, true),
+        ("成交额", 96.0, true),
+        ("市值", 96.0, true),
+    ];
+    let stock_table = |tid: u8, title: &str, note: &str, rows: &[StockRow], dcol: u8| {
         let mut c = column![].spacing(3);
         c = c.push(section(title, note));
-        let mut h = row![].spacing(3);
-        for (t, w, n) in [
-            ("代号", 76.0, false),
-            ("名称", 250.0, false),
-            ("板块", 150.0, false),
-            ("价格", 96.0, true),
-            ("涨跌幅", 76.0, true),
-            ("成交额", 96.0, true),
-            ("市值", 96.0, true),
-        ] {
-            h = h.push(cell(t.into(), w, C_HEAD, n));
-        }
-        c = c.push(h);
-        for r in rows {
+        c = c.push(sort_head(tid, &STOCK_COLS, dcol));
+        for r in sort_rows(rows, tid, dcol, |r: &StockRow, i| match i {
+            0 => sv(&r.symbol),
+            1 => sv(&r.name),
+            2 => sv(&r.sector),
+            3 => n(r.price),
+            4 => n(r.chg_pct),
+            5 => n(r.turnover),
+            // 0 是「原表没给」，按缺值处理沉底——当成市值为零会让 ETF
+            // 全挤到升序榜首，看着像一堆一文不值的公司
+            _ => (r.mcap > 0.0).then_some(r.mcap).map_or(SortVal::None, SortVal::N),
+        }) {
+            let r = &r;
             c = c.push(
                 row![
-                    cell(r.symbol.clone(), 76.0, C_TXT, false),
-                    cell(clip(&r.name, 32), 250.0, C_DIM, false),
+                    link_cell(r.symbol.clone(), &r.url, 76.0, C_TXT, false),
+                    link_cell(clip(&r.name, 32), &r.url, 250.0, C_DIM, false),
                     cell(clip(&r.sector, 18), 150.0, C_DIM, false),
                     cell(money_cell(r.price), 96.0, C_TXT, true),
                     cell(format!("{:+.2}%", r.chg_pct), 76.0, sign(r.chg_pct), true),
@@ -2058,24 +2306,27 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState) -> Element<'a, RadarMsg> {
         c
     };
     col = col.push(stock_table(
+        tbl::EQ_HOT,
         &format!("热门榜（全表 {} 只）", p.universe),
         "按**成交额**排，不按成交股数——1.7 美元的票成交 2.7 亿股，钱远不如 1016 美元那只多",
         &p.hot,
+        5,
     ));
     col = col.push(stock_table(
+        tbl::EQ_GAIN,
         "涨幅榜",
         "价格与成交额**两个地板都设了**：不设价格地板，榜首永远是 $0.016 涨 1130% 的仙股",
         &p.gainers,
+        4,
     ));
-    col = col.push(stock_table("跌幅榜", "", &p.losers));
+    col = col.push(stock_table(tbl::EQ_LOSE, "跌幅榜", "", &p.losers, 4));
 
     // ── 板块 ──
     col = col.push(section(
         "板块表现",
         "加权说「钱的方向」、中位说「多数成分股的方向」。两者背离就是几只权重股在扛",
     ));
-    let mut h = row![].spacing(3);
-    for (t, w, n) in [
+    const SECTOR_COLS: [Hd; 9] = [
         ("板块", 190.0, false),
         ("只数", 60.0, true),
         ("涨", 60.0, true),
@@ -2085,11 +2336,22 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState) -> Element<'a, RadarMsg> {
         ("加权覆盖", 76.0, true),
         ("中位", 80.0, true),
         ("成交额", 96.0, true),
-    ] {
-        h = h.push(cell(t.into(), w, C_HEAD, n));
-    }
-    col = col.push(h);
-    for sr in &p.sectors {
+    ];
+    col = col.push(sort_head(tbl::EQ_SECTOR, &SECTOR_COLS, 8));
+    for sr in sort_rows(&p.sectors, tbl::EQ_SECTOR, 8, |r: &SectorRow, i| match i {
+        0 => sv(&r.sector),
+        1 => n(r.n as f64),
+        2 => n(r.adv as f64),
+        3 => n(r.dec as f64),
+        4 => (r.n > 0).then(|| r.adv as f64 / r.n as f64).map_or(SortVal::None, SortVal::N),
+        5 => on(r.wtd_chg),
+        // 排的是**覆盖比例**不是绝对条数：1086/1688 比 193/195 差得多，
+        // 而按条数排前者反而在前
+        6 => (r.n > 0).then(|| r.wtd_n as f64 / r.n as f64).map_or(SortVal::None, SortVal::N),
+        7 => on(r.median_chg),
+        _ => n(r.turnover),
+    }) {
+        let sr = &sr;
         let frac = (sr.n > 0).then(|| sr.adv as f64 / sr.n as f64);
         col = col.push(
             row![
@@ -2123,40 +2385,92 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState) -> Element<'a, RadarMsg> {
         );
     }
 
-    // ── 新股 ──
-    if !p.ipos.is_empty() {
-        col = col.push(section("新股上市", "纳斯达克新股日历：已定价 / 待上市 / 已申报 / 已撤回"));
-        let mut h = row![].spacing(3);
-        for (t, w, n) in [
-            ("代号", 76.0, false),
-            ("公司", 280.0, false),
-            ("状态", 76.0, false),
-            ("交易所", 150.0, false),
-            ("发行价", 88.0, true),
-            ("股数", 116.0, true),
-            ("募资额", 130.0, true),
-            ("日期", 104.0, true),
-        ] {
-            h = h.push(cell(t.into(), w, C_HEAD, n));
-        }
-        col = col.push(h);
-        for r in &p.ipos {
-            col = col.push(
-                row![
-                    cell(r.symbol.clone(), 76.0, C_TXT, false),
-                    cell(clip(&r.company, 34), 280.0, C_TXT, false),
-                    cell(r.status.clone(), 76.0, C_GOLD, false),
-                    cell(clip(&r.exchange, 18), 150.0, C_DIM, false),
-                    cell(dash(&r.price), 88.0, C_DIM, true),
-                    cell(dash(&r.shares), 116.0, C_DIM, true),
-                    cell(dash(&r.value), 130.0, C_TXT, true),
-                    cell(dash(&r.date), 104.0, C_DIM, true),
-                ]
-                .spacing(3),
-            );
-        }
+    col.into()
+}
+
+/// 新股上市。**放在整屏最上面**：它是这一屏里唯一带日程的一块，
+/// 而且是可以按月往回翻的——埋在四张榜下面的话每次都得滚到底。
+fn equity_ipos<'a>(p: &EquityPanorama) -> Element<'a, RadarMsg> {
+    let mut col = column![].spacing(3);
+    col = col.push(section("新股上市", "纳斯达克新股日历：已定价 / 待上市 / 已申报 / 已撤回"));
+
+    // 月份选择。显示的是**守护实际查回来的**月份，不是面板请求的那个：
+    // 换月的那一两轮里两者不一样，显示请求值会让人以为已经换好了
+    let want = super::radar::ipo_month();
+    super::radar_readout::set_ipo_month(&want);
+    let got = if p.month.is_empty() { "—" } else { p.month.as_str() };
+    let mut mr = row![text("月份 ").size(10).color(C_DIM)].spacing(3);
+    mr = mr.push(chip("‹ 上一月", false, RadarMsg::IpoMonth(-1)));
+    mr = mr.push(
+        container(text(got.to_string()).size(11).color(C_TXT)).width(Length::Fixed(76.0)),
+    );
+    mr = mr.push(chip("下一月 ›", false, RadarMsg::IpoMonth(1)));
+    if want != p.month && !p.month.is_empty() {
+        mr = mr.push(text(format!("　查询 {want} 中…")).size(10).color(C_GOLD));
+    }
+    col = col.push(mr.align_y(iced::Alignment::Center));
+
+    if p.ipos.is_empty() {
+        // 空月份要说清是「这个月没有」，别让人以为是抓取坏了
+        col = col.push(text(format!("{got} 没有新股记录")).size(11).color(C_DIM));
+        return col.into();
+    }
+    const COLS: [Hd; 8] = [
+        ("代号", 76.0, false),
+        ("公司", 280.0, false),
+        ("状态", 76.0, false),
+        ("交易所", 150.0, false),
+        ("发行价", 88.0, true),
+        ("股数", 116.0, true),
+        ("募资额", 130.0, true),
+        ("日期", 104.0, true),
+    ];
+    col = col.push(sort_head(tbl::EQ_IPO, &COLS, NO_SORT));
+    for r in sort_rows(&p.ipos, tbl::EQ_IPO, NO_SORT, |r: &IpoRow, i| match i {
+        0 => sv(&r.symbol),
+        1 => sv(&r.company),
+        2 => sv(&r.status),
+        3 => sv(&r.exchange),
+        // 这三列在原表里是带 $ 和千位逗号的串，排序要按**数**来
+        4 => money_num(&r.price),
+        5 => money_num(&r.shares),
+        6 => money_num(&r.value),
+        _ => mdy_num(&r.date),
+    }) {
+        col = col.push(
+            row![
+                link_cell(r.symbol.clone(), &r.url, 76.0, C_TXT, false),
+                link_cell(clip(&r.company, 34), &r.url, 280.0, C_TXT, false),
+                cell(r.status.clone(), 76.0, C_GOLD, false),
+                cell(clip(&r.exchange, 18), 150.0, C_DIM, false),
+                cell(dash(&r.price), 88.0, C_DIM, true),
+                cell(dash(&r.shares), 116.0, C_DIM, true),
+                cell(dash(&r.value), 130.0, C_TXT, true),
+                cell(dash(&r.date), 104.0, C_DIM, true),
+            ]
+            .spacing(3),
+        );
     }
     col.into()
+}
+
+/// `"$100,000,000"` / `"2,066,243"` → 数。排序用——按字符串排会让
+/// `$34,500,000` 排在 `$100,000,000` 前面。
+fn money_num(s: &str) -> SortVal {
+    let t: String = s.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+    t.parse::<f64>().map_or(SortVal::None, SortVal::N)
+}
+
+/// `"9/03/2026"` → 可比的数。按字符串排会让 `10/01` 排在 `9/03` 前面。
+fn mdy_num(s: &str) -> SortVal {
+    let p: Vec<&str> = s.split('/').collect();
+    if p.len() != 3 {
+        return SortVal::None;
+    }
+    match (p[2].parse::<f64>(), p[0].parse::<f64>(), p[1].parse::<f64>()) {
+        (Ok(y), Ok(m), Ok(d)) => SortVal::N(y * 10_000.0 + m * 100.0 + d),
+        _ => SortVal::None,
+    }
 }
 
 /// 宏观 + 新闻（docs/22 §7 第二批）。
@@ -2197,9 +2511,8 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState) -> Element<'a, RadarMsg> {
     }
     col = col.push(sr);
 
-    col = col.push(section("宏观指标", "变化列是与上一期之差；世行是年频，没有上一期"));
-    let mut h = row![].spacing(3);
-    for (t, w, n) in [
+    col = col.push(section("宏观指标", "变化列是与上一期之差；世行是年频，没有上一期。点指标名开原站页面"));
+    const MACRO_COLS: [Hd; 7] = [
         ("来源", 96.0, false),
         ("地区", 130.0, false),
         ("指标", 200.0, false),
@@ -2207,16 +2520,27 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState) -> Element<'a, RadarMsg> {
         ("单位", 60.0, false),
         ("较上期", 96.0, true),
         ("观测", 104.0, true),
-    ] {
-        h = h.push(cell(t.into(), w, C_HEAD, n));
-    }
-    col = col.push(h);
-    for r in &m.rows {
+    ];
+    // 默认**不排序**：守护是按「欧央行 → 劳工统计局 → 世行」分块给的，
+    // 同一来源的几行挨在一起才好读；按数值拍平会把利率和 GDP 增速混在一起
+    col = col.push(sort_head(tbl::MACRO_ROWS, &MACRO_COLS, NO_SORT));
+    for r in sort_rows(&m.rows, tbl::MACRO_ROWS, NO_SORT, |r: &MacroRow, i| match i {
+        0 => sv(&r.source),
+        1 => sv(&r.area),
+        2 => sv(&r.label),
+        3 => n(r.value),
+        4 => sv(&r.unit),
+        5 => on(r.chg),
+        // 观测日期是 `2026-09-07` / `2026-08` / `2025` 三种粒度混在一起。
+        // 按字符串排刚好是对的（都是零填充的 ISO 前缀）
+        _ => sv(&r.obs),
+    }) {
+        let r = &r;
         col = col.push(
             row![
                 cell(r.source.clone(), 96.0, C_DIM, false),
                 cell(clip(&r.area, 14), 130.0, C_TXT, false),
-                cell(clip(&r.label, 22), 200.0, C_TXT, false),
+                link_cell(clip(&r.label, 22), &r.url, 200.0, C_TXT, false),
                 cell(format!("{:.3}", r.value), 128.0, C_TXT, true),
                 cell(r.unit.clone(), 60.0, C_DIM, false),
                 cell(
@@ -2232,18 +2556,37 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState) -> Element<'a, RadarMsg> {
         );
     }
 
-    col = col.push(section("央行与市场新闻", "欧洲央行 / 美联储 RSS 无需 key；EODHD 需配 token"));
-    let mut h = row![].spacing(3);
-    for (t, w, n) in [("来源", 116.0, false), ("标题", 820.0, false), ("时间", 220.0, false)] {
-        h = h.push(cell(t.into(), w, C_HEAD, n));
+    col = col.push(section("央行与市场新闻", "欧洲央行 / 美联储 RSS 无需 key；EODHD 需配 token。点标题在浏览器里看原文"));
+    col = col.push(days_bar(
+        tbl::MACRO_NEWS,
+        0,
+        &[(1, "今天"), (7, "近 7 天"), (30, "近 30 天"), (0, "全部")],
+    ));
+    let days = super::radar::table_days(tbl::MACRO_NEWS, 0);
+    const NEWS_COLS: [Hd; 3] =
+        [("来源", 116.0, false), ("标题", 820.0, false), ("时间", 220.0, false)];
+    col = col.push(sort_head(tbl::MACRO_NEWS, &NEWS_COLS, 2));
+    let kept: Vec<NewsRow> =
+        m.news.iter().filter(|x| within_days(x.ts_ms, days)).cloned().collect();
+    if kept.is_empty() && !m.news.is_empty() {
+        col = col.push(
+            text(format!("这段时间内没有新闻（共 {} 条，放宽时间范围看看）", m.news.len()))
+                .size(11)
+                .color(C_DIM),
+        );
     }
-    col = col.push(h);
-    for n in &m.news {
+    for x in sort_rows(&kept, tbl::MACRO_NEWS, 2, |x: &NewsRow, i| match i {
+        0 => sv(&x.source),
+        1 => sv(&x.title),
+        // 按**时间戳**排，不按那个显示串——两个源的时间格式不一样
+        // （RFC822 带时区名），字符串排出来是按星期几排的
+        _ => n(x.ts_ms as f64),
+    }) {
         col = col.push(
             row![
-                cell(n.source.clone(), 116.0, C_DIM, false),
-                cell(clip(&n.title, 96), 820.0, C_TXT, false),
-                cell(n.published.clone(), 220.0, C_DIM, false),
+                cell(x.source.clone(), 116.0, C_DIM, false),
+                link_cell(clip(&x.title, 96), &x.link, 820.0, C_TXT, false),
+                cell(x.published.clone(), 220.0, C_DIM, false),
             ]
             .spacing(3),
         );
@@ -2549,6 +2892,13 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     }
 
     if !matches!(v.mode, ViewMode::Heatmap | ViewMode::Screener) {
+        // 动作回执（打开链接、启停守护）**要在提前返回之前推进去**：
+        // 原来它挂在下面热图那一段里，四个新看板点了链接后没有任何反馈
+        let am = super::radar::action_message();
+        if !am.is_empty() {
+            let bad = am.starts_with('✗') || am.starts_with("拒绝") || am.starts_with("打开失败");
+            body = body.push(text(am).size(10).color(if bad { C_BAD } else { C_OK }));
+        }
         let inner = match v.mode {
             ViewMode::Overview => overview_view(&st.overview, v),
             ViewMode::Crypto => crypto_view(&st.panorama, v),
@@ -3977,5 +4327,104 @@ mod tests {
         r.m.insert("Perf.YTD".into(), 16.3);
         assert_eq!(metric_value(&r, "Perf.YTD", 1), Some(16.3));
         assert!(metric_value(&r, "gap", 1).is_none(), "缺的指标应为 None");
+    }
+}
+
+#[cfg(test)]
+mod board_table_tests {
+    use super::*;
+
+    #[test]
+    fn a_deliberately_ordered_list_is_left_alone() {
+        // 预测市场热门榜是两家各自排完再交错的。按成交额重排就把它拍回成
+        // 跨平台比大小——而两家的成交额窗口和单位根本不是一个量
+        let rows = vec![("kalshi", 1e7), ("polymarket", 1e5), ("kalshi", 9e6)];
+        let out = sort_rows(&rows, 200, NO_SORT, |r: &(&str, f64), i| match i {
+            0 => sv(r.0),
+            _ => n(r.1),
+        });
+        assert_eq!(out, rows, "NO_SORT 必须原样返回");
+    }
+
+    #[test]
+    fn missing_values_sink_in_both_directions() {
+        // 升序时让一片「—」占满前几行没有任何用处
+        let rows = vec![("有", Some(3.0)), ("缺", None), ("小", Some(1.0))];
+        let key = |r: &(&str, Option<f64>), _i: u8| on(r.1);
+        let desc = sort_rows(&rows, 201, 0, key);
+        assert_eq!(desc.last().unwrap().0, "缺");
+        // 再点一次翻成升序
+        super::super::radar::apply(ViewState::DEFAULT, RadarMsg::SortTable { table: 201, col: 0 });
+        let asc = sort_rows(&rows, 201, 0, key);
+        assert_eq!(asc.last().unwrap().0, "缺", "升序时缺值也要沉底");
+        assert_eq!(asc[0].0, "小");
+    }
+
+    #[test]
+    fn money_and_date_strings_sort_as_numbers() {
+        // 按字符串排会让 $34,500,000 排在 $100,000,000 前面、10/01 排在 9/03 前面
+        let a = match money_num("$34,500,000") {
+            SortVal::N(x) => x,
+            _ => panic!(),
+        };
+        let b = match money_num("$100,000,000") {
+            SortVal::N(x) => x,
+            _ => panic!(),
+        };
+        assert!(b > a);
+        assert!(matches!(money_num(""), SortVal::None));
+
+        let sep = match mdy_num("9/03/2026") {
+            SortVal::N(x) => x,
+            _ => panic!(),
+        };
+        let oct = match mdy_num("10/01/2026") {
+            SortVal::N(x) => x,
+            _ => panic!(),
+        };
+        assert!(oct > sep);
+        assert!(matches!(mdy_num("待定"), SortVal::None));
+    }
+
+    #[test]
+    fn a_zero_market_cap_sinks_instead_of_leading_the_ascending_list() {
+        // 0 是「原表没给」（多为 ETF）。当成市值为零，升序榜首会挤满 ETF，
+        // 看着像一堆一文不值的公司
+        let rows = vec![
+            StockRow { symbol: "ETF".into(), mcap: 0.0, ..Default::default() },
+            StockRow { symbol: "小".into(), mcap: 1e8, ..Default::default() },
+        ];
+        let out = sort_rows(&rows, 202, 6, |r: &StockRow, _i| {
+            (r.mcap > 0.0).then_some(r.mcap).map_or(SortVal::None, SortVal::N)
+        });
+        assert_eq!(out.last().unwrap().symbol, "ETF");
+    }
+
+    #[test]
+    fn a_row_without_a_url_gets_no_button() {
+        // 点了没反应的按钮比没有按钮更让人困惑
+        assert!(super::super::radar_readout::register_link("").is_none());
+        let id = super::super::radar_readout::register_link("https://x/a").unwrap();
+        // 同一个 URL 永远是同一个 id——按帧下标发消息会在快照刷新后错位
+        assert_eq!(super::super::radar_readout::register_link("https://x/a"), Some(id));
+        assert_eq!(super::super::radar_readout::link_of(id).as_deref(), Some("https://x/a"));
+    }
+
+    #[test]
+    fn only_http_links_are_opened() {
+        // 登记表里的串来自守护下发的快照，而 `xdg-open` 会按协议头去调
+        // 任意处理器
+        let id = super::super::radar_readout::register_link("file:///etc/passwd").unwrap();
+        assert!(super::super::radar_readout::open_link(id).starts_with("拒绝打开"));
+    }
+
+    #[test]
+    fn the_day_filter_keeps_rows_whose_timestamp_failed_to_parse() {
+        // 时间戳为 0 是数据问题，不该被时间筛静默吃掉
+        assert!(within_days(0, 7));
+        assert!(within_days(1, 0), "days=0 表示不限");
+        let now = chrono::Local::now().timestamp_millis();
+        assert!(within_days(now - 86_400_000, 7));
+        assert!(!within_days(now - 30 * 86_400_000, 7));
     }
 }

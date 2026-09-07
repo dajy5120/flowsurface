@@ -143,6 +143,8 @@ pub struct CoinRow {
     pub price: f64,
     pub chg_pct: f64,
     pub vol_usd: Option<f64>,
+    /// 该所这个对的网页。空 = 没有链接可给。
+    pub url: String,
 }
 
 /// 一行永续。
@@ -158,6 +160,7 @@ pub struct PerpRow {
     pub funding_apr: f64,
     pub oi_usd: Option<f64>,
     pub vol_usd: Option<f64>,
+    pub url: String,
 }
 
 /// 期权链汇总（Deribit 按币种）。
@@ -172,6 +175,7 @@ pub struct OptionRow {
     pub vol_notional_usd: f64,
     pub iv: Option<f64>,
     pub underlying: Option<f64>,
+    pub url: String,
 }
 
 /// 新上市。
@@ -180,6 +184,7 @@ pub struct ListingRow {
     pub symbol: String,
     pub venue: String,
     pub listed_ms: i64,
+    pub url: String,
 }
 
 /// 加密全景整块。
@@ -214,6 +219,8 @@ pub struct PredRow {
     pub close_ms: Option<i64>,
     pub start_ms: Option<i64>,
     pub slug: String,
+    /// 原盘页面。空 = 没有链接可给。
+    pub url: String,
 }
 
 /// 预测市场平台状态。
@@ -254,6 +261,8 @@ pub struct StockRow {
     pub industry: String,
     pub country: String,
     pub ipo_year: i64,
+    /// 纳斯达克个股页。
+    pub url: String,
 }
 
 /// 一个板块。
@@ -283,6 +292,7 @@ pub struct IpoRow {
     pub shares: String,
     pub value: String,
     pub date: String,
+    pub url: String,
 }
 
 /// 一条指数报价（Cboe 延迟）。
@@ -299,6 +309,7 @@ pub struct IndexQuote {
     pub prev_close: f64,
     /// 最后成交时间——Cboe 是延迟数据，这就是延迟多少的证据。
     pub last_trade: String,
+    pub url: String,
 }
 
 /// 股票全景整块。
@@ -313,6 +324,9 @@ pub struct EquityPanorama {
     pub sectors: Vec<SectorRow>,
     pub ipos: Vec<IpoRow>,
     pub errors: Vec<(String, String)>,
+    /// 守护**实际查的**新股月份（`YYYY-MM`）。显示这个而不是面板自己请求的那个：
+    /// 换月的那一两轮里两者不一样，显示请求值会让人以为已经换好了。
+    pub month: String,
 }
 
 /// 一个宏观读数。
@@ -327,6 +341,8 @@ pub struct MacroRow {
     /// 缺了这一列整张表就没法读。
     pub obs: String,
     pub chg: Option<f64>,
+    /// 该序列在原站上的页面。
+    pub url: String,
 }
 
 /// 一条新闻。
@@ -694,13 +710,53 @@ pub fn bump_nonce() {
 /// 把选中的来源写给守护（原子写，同快照）。
 ///
 /// 内容没变就不写：面板每帧都会走到这里，每帧重写文件既浪费也会让守护看到抖动。
+/// 请求文件的**全部**内容都由这里出去。分成两路写会互相把对方的字段冲掉——
+/// 守护读的是同一个文件，后写的那次没带 `sources` 就等于把来源清空了。
+static REQ_PARTS: Mutex<Option<(String, Vec<String>, String)>> = Mutex::new(None);
+static IPO_MONTH: Mutex<String> = Mutex::new(String::new());
+
 pub fn write_request(
     source: &str,
     security_types: &[&str],
     filters: &[super::radar_filter::Wire],
 ) {
+    if let Ok(mut g) = REQ_PARTS.lock() {
+        *g = Some((
+            source.to_string(),
+            security_types.iter().map(|x| x.to_string()).collect(),
+            request_body(source, security_types, filters),
+        ));
+    }
+    flush_request();
+}
+
+/// 设新股日历要查的月份。与来源/筛选走同一个文件，故只改这一项、其余保留。
+pub fn set_ipo_month(month: &str) {
+    if let Ok(mut g) = IPO_MONTH.lock() {
+        if *g == month {
+            return;
+        }
+        *g = month.to_string();
+    }
+    flush_request();
+}
+
+fn flush_request() {
     static LAST: Mutex<String> = Mutex::new(String::new());
-    let body = request_body(source, security_types, filters);
+    // 还没写过来源时也要能发月份：新股面板可能是用户开机后点的第一个东西
+    let base = REQ_PARTS
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|(_, _, b)| b.clone()))
+        .unwrap_or_else(|| request_body("", &[], &[]));
+    let month = IPO_MONTH.lock().map(|g| g.clone()).unwrap_or_default();
+    let body = match serde_json::from_str::<serde_json::Value>(&base) {
+        Ok(mut v) if !month.is_empty() => {
+            v["ipo_month"] = serde_json::json!(month);
+            v.to_string()
+        }
+        _ => base,
+    };
     if let Ok(mut g) = LAST.lock() {
         if *g == body {
             return;
@@ -714,6 +770,73 @@ pub fn write_request(
     let tmp = p.with_extension("json.tmp");
     if std::fs::write(&tmp, body.as_bytes()).is_ok() {
         let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+/// 链接登记表：`RadarMsg` 是 `Copy` 的、装不下可变长的串，而按帧下标发消息
+/// 会在快照刷新后错位（点开的是别人的链接）。故用**内容哈希**做 id：
+/// 同一个 URL 永远是同一个 id，登记表只增不改，旧 id 也一定解得对。
+static LINKS: Mutex<Option<std::collections::HashMap<u64, String>>> = Mutex::new(None);
+
+/// 表里最多留多少条。加密对约两千、美股七千，正常远到不了；
+/// 上限只是防某天数据源开始吐随机 URL 时把内存吃光。
+const MAX_LINKS: usize = 50_000;
+
+fn hash_url(u: &str) -> u64 {
+    // FNV-1a：够散且不引依赖。撞了也只是两条链接串号，不会崩
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in u.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
+}
+
+/// 登记一个链接，返回它的 id。空串返回 `None`——**没有链接就不该有按钮**，
+/// 给个点了没反应的按钮比不给更糟。
+pub fn register_link(url: &str) -> Option<u64> {
+    if url.is_empty() {
+        return None;
+    }
+    let id = hash_url(url);
+    if let Ok(mut g) = LINKS.lock() {
+        let m = g.get_or_insert_with(Default::default);
+        if !m.contains_key(&id) {
+            if m.len() >= MAX_LINKS {
+                return None;
+            }
+            m.insert(id, url.to_string());
+        }
+    }
+    Some(id)
+}
+
+/// 按 id 取回链接。
+pub fn link_of(id: u64) -> Option<String> {
+    LINKS.lock().ok().and_then(|g| g.as_ref().and_then(|m| m.get(&id).cloned()))
+}
+
+/// 用系统默认浏览器打开。**必须 detach**：`xdg-open` 会把子进程留在那儿，
+/// 不 spawn-and-forget 的话面板会攒一堆僵尸；也不能 `status()` 等它，
+/// 那是拿 UI 线程去等一个浏览器启动。
+pub fn open_link(id: u64) -> String {
+    let Some(url) = link_of(id) else {
+        return "链接已失效".into();
+    };
+    // 只放行 http(s)：登记表里的串来自守护下发的快照，
+    // 而 `xdg-open` 会按协议头去调任意处理器（`file://`、自定义 scheme…）
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return format!("拒绝打开非 http(s) 链接：{url}");
+    }
+    match std::process::Command::new("xdg-open")
+        .arg(&url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => format!("已在浏览器打开 {url}"),
+        Err(e) => format!("打开失败：{e}"),
     }
 }
 
@@ -1185,6 +1308,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 price: f_of(o, "price"),
                 chg_pct: f_of(o, "chg_pct"),
                 vol_usd: optf_of(o, "vol_usd"),
+                url: s(o, "url"),
             })
             .collect()
     };
@@ -1215,6 +1339,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 funding_apr: f_of(o, "funding_apr"),
                 oi_usd: optf_of(o, "oi_usd"),
                 vol_usd: optf_of(o, "vol_usd"),
+                url: s(o, "url"),
             })
             .collect(),
         options: sub("panorama", "options")
@@ -1228,6 +1353,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 vol_notional_usd: f_of(o, "vol_notional_usd"),
                 iv: optf_of(o, "iv"),
                 underlying: optf_of(o, "underlying"),
+                url: s(o, "url"),
             })
             .collect(),
         listings: sub("panorama", "listings")
@@ -1236,6 +1362,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 symbol: s(o, "symbol"),
                 venue: s(o, "venue"),
                 listed_ms: i64_of(o, "listed_ms"),
+                url: s(o, "url"),
             })
             .collect(),
     };
@@ -1255,6 +1382,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 close_ms: o.get("close_ms").and_then(|x| x.as_i64()),
                 start_ms: o.get("start_ms").and_then(|x| x.as_i64()),
                 slug: s(o, "slug"),
+                url: s(o, "url"),
             })
             .collect()
     };
@@ -1287,6 +1415,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 industry: s(o, "industry"),
                 country: s(o, "country"),
                 ipo_year: i64_of(o, "ipo_year"),
+                url: s(o, "url"),
             })
             .collect()
     };
@@ -1312,6 +1441,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 low: f_of(o, "low"),
                 prev_close: f_of(o, "prev_close"),
                 last_trade: s(o, "last_trade"),
+                url: s(o, "url"),
             })
             .collect(),
         universe: v.get("equity").and_then(|x| x.get("universe")).and_then(|x| x.as_i64()).unwrap_or(0),
@@ -1342,9 +1472,11 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 shares: s(o, "shares"),
                 value: s(o, "value"),
                 date: s(o, "date"),
+                url: s(o, "url"),
             })
             .collect(),
         errors: sub("equity", "errors").iter().map(|o| (s(o, "what"), s(o, "err"))).collect(),
+        month: v.get("equity").map(|x| s(x, "month")).unwrap_or_default(),
     };
     let macros = MacroBoard {
         rows: sub("macros", "rows")
@@ -1357,6 +1489,7 @@ fn parse_board(v: &serde_json::Value) -> RadarReadout {
                 unit: s(o, "unit"),
                 obs: s(o, "obs"),
                 chg: optf_of(o, "chg"),
+                url: s(o, "url"),
             })
             .collect(),
         news: sub("macros", "news")

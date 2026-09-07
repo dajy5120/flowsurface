@@ -357,6 +357,62 @@ pub enum RadarMsg {
     ToggleFilters,
     /// 点列头：同列则翻向，异列则换列并回到降序（数值列降序更符合「看榜」的直觉）。
     SortBy(SortKey),
+    /// 在浏览器里打开原文。`u64` 是链接登记表的 id（内容哈希，见
+    /// `radar_readout::register_link`）——`RadarMsg` 是 `Copy` 的，装不下串。
+    OpenLink(u64),
+    /// 点四个新看板里某张表的列头。这些表各有各的列，共用 `SortKey` 会
+    /// 让「按资金费排」这种列没处放，故按 `(表, 列)` 单独记。
+    SortTable { table: u8, col: u8 },
+    /// 设某张表的时间范围（天）。`0` = 不限。
+    SetDays { table: u8, days: u16 },
+    /// 新股日历翻月。参数是**相对当前月的偏移量**，不是绝对月份——
+    /// 存偏移量的话跨月那天会自动跟着走，存绝对值则会停在旧月份上。
+    IpoMonth(i32),
+}
+
+/// 四个新看板里各张表的排序状态：`表 → (列, 是否降序)`。
+///
+/// 不塞进 `ViewState`：那是 `Copy` 且定长的，而这里的表会继续增加。
+static TABLE_SORT: std::sync::Mutex<Option<std::collections::HashMap<u8, (u8, bool)>>> =
+    std::sync::Mutex::new(None);
+/// 各张表的时间范围（天）。`0` = 不限。
+static TABLE_DAYS: std::sync::Mutex<Option<std::collections::HashMap<u8, u16>>> =
+    std::sync::Mutex::new(None);
+/// 新股日历相对当前月的偏移量。
+static IPO_OFFSET: std::sync::Mutex<i32> = std::sync::Mutex::new(0);
+
+/// 某张表的排序状态。没点过就用调用方给的默认列 + 降序，
+/// 并**把这个默认值落进注册表**。
+///
+/// 落进去是必需的：不落的话第一次点当前活动列时，`apply` 看到的是「没有记录」，
+/// 于是走「换列」分支又回到降序——列头显示着 ↓、点一下还是 ↓，像是坏了。
+pub fn table_sort(table: u8, default_col: u8) -> (u8, bool) {
+    if let Ok(mut g) = TABLE_SORT.lock() {
+        let m = g.get_or_insert_with(Default::default);
+        return *m.entry(table).or_insert((default_col, true));
+    }
+    (default_col, true)
+}
+
+/// 某张表的时间范围（天）。`0` = 不限。
+pub fn table_days(table: u8, default_days: u16) -> u16 {
+    TABLE_DAYS
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(&table).copied()))
+        .unwrap_or(default_days)
+}
+
+/// 新股日历要查的月份（`YYYY-MM`）。
+pub fn ipo_month() -> String {
+    let off = IPO_OFFSET.lock().map(|g| *g).unwrap_or(0);
+    let now = chrono::Local::now().date_naive();
+    // 逐月加减，不做「30 天」的近似——31 号往前推一个月会跳过整个二月
+    let (mut y, mut m) = (now.format("%Y").to_string().parse::<i32>().unwrap_or(2026), now.format("%m").to_string().parse::<i32>().unwrap_or(1));
+    let t = y * 12 + (m - 1) + off;
+    y = t.div_euclid(12);
+    m = t.rem_euclid(12) + 1;
+    format!("{y:04}-{m:02}")
 }
 
 static ACTION_MSG: Mutex<String> = Mutex::new(String::new());
@@ -450,7 +506,38 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
             );
             }
         }
-        RadarMsg::Start | RadarMsg::Stop | RadarMsg::Refresh | RadarMsg::ManualEdited | RadarMsg::ToggleEnum { .. } | RadarMsg::ClearEnum { .. } => {}
+        RadarMsg::SortTable { table, col } => {
+            if let Ok(mut g) = TABLE_SORT.lock() {
+                let m = g.get_or_insert_with(Default::default);
+                // 同列翻向、异列换列并回到降序——与主表的列头行为一致。
+                // 第一次点某张表要**落在降序**，不能先 `or_insert` 再翻向：
+                // 那样第一下点下去就直接变成升序了
+                let next = match m.get(&table) {
+                    Some((c, d)) if *c == col => (col, !*d),
+                    _ => (col, true),
+                };
+                m.insert(table, next);
+            }
+        }
+        RadarMsg::SetDays { table, days } => {
+            if let Ok(mut g) = TABLE_DAYS.lock() {
+                g.get_or_insert_with(Default::default).insert(table, days);
+            }
+        }
+        RadarMsg::IpoMonth(d) => {
+            if let Ok(mut g) = IPO_OFFSET.lock() {
+                // 往未来翻没有意义：新股日历只有已申报/待上市，
+                // 而「待上市」本来就已经在当月这一页里
+                *g = (*g + d).clamp(-36, 1);
+            }
+        }
+        RadarMsg::Start
+        | RadarMsg::Stop
+        | RadarMsg::Refresh
+        | RadarMsg::ManualEdited
+        | RadarMsg::OpenLink(_)
+        | RadarMsg::ToggleEnum { .. }
+        | RadarMsg::ClearEnum { .. } => {}
     }
     v
 }
@@ -460,6 +547,8 @@ pub fn handle(msg: RadarMsg) {
     let m = match msg {
         RadarMsg::Start => ro::radar_start(),
         RadarMsg::Stop => ro::radar_stop(),
+        // 打开浏览器是个副作用，走这一路而不是 `apply`——`apply` 是纯函数
+        RadarMsg::OpenLink(id) => ro::open_link(id),
         RadarMsg::Refresh => {
             // 只叫醒面板自己是不够的——那只是重读快照。要让守护**去取**，
             // 得让请求文件的内容变一下：`bump_nonce` 改变下一份请求体，
@@ -1041,5 +1130,71 @@ mod tests {
         let o = order(&rows, v, &[]);
         assert_eq!(rows[o[0]].symbol, "AAAUSDT");
         assert_eq!(rows[o[1]].venue, "binance:linear", "同名按 venue 定序");
+    }
+}
+
+#[cfg(test)]
+mod board_control_tests {
+    use super::*;
+
+    #[test]
+    fn table_sort_toggles_within_one_table_and_leaves_others_alone() {
+        // 四个看板里各张表的列完全不同，共用一套排序状态会让
+        // 「按资金费排」跟着切到别的表上去
+        apply(ViewState::DEFAULT, RadarMsg::SortTable { table: 7, col: 3 });
+        assert_eq!(table_sort(7, 0), (3, true), "换列回到降序");
+        apply(ViewState::DEFAULT, RadarMsg::SortTable { table: 7, col: 3 });
+        assert_eq!(table_sort(7, 0), (3, false), "同列翻向");
+        // 没点过的表拿到的是调用方给的默认列
+        assert_eq!(table_sort(8, 5), (5, true));
+    }
+
+    /// 偏移量是**进程级静态**，而测试是并行跑的。两个用例各自翻月会互相打架
+    /// （实测：一个把偏移顶到上限，另一个再算「翻回来」就对不上了）。
+    /// 故翻月的断言全在这一个用例里，且开头先归零。
+    fn reset_ipo() {
+        // 先撞下限（clamp 到 −36）再加回 36，落点与之前点过多少次无关
+        apply(ViewState::DEFAULT, RadarMsg::IpoMonth(-999));
+        apply(ViewState::DEFAULT, RadarMsg::IpoMonth(36));
+    }
+
+    #[test]
+    fn the_ipo_month_walks_calendar_months_and_stays_in_range() {
+        reset_ipo();
+        let cur = ipo_month();
+        assert_eq!(cur.len(), 7);
+        assert_eq!(&cur[4..5], "-");
+
+        // 按天数近似的话，31 号往前推一个月会整个跳过二月
+        apply(ViewState::DEFAULT, RadarMsg::IpoMonth(-1));
+        let prev = ipo_month();
+        assert_ne!(prev, cur);
+        let m: u32 = prev[5..].parse().unwrap();
+        assert!((1..=12).contains(&m), "月份要落在 1~12：{prev}");
+        apply(ViewState::DEFAULT, RadarMsg::IpoMonth(1));
+        assert_eq!(ipo_month(), cur, "翻回来要回到原处");
+
+        // 往未来翻没有意义：未来月份的日历是空的，让人对着空表发呆
+        reset_ipo();
+        for _ in 0..40 {
+            apply(ViewState::DEFAULT, RadarMsg::IpoMonth(1));
+        }
+        let far = ipo_month();
+        assert!(far <= next_month(&cur), "最多只能到下个月：{far}");
+
+        // 往过去也要有底，否则能一路翻到公元前
+        reset_ipo();
+        for _ in 0..80 {
+            apply(ViewState::DEFAULT, RadarMsg::IpoMonth(-1));
+        }
+        let back = ipo_month();
+        assert!(back > "2000-01".to_string(), "下限之外：{back}");
+        reset_ipo();
+    }
+
+    fn next_month(m: &str) -> String {
+        let (y, mo) = m.split_once('-').unwrap();
+        let (y, mo): (i32, i32) = (y.parse().unwrap(), mo.parse().unwrap());
+        if mo == 12 { format!("{:04}-01", y + 1) } else { format!("{y:04}-{:02}", mo + 1) }
     }
 }
