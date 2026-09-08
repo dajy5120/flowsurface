@@ -193,6 +193,10 @@ impl From<&pane::State> for data::Pane {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
             },
+            pane::Content::Observatory => data::Pane::Observatory {
+                settings: pane.settings.clone(),
+                link_group: pane.link_group,
+            },
             pane::Content::PredictionBoard => data::Pane::PredictionBoard {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
@@ -399,6 +403,15 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             link_group,
         } => Configuration::Pane(pane::State::from_config(
             pane::Content::C4Shadow,
+            vec![],
+            settings,
+            link_group,
+        )),
+        data::Pane::Observatory {
+            settings,
+            link_group,
+        } => Configuration::Pane(pane::State::from_config(
+            pane::Content::Observatory,
             vec![],
             settings,
             link_group,

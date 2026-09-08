@@ -125,6 +125,13 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    /// 数据接口观察终端（docs/23）。无行情流、无图表状态，只有窗口设置。
+    Observatory {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     Recorder {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -281,6 +288,9 @@ pub enum ContentKind {
     /// 全市场雷达（docs/22 P0）：加密全市场树图 + 涨跌速度/量异常排行。
     /// 只读 radar_board.json 旁路，**零交易所流**（数据来自独立的 ws-radar 守护）。
     MarketMap,
+    /// 数据接口观察终端（docs/23 P0）：REST/WS/TCP/FIX 统一到一处观察与录制。
+    /// **零交易所流**：全部连接在独立的 `ws-observatory` 守护里，面板只读快照。
+    Observatory,
     /// 录制驾驶舱（docs/08 F6-P3）：24/7 守护录制控制中心（服务启停 + 配置 + 实况 + 总览）。
     Recorder,
     /// Tardis 历史回放（docs/20 Phase 5）：已购 30 天逐笔按变速推进 `ws:bt:{run}:trades` 喂图。
@@ -313,7 +323,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 19] = [
+    pub const ALL: [ContentKind; 20] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -329,6 +339,7 @@ impl ContentKind {
         ContentKind::OptionsBoard,
         ContentKind::PredictionBoard,
         ContentKind::MarketMap,
+        ContentKind::Observatory,
         ContentKind::Recorder,
         ContentKind::TardisReplay,
         ContentKind::TardisBoard,
@@ -354,6 +365,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::OptionsBoard => "期权/0DTE",
             ContentKind::PredictionBoard => "预测市场",
             ContentKind::MarketMap => "全市场雷达",
+            ContentKind::Observatory => "接口观察终端",
             ContentKind::Recorder => "数据录制",
             ContentKind::TardisReplay => "Tardis 历史回放",
             ContentKind::TardisBoard => "Tardis 历史面板",
@@ -434,7 +446,9 @@ impl PaneSetup {
                 | ContentKind::OptionsBoard
                 | ContentKind::PredictionBoard
                 | ContentKind::MarketMap
-                | ContentKind::Recorder
+                | ContentKind::Observatory
+                | ContentKind::Observatory
+            | ContentKind::Recorder
                 | ContentKind::TardisReplay
                 | ContentKind::TardisBoard
                 | ContentKind::BacktestResult => None,
@@ -466,6 +480,7 @@ impl PaneSetup {
             | ContentKind::OptionsBoard
             | ContentKind::PredictionBoard
             | ContentKind::MarketMap
+            | ContentKind::Observatory
             | ContentKind::Recorder
             | ContentKind::TardisReplay
             | ContentKind::TardisBoard

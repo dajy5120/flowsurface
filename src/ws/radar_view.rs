@@ -2995,11 +2995,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         m.into_iter().collect()
     };
     tiers.sort_by(|a, b| a.0.cmp(&b.0));
-    let tier_txt = tiers
-        .iter()
-        .map(|(t, n)| format!("{t}×{n}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // 上一版把等级拼成一个字符串（`A×693 C×5960`）。改成逐档徽章之后
+    // 那个串就没人用了——顺手删掉，留着会让下次读代码的人找它的用处
     // 这一屏**一张表里混着两档**：加密是交易所直连的实时价，股票是
     // TradingView 的延迟报价。只标一个等级会让人把整张表当成同一档，
     // 故徽章按行数分档列出来，两层的更新时间也分开显示
