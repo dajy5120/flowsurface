@@ -447,8 +447,7 @@ impl PaneSetup {
                 | ContentKind::PredictionBoard
                 | ContentKind::MarketMap
                 | ContentKind::Observatory
-                | ContentKind::Observatory
-            | ContentKind::Recorder
+                | ContentKind::Recorder
                 | ContentKind::TardisReplay
                 | ContentKind::TardisBoard
                 | ContentKind::BacktestResult => None,

@@ -124,6 +124,8 @@ pub struct SessionView {
     pub tail_lapped: i64,
     pub filter: FilterStat,
     pub parse: bool,
+    pub capture: CaptureStat,
+    pub triggers: Vec<TrigStat>,
 }
 
 /// 录制状态（docs/23 §6）。
@@ -143,6 +145,34 @@ pub struct RecStat {
     /// 被闸门停了。**与「用户点了停止」是两回事**，界面要分开说。
     pub halted: bool,
     pub halt: String,
+}
+
+/// 一条触发规则的状态（docs/23 §7）。
+#[derive(Default, Clone, PartialEq)]
+pub struct TrigStat {
+    pub name: String,
+    /// 条件串。守护原样回发——面板删掉其中一条时要把其余的重发。
+    pub cond: String,
+    pub pre_roll_ms: i64,
+    pub post_roll_ms: i64,
+    pub cooldown_ms: i64,
+    pub cap_per_hour: i64,
+    pub fired: i64,
+    /// **被闸门挡下来的次数**。它说明条件写得太宽——不显示的话，
+    /// 用户看着条件明明命中却没录，会以为是条件写错了。
+    pub blocked: i64,
+    pub blocked_why: String,
+    pub used_this_hour: i64,
+    /// 正在录后半段。
+    pub capturing: bool,
+}
+
+/// 捕获筛选的状态（docs/23 §8.1）。
+#[derive(Default, Clone, PartialEq)]
+pub struct CaptureStat {
+    pub src: String,
+    /// 被它筛掉的条数。**必须显示**——不显示的话用户看到条数少了会以为是丢包。
+    pub dropped: i64,
 }
 
 /// 显示筛选的状态。
@@ -395,6 +425,30 @@ pub fn parse(v: &serde_json::Value) -> ObsReadout {
             }
         },
         parse: sv.get("parse").and_then(|b| b.as_bool()).unwrap_or(false),
+        capture: {
+            let c = sv.get("capture").cloned().unwrap_or_default();
+            CaptureStat { src: s(&c, "src"), dropped: i(&c, "dropped") }
+        },
+        triggers: arr(sv, "triggers")
+            .iter()
+            .map(|t| TrigStat {
+                name: s(t, "name"),
+                cond: s(t, "cond"),
+                pre_roll_ms: i(t, "pre_roll_ms"),
+                post_roll_ms: i(t, "post_roll_ms"),
+                cooldown_ms: i(t, "cooldown_ms"),
+                cap_per_hour: i(t, "cap_per_hour"),
+                fired: i(t, "fired"),
+                blocked: i(t, "blocked"),
+                blocked_why: t
+                    .get("blocked_why")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                used_this_hour: i(t, "used_this_hour"),
+                capturing: t.get("capturing").and_then(|b| b.as_bool()).unwrap_or(false),
+            })
+            .collect(),
     });
 
     let rec = {
@@ -481,7 +535,19 @@ static REQ: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 fn patch(kv: &[(&str, serde_json::Value)]) {
     let body = {
         let Ok(mut g) = REQ.lock() else { return };
-        let v = g.get_or_insert_with(|| serde_json::json!({}));
+        // **基线从磁盘上的现状取，不是从空对象**。
+        //
+        // 面板启动时并不知道请求文件里已经有什么——那可能是上一次会话留下的，
+        // 也可能是别人手写进去的。从空对象开始的话，用户在面板上做的第一个
+        // 操作就会把所有它不知道的键冲掉。实测：手写了一条 `capture`，
+        // 在面板上点一下「删规则」，请求文件就只剩 `{"triggers":[]}` 了
+        let v = g.get_or_insert_with(|| {
+            std::fs::read_to_string(request_path())
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .filter(|x| x.is_object())
+                .unwrap_or_else(|| serde_json::json!({}))
+        });
         for (k, x) in kv {
             v[*k] = x.clone();
         }
@@ -573,6 +639,121 @@ pub fn form_ready(catalog: &[AdapterSpec]) -> Result<(), String> {
             return Err(format!("「{}」是必填的", f.label));
         }
     }
+    Ok(())
+}
+
+/// 捕获筛选的编辑框（面板内存，随打字变）。
+static CAPTURE: Mutex<String> = Mutex::new(String::new());
+
+pub fn capture_text() -> String {
+    CAPTURE.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn set_capture_text(t: &str) {
+    if let Ok(mut g) = CAPTURE.lock() {
+        *g = t.to_string();
+    }
+}
+
+/// 把捕获筛选发给守护。
+///
+/// **与显示筛选走不同的键**：共用一个的话，改个显示条件会把数据也筛掉。
+pub fn request_capture() {
+    patch(&[("capture", serde_json::json!(capture_text()))]);
+}
+
+/// 新规则的编辑框：`(名称, 条件, pre_ms, post_ms, cooldown_ms, 每小时)`。
+static NEW_TRIG: Mutex<Option<TrigForm>> = Mutex::new(None);
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct TrigForm {
+    pub name: String,
+    pub cond: String,
+    pub pre_roll_ms: String,
+    pub post_roll_ms: String,
+    pub cooldown_ms: String,
+    pub max_per_hour: String,
+}
+
+impl Default for TrigForm {
+    /// 缺省值**保守**：一个每帧都命中的条件在 19000 条/秒下，
+    /// 配 0 会一秒生成两万个录制目录。
+    fn default() -> Self {
+        Self {
+            name: "规则1".into(),
+            cond: String::new(),
+            pre_roll_ms: "10000".into(),
+            post_roll_ms: "5000".into(),
+            cooldown_ms: "30000".into(),
+            max_per_hour: "10".into(),
+        }
+    }
+}
+
+pub fn new_trig() -> TrigForm {
+    NEW_TRIG.lock().map(|g| g.clone().unwrap_or_default()).unwrap_or_default()
+}
+
+pub fn set_new_trig(f: impl FnOnce(&mut TrigForm)) {
+    if let Ok(mut g) = NEW_TRIG.lock() {
+        f(g.get_or_insert_with(TrigForm::default));
+    }
+}
+
+fn trig_json(name: &str, cond: &str, pre: i64, post: i64, cool: i64, cap: i64) -> serde_json::Value {
+    serde_json::json!({
+        "name": name, "cond": cond,
+        "pre_roll_ms": pre, "post_roll_ms": post,
+        "cooldown_ms": cool, "max_per_hour": cap,
+    })
+}
+
+/// 把整份规则表发给守护。
+///
+/// **整份重发**而不是增量：守护那边重建规则会把冷却状态和本小时计数清掉，
+/// 所以只在真的变了时才调这个（面板侧由「添加/删除」触发，不随打字发）。
+pub fn request_triggers(all: &[TrigStat]) {
+    let list: Vec<serde_json::Value> = all
+        .iter()
+        .map(|t| {
+            trig_json(
+                &t.name,
+                &t.cond,
+                t.pre_roll_ms,
+                t.post_roll_ms,
+                t.cooldown_ms,
+                t.cap_per_hour,
+            )
+        })
+        .collect();
+    patch(&[("triggers", serde_json::json!(list))]);
+}
+
+/// 在现有规则表上加一条。
+pub fn request_add_trigger(existing: &[TrigStat], f: &TrigForm) -> Result<(), String> {
+    if f.cond.trim().is_empty() {
+        return Err("条件不能为空".into());
+    }
+    if existing.iter().any(|t| t.name == f.name) {
+        // 同名规则会让「删掉哪一条」变得没法表达
+        return Err(format!("已经有一条叫「{}」的规则了", f.name));
+    }
+    let num = |s: &str, d: i64| s.trim().parse::<i64>().unwrap_or(d);
+    let mut list: Vec<serde_json::Value> = existing
+        .iter()
+        .map(|t| {
+            trig_json(&t.name, &t.cond, t.pre_roll_ms, t.post_roll_ms, t.cooldown_ms, t.cap_per_hour)
+        })
+        .collect();
+    list.push(trig_json(
+        &f.name,
+        &f.cond,
+        num(&f.pre_roll_ms, 10_000),
+        num(&f.post_roll_ms, 5_000),
+        num(&f.cooldown_ms, 30_000),
+        num(&f.max_per_hour, 10),
+    ));
+    patch(&[("triggers", serde_json::json!(list))]);
     Ok(())
 }
 
@@ -701,6 +882,32 @@ mod tests {
     }
 
     #[test]
+    fn the_first_patch_starts_from_what_is_already_on_disk() {
+        // 面板启动时不知道请求文件里已经有什么。从空对象开始的话，
+        // 用户在面板上做的第一个操作就会把所有它不知道的键冲掉——
+        // 实测：手写一条 capture，点一下「删规则」，文件就只剩 triggers 了
+        let p = request_path();
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(
+            &p,
+            r#"{"adapter":"ws.raw","nonce":42,"capture":"len > 40","别人写的":1}"#,
+        );
+        if let Ok(mut g) = REQ.lock() {
+            *g = None; // 模拟面板刚启动
+        }
+        patch(&[("triggers", serde_json::json!([]))]);
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(after["capture"], "len > 40", "别的键要保住");
+        assert_eq!(after["nonce"], 42, "连接那一路更要保住");
+        assert_eq!(after["别人写的"], 1, "连不认识的键也保住");
+        assert!(after["triggers"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
     fn changing_the_filter_does_not_touch_the_connection_fields() {
         // 两个都踩过：少带 nonce → 守护看到 3 变回 0，判成「连接变了」→ 改筛选就重连；
         // 少带 adapter → 判成「要断开」→ 改筛选就断线
@@ -720,6 +927,46 @@ mod tests {
     fn the_nonce_only_ever_increases() {
         // 守护靠「变没变」判断要不要重连。回绕会让重连按钮失灵
         assert!(next_nonce() < next_nonce());
+    }
+
+    #[test]
+    fn trigger_state_carries_enough_to_rebuild_the_list() {
+        // 面板删掉其中一条时要把其余的原样重发。只回发名字的话就重发不了
+        let j = r#"{"stamp":"s","session":{"triggers":[
+          {"name":"大单","cond":"$.q > 10","pre_roll_ms":10000,"post_roll_ms":5000,
+           "cooldown_ms":30000,"cap_per_hour":10,"fired":3,"blocked":1724415,
+           "blocked_why":"本小时已触发 10/10 次","used_this_hour":10,"capturing":false}],
+          "capture":{"src":"$.s == BTCUSDT","dropped":385024}}}"#;
+        let r = parse(&serde_json::from_str(j).unwrap());
+        let t = &r.session.as_ref().unwrap().triggers[0];
+        assert_eq!(t.cond, "$.q > 10", "条件要回发，否则重发不了");
+        assert_eq!((t.pre_roll_ms, t.post_roll_ms), (10_000, 5_000));
+        assert_eq!(t.blocked, 1_724_415, "被挡次数说明条件写得太宽");
+        assert!(t.blocked_why.contains("10/10"));
+        assert_eq!(r.session.as_ref().unwrap().capture.dropped, 385_024);
+    }
+
+    #[test]
+    fn the_new_trigger_form_defaults_are_conservative() {
+        // 一个每帧都命中的条件在 19000 条/秒下，配 0 会一秒生成两万个录制目录
+        let f = TrigForm::default();
+        assert!(f.cooldown_ms.parse::<i64>().unwrap() >= 1_000);
+        assert!(f.max_per_hour.parse::<i64>().unwrap() <= 60);
+        assert!(f.pre_roll_ms.parse::<i64>().unwrap() > 0, "pre-roll 是触发录制的全部意义");
+        assert!(f.cond.is_empty(), "条件要用户自己写");
+    }
+
+    #[test]
+    fn adding_a_trigger_rejects_an_empty_condition_and_a_duplicate_name() {
+        // 空条件会命中一切；同名规则会让「删掉哪一条」没法表达
+        let mut f = TrigForm::default();
+        assert!(request_add_trigger(&[], &f).is_err(), "空条件要挡住");
+        f.cond = "len > 100".into();
+        let existing = vec![TrigStat { name: "规则1".into(), ..Default::default() }];
+        let e = request_add_trigger(&existing, &f).unwrap_err();
+        assert!(e.contains("规则1"), "{e}");
+        f.name = "规则2".into();
+        assert!(request_add_trigger(&existing, &f).is_ok());
     }
 
     #[test]

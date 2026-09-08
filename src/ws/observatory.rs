@@ -40,6 +40,39 @@ pub fn handle(m: ObsMsg) {
         }
         ObsMsg::ApplyFilter => ro::request_view(),
         ObsMsg::SetRecord(on) => ro::request_record(on),
+        ObsMsg::CaptureEdited(t) => ro::set_capture_text(&t),
+        ObsMsg::ApplyCapture => ro::request_capture(),
+        ObsMsg::TrigEdited(k, v) => ro::set_new_trig(|f| match k {
+            "name" => f.name = v,
+            "cond" => f.cond = v,
+            "pre" => f.pre_roll_ms = v,
+            "post" => f.post_roll_ms = v,
+            "cool" => f.cooldown_ms = v,
+            _ => f.max_per_hour = v,
+        }),
+        ObsMsg::AddTrigger => {
+            let cur = ro::snapshot();
+            let existing = cur.session.as_ref().map(|s| s.triggers.as_slice()).unwrap_or(&[]);
+            // 加失败（空条件、重名）时**什么都不发**——发一份坏的规则表
+            // 会把守护那边已有规则的冷却状态一起清掉
+            let _ = ro::request_add_trigger(existing, &ro::new_trig());
+        }
+        ObsMsg::DelTrigger(i) => {
+            let cur = ro::snapshot();
+            let Some(s) = cur.session.as_ref() else { return };
+            if i >= s.triggers.len() {
+                return;
+            }
+            // 整份重发：守护那边是整表重建
+            let rest: Vec<ro::TrigStat> = s
+                .triggers
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, t)| t.clone())
+                .collect();
+            ro::request_triggers(&rest);
+        }
         ObsMsg::SaveLast(secs) => {
             // 区间的右端取**环覆盖的终点**而不是「现在」：两者差着一次快照
             // 的时间，用「现在」会让区间右端落在还没进环的位置上

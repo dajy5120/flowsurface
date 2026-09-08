@@ -610,7 +610,6 @@ impl State {
                 | Content::Factory
                 | Content::C4Shadow
                 | Content::Observatory
-            | Content::Observatory
                 | Content::OptionsBoard
                 | Content::PredictionBoard
                 | Content::MarketMap

@@ -557,14 +557,13 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
                 *g = (*g + d).clamp(-36, 1);
             }
         }
+        // 这几条**不改 `ViewState`**：启停/刷新/打开链接是副作用（在 `handle` 里），
+        // 强制刷新只写请求文件。`ManualEdited` 等已在上面各自处理，不再列
         RadarMsg::Start
         | RadarMsg::ForceBlock(_)
         | RadarMsg::Stop
         | RadarMsg::Refresh
-        | RadarMsg::ManualEdited
-        | RadarMsg::OpenLink(_)
-        | RadarMsg::ToggleEnum { .. }
-        | RadarMsg::ClearEnum { .. } => {}
+        | RadarMsg::OpenLink(_) => {}
     }
     v
 }

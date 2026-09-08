@@ -46,6 +46,16 @@ pub enum ObsMsg {
     PickAdapter(String),
     /// 连接表单里某个字段被编辑。
     FieldEdited(String, String),
+    /// 捕获筛选在打字。
+    CaptureEdited(String),
+    /// 把捕获筛选发给守护。**这一步会真的开始丢数据**，所以要显式点。
+    ApplyCapture,
+    /// 新规则表单里某个字段被编辑。第一个参数是字段名。
+    TrigEdited(&'static str, String),
+    /// 添加这条规则。
+    AddTrigger,
+    /// 删掉第 n 条规则。
+    DelTrigger(usize),
 }
 
 fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, ObsMsg> {
@@ -306,6 +316,9 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     // ── 录制 ──
     body = body.push(record_block(&st, sess, &r));
 
+    // ── 触发录制 + 捕获筛选 ──
+    body = body.push(trigger_block(sess));
+
     // ── 逐流指标：四个阶段分开 ──
     body = body.push(section(
         "逐流指标",
@@ -463,6 +476,145 @@ pub fn reset_frame_peak() {
     if let Ok(mut g) = FRAME_PEAK.lock() {
         *g = 0.0;
     }
+}
+
+/// 触发录制与捕获筛选（docs/23 §7、§8.1）。
+///
+/// 捕获筛选**放在触发规则下面、并且长得不一样**：它和上面那个显示筛选是
+/// 两件完全不同的事，而用户永远会把它们搞混。
+fn trigger_block<'a>(sess: &ro::SessionView) -> Element<'a, ObsMsg> {
+    let mut col = column![].spacing(4);
+
+    // ── 触发规则 ──
+    col = col.push(section(
+        "触发录制",
+        "条件命中时把**命中之前**那几秒一起存下来——这是环形缓冲的兑现",
+    ));
+    if !sess.triggers.is_empty() {
+        let mut h = row![].spacing(3);
+        for (t, w, n) in [
+            ("规则", 96.0, false),
+            ("条件", 240.0, false),
+            ("前/后", 92.0, false),
+            ("冷却", 62.0, true),
+            ("已录", 62.0, true),
+            ("本小时", 74.0, true),
+            ("被挡下", 84.0, true),
+            ("状态", 240.0, false),
+            ("", 44.0, false),
+        ] {
+            h = h.push(cell(t.into(), w, C_HEAD, n));
+        }
+        col = col.push(h);
+        for (i, t) in sess.triggers.iter().enumerate() {
+            let at_cap = t.cap_per_hour > 0 && t.used_this_hour >= t.cap_per_hour;
+            let status = if t.capturing {
+                ("● 正在录后半段".to_string(), C_OK)
+            } else if !t.blocked_why.is_empty() {
+                // **必须显示为什么被挡**：用户看着条件明明命中却没录，
+                // 会以为是条件写错了，其实只是在冷却
+                (t.blocked_why.clone(), if at_cap { C_GOLD } else { C_DIM })
+            } else {
+                ("等待命中".to_string(), C_DIM)
+            };
+            col = col.push(
+                row![
+                    cell(clip(&t.name, 10), 96.0, C_TXT, false),
+                    cell(clip(&t.cond, 30), 240.0, C_DIM, false),
+                    cell(
+                        format!("{}s/{}s", t.pre_roll_ms / 1000, t.post_roll_ms / 1000),
+                        92.0,
+                        C_DIM,
+                        false
+                    ),
+                    cell(format!("{}s", t.cooldown_ms / 1000), 62.0, C_DIM, true),
+                    cell(t.fired.to_string(), 62.0, C_OK, true),
+                    cell(
+                        format!("{}/{}", t.used_this_hour, t.cap_per_hour),
+                        74.0,
+                        if at_cap { C_GOLD } else { C_DIM },
+                        true
+                    ),
+                    // 被挡次数本身就是信息：它说明条件写得太宽
+                    cell(
+                        t.blocked.to_string(),
+                        84.0,
+                        if t.blocked > t.fired * 1000 { C_GOLD } else { C_DIM },
+                        true
+                    ),
+                    cell(status.0, 240.0, status.1, false),
+                    chip("删", ObsMsg::DelTrigger(i)),
+                ]
+                .spacing(3),
+            );
+        }
+    }
+
+    // 新规则表单
+    let f = ro::new_trig();
+    let fld = |ph: &str, v: &str, key: &'static str, w: f32| {
+        text_input(ph, v)
+            .on_input(move |t| ObsMsg::TrigEdited(key, t))
+            .size(11)
+            .padding([2, 6])
+            .width(Length::Fixed(w))
+    };
+    col = col.push(
+        row![
+            text("新增").size(10).color(C_DIM),
+            fld("名称", &f.name, "name", 96.0),
+            fld("条件，如 $.data.q > 10", &f.cond, "cond", 300.0),
+            text("前").size(10).color(C_DIM),
+            fld("10000", &f.pre_roll_ms, "pre", 66.0),
+            text("后").size(10).color(C_DIM),
+            fld("5000", &f.post_roll_ms, "post", 66.0),
+            text("冷却").size(10).color(C_DIM),
+            fld("30000", &f.cooldown_ms, "cool", 66.0),
+            text("次/时").size(10).color(C_DIM),
+            fld("10", &f.max_per_hour, "cap", 50.0),
+            chip("添加", ObsMsg::AddTrigger),
+        ]
+        .spacing(5)
+        .align_y(iced::Alignment::Center),
+    );
+    col = col.push(
+        text("毫秒。冷却与「次/时」有下限——配 0 不是「不限」：一个每帧都命中的条件在两万条/秒下会一秒生成两万个录制目录")
+            .size(10)
+            .color(C_DIM),
+    );
+
+    // ── 捕获筛选：**与显示筛选长得明显不同** ──
+    col = col.push(section("捕获筛选", ""));
+    let ctext = ro::capture_text();
+    let shown = if ctext.is_empty() { sess.capture.src.clone() } else { ctext };
+    col = col.push(
+        row![
+            text("⚠ 入环之前就筛").size(10).color(C_BAD),
+            text_input("$.data.s == BTCUSDT", &shown)
+                .on_input(ObsMsg::CaptureEdited)
+                .on_submit(ObsMsg::ApplyCapture)
+                .size(11)
+                .padding([2, 6])
+                .width(Length::Fixed(400.0)),
+            chip("应用", ObsMsg::ApplyCapture),
+            // 这句话要**常驻**：用户永远会把它和上面那个显示筛选搞混
+            text("筛掉的数据不会被录下来，也不会进环——永远没有了").size(10).color(C_BAD),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+    );
+    if sess.capture.dropped > 0 {
+        // 不显示的话，用户看到条数少了会以为是丢包
+        col = col.push(
+            text(format!(
+                "已筛掉 {} 条（这不是丢包，是你自己筛的）",
+                sess.capture.dropped
+            ))
+            .size(10)
+            .color(C_GOLD),
+        );
+    }
+    col.into()
 }
 
 /// 录制区块。
@@ -707,6 +859,8 @@ mod tests {
                 tail_lapped: 0,
                 filter: FilterStat::default(),
                 parse: false,
+                capture: Default::default(),
+                triggers: vec![],
             }),
             ..Default::default()
         };
@@ -742,89 +896,99 @@ mod tests {
         assert!(!live.iter().any(|t| t.flags.contains("replayed")));
     }
 
+    /// 连接表单的状态是**进程级静态**，而测试是并行跑的——两个用例各自
+    /// `form_pick` 会互相打架（实测过一次）。故表单相关的断言全在这一个用例里。
     #[test]
     fn the_connection_form_comes_entirely_from_the_descriptor() {
-        // 自描述设计的兑现点：控件种类、标签、默认值、必填、密码框全部来自
-        // config_schema。这条用例守的是「加一个字段不用改 UI」
+        use super::super::observatory_readout as r;
         use super::super::observatory_readout::{AdapterSpec, FieldSpec};
-        let a = AdapterSpec {
-            id: "x.proto".into(),
-            label: "某协议".into(),
-            transport: "tcp".into(),
-            config_schema: vec![
-                FieldSpec {
-                    key: "host".into(),
-                    label: "主机".into(),
-                    kind: "text".into(),
-                    default: "127.0.0.1".into(),
-                    required: true,
-                    hint: "".into(),
-                    options: vec![],
-                },
-                FieldSpec {
-                    key: "token".into(),
-                    label: "令牌".into(),
-                    kind: "secret".into(),
-                    default: String::new(),
-                    required: false,
-                    hint: "".into(),
-                    options: vec![],
-                },
-            ],
-            streams: vec![],
-            can_request: true,
-        };
-        let cat = vec![a];
-        super::super::observatory_readout::form_pick(&cat, "x.proto");
-        let (id, vals) = super::super::observatory_readout::form(&cat);
-        assert_eq!(id, "x.proto");
-        assert_eq!(vals["host"], "127.0.0.1", "默认值来自 descriptor");
-        // 必填项有默认值 → 就绪
-        assert!(super::super::observatory_readout::form_ready(&cat).is_ok());
-        // 清空必填项 → 挡住，且说清是哪一项
-        super::super::observatory_readout::form_set("host", "  ");
-        let e = super::super::observatory_readout::form_ready(&cat).unwrap_err();
-        assert!(e.contains("主机"), "{e}");
-    }
-
-    #[test]
-    fn switching_adapter_does_not_carry_values_across() {
-        // 字段名相同但语义未必相同（同名的 url 在 REST 和 WS 上要填的
-        // 东西不一样），留着只会让人填错
-        use super::super::observatory_readout::{AdapterSpec, FieldSpec};
-        let f = |k: &str, d: &str| FieldSpec {
+        let f = |k: &str, label: &str, kind: &str, d: &str, req: bool| FieldSpec {
             key: k.into(),
-            label: k.into(),
-            kind: "text".into(),
+            label: label.into(),
+            kind: kind.into(),
             default: d.into(),
-            required: false,
+            required: req,
             hint: String::new(),
             options: vec![],
         };
         let cat = vec![
             AdapterSpec {
-                id: "a".into(),
-                label: "A".into(),
-                transport: "ws".into(),
-                config_schema: vec![f("url", "wss://")],
+                id: "x.proto".into(),
+                label: "某协议".into(),
+                transport: "tcp".into(),
+                config_schema: vec![
+                    f("host", "主机", "text", "127.0.0.1", true),
+                    f("token", "令牌", "secret", "", false),
+                ],
                 streams: vec![],
-                can_request: false,
+                can_request: true,
             },
             AdapterSpec {
-                id: "b".into(),
-                label: "B".into(),
+                id: "y.rest".into(),
+                label: "另一个".into(),
                 transport: "rest".into(),
-                config_schema: vec![f("url", "https://")],
+                config_schema: vec![f("host", "主机", "text", "https://默认不同", false)],
                 streams: vec![],
                 can_request: false,
             },
         ];
-        super::super::observatory_readout::form_pick(&cat, "a");
-        super::super::observatory_readout::form_set("url", "wss://填过的");
-        super::super::observatory_readout::form_pick(&cat, "b");
-        let (id, vals) = super::super::observatory_readout::form(&cat);
-        assert_eq!(id, "b");
-        assert_eq!(vals["url"], "https://", "换协议要回到新协议的默认值");
+
+        // ── 自描述：控件种类、标签、默认值、必填全来自 descriptor ──
+        r::form_pick(&cat, "x.proto");
+        let (id, vals) = r::form(&cat);
+        assert_eq!(id, "x.proto");
+        assert_eq!(vals["host"], "127.0.0.1", "默认值来自 descriptor");
+        assert!(r::form_ready(&cat).is_ok(), "必填项有默认值 → 就绪");
+
+        // ── 必填项空着要挡住，且说清是哪一项 ──
+        r::form_set("host", "  ");
+        let e = r::form_ready(&cat).unwrap_err();
+        assert!(e.contains("主机"), "{e}");
+
+        // ── 换 Adapter 不跨协议保留字段值 ──
+        //
+        // 字段名相同但语义未必相同（同名的 host 在两个协议上要填的东西不一样），
+        // 留着只会让人填错
+        r::form_set("host", "填过的值");
+        r::form_pick(&cat, "y.rest");
+        let (id, vals) = r::form(&cat);
+        assert_eq!(id, "y.rest");
+        assert_eq!(vals["host"], "https://默认不同", "要回到新协议的默认值");
+    }
+
+    #[test]
+    fn the_capture_filter_is_visually_separated_from_the_display_filter() {
+        // 用户**永远**会把这两个搞混（Wireshark 三十年的经验）。
+        // 这条用例守的是那句常驻警告：它必须出现在捕获筛选旁边，
+        // 而且必须说清「筛掉的永远没有了」
+        let whole = include_str!("observatory_view.rs");
+        let src = whole.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            src.contains("筛掉的数据不会被录下来"),
+            "捕获筛选旁边必须常驻这句警告"
+        );
+        assert!(
+            src.contains("只影响显示，不影响录制"),
+            "显示筛选旁边也要有对应的一句"
+        );
+    }
+
+    #[test]
+    fn a_blocked_trigger_shows_why_not_just_a_count() {
+        // 用户看着条件明明命中却没录，会以为是条件写错了，其实只是在冷却
+        let t = super::super::observatory_readout::TrigStat {
+            name: "宽".into(),
+            fired: 1,
+            blocked: 1_724_415,
+            blocked_why: "本小时已触发 1/1 次".into(),
+            used_this_hour: 1,
+            cap_per_hour: 1,
+            ..Default::default()
+        };
+        assert!(!t.blocked_why.is_empty());
+        assert!(t.used_this_hour >= t.cap_per_hour, "到上限要能判出来并标黄");
+        // 被挡次数远大于已录次数 = 条件写得太宽，界面据此变色
+        assert!(t.blocked > t.fired * 1000);
     }
 
     #[test]
