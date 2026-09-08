@@ -228,6 +228,12 @@ fn board_path() -> PathBuf {
 }
 
 pub fn request_path() -> PathBuf {
+    // 测试改写。**必须有**：不改的话跑一遍测试就会把用户正在跑的那份
+    // 请求文件冲掉——守护会立刻照着测试写的内容去重连
+    #[cfg(test)]
+    if let Some(p) = tests::req_override() {
+        return p;
+    }
     std::env::var("WS_OBS_REQUEST")
         .map(PathBuf::from)
         .unwrap_or_else(|_| runtime_dir().join("observatory_request.json"))
@@ -747,15 +753,71 @@ pub fn set_send_body(t: &str) {
     }
 }
 
+/// 请求库的编辑区状态：名称框 + 当前这些 `{{参数}}` 的值。
+///
+/// 参数值**不跟着库走**：库里存的是默认值，这里是「这一次要发的值」。
+/// 两者混在一起的话，改一次参数就把默认值改了，下次载入出来的不是原来那条。
+static LIB_NAME: Mutex<String> = Mutex::new(String::new());
+static LIB_PARAMS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+pub fn lib_name() -> String {
+    LIB_NAME.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn set_lib_name(t: &str) {
+    if let Ok(mut g) = LIB_NAME.lock() {
+        *g = t.to_string();
+    }
+}
+
+/// 当前参数值。请求体里新出现的 `{{名字}}` 会自动补一个空项，
+/// 删掉的会被丢弃——否则参数框会越攒越多，全是早就不用的名字。
+pub fn lib_params() -> Vec<(String, String)> {
+    let want = crate::ws::observatory_lib::placeholders(&send_body());
+    let Ok(mut g) = LIB_PARAMS.lock() else { return Vec::new() };
+    g.retain(|(k, _)| want.iter().any(|w| w == k));
+    for w in &want {
+        if !g.iter().any(|(k, _)| k == w) {
+            g.push((w.clone(), String::new()));
+        }
+    }
+    // 按请求体里的出现顺序排，界面上才对得上
+    let mut out = g.clone();
+    out.sort_by_key(|(k, _)| want.iter().position(|w| w == k).unwrap_or(usize::MAX));
+    out
+}
+
+pub fn set_lib_param(name: &str, val: &str) {
+    if let Ok(mut g) = LIB_PARAMS.lock() {
+        match g.iter_mut().find(|(k, _)| k == name) {
+            Some(e) => e.1 = val.to_string(),
+            None => g.push((name.to_string(), val.to_string())),
+        }
+    }
+}
+
+/// 载入一条：请求体和**默认参数值**一起进编辑区。
+pub fn load_saved(e: &crate::ws::observatory_lib::Saved) {
+    set_send_body(&e.body);
+    set_lib_name(&e.name);
+    if let Ok(mut g) = LIB_PARAMS.lock() {
+        *g = e.params.clone();
+    }
+}
+
 /// 发一条出站请求。走 `send` 段的独立 nonce——与连接、录制都分开。
+///
+/// 发出去的是**填好参数**的那份。填不上的由调用方先拦下——
+/// 把 `{{x}}` 字面量发出去，对端只会回一条看不懂的错误。
 pub fn request_send(stream_id: u32) {
     use std::sync::atomic::{AtomicI64, Ordering};
     static N: AtomicI64 = AtomicI64::new(1);
+    let f = crate::ws::observatory_lib::fill(&send_body(), &lib_params());
     patch(&[(
         "send",
         serde_json::json!({
             "stream_id": stream_id,
-            "body": send_body(),
+            "body": f.body,
             "nonce": N.fetch_add(1, Ordering::Relaxed),
         }),
     )]);
@@ -1000,6 +1062,24 @@ mod tests {
         assert_eq!((se.tail_skipped, se.tail_arrived), (21, 221));
     }
 
+    /// 测试期间请求文件一律指到临时目录。
+    ///
+    /// **默认就改，不是可选项**：不改的话，跑一遍测试就会写进
+    /// `$XDG_RUNTIME_DIR` 里那份**用户正在用**的请求文件，守护会立刻照着
+    /// 测试内容去重连。实测发生过——跑完测试之后，守护那边真的多出了
+    /// 两条叫「规则1」「规则2」的触发规则。
+    ///
+    /// 只有需要自己读回文件内容的测试才显式指定路径。
+    static REQ_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    pub(super) fn req_override() -> Option<PathBuf> {
+        Some(REQ_PATH.lock().ok().and_then(|g| g.clone()).unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join(format!("ws-obs-test-{}", std::process::id()))
+                .join("observatory_request.json")
+        }))
+    }
+
     /// 请求文件和 `REQ` 都是**进程级**的，两个测试并行跑就会互相踩。
     /// 合成一条按顺序走——这是第三次栽在同一个坑上了（前两次是 IPO 月份
     /// 和连接表单），并行测试碰进程级状态就得这么办。
@@ -1008,7 +1088,12 @@ mod tests {
         // ① 面板启动时不知道请求文件里已经有什么。从空对象开始的话，
         //    用户在面板上做的第一个操作就会把所有它不知道的键冲掉——
         //    实测：手写一条 capture，点一下「删规则」，文件就只剩 triggers 了
-        let p = request_path();
+        let p = std::env::temp_dir()
+            .join(format!("ws-obs-req-{}", std::process::id()))
+            .join("observatory_request.json");
+        if let Ok(mut g) = REQ_PATH.lock() {
+            *g = Some(p.clone());
+        }
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }
@@ -1039,8 +1124,37 @@ mod tests {
         assert_eq!(before["nonce"], 7);
         assert_eq!(before["adapter"], "ws.raw");
 
-        let _ = std::fs::remove_file(&p);
+        // ③ 请求库：发出去的必须是**填好参数**的那份。发模板的话，
+        //    对端收到 `{{sym}}@depth` 这段字面量，然后回一条看不懂的错误
         if let Ok(mut g) = REQ.lock() {
+            *g = Some(serde_json::json!({"adapter":"ws.raw","nonce":9}));
+        }
+        crate::ws::observatory_lib::reset_for_test(Some(&p.with_file_name("lib.json")));
+        load_saved(&crate::ws::observatory_lib::Saved {
+            name: "深度".into(),
+            adapter: "ws.raw".into(),
+            body: r#"{"params":["{{sym}}@depth"]}"#.into(),
+            params: vec![("sym".into(), "btcusdt".into())],
+        });
+        assert_eq!(send_body(), r#"{"params":["{{sym}}@depth"]}"#);
+        assert_eq!(lib_params(), vec![("sym".to_string(), "btcusdt".to_string())]);
+        request_send(1);
+        let sent: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(sent["send"]["body"], r#"{"params":["btcusdt@depth"]}"#);
+        assert_eq!(sent["nonce"], 9, "发请求不该动连接那一路");
+
+        // 请求体里换掉占位符之后，旧参数要消失、新的要补上——
+        // 不然参数框会越攒越多，全是早就不用的名字
+        set_send_body("{{lvl}} 档");
+        assert_eq!(lib_params(), vec![("lvl".to_string(), String::new())]);
+        crate::ws::observatory_lib::reset_for_test(None);
+
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+        if let Ok(mut g) = REQ.lock() {
+            *g = None;
+        }
+        if let Ok(mut g) = REQ_PATH.lock() {
             *g = None;
         }
     }

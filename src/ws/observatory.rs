@@ -4,6 +4,7 @@
 //! 请求文件的写入全部走 `observatory_readout` 的局部修改路径——
 //! 重建整份请求会把 nonce/adapter 冲掉，改个筛选就变成重连或断线。
 
+use super::observatory_lib as lib;
 use super::observatory_readout as ro;
 use super::observatory_view::ObsMsg;
 
@@ -60,6 +61,29 @@ pub fn handle(m: ObsMsg) {
                 .unwrap_or(0);
             ro::request_send(sid);
         }
+        ObsMsg::LibNameEdited(t) => ro::set_lib_name(&t),
+        ObsMsg::LibParamEdited(k, v) => ro::set_lib_param(&k, &v),
+        ObsMsg::LibSave => {
+            let name = ro::lib_name();
+            if !name.trim().is_empty() {
+                let cur = ro::snapshot();
+                lib::save(lib::Saved {
+                    name: name.trim().to_string(),
+                    // 记下这条是给谁写的。**不是用来禁止跨 Adapter 用**——
+                    // 同一段 JSON 在两个交易所的 WS 上都能发
+                    adapter: cur.session.as_ref().map(|s| s.adapter.clone()).unwrap_or_default(),
+                    body: ro::send_body(),
+                    // 存的是**默认值**：下次载入出来还是这一份
+                    params: ro::lib_params(),
+                });
+            }
+        }
+        ObsMsg::LibLoad(name) => {
+            if let Some(e) = lib::get(&name) {
+                ro::load_saved(&e);
+            }
+        }
+        ObsMsg::LibDelete(name) => lib::remove(&name),
         ObsMsg::CaptureEdited(t) => ro::set_capture_text(&t),
         ObsMsg::ApplyCapture => ro::request_capture(),
         ObsMsg::TrigEdited(k, v) => ro::set_new_trig(|f| match k {

@@ -12,6 +12,7 @@ use std::time::Instant;
 use iced::widget::{button, canvas, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length};
 
+use super::observatory_lib as lib;
 use super::observatory_readout::{self as ro, StreamStat};
 use super::observatory_table::{Palette, TailTable};
 
@@ -65,6 +66,16 @@ pub enum ObsMsg {
     SendEdited(String),
     /// 发出去。
     SendNow,
+    /// 请求库（docs/23 §9 Mode 1）：名称框在打字。
+    LibNameEdited(String),
+    /// 把当前请求体存成这个名字。同名覆盖。
+    LibSave,
+    /// 载入一条：请求体和参数一起进编辑区。
+    LibLoad(String),
+    /// 删一条。
+    LibDelete(String),
+    /// 某个 `{{参数}}` 的值被编辑。
+    LibParamEdited(String, String),
 }
 
 fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, ObsMsg> {
@@ -576,11 +587,35 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
         .map(|a| a.can_request)
         .unwrap_or(false);
 
+    // ── 请求库（docs/23 §9 Mode 1）──
+    let saved = lib::all();
+    if !saved.is_empty() {
+        col = col.push(section("请求库", "存的是请求体和参数默认值；密钥请写 ${环境变量名}，别存进来"));
+        let mut r = row![].spacing(4);
+        for e in &saved {
+            r = r.push(chip(&e.name, ObsMsg::LibLoad(e.name.clone())));
+            r = r.push(chip("×", ObsMsg::LibDelete(e.name.clone())));
+        }
+        col = col.push(r.wrap());
+        // 载入的这条是给别的 Adapter 写的时候说一声。**不拦**——
+        // 同一段 JSON 在两个交易所的 WS 上都能发
+        let cur = ro::lib_name();
+        if let Some(e) = saved.iter().find(|e| e.name == cur) {
+            if !e.adapter.is_empty() && e.adapter != sess.adapter {
+                col = col.push(
+                    text(format!("「{}」是在 {} 上存的，当前是 {}", e.name, e.adapter, sess.adapter))
+                        .size(10)
+                        .color(C_DIM),
+                );
+            }
+        }
+    }
+
     col = col.push(section("发送", "出站帧也会进信封——「我发了什么」和「它回了什么」能对上"));
     if can_send {
         col = col.push(
             row![
-                text_input("请求体（WS 是订阅报文；REST 是 POST body；FIX 用 | 代替 SOH）", &ro::send_body())
+                text_input("请求体（WS 是订阅报文；REST 是 POST body；FIX 用 | 代替 SOH；{{名字}} 是参数）", &ro::send_body())
                     .on_input(ObsMsg::SendEdited)
                     .on_submit(ObsMsg::SendNow)
                     .size(11)
@@ -591,6 +626,60 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
             .spacing(8)
             .align_y(iced::Alignment::Center),
         );
+
+        // ── 参数 ──
+        let params = ro::lib_params();
+        if !params.is_empty() {
+            let mut r = row![text("参数").size(10).color(C_DIM)].spacing(6)
+                .align_y(iced::Alignment::Center);
+            for (k, v) in &params {
+                let key = k.clone();
+                r = r.push(text(format!("{k} =")).size(10).color(C_DIM));
+                r = r.push(
+                    text_input("", v)
+                        .on_input(move |t| ObsMsg::LibParamEdited(key.clone(), t))
+                        .size(11)
+                        .padding([2, 6])
+                        .width(Length::Fixed(140.0)),
+                );
+            }
+            col = col.push(r.wrap());
+            // 空着的参数会让 {{x}} 字面量发出去，对端回一条看不懂的错误。
+            // 发之前就说，别等对端来告诉你
+            let empty: Vec<&str> =
+                params.iter().filter(|(_, v)| v.trim().is_empty()).map(|(k, _)| k.as_str()).collect();
+            if !empty.is_empty() {
+                col = col.push(
+                    text(format!("⚠ {} 还没填——直接发的话对端收到的是字面量", empty.join("、")))
+                        .size(10)
+                        .color(C_GOLD),
+                );
+            }
+        }
+
+        // ── 存进库 ──
+        let mut sr = row![
+            text_input("存成…", &ro::lib_name())
+                .on_input(ObsMsg::LibNameEdited)
+                .on_submit(ObsMsg::LibSave)
+                .size(11)
+                .padding([2, 6])
+                .width(Length::Fixed(200.0)),
+            chip(
+                if saved.iter().any(|e| e.name == ro::lib_name().trim()) { "覆盖" } else { "保存" },
+                ObsMsg::LibSave
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        // 这个文件**留在磁盘上**、还会被一起备份走，比 tmpfs 上的请求文件更糟。
+        // 存之前说，别等它躺在那儿
+        if lib::looks_like_a_secret(&ro::send_body()) {
+            sr = sr.push(
+                text("🔑 请求体里像有明文密钥——改成 ${环境变量名}").size(10).color(C_GOLD),
+            );
+        }
+        col = col.push(sr);
     } else {
         // 说清是**这个 Adapter 不支持**，而不是让按钮点了没反应
         col = col.push(
