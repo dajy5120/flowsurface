@@ -155,6 +155,25 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
             .into();
     }
 
+    // ── 回放态横幅（docs/23 §11.2）──
+    //
+    // **靠帧上的 `replayed` 标志判断，不靠 adapter id**：那是协议层的事实，
+    // 对将来任何一种回放式 Adapter 都成立，而且 UI 不需要认识任何具体协议。
+    let replaying = st
+        .session
+        .as_ref()
+        .is_some_and(|s| s.tail.iter().any(|t| t.flags.contains("replayed")));
+    if replaying {
+        body = body.push(
+            container(
+                text("⏵ 回放态——表里是历史数据。「滞后」列算的是**当时**的链路延迟，不是现在的")
+                    .size(11)
+                    .color(C_GOLD),
+            )
+            .padding([3, 8]),
+        );
+    }
+
     // ── 连接表单：**完全由守护下发的 descriptor 生成** ──
     //
     // 这是自描述设计的兑现：控件种类、标签、默认值、必填与否、密码框，
@@ -707,6 +726,20 @@ mod tests {
         // 留足余量：超过 8ms 就说明有东西在随行数线性变贵，该查了
         eprintln!("[P1] 200 行满载尾窗最慢一帧 {worst:.3}ms（预算 16ms）");
         assert!(worst < 8.0, "满载尾窗最慢一帧 {worst:.2}ms，超出预算");
+    }
+
+    #[test]
+    fn the_replay_banner_keys_off_the_frame_flag_not_the_adapter_id() {
+        // docs/23 §11.2：界面据 REPLAYED 位切换口径。用 adapter id 判断的话，
+        // 将来任何一种新的回放式 Adapter 都要回来改 UI——那正是这套架构要避免的
+        let f = |s: &str| super::super::observatory_readout::TailRow {
+            flags: s.into(),
+            ..Default::default()
+        };
+        let rows = vec![f(""), f("replayed"), f("gap")];
+        assert!(rows.iter().any(|t| t.flags.contains("replayed")));
+        let live = vec![f(""), f("gap|synthetic")];
+        assert!(!live.iter().any(|t| t.flags.contains("replayed")));
     }
 
     #[test]
