@@ -1,16 +1,11 @@
-//! 接口观察终端的**副作用**（docs/23）：守护启停 + 连/断。
+//! 接口观察终端的**副作用**（docs/23）：守护启停 + 连/断 + 显示口径。
 //!
 //! 与 `c4` / `prediction` / `radar` 同一模式：`_view` 只产生消息，副作用集中在这里。
+//! 请求文件的写入全部走 `observatory_readout` 的局部修改路径——
+//! 重建整份请求会把 nonce/adapter 冲掉，改个筛选就变成重连或断线。
 
 use super::observatory_readout as ro;
 use super::observatory_view::ObsMsg;
-
-/// 面板侧的请求 nonce。只增——守护比对**变没变**，不解释值。
-fn bump() -> i64 {
-    use std::sync::atomic::{AtomicI64, Ordering};
-    static N: AtomicI64 = AtomicI64::new(1);
-    N.fetch_add(1, Ordering::Relaxed)
-}
 
 pub fn handle(m: ObsMsg) {
     match m {
@@ -21,44 +16,31 @@ pub fn handle(m: ObsMsg) {
             let _ = ro::svc_action("stop");
         }
         ObsMsg::Connect => {
-            // 重连当前会话：adapter/config 保持不变，靠 nonce 触发
             let cur = ro::snapshot();
-            let (a, cfg) = match cur.session.as_ref() {
-                Some(s) => (
-                    s.adapter.clone(),
-                    s.config
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect::<std::collections::BTreeMap<_, _>>(),
-                ),
-                None => return,
-            };
+            let Some(s) = cur.session.as_ref() else { return };
+            let cfg: std::collections::BTreeMap<String, String> =
+                s.config.iter().cloned().collect();
             // **抹去过的值不能回写**：快照里的密钥是 «已抹去»，原样发回去
             // 就等于把真密钥换成了这四个字，下一次连接必然失败
             if cfg.values().any(|v| v.contains("已抹去")) {
                 return;
             }
-            let body = serde_json::json!({"adapter": a, "config": cfg, "nonce": bump()});
-            ro::write_request(&body.to_string());
+            ro::request_connect(&s.adapter, &cfg);
         }
-        ObsMsg::Disconnect => {
-            ro::write_request(&serde_json::json!({"adapter": "", "nonce": bump()}).to_string());
+        ObsMsg::Disconnect => ro::request_disconnect(),
+        // 打字**只改面板内存**：每次按键都写文件的话，守护会在你打到一半时
+        // 反复重编译一条写错的表达式，日志里全是「筛选写错了」
+        ObsMsg::FilterEdited(t) => ro::set_filter_text(&t),
+        ObsMsg::SetParse(on) => {
+            ro::set_parse(on);
+            ro::request_view();
         }
+        ObsMsg::ApplyFilter => ro::request_view(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn the_nonce_only_increases() {
-        // 守护靠「变没变」判断要不要重连。回绕或重复会让重连按钮失灵
-        let a = bump();
-        let b = bump();
-        assert!(b > a);
-    }
-
     #[test]
     fn a_redacted_config_is_never_written_back() {
         // 快照里的密钥是 «已抹去»。原样发回去等于把真密钥换成这四个字，

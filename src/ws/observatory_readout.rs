@@ -102,6 +102,8 @@ pub struct TailRow {
     pub lag_ns: Option<f64>,
     pub preview: String,
     pub preview_truncated: bool,
+    /// Parsed 视图的解析结果（`路径 → 值`）。`None` = 没开解析或解不出来。
+    pub parsed: Option<Vec<(String, String)>>,
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -116,6 +118,26 @@ pub struct SessionView {
     pub tail: Vec<TailRow>,
     /// 这一窗跳过了多少条。**必须显示**，否则界面就是在假装全都显示了。
     pub tail_skipped: i64,
+    /// 上次刷新到现在**到了**多少条。`tail_skipped` 的分母。
+    pub tail_arrived: i64,
+    /// 游标被环淘汰追上而丢的条数。非 0 = 连尾窗都跟不上环的淘汰速度。
+    pub tail_lapped: i64,
+    pub filter: FilterStat,
+    pub parse: bool,
+}
+
+/// 显示筛选的状态。
+#[derive(Default, Clone, PartialEq)]
+pub struct FilterStat {
+    pub src: String,
+    /// 编译错误。非空时**显示的是全部数据**——写错了报错并照常显示，
+    /// 而不是给一张空表让人以为没数据。
+    pub err: String,
+    /// 这条筛选要不要逐条解 JSON。面板据此提示「这条贵」。
+    pub needs_json: bool,
+    pub scanned: i64,
+    /// 扫到预算上限还没凑够。**必须显示**。
+    pub exhausted: bool,
 }
 
 #[derive(Default, Clone)]
@@ -162,6 +184,17 @@ pub fn snapshot() -> std::sync::Arc<ObsReadout> {
         .lock()
         .map(|g| g.clone())
         .unwrap_or_default()
+}
+
+/// 直接写入读数，**仅供测试**：让帧时测量能喂进一份确定的快照，
+/// 而不是依赖后台 poller 恰好读到什么。
+#[doc(hidden)]
+pub fn seed_for_test(r: ObsReadout) {
+    POLLER.get_or_init(|| ()); // 占位，阻止真的起 poller 线程
+    let lock = READOUT.get_or_init(|| Mutex::new(std::sync::Arc::new(ObsReadout::default())));
+    if let Ok(mut g) = lock.lock() {
+        *g = std::sync::Arc::new(r);
+    }
 }
 
 fn ensure_poller() {
@@ -320,9 +353,25 @@ pub fn parse(v: &serde_json::Value) -> ObsReadout {
                     .get("preview_truncated")
                     .and_then(|b| b.as_bool())
                     .unwrap_or(false),
+                parsed: x.get("parsed").and_then(|p| p.as_object()).map(|o| {
+                    o.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect()
+                }),
             })
             .collect(),
         tail_skipped: i(sv, "tail_skipped"),
+        tail_arrived: i(sv, "tail_arrived"),
+        tail_lapped: i(sv, "tail_lapped"),
+        filter: {
+            let f = sv.get("filter").cloned().unwrap_or_default();
+            FilterStat {
+                src: s(&f, "src"),
+                err: s(&f, "err"),
+                needs_json: f.get("needs_json").and_then(|b| b.as_bool()).unwrap_or(false),
+                scanned: i(&f, "scanned"),
+                exhausted: f.get("exhausted").and_then(|b| b.as_bool()).unwrap_or(false),
+            }
+        },
+        parse: sv.get("parse").and_then(|b| b.as_bool()).unwrap_or(false),
     });
 
     ObsReadout {
@@ -359,8 +408,81 @@ pub fn svc_action(action: &str) -> String {
     }
 }
 
+/// 面板侧的显示口径。**在面板内存里，随打字变**——每次按键都写文件的话，
+/// 守护会在你打到一半时反复重编译一条写错的表达式。写文件由「应用」触发。
+static VIEW: Mutex<(String, bool)> = Mutex::new((String::new(), false));
+
+pub fn view_state() -> (String, bool) {
+    VIEW.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn set_filter_text(t: &str) {
+    if let Ok(mut g) = VIEW.lock() {
+        g.0 = t.to_string();
+    }
+}
+
+pub fn set_parse(on: bool) {
+    if let Ok(mut g) = VIEW.lock() {
+        g.1 = on;
+    }
+}
+
+/// 请求文件的**全部**内容都从这里出去，且是**局部修改**。
+///
+/// 每次重建整份请求会踩两个坑，两个都试过：
+/// - 少带 `nonce` → 守护看到 nonce 从 3 变回 0，判定成「连接变了」→ **改个筛选就重连**
+/// - 少带 `adapter` → 守护判定成「要断开」→ **改个筛选就断线**
+///
+/// 所以这里保存上一次写出去的整份 JSON，每次只改要改的键。
+static REQ: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+
+fn patch(kv: &[(&str, serde_json::Value)]) {
+    let body = {
+        let Ok(mut g) = REQ.lock() else { return };
+        let v = g.get_or_insert_with(|| serde_json::json!({}));
+        for (k, x) in kv {
+            v[*k] = x.clone();
+        }
+        v.to_string()
+    };
+    write_raw(&body);
+}
+
+/// 只增计数：守护比对**变没变**，不解释值。
+fn next_nonce() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static N: AtomicI64 = AtomicI64::new(1);
+    N.fetch_add(1, Ordering::Relaxed)
+}
+
+/// 连接到某个 adapter。会顺带把当前的显示口径一起带上。
+pub fn request_connect(adapter: &str, config: &std::collections::BTreeMap<String, String>) {
+    let (filter, parse) = view_state();
+    patch(&[
+        ("adapter", serde_json::json!(adapter)),
+        ("config", serde_json::json!(config)),
+        ("nonce", serde_json::json!(next_nonce())),
+        ("filter", serde_json::json!(filter)),
+        ("parse", serde_json::json!(parse)),
+    ]);
+}
+
+pub fn request_disconnect() {
+    patch(&[
+        ("adapter", serde_json::json!("")),
+        ("nonce", serde_json::json!(next_nonce())),
+    ]);
+}
+
+/// 只改显示口径。**不碰 adapter/config/nonce**——改个筛选不该让连接断一下。
+pub fn request_view() {
+    let (filter, parse) = view_state();
+    patch(&[("filter", serde_json::json!(filter)), ("parse", serde_json::json!(parse))]);
+}
+
 /// 写控制请求（原子：同目录 tmp + rename）。**只有面板写这个文件。**
-pub fn write_request(body: &str) {
+fn write_raw(body: &str) {
     let p = request_path();
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
@@ -396,7 +518,7 @@ mod tests {
         "tail":[{"seq":101,"stream_id":0,"recv_ms":1788841019000,"len":205,"wire":"text",
                  "dir":"in","flags":"gap|synthetic","lag_ns":null,
                  "preview":"读失败","preview_truncated":false}],
-        "tail_skipped":21}
+        "tail_skipped":21,"tail_arrived":221,"tail_lapped":0}
     }"#;
 
     #[test]
@@ -445,7 +567,30 @@ mod tests {
         let r = parse(&serde_json::from_str(SNAP).unwrap());
         let t = &r.session.as_ref().unwrap().tail[0];
         assert_eq!(t.flags, "gap|synthetic");
-        assert_eq!(r.session.as_ref().unwrap().tail_skipped, 21);
+        let se = r.session.as_ref().unwrap();
+        assert_eq!((se.tail_skipped, se.tail_arrived), (21, 221));
+    }
+
+    #[test]
+    fn changing_the_filter_does_not_touch_the_connection_fields() {
+        // 两个都踩过：少带 nonce → 守护看到 3 变回 0，判成「连接变了」→ 改筛选就重连；
+        // 少带 adapter → 判成「要断开」→ 改筛选就断线
+        if let Ok(mut g) = REQ.lock() {
+            *g = Some(serde_json::json!({"adapter":"ws.raw","config":{"url":"wss://x"},"nonce":7}));
+        }
+        set_filter_text("len > 10");
+        let (f, _) = view_state();
+        assert_eq!(f, "len > 10");
+        // patch 之后 adapter/nonce 必须原样还在
+        let before = REQ.lock().unwrap().clone().unwrap();
+        assert_eq!(before["nonce"], 7);
+        assert_eq!(before["adapter"], "ws.raw");
+    }
+
+    #[test]
+    fn the_nonce_only_ever_increases() {
+        // 守护靠「变没变」判断要不要重连。回绕会让重连按钮失灵
+        assert!(next_nonce() < next_nonce());
     }
 
     #[test]

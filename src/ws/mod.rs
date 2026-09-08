@@ -14,6 +14,7 @@ pub mod c4_readout;
 pub mod c4_view;
 pub mod observatory;
 pub mod observatory_readout;
+pub mod observatory_table;
 pub mod observatory_view;
 pub mod options_readout;
 pub mod options_view;

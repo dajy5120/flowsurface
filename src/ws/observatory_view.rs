@@ -7,10 +7,13 @@
 //! `no_adapter_id_leaks_into_this_view` 钉住这一点——它连注释一起扫，
 //! 因为注释里出现一个具体 id，通常就是代码即将引用它的前一步。
 
-use iced::widget::{button, column, container, row, scrollable, text};
+use std::time::Instant;
+
+use iced::widget::{button, canvas, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length};
 
-use super::observatory_readout::{self as ro, StreamStat, TailRow};
+use super::observatory_readout::{self as ro, StreamStat};
+use super::observatory_table::{Palette, TailTable};
 
 const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
 const C_DIM: Color = Color::from_rgb(0.55, 0.55, 0.6);
@@ -19,13 +22,20 @@ const C_GOLD: Color = Color::from_rgb(0.9, 0.8, 0.4);
 const C_BAD: Color = Color::from_rgb(0.9, 0.45, 0.4);
 const C_OK: Color = Color::from_rgb(0.35, 0.78, 0.98);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObsMsg {
     Start,
     Stop,
     /// 连/断当前目标。
     Connect,
     Disconnect,
+    /// 筛选框在打字。**只改面板内存，不写文件**——每次按键都写的话，
+    /// 守护会在你打到一半时反复重编译一条写错的表达式。
+    FilterEdited(String),
+    /// 把筛选发给守护。
+    ApplyFilter,
+    /// Raw / Parsed 切换。
+    SetParse(bool),
 }
 
 fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, ObsMsg> {
@@ -85,6 +95,7 @@ fn health_badge(h: &str, connected: bool) -> (&'static str, Color) {
 }
 
 pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
+    let t0 = Instant::now();
     let st = ro::snapshot();
     let mut body = column![].spacing(4).padding(8);
 
@@ -254,33 +265,127 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     }
 
     // ── 尾窗 ──
-    let hdr = if sess.tail_skipped > 0 {
-        // 假装全都显示了，是这类工具最常见的谎
-        format!("最近 {} 条（本窗跳过 {} 条）", sess.tail.len(), sess.tail_skipped)
-    } else {
-        format!("最近 {} 条", sess.tail.len())
+    let (ftext, _) = ro::view_state();
+    let f = &sess.filter;
+    // 「到了 N 条、显示 M 条」比「跳过 K 条」说得清楚。带筛选时措辞还要再变一次：
+    // 没显示的那些既有被筛掉的也有没排上一屏的，两者分不开（被筛掉的根本没被扫到）
+    let hdr = match (sess.tail_arrived, f.src.is_empty()) {
+        (0, _) => format!("最近 {} 条", sess.tail.len()),
+        (n, true) => format!("这半秒到了 {n} 条，显示最新 {}", sess.tail.len()),
+        (n, false) => format!("这半秒到了 {n} 条，符合条件的显示 {}", sess.tail.len()),
     };
-    body = body.push(section(&hdr, "原始负载。解码是可选的一层——观察没见过的接口时，Raw 才是真相"));
-    let mut h = row![].spacing(3);
-    for (t, w, n) in [
-        ("seq", 74.0, true),
-        ("时刻", 84.0, false),
-        ("流", 34.0, true),
-        ("长度", 60.0, true),
-        ("标志", 108.0, false),
-        ("负载", 620.0, false),
-    ] {
-        h = h.push(cell(t.into(), w, C_HEAD, n));
+    body = body.push(section(&hdr, "解码是可选的一层——观察没见过的接口时，Raw 才是真相"));
+
+    // 筛选条。
+    //
+    // **显示的是守护实际在用的口径，不是面板请求的**：两者在往返的那半秒里
+    // 不一样，显示请求值会让人以为已经生效了（同 docs/22 §7.7 新股月份那条）。
+    // 输入框本地可编辑，但本地为空时用守护那份填进去——否则用户看不见
+    // 当前到底在筛什么。
+    let shown = if ftext.is_empty() { f.src.clone() } else { ftext.clone() };
+    let mut fr = row![
+        text("显示筛选").size(10).color(C_DIM),
+        text_input("len > 1024 && $.data.s == BTCUSDT", &shown)
+            .on_input(ObsMsg::FilterEdited)
+            .on_submit(ObsMsg::ApplyFilter)
+            .size(11)
+            .padding([2, 6])
+            .width(Length::Fixed(440.0)),
+        chip("应用", ObsMsg::ApplyFilter),
+        // 勾选框反映**已生效**的状态：点下去到生效有半秒往返，
+        // 立刻打勾会让人以为已经切了，其实表里还是原文
+        checkbox(sess.parse).on_toggle(ObsMsg::SetParse).size(12),
+        text("解析（Parsed 视图）").size(10).color(C_DIM),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    // **只影响你看到什么，不动数据**——这句话要常驻，用户永远会把它和捕获筛选搞混
+    fr = fr.push(text("只影响显示，不影响录制").size(10).color(C_DIM));
+    if !f.err.is_empty() {
+        // 写错了照常显示全部并报错，而不是给一张空表让人以为没数据
+        fr = fr.push(text(format!("⚠ {}（当前显示全部）", clip(&f.err, 60))).size(10).color(C_BAD));
+    } else if f.needs_json {
+        fr = fr.push(text("$. 路径要逐条解析，比较贵").size(10).color(C_GOLD));
     }
-    body = body.push(h);
-    for t in sess.tail.iter().rev() {
-        body = body.push(tail_row(t));
+    body = body.push(fr);
+    if sess.tail_lapped > 0 {
+        // 与「没排上一屏」是两件事：这些是**真的被环淘汰掉了**，
+        // 该调的是环容量，不是刷新频率
+        body = body.push(
+            text(format!(
+                "⚠ 尾窗游标被环追上，丢了 {} 条——环容量跟不上，调大 ring 或降速",
+                sess.tail_lapped
+            ))
+            .size(10)
+            .color(C_BAD),
+        );
+    }
+    if f.exhausted {
+        // 悄悄给一张短表，用户会以为这段时间就这么点数据
+        body = body.push(
+            text(format!("⚠ 往回扫了 {} 条就到上限了，更早的没看——收窄条件或调大 scan_budget", f.scanned))
+                .size(10)
+                .color(C_GOLD),
+        );
     }
 
+    // 表格画在 canvas 上：200 行 × 6 列做成 widget 是每帧重建 1200 个节点
+    let table = TailTable {
+        rows: sess.tail.iter().rev().cloned().collect(),
+        version: sess.ring.next_seq as u64,
+        cache: canvas::Cache::new(),
+        pal: Palette {
+            head: C_HEAD,
+            dim: C_DIM,
+            txt: C_TXT,
+            gold: C_GOLD,
+            bad: C_BAD,
+            stripe: Color::from_rgba(1.0, 1.0, 1.0, 0.025),
+        },
+        // 跟**守护实际给了什么**：它说这批行带解析结果，才按解析显示
+        parsed_view: sess.parse,
+    };
+    let h = table.height();
     body = body.push(
-        text(format!("快照 {} · 读于 {}", st.stamp, st.refreshed)).size(10).color(C_DIM),
+        canvas(table).width(Length::Fill).height(Length::Fixed(h)),
+    );
+
+    // **面板自报帧时**：不自报的话，UI 变慢时没人知道是 UI 慢还是数据慢
+    let ms = frame_ms(t0);
+    body = body.push(
+        row![
+            text(format!("快照 {} · 读于 {}", st.stamp, st.refreshed)).size(10).color(C_DIM),
+            text(format!("· 本帧 {ms:.1}ms")).size(10).color(if ms > 16.0 { C_GOLD } else { C_DIM }),
+        ]
+        .spacing(6),
     );
     scrollable(body).width(Length::Fill).height(Length::Fill).into()
+}
+
+/// 记录并返回本次构建耗时（毫秒），同时维护一个滚动峰值。
+///
+/// 只报**这一帧**是不够的：偶发的一次 30ms 会在下一帧就被冲掉，
+/// 而卡顿恰恰是偶发的。故峰值单独留一份。
+fn frame_ms(t0: Instant) -> f64 {
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    if let Ok(mut g) = FRAME_PEAK.lock() {
+        *g = g.max(ms);
+    }
+    ms
+}
+
+static FRAME_PEAK: std::sync::Mutex<f64> = std::sync::Mutex::new(0.0);
+
+/// 近期最慢的一帧（毫秒）。诊断用。
+pub fn frame_peak_ms() -> f64 {
+    FRAME_PEAK.lock().map(|g| *g).unwrap_or(0.0)
+}
+
+/// 复位峰值。
+pub fn reset_frame_peak() {
+    if let Ok(mut g) = FRAME_PEAK.lock() {
+        *g = 0.0;
+    }
 }
 
 fn stream_row<'a>(s: &StreamStat) -> Element<'a, ObsMsg> {
@@ -298,34 +403,6 @@ fn stream_row<'a>(s: &StreamStat) -> Element<'a, ObsMsg> {
         cell(s.skipped_ui.to_string(), 74.0, C_DIM, true),
         cell(ns(s.lag_p50_ns), 82.0, C_TXT, true),
         cell(ns(s.lag_p99_ns), 82.0, C_DIM, true),
-    ]
-    .spacing(3)
-    .into()
-}
-
-fn tail_row<'a>(t: &TailRow) -> Element<'a, ObsMsg> {
-    let flag_c = if t.flags.contains("gap") {
-        C_BAD
-    } else if t.flags.is_empty() {
-        C_DIM
-    } else {
-        C_GOLD
-    };
-    let clock = chrono::DateTime::from_timestamp_millis(t.recv_ms)
-        .map(|x| x.with_timezone(&chrono::Local).format("%H:%M:%S%.3f").to_string())
-        .unwrap_or_else(|| "—".into());
-    let payload = if t.preview_truncated {
-        format!("{}…（共 {} 字节）", clip(&t.preview, 90), t.len)
-    } else {
-        clip(&t.preview, 100)
-    };
-    row![
-        cell(t.seq.to_string(), 74.0, C_DIM, true),
-        cell(clock, 84.0, C_DIM, false),
-        cell(t.stream_id.to_string(), 34.0, C_DIM, true),
-        cell(t.len.to_string(), 60.0, C_DIM, true),
-        cell(if t.flags.is_empty() { "—".into() } else { t.flags.clone() }, 108.0, flag_c, false),
-        cell(payload, 620.0, if t.flags.contains("synthetic") { C_GOLD } else { C_TXT }, false),
     ]
     .spacing(3)
     .into()
@@ -405,6 +482,82 @@ mod tests {
         assert_eq!(human_bytes(512), "512B");
         assert_eq!(human_bytes(2048), "2.0K");
         assert_eq!(human_bytes(536_870_912), "512.0M");
+    }
+
+    /// P1 判据（docs/23 §13）：**5 万条/秒下帧时间 < 16 ms**。
+    ///
+    /// 关键在于：面板的开销与**进来的速率无关**，只与尾窗行数有关——
+    /// 全速流永远不进 UI（Law 02）。所以这里喂一份 200 行的满载快照，
+    /// 量的就是 47k/s 实况下面板每帧真正要做的事。
+    #[test]
+    fn a_full_tail_builds_well_under_one_frame() {
+        use super::super::observatory_readout::{
+            AdapterSpec, FilterStat, ObsReadout, RingStat, SessionView, StreamStat, TailRow,
+        };
+        let row = |i: i64| TailRow {
+            seq: 5_861_177 + i,
+            stream_id: 0,
+            recv_ms: 1_788_849_521_207,
+            len: 77,
+            wire: "text".into(),
+            dir: "in".into(),
+            flags: String::new(),
+            lag_ns: None,
+            preview: r#"{"stream":"blast","data":{"s":"BTCUSDT","i":5861176,"p":"80000.1","q":"0.5"}}"#.into(),
+            preview_truncated: false,
+            parsed: None,
+        };
+        let st = ObsReadout {
+            stamp: "2026-09-08 13:18:41".into(),
+            present: true,
+            connected: true,
+            health: "live".into(),
+            catalog: vec![AdapterSpec {
+                id: "x".into(),
+                label: "X".into(),
+                transport: "ws".into(),
+                config_schema: vec![],
+                streams: vec![],
+                can_request: true,
+            }],
+            session: Some(SessionView {
+                adapter: "x".into(),
+                adapter_label: "X".into(),
+                config: vec![("url".into(), "ws://127.0.0.1".into())],
+                reconnects: 0,
+                ring: RingStat { next_seq: 5_861_377, ..Default::default() },
+                streams: vec![StreamStat {
+                    label: "帧".into(),
+                    received: 5_861_177,
+                    rate_msg: 47_000,
+                    spark_msg: vec![47_000; 60],
+                    ..Default::default()
+                }],
+                tail: (0..200).map(row).collect(),
+                tail_skipped: 23_352,
+                tail_arrived: 23_552,
+                tail_lapped: 0,
+                filter: FilterStat::default(),
+                parse: false,
+            }),
+            ..Default::default()
+        };
+        super::super::observatory_readout::seed_for_test(st);
+
+        // 先跑几次预热（首次会把字体等惰性资源准备好）
+        for _ in 0..5 {
+            let _ = pane_body();
+        }
+        let mut worst = 0f64;
+        for _ in 0..50 {
+            let t = std::time::Instant::now();
+            let _ = pane_body();
+            worst = worst.max(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        // 16ms 是 60fps 的整帧预算，而这只是**构建 widget 树**的部分。
+        // 留足余量：超过 8ms 就说明有东西在随行数线性变贵，该查了
+        eprintln!("[P1] 200 行满载尾窗最慢一帧 {worst:.3}ms（预算 16ms）");
+        assert!(worst < 8.0, "满载尾窗最慢一帧 {worst:.2}ms，超出预算");
     }
 
     #[test]
