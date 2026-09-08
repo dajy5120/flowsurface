@@ -11,6 +11,8 @@ pub mod backtest_readout;
 pub mod backtest_view;
 pub mod c4;
 pub mod c4_readout;
+pub mod egress;
+pub mod egress_view;
 pub mod c4_view;
 pub mod observatory;
 pub mod observatory_lib;

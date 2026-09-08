@@ -30,9 +30,10 @@ pub const WS_PREDICTION: &str = "预测市场"; // Polymarket 决策支持面板
 pub const WS_TARDIS: &str = "Tardis 历史回放"; // 已购 30 天逐笔变速回放（docs/20 Phase 5）
 pub const WS_GLOBAL: &str = "全球市场"; // 全市场雷达 + 树图（docs/22）
 pub const WS_OBSERVATORY: &str = "接口观察终端"; // REST/WS/TCP/FIX 统一观察与录制（docs/23）
-pub const WORKSPACES: [&str; 12] = [
+pub const WS_EGRESS: &str = "网络出口"; // 谁在往外发包 + 手动启停（一页看全）
+pub const WORKSPACES: [&str; 13] = [
     WS_OFFICIAL, WS_LIVE, WS_RECORDED, WS_SELFDATA, WS_RECORDER, WS_FACTORY, WS_C4, WS_OPTIONS,
-    WS_PREDICTION, WS_TARDIS, WS_GLOBAL, WS_OBSERVATORY,
+    WS_PREDICTION, WS_TARDIS, WS_GLOBAL, WS_OBSERVATORY, WS_EGRESS,
 ];
 
 /// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
@@ -54,6 +55,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
         WS_TARDIS => Icon::Return,        // 历史回放（同「录制数据回测」语义）
         WS_GLOBAL => Icon::Search,        // 全市场扫描
         WS_OBSERVATORY => Icon::Search,   // 接口观察（docs/23）
+        WS_EGRESS => Icon::Link,          // 网络出口总闸
         _ => Icon::Layout,
     }
 }
@@ -96,6 +98,9 @@ fn pane_template(name: &str) -> &'static str {
         // 接口观察终端（docs/23 P0）：**零交易所连接**——全部连接在
         // ws-observatory 守护里，这个 pane 只读快照
         WS_OBSERVATORY => r#"{"Observatory":{"settings":{},"link_group":null}}"#,
+        // 网络出口总闸：**零交易所连接**——它只数 /proc 和调 systemctl。
+        // 这个工作区本身要是也拉行情，那就荒唐了
+        WS_EGRESS => r#"{"NetEgress":{"settings":{},"link_group":null}}"#,
         _ => r#"{"Starter":{"link_group":null}}"#,
     }
 }

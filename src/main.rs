@@ -926,7 +926,11 @@ impl Flowsurface {
         let ws_redis_url = std::env::var("WS_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
-        let exchange_streams = if is_replay || is_selfdata {
+        // 网络出口总闸（ws::egress）：关掉时这一支返回 `Subscription::none()`，
+        // iced 会把订阅连同底下的 WS 一起丢掉——**连接是真的断**，
+        // 不是「界面不显示了」。这是面板上唯一能停掉 Cockpit 自身出口的地方，
+        // systemctl 管不着本进程
+        let exchange_streams = if is_replay || is_selfdata || !ws::egress::streams_enabled() {
             Subscription::none()
         } else {
             self.active_dashboard().market_subscriptions(&self.handles).map(Message::MarketWsEvent)

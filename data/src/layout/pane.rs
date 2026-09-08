@@ -126,6 +126,13 @@ pub enum Pane {
         link_group: Option<LinkGroup>,
     },
     /// 数据接口观察终端（docs/23）。无行情流、无图表状态，只有窗口设置。
+    /// 网络出口总闸：一页看全谁在往外发包，每一路都能手动启停。
+    NetEgress {
+        #[serde(default)]
+        settings: Settings,
+        #[serde(default)]
+        link_group: Option<LinkGroup>,
+    },
     Observatory {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -291,6 +298,7 @@ pub enum ContentKind {
     /// 数据接口观察终端（docs/23 P0）：REST/WS/TCP/FIX 统一到一处观察与录制。
     /// **零交易所流**：全部连接在独立的 `ws-observatory` 守护里，面板只读快照。
     Observatory,
+    NetEgress,
     /// 录制驾驶舱（docs/08 F6-P3）：24/7 守护录制控制中心（服务启停 + 配置 + 实况 + 总览）。
     Recorder,
     /// Tardis 历史回放（docs/20 Phase 5）：已购 30 天逐笔按变速推进 `ws:bt:{run}:trades` 喂图。
@@ -323,7 +331,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 20] = [
+    pub const ALL: [ContentKind; 21] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -340,6 +348,7 @@ impl ContentKind {
         ContentKind::PredictionBoard,
         ContentKind::MarketMap,
         ContentKind::Observatory,
+        ContentKind::NetEgress,
         ContentKind::Recorder,
         ContentKind::TardisReplay,
         ContentKind::TardisBoard,
@@ -366,6 +375,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::PredictionBoard => "预测市场",
             ContentKind::MarketMap => "全市场雷达",
             ContentKind::Observatory => "接口观察终端",
+            ContentKind::NetEgress => "网络出口",
             ContentKind::Recorder => "数据录制",
             ContentKind::TardisReplay => "Tardis 历史回放",
             ContentKind::TardisBoard => "Tardis 历史面板",
@@ -447,6 +457,7 @@ impl PaneSetup {
                 | ContentKind::PredictionBoard
                 | ContentKind::MarketMap
                 | ContentKind::Observatory
+                | ContentKind::NetEgress
                 | ContentKind::Recorder
                 | ContentKind::TardisReplay
                 | ContentKind::TardisBoard
@@ -480,6 +491,7 @@ impl PaneSetup {
             | ContentKind::PredictionBoard
             | ContentKind::MarketMap
             | ContentKind::Observatory
+            | ContentKind::NetEgress
             | ContentKind::Recorder
             | ContentKind::TardisReplay
             | ContentKind::TardisBoard
