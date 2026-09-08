@@ -162,6 +162,11 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         };
         top = top.push(text(t).size(10).color(C_GOLD));
     }
+    if !st.secret_warn.is_empty() {
+        // 明文密钥不阻止连接，但静默接受等于假装没这回事：请求文件是
+        // tmpfs 上的普通文件，同一用户的任何进程都读得到
+        top = top.push(text(format!("🔑 {}", clip(&st.secret_warn, 56))).size(10).color(C_GOLD));
+    }
     // 模式切换。**同一个会话上的三种界面**，不是三个程序
     let mode = ro::mode();
     let mut mr = row![text("模式").size(10).color(C_DIM)].spacing(4)

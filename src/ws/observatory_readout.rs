@@ -204,6 +204,9 @@ pub struct ObsReadout {
     /// 最近一次保存/收尾的回执。时间窗保存是异步的，不给回执用户
     /// 不知道到底存没存下来。
     pub last_save: String,
+    /// 密钥是明文填的还是写成 `${环境变量名}`。明文不阻止连接，但必须说——
+    /// 请求文件是 tmpfs 上的普通文件，明文密钥就一直躺在那儿。
+    pub secret_warn: String,
     pub refreshed: String,
     pub svc: super::svcctl::UnitState,
 }
@@ -478,6 +481,7 @@ pub fn parse(v: &serde_json::Value) -> ObsReadout {
         session,
         rec,
         last_save: s(v, "last_save"),
+        secret_warn: s(v, "secret_warn"),
         refreshed: String::new(),
         svc: Default::default(),
     }
@@ -984,11 +988,14 @@ mod tests {
         assert_eq!((se.tail_skipped, se.tail_arrived), (21, 221));
     }
 
+    /// 请求文件和 `REQ` 都是**进程级**的，两个测试并行跑就会互相踩。
+    /// 合成一条按顺序走——这是第三次栽在同一个坑上了（前两次是 IPO 月份
+    /// 和连接表单），并行测试碰进程级状态就得这么办。
     #[test]
-    fn the_first_patch_starts_from_what_is_already_on_disk() {
-        // 面板启动时不知道请求文件里已经有什么。从空对象开始的话，
-        // 用户在面板上做的第一个操作就会把所有它不知道的键冲掉——
-        // 实测：手写一条 capture，点一下「删规则」，文件就只剩 triggers 了
+    fn patching_the_request_file_preserves_every_key_it_did_not_write() {
+        // ① 面板启动时不知道请求文件里已经有什么。从空对象开始的话，
+        //    用户在面板上做的第一个操作就会把所有它不知道的键冲掉——
+        //    实测：手写一条 capture，点一下「删规则」，文件就只剩 triggers 了
         let p = request_path();
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
@@ -1007,23 +1014,23 @@ mod tests {
         assert_eq!(after["nonce"], 42, "连接那一路更要保住");
         assert_eq!(after["别人写的"], 1, "连不认识的键也保住");
         assert!(after["triggers"].as_array().unwrap().is_empty());
-        let _ = std::fs::remove_file(&p);
-    }
 
-    #[test]
-    fn changing_the_filter_does_not_touch_the_connection_fields() {
-        // 两个都踩过：少带 nonce → 守护看到 3 变回 0，判成「连接变了」→ 改筛选就重连；
-        // 少带 adapter → 判成「要断开」→ 改筛选就断线
+        // ② 两个都踩过：少带 nonce → 守护看到 3 变回 0，判成「连接变了」→
+        //    改筛选就重连；少带 adapter → 判成「要断开」→ 改筛选就断线
         if let Ok(mut g) = REQ.lock() {
             *g = Some(serde_json::json!({"adapter":"ws.raw","config":{"url":"wss://x"},"nonce":7}));
         }
         set_filter_text("len > 10");
         let (f, _) = view_state();
         assert_eq!(f, "len > 10");
-        // patch 之后 adapter/nonce 必须原样还在
         let before = REQ.lock().unwrap().clone().unwrap();
         assert_eq!(before["nonce"], 7);
         assert_eq!(before["adapter"], "ws.raw");
+
+        let _ = std::fs::remove_file(&p);
+        if let Ok(mut g) = REQ.lock() {
+            *g = None;
+        }
     }
 
     #[test]
@@ -1070,6 +1077,16 @@ mod tests {
         assert!(e.contains("规则1"), "{e}");
         f.name = "规则2".into();
         assert!(request_add_trigger(&existing, &f).is_ok());
+    }
+
+    #[test]
+    fn a_plaintext_secret_warning_reaches_the_panel_and_an_absent_one_is_empty() {
+        // 守护那边判明文/引用，面板只负责把话说出来。旧版守护不发这个字段，
+        // 那也不能变成一条假警告
+        let with = r#"{"stamp":"s","secret_warn":"明文密钥：headers（建议改成 ${环境变量名}）"}"#;
+        assert!(parse(&serde_json::from_str(with).unwrap()).secret_warn.contains("headers"));
+        let without = r#"{"stamp":"s"}"#;
+        assert!(parse(&serde_json::from_str(without).unwrap()).secret_warn.is_empty());
     }
 
     #[test]

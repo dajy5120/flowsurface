@@ -1631,7 +1631,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn the_panorama_keeps_the_caveats_attached_to_the_numbers() {
         let j = r#"{"stamp":"s","rows":[],"panorama":{
           "venues":[{"venue":"kraken","label":"Kraken","kind":"spot","pairs":731,
