@@ -110,8 +110,11 @@ pub struct TailRow {
 pub struct SessionView {
     pub adapter: String,
     pub adapter_label: String,
-    /// 密钥已由守护抹去。
+    /// 密钥已由守护抹去；`${环境变量名}` 是引用，会原样留着。
     pub config: Vec<(String, String)>,
+    /// Adapter 报上来的链路事实：WS 有没有开 permessage-deflate 之类。
+    /// 从数据本身看不出来（帧里存的是解压后的内容），只能由 Adapter 说。
+    pub transport: Vec<(String, String)>,
     pub reconnects: i64,
     pub ring: RingStat,
     pub streams: Vec<StreamStat>,
@@ -348,6 +351,15 @@ pub fn parse(v: &serde_json::Value) -> ObsReadout {
         adapter_label: s(sv, "adapter_label"),
         config: sv
             .get("config")
+            .and_then(|c| c.as_object())
+            .map(|o| {
+                o.iter()
+                    .map(|(k, x)| (k.clone(), x.as_str().unwrap_or("").to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        transport: sv
+            .get("transport")
             .and_then(|c| c.as_object())
             .map(|o| {
                 o.iter()
@@ -1077,6 +1089,19 @@ mod tests {
         assert!(e.contains("规则1"), "{e}");
         f.name = "规则2".into();
         assert!(request_add_trigger(&existing, &f).is_ok());
+    }
+
+    #[test]
+    fn the_link_facts_the_bytes_cannot_tell_you_reach_the_panel() {
+        // docs/23 §14 坑 4：帧里存的是解压后的内容，事后看不出压没压。
+        // 只有 Adapter 在建连时说得清，所以这条必须一路走到界面
+        let j = r#"{"stamp":"s","session":{"adapter":"ws.raw",
+          "transport":{"ws.deflate":"开","ws.extensions":"permessage-deflate; client_max_window_bits"}}}"#;
+        let se = parse(&serde_json::from_str(j).unwrap()).session.unwrap();
+        assert!(se.transport.iter().any(|(k, v)| k == "ws.deflate" && v == "开"));
+        // 旧版守护不发这个字段，那就是空，不是假数据
+        let old = r#"{"stamp":"s","session":{"adapter":"ws.raw"}}"#;
+        assert!(parse(&serde_json::from_str(old).unwrap()).session.unwrap().transport.is_empty());
     }
 
     #[test]

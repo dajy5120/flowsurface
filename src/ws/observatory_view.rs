@@ -313,6 +313,16 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     }
     body = body.push(cfgline.align_y(iced::Alignment::Center));
 
+    // 链路事实：从数据本身看不出来的那些。deflate 是典型——帧里存的是
+    // 解压后的内容，不在这儿说的话，事后没人知道这条连接压没压
+    if !sess.transport.is_empty() {
+        let mut tl = row![text("链路 ").size(10).color(C_DIM)].spacing(8);
+        for (k, v) in &sess.transport {
+            tl = tl.push(text(format!("{k}={}", clip(v, 40))).size(10).color(C_DIM));
+        }
+        body = body.push(tl.align_y(iced::Alignment::Center));
+    }
+
     // ── API 调试：发请求 + 两次应答对比 ──
     if mode == ro::Mode::Api {
         body = body.push(api_block(&st, sess));
@@ -1023,6 +1033,7 @@ mod tests {
             session: Some(SessionView {
                 adapter: "x".into(),
                 adapter_label: "X".into(),
+                transport: Vec::new(),
                 config: vec![("url".into(), "ws://127.0.0.1".into())],
                 reconnects: 0,
                 ring: RingStat { next_seq: 5_861_377, ..Default::default() },
