@@ -40,6 +40,26 @@ pub fn handle(m: ObsMsg) {
         }
         ObsMsg::ApplyFilter => ro::request_view(),
         ObsMsg::SetRecord(on) => ro::request_record(on),
+        ObsMsg::SetMode(m) => ro::set_mode(m),
+        // 暂停**只改面板**：不发请求文件，后端照常收、照常录、照常触发
+        ObsMsg::TogglePause => {
+            let cur = ro::snapshot();
+            ro::toggle_pause(&cur);
+        }
+        ObsMsg::SendEdited(t) => ro::set_send_body(&t),
+        ObsMsg::SendNow => {
+            // 发到**当前 Adapter 的控制流**：它是双向那条。
+            // 写死 0 的话，在响应流是 0 的 Adapter 上会把请求发到数据流里
+            let cur = ro::snapshot();
+            let sid = cur
+                .session
+                .as_ref()
+                .and_then(|s| cur.catalog.iter().find(|a| a.id == s.adapter))
+                .and_then(|a| a.streams.iter().find(|st| st.id == "control"))
+                .map(|st| st.stream_id)
+                .unwrap_or(0);
+            ro::request_send(sid);
+        }
         ObsMsg::CaptureEdited(t) => ro::set_capture_text(&t),
         ObsMsg::ApplyCapture => ro::request_capture(),
         ObsMsg::TrigEdited(k, v) => ro::set_new_trig(|f| match k {

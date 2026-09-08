@@ -642,6 +642,109 @@ pub fn form_ready(catalog: &[AdapterSpec]) -> Result<(), String> {
     Ok(())
 }
 
+/// 界面模式（docs/23 §9）。**三种模式是同一个后端会话上的三种界面**，
+/// 不是三个程序——切模式不碰连接、不碰录制。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// 我要试一个接口。
+    Api,
+    /// 我要盯着这条流。
+    #[default]
+    Observe,
+    /// 让它录着。
+    Record,
+}
+
+impl Mode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Api => "API 调试",
+            Mode::Observe => "数据观察",
+            Mode::Record => "录制",
+        }
+    }
+    pub const ALL: [Mode; 3] = [Mode::Api, Mode::Observe, Mode::Record];
+}
+
+static MODE: Mutex<Mode> = Mutex::new(Mode::Observe);
+
+pub fn mode() -> Mode {
+    MODE.lock().map(|g| *g).unwrap_or_default()
+}
+
+pub fn set_mode(m: Mode) {
+    if let Ok(mut g) = MODE.lock() {
+        *g = m;
+    }
+}
+
+/// 暂停时冻结的尾窗（docs/23 §14 坑 7）。
+///
+/// **暂停不是断连**：后端照常收、照常录、照常触发。停的只是这一屏的刷新。
+/// 界面上必须写清楚，否则用户会以为暂停期间的数据没了。
+///
+/// 冻结整份而不是「停止追加」：后者在环淘汰之后会露出空洞，
+/// 而暂停恰恰是为了盯住某一屏不动。
+static PAUSED: Mutex<Option<Frozen>> = Mutex::new(None);
+
+#[derive(Clone)]
+pub struct Frozen {
+    pub rows: Vec<TailRow>,
+    /// 暂停那一刻的 seq。用来算「暂停期间后端又收了多少」。
+    pub at_seq: i64,
+    pub at: String,
+}
+
+pub fn paused() -> Option<Frozen> {
+    PAUSED.lock().ok().and_then(|g| g.clone())
+}
+
+pub fn is_paused() -> bool {
+    PAUSED.lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
+/// 暂停 / 继续。
+pub fn toggle_pause(cur: &ObsReadout) {
+    let Ok(mut g) = PAUSED.lock() else { return };
+    if g.is_some() {
+        *g = None;
+        return;
+    }
+    let Some(s) = cur.session.as_ref() else { return };
+    *g = Some(Frozen {
+        rows: s.tail.clone(),
+        at_seq: s.ring.next_seq,
+        at: chrono::Local::now().format("%H:%M:%S").to_string(),
+    });
+}
+
+/// API 调试的请求体编辑框。
+static SEND_BODY: Mutex<String> = Mutex::new(String::new());
+
+pub fn send_body() -> String {
+    SEND_BODY.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn set_send_body(t: &str) {
+    if let Ok(mut g) = SEND_BODY.lock() {
+        *g = t.to_string();
+    }
+}
+
+/// 发一条出站请求。走 `send` 段的独立 nonce——与连接、录制都分开。
+pub fn request_send(stream_id: u32) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static N: AtomicI64 = AtomicI64::new(1);
+    patch(&[(
+        "send",
+        serde_json::json!({
+            "stream_id": stream_id,
+            "body": send_body(),
+            "nonce": N.fetch_add(1, Ordering::Relaxed),
+        }),
+    )]);
+}
+
 /// 捕获筛选的编辑框（面板内存，随打字变）。
 static CAPTURE: Mutex<String> = Mutex::new(String::new());
 
@@ -1021,5 +1124,149 @@ mod tests {
         // 全零的假会话，界面上显示成「已连接但一条数据都没有」
         let r = parse(&serde_json::from_str(r#"{"connected":false,"session":null}"#).unwrap());
         assert!(r.session.is_none());
+    }
+}
+
+/// 两次响应的差异（docs/23 §9 Mode 1）。
+///
+/// **按字段比，不按文本比**：API 响应是结构化的，「哪些字段变了」才是
+/// 要问的问题。文本 diff 会被键顺序、空白、数组重排搅得没法看。
+#[derive(Default, Clone, PartialEq, Debug)]
+pub struct Diff {
+    /// 新出现的字段。
+    pub added: Vec<(String, String)>,
+    /// 消失的字段。**要单独列**——接口悄悄不再返回某个字段，
+    /// 是升级时最容易漏掉的一类变化。
+    pub removed: Vec<(String, String)>,
+    /// 值变了的：`(路径, 旧值, 新值)`。
+    pub changed: Vec<(String, String, String)>,
+    /// 两边都有且相同的字段数。
+    pub same: usize,
+}
+
+impl Diff {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
+    }
+    pub fn total_changes(&self) -> usize {
+        self.added.len() + self.removed.len() + self.changed.len()
+    }
+}
+
+/// 比较两份解析结果（旧 → 新）。
+pub fn diff_parsed(old: &[(String, String)], new: &[(String, String)]) -> Diff {
+    let om: std::collections::BTreeMap<&str, &str> =
+        old.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let nm: std::collections::BTreeMap<&str, &str> =
+        new.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut d = Diff::default();
+    for (k, nv) in &nm {
+        match om.get(k) {
+            None => d.added.push((k.to_string(), nv.to_string())),
+            Some(ov) if ov != nv => {
+                d.changed.push((k.to_string(), ov.to_string(), nv.to_string()))
+            }
+            Some(_) => d.same += 1,
+        }
+    }
+    for (k, ov) in &om {
+        if !nm.contains_key(k) {
+            d.removed.push((k.to_string(), ov.to_string()));
+        }
+    }
+    d
+}
+
+/// 从尾窗里挑出某条流最近的两条，比一比。
+///
+/// 需要**开启解析**——没有解析结果时无从比起，返回 `None` 让界面去提示，
+/// 而不是拿原始文本硬比出一堆噪声。
+pub fn diff_last_two(sess: &SessionView, stream_id: u32) -> Option<(Diff, i64, i64)> {
+    let mut it = sess
+        .tail
+        .iter()
+        .rev()
+        .filter(|r| r.stream_id == stream_id && r.parsed.as_ref().is_some_and(|p| !p.is_empty()));
+    let new = it.next()?;
+    let old = it.next()?;
+    Some((
+        diff_parsed(old.parsed.as_ref()?, new.parsed.as_ref()?),
+        old.seq,
+        new.seq,
+    ))
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+
+    fn kv(p: &[(&str, &str)]) -> Vec<(String, String)> {
+        p.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    #[test]
+    fn a_field_that_stopped_being_returned_is_listed_separately() {
+        // 接口悄悄不再返回某个字段，是升级时最容易漏掉的一类变化。
+        // 只报「值变了」的话它根本不会出现
+        let old = kv(&[("$.a", "1"), ("$.gone", "x")]);
+        let new = kv(&[("$.a", "2"), ("$.new", "y")]);
+        let d = diff_parsed(&old, &new);
+        assert_eq!(d.removed, vec![("$.gone".to_string(), "x".to_string())]);
+        assert_eq!(d.added, vec![("$.new".to_string(), "y".to_string())]);
+        assert_eq!(d.changed, vec![("$.a".to_string(), "1".to_string(), "2".to_string())]);
+        assert_eq!(d.same, 0);
+    }
+
+    #[test]
+    fn two_identical_responses_diff_to_nothing() {
+        let a = kv(&[("$.x", "1"), ("$.y", "2")]);
+        let d = diff_parsed(&a, &a);
+        assert!(d.is_empty());
+        assert_eq!(d.same, 2);
+        assert_eq!(d.total_changes(), 0);
+    }
+
+    #[test]
+    fn comparing_by_field_not_by_text_ignores_key_order() {
+        // 文本 diff 会被键顺序搅得没法看，而键顺序在 JSON 里没有意义
+        let a = kv(&[("$.a", "1"), ("$.b", "2")]);
+        let b = kv(&[("$.b", "2"), ("$.a", "1")]);
+        assert!(diff_parsed(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn a_diff_needs_two_parsed_responses() {
+        // 没有解析结果时无从比起。拿原始文本硬比会得到一堆噪声，
+        // 不如让界面提示「开启解析」
+        let mut s = SessionView::default();
+        s.tail = vec![TailRow { stream_id: 0, parsed: None, ..Default::default() }];
+        assert!(diff_last_two(&s, 0).is_none());
+        s.tail = vec![
+            TailRow { seq: 1, stream_id: 0, parsed: Some(kv(&[("$.p", "1")])), ..Default::default() },
+        ];
+        assert!(diff_last_two(&s, 0).is_none(), "只有一条也比不了");
+        s.tail.push(TailRow {
+            seq: 2,
+            stream_id: 0,
+            parsed: Some(kv(&[("$.p", "2")])),
+            ..Default::default()
+        });
+        let (d, a, b) = diff_last_two(&s, 0).unwrap();
+        assert_eq!((a, b), (1, 2), "旧 → 新");
+        assert_eq!(d.changed.len(), 1);
+    }
+
+    #[test]
+    fn the_diff_only_looks_at_the_stream_it_was_asked_about() {
+        // 控制流里混着「已连接」之类的合成帧，比进去只会是噪声
+        let mut s = SessionView::default();
+        s.tail = vec![
+            TailRow { seq: 1, stream_id: 1, parsed: Some(kv(&[("$.z", "9")])), ..Default::default() },
+            TailRow { seq: 2, stream_id: 0, parsed: Some(kv(&[("$.p", "1")])), ..Default::default() },
+            TailRow { seq: 3, stream_id: 0, parsed: Some(kv(&[("$.p", "2")])), ..Default::default() },
+        ];
+        let (d, a, b) = diff_last_two(&s, 0).unwrap();
+        assert_eq!((a, b), (2, 3));
+        assert_eq!(d.changed[0].0, "$.p");
     }
 }

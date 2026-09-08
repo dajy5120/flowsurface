@@ -56,6 +56,15 @@ pub enum ObsMsg {
     AddTrigger,
     /// 删掉第 n 条规则。
     DelTrigger(usize),
+    /// 切界面模式（docs/23 §9）。**三种模式是同一个会话上的三种界面**，
+    /// 切模式不碰连接、不碰录制。
+    SetMode(ro::Mode),
+    /// 暂停 / 继续。**只停这一屏**——后端照常收、照常录。
+    TogglePause,
+    /// API 调试的请求体在打字。
+    SendEdited(String),
+    /// 发出去。
+    SendNow,
 }
 
 fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, ObsMsg> {
@@ -153,6 +162,36 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         };
         top = top.push(text(t).size(10).color(C_GOLD));
     }
+    // 模式切换。**同一个会话上的三种界面**，不是三个程序
+    let mode = ro::mode();
+    let mut mr = row![text("模式").size(10).color(C_DIM)].spacing(4)
+        .align_y(iced::Alignment::Center);
+    for m in ro::Mode::ALL {
+        mr = mr.push(chip_on(m.label(), m == mode, ObsMsg::SetMode(m)));
+    }
+    // 暂停**只停这一屏**（docs/23 §14 坑 7）。不写清楚的话，
+    // 用户会以为暂停期间的数据没了
+    let frozen = ro::paused();
+    match &frozen {
+        Some(f) => {
+            mr = mr.push(chip_on("▶ 继续", true, ObsMsg::TogglePause));
+            let behind = st
+                .session
+                .as_ref()
+                .map(|s| (s.ring.next_seq - f.at_seq).max(0))
+                .unwrap_or(0);
+            mr = mr.push(
+                text(format!(
+                    "⏸ 已暂停于 {} · 后端仍在收（这期间又来了 {behind} 条，没丢）",
+                    f.at
+                ))
+                .size(10)
+                .color(C_GOLD),
+            );
+        }
+        None => mr = mr.push(chip("⏸ 暂停", ObsMsg::TogglePause)),
+    }
+    body = body.push(mr);
     body = body.push(top);
 
     if !st.present {
@@ -269,8 +308,14 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     }
     body = body.push(cfgline.align_y(iced::Alignment::Center));
 
+    // ── API 调试：发请求 + 两次应答对比 ──
+    if mode == ro::Mode::Api {
+        body = body.push(api_block(&st, sess));
+    }
+
     // ── 环形缓冲：覆盖区间是这一屏最要紧的一个数 ──
     let r = &sess.ring;
+    if mode != ro::Mode::Api {
     body = body.push(section(
         "环形缓冲",
         "「能往回捞多久」= 覆盖区间。想存的时间窗如果比它早，捞出来的会是一段安静变短的数据",
@@ -312,14 +357,29 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         ]
         .spacing(3),
     );
+    }
 
-    // ── 录制 ──
-    body = body.push(record_block(&st, sess, &r));
-
-    // ── 触发录制 + 捕获筛选 ──
-    body = body.push(trigger_block(sess));
+    // ── 录制 ──（录制模式才占版面；观察模式给一行摘要就够了）
+    if mode == ro::Mode::Record {
+        body = body.push(record_block(&st, sess, &r));
+        body = body.push(trigger_block(sess));
+    } else if st.rec.on {
+        // 别的模式下**仍然要显示正在录**：不显示的话，用户切走之后
+        // 会忘了自己还在往盘上写
+        body = body.push(
+            text(format!(
+                "● 正在录制 {} · {} 条 {} · 到「录制」模式去停",
+                st.rec.session_id,
+                st.rec.frames,
+                human_bytes(st.rec.bytes)
+            ))
+            .size(10)
+            .color(C_OK),
+        );
+    }
 
     // ── 逐流指标：四个阶段分开 ──
+    if mode != ro::Mode::Api {
     body = body.push(section(
         "逐流指标",
         "丢弃按阶段分开：帧=太大 / 环=满了 / 盘=写不动。「UI 跳过」不是故障——人眼一秒读不了 20 行",
@@ -352,6 +412,8 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
                 .spacing(3),
             );
         }
+    }
+
     }
 
     // ── 尾窗 ──
@@ -419,10 +481,17 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         );
     }
 
-    // 表格画在 canvas 上：200 行 × 6 列做成 widget 是每帧重建 1200 个节点
+    // 表格画在 canvas 上：200 行 × 6 列做成 widget 是每帧重建 1200 个节点。
+    //
+    // 暂停时用**冻结的那一份**，并且把 version 也冻住——否则缓存每帧失效，
+    // 暂停反而比不暂停还贵（docs/23 §10.6：暂停就该是真的零开销）
+    let (rows, ver) = match &frozen {
+        Some(f) => (f.rows.clone(), f.at_seq as u64),
+        None => (sess.tail.clone(), sess.ring.next_seq as u64),
+    };
     let table = TailTable {
-        rows: sess.tail.iter().rev().cloned().collect(),
-        version: sess.ring.next_seq as u64,
+        rows: rows.iter().rev().cloned().collect(),
+        version: ver,
         cache: canvas::Cache::new(),
         pal: Palette {
             head: C_HEAD,
@@ -476,6 +545,112 @@ pub fn reset_frame_peak() {
     if let Ok(mut g) = FRAME_PEAK.lock() {
         *g = 0.0;
     }
+}
+
+/// API 调试（docs/23 §9 Mode 1）：发请求 + 两次应答对比。
+///
+/// **两次应答做 diff 是调接口时最有用的功能**：改一个参数、再发一次，
+/// 直接看哪几个字段动了。按字段比而不是按文本比——键顺序和空白在 JSON 里
+/// 没有意义，文本 diff 会被它们搅得没法看。
+fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, ObsMsg> {
+    let mut col = column![].spacing(4);
+    let can_send = st
+        .catalog
+        .iter()
+        .find(|a| a.id == sess.adapter)
+        .map(|a| a.can_request)
+        .unwrap_or(false);
+
+    col = col.push(section("发送", "出站帧也会进信封——「我发了什么」和「它回了什么」能对上"));
+    if can_send {
+        col = col.push(
+            row![
+                text_input("请求体（WS 是订阅报文；REST 是 POST body；FIX 用 | 代替 SOH）", &ro::send_body())
+                    .on_input(ObsMsg::SendEdited)
+                    .on_submit(ObsMsg::SendNow)
+                    .size(11)
+                    .padding([2, 6])
+                    .width(Length::Fixed(700.0)),
+                chip("发送", ObsMsg::SendNow),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        );
+    } else {
+        // 说清是**这个 Adapter 不支持**，而不是让按钮点了没反应
+        col = col.push(
+            text("当前 Adapter 不接受出站请求（回放就是这样）").size(10).color(C_DIM),
+        );
+    }
+
+    // ── 两次应答对比 ──
+    col = col.push(section("上两次应答的差异", "按字段比，不按文本比"));
+    // 数据流永远是 0 号：descriptor 里第一条流就是负载流
+    match ro::diff_last_two(sess, 0) {
+        None => {
+            // 说清**为什么**比不了：没开解析、还是只收到一条
+            let n = sess.tail.iter().filter(|r| r.stream_id == 0).count();
+            col = col.push(
+                text(if !sess.parse {
+                    "要先勾上「解析」才能按字段比".to_string()
+                } else {
+                    format!("还只有 {n} 条应答，至少要两条")
+                })
+                .size(10)
+                .color(C_DIM),
+            );
+        }
+        Some((d, a, b)) => {
+            col = col.push(
+                text(format!(
+                    "seq {a} → {b}：{} 处变化，{} 个字段没动",
+                    d.total_changes(),
+                    d.same
+                ))
+                .size(11)
+                .color(if d.is_empty() { C_DIM } else { C_TXT }),
+            );
+            for (k, o, n) in d.changed.iter().take(24) {
+                col = col.push(
+                    row![
+                        cell(clip(k, 34), 250.0, C_TXT, false),
+                        cell(clip(o, 26), 190.0, C_DIM, false),
+                        text("→").size(10).color(C_DIM),
+                        cell(clip(n, 26), 190.0, C_OK, false),
+                    ]
+                    .spacing(6),
+                );
+            }
+            for (k, v) in d.added.iter().take(12) {
+                col = col.push(
+                    row![
+                        cell(format!("+ {}", clip(k, 32)), 250.0, C_OK, false),
+                        cell(clip(v, 26), 190.0, C_OK, false),
+                    ]
+                    .spacing(6),
+                );
+            }
+            // **消失的字段单独列**：接口悄悄不再返回某个字段，
+            // 是升级时最容易漏掉的一类变化
+            for (k, v) in d.removed.iter().take(12) {
+                col = col.push(
+                    row![
+                        cell(format!("− {}", clip(k, 32)), 250.0, C_BAD, false),
+                        cell(clip(v, 26), 190.0, C_DIM, false),
+                    ]
+                    .spacing(6),
+                );
+            }
+            if d.total_changes() > 48 {
+                col = col.push(
+                    text(format!("…共 {} 处，只列了前面几条", d.total_changes()))
+                        .size(10)
+                        .color(C_DIM),
+                );
+            }
+        }
+    }
+    col.into()
 }
 
 /// 触发录制与捕获筛选（docs/23 §7、§8.1）。
@@ -954,6 +1129,36 @@ mod tests {
         let (id, vals) = r::form(&cat);
         assert_eq!(id, "y.rest");
         assert_eq!(vals["host"], "https://默认不同", "要回到新协议的默认值");
+    }
+
+    #[test]
+    fn pausing_says_that_the_backend_is_still_running() {
+        // docs/23 §14 坑 7：**暂停不是断连**。不写清楚的话，
+        // 用户会以为暂停期间的数据没了
+        let whole = include_str!("observatory_view.rs");
+        let src = whole.split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("后端仍在收"), "暂停时必须说明后端照常在收");
+        assert!(src.contains("没丢"), "还要说清那些数据没丢");
+    }
+
+    #[test]
+    fn a_paused_tail_freezes_its_version_so_the_cache_stays_valid() {
+        // §10.6：暂停就该是真的零开销。version 不冻的话缓存每帧失效，
+        // 暂停反而比不暂停还贵
+        let whole = include_str!("observatory_view.rs");
+        let src = whole.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            src.contains("f.at_seq as u64"),
+            "暂停时 version 要用冻结那一刻的 seq"
+        );
+    }
+
+    #[test]
+    fn recording_stays_visible_outside_the_record_mode() {
+        // 切走之后忘了自己还在往盘上写，是这类工具最容易造成的事故
+        let whole = include_str!("observatory_view.rs");
+        let src = whole.split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("正在录制"), "别的模式下也要提示正在录");
     }
 
     #[test]
