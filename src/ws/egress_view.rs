@@ -61,6 +61,7 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
 
     // ── 总数 ──
     let total = egress::total_conns(&rows);
+    let wire = egress::wire_rate();
     let ours: u32 = rows
         .iter()
         .zip(egress::ALL)
@@ -71,6 +72,13 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
     body = body.push(
         row![
             text("网络出口").size(13).color(C_HEAD),
+            // 整机网速放在最显眼处：这是「我这会儿到底在耗多少流量」的答案
+            text(match wire {
+                Some((d, u)) => format!("整机 {}", egress::human_rate(d, u)),
+                None => "整机 测量中…".into(),
+            })
+            .size(13)
+            .color(C_OK),
             text(format!("本项目 {ours} 条 · 全机 {}", total.label()))
                 .size(11)
                 .color(if ours > 0 { C_OK } else { C_DIM }),
@@ -79,6 +87,15 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center),
+    );
+    // 两个数**本来就对不上**。不说清的话，用户会以为哪儿算错了
+    body = body.push(
+        text(format!(
+            "整机 = 真实网卡（{}）上的字节，含 IP/TCP 头，且是整台机器的（浏览器、系统更新都在内）；             每一路数的是 TCP 载荷。走本机代理的流量两边各算一次，所以逐行相加会大于整机。",
+            egress::wire_ifaces().join(" + ")
+        ))
+        .size(10)
+        .color(C_DIM),
     );
     body = body.push(
         text("「现在 0 条」不等于「不会再用流量」——定时任务平时就是 0，到点照拉。看「下次」那一列")
@@ -96,6 +113,7 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
         ("连谁", 320.0, false),
         ("状态", 96.0, false),
         ("连接", 130.0, true),
+        ("速度", 200.0, false),
         ("下次 / 已运行", 120.0, false),
         ("开机自启", 84.0, false),
         ("", 150.0, false),
@@ -130,6 +148,14 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
                 if r.conns.is_some_and(|c| c.total() > 0) { C_OK } else { C_DIM },
                 true
             ),
+            // 「—」= 还没有两次采样，或这一路根本没在跑。
+            // **和「0B/s」是两回事**：后者是「连着但没在传」
+            cell(
+                r.bps.map(|r| r.label()).unwrap_or_else(|| "—".into()),
+                200.0,
+                if r.bps.is_some_and(|r| r.total_down() > 1024.0) { C_OK } else { C_DIM },
+                false
+            ),
             cell(when, 120.0, C_DIM, false),
         ]
         .spacing(4)
@@ -156,6 +182,15 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
         text(
             "停 Cockpit 行情图 = 关掉交易所订阅，连接会真的断开（不是只让界面不显示）；\
              再打开时图表自己会重新连上。",
+        )
+        .size(10)
+        .color(C_DIM),
+    );
+    body = body.push(
+        text(
+            "速度每 2 秒采一次，是**下限**——两次采样之间关掉的连接，它最后那段字节数没算进来。\
+             「—」是还没测出来或这一路没在跑，「0B/s」是连着但没在传。\
+             一路同时有「直连」和「经本机」两个数时，那多半是个代理——两边是同一份字节。",
         )
         .size(10)
         .color(C_DIM),
