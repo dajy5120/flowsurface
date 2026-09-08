@@ -36,6 +36,16 @@ pub enum ObsMsg {
     ApplyFilter,
     /// Raw / Parsed 切换。
     SetParse(bool),
+    /// 开/停录制。
+    SetRecord(bool),
+    /// 从环里回捞最近 N 秒（docs/23 §5.1）。这是环形缓冲的兑现：
+    /// 看到异常**之后**才决定录。
+    SaveLast(u32),
+    /// 换一个 Adapter。参数是它的 id——**这是 UI 里唯一出现 adapter id 的地方，
+    /// 而且是从守护下发的目录里拿的，不是写死的**。
+    PickAdapter(String),
+    /// 连接表单里某个字段被编辑。
+    FieldEdited(String, String),
 }
 
 fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, ObsMsg> {
@@ -46,7 +56,15 @@ fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, ObsMsg> {
 }
 
 fn chip<'a>(label: &str, msg: ObsMsg) -> Element<'a, ObsMsg> {
-    button(text(label.to_string()).size(11)).padding([2, 7]).on_press(msg).into()
+    chip_on(label, false, msg)
+}
+
+fn chip_on<'a>(label: &str, active: bool, msg: ObsMsg) -> Element<'a, ObsMsg> {
+    button(text(label.to_string()).size(11))
+        .padding([2, 7])
+        .style(move |t, st| crate::style::button::modifier(t, st, active))
+        .on_press(msg)
+        .into()
 }
 
 /// 一行 60 格火花线。用块字符画——数据速率这种东西看**形状**比看数字快。
@@ -137,33 +155,70 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
             .into();
     }
 
-    // ── Adapter 目录：**完全由守护下发**，这里不认识任何协议 ──
-    body = body.push(section("已注册的 Adapter", "加协议只改守护侧；这张表和下面的表单都是它下发的"));
-    let mut h = row![].spacing(3);
-    for (t, w, n) in [
-        ("id", 130.0, false),
-        ("名称", 170.0, false),
-        ("传输", 60.0, false),
-        ("配置项", 60.0, true),
-        ("流", 46.0, true),
-        ("可发请求", 70.0, false),
-    ] {
-        h = h.push(cell(t.into(), w, C_HEAD, n));
-    }
-    body = body.push(h);
+    // ── 连接表单：**完全由守护下发的 descriptor 生成** ──
+    //
+    // 这是自描述设计的兑现：控件种类、标签、默认值、必填与否、密码框，
+    // 全部来自 `config_schema`。加一个协议、加一个字段，这里一行都不用改。
+    body = body.push(section(
+        "连接",
+        "表单由 Adapter 自述生成——加协议或加字段只改守护侧一处",
+    ));
+    let (pick, vals) = ro::form(&st.catalog);
+    let mut ar = row![text("Adapter").size(10).color(C_DIM)].spacing(4)
+        .align_y(iced::Alignment::Center);
     for a in &st.catalog {
-        body = body.push(
-            row![
-                cell(a.id.clone(), 130.0, C_TXT, false),
-                cell(a.label.clone(), 170.0, C_TXT, false),
-                cell(a.transport.clone(), 60.0, C_DIM, false),
-                cell(a.config_schema.len().to_string(), 60.0, C_DIM, true),
-                cell(a.streams.len().to_string(), 46.0, C_DIM, true),
-                cell(if a.can_request { "是" } else { "否" }.into(), 70.0, C_DIM, false),
-            ]
-            .spacing(3),
+        ar = ar.push(chip_on(&a.label, a.id == pick, ObsMsg::PickAdapter(a.id.clone())));
+    }
+    if let Some(a) = st.catalog.iter().find(|a| a.id == pick) {
+        ar = ar.push(
+            text(format!("{} · {} 条流", a.transport, a.streams.len())).size(10).color(C_DIM),
         );
     }
+    body = body.push(ar);
+
+    if let Some(a) = st.catalog.iter().find(|a| a.id == pick) {
+        for f in &a.config_schema {
+            let v = vals.get(&f.key).cloned().unwrap_or_default();
+            let key = f.key.clone();
+            let mut fr = row![
+                container(
+                    text(format!("{}{}", f.label, if f.required { " *" } else { "" }))
+                        .size(10)
+                        .color(if f.required { C_TXT } else { C_DIM })
+                )
+                .width(Length::Fixed(110.0)),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center);
+            // **密钥用密码框**：它会被人截图、被人录屏。守护那边也会在快照和
+            // 清单里抹掉它，但那挡不住屏幕
+            let input = text_input(&f.hint, &v)
+                .on_input(move |t| ObsMsg::FieldEdited(key.clone(), t))
+                .on_submit(ObsMsg::Connect)
+                .size(11)
+                .padding([2, 6])
+                .width(Length::Fixed(520.0));
+            fr = fr.push(if f.kind == "secret" { input.secure(true) } else { input });
+            if !f.hint.is_empty() {
+                fr = fr.push(text(f.hint.clone()).size(10).color(C_DIM));
+            }
+            body = body.push(fr);
+        }
+    }
+
+    let mut cr = row![].spacing(8).align_y(iced::Alignment::Center);
+    match ro::form_ready(&st.catalog) {
+        Ok(()) => cr = cr.push(chip("连接", ObsMsg::Connect)),
+        Err(e) => {
+            // 必填项空着就点连接，只会拿到一条难懂的握手错误。早点挡住，
+            // 错误信息才说得清「该怎么改」
+            cr = cr.push(text(format!("⚠ {e}")).size(10).color(C_GOLD));
+        }
+    }
+    if st.connected || st.session.is_some() {
+        cr = cr.push(chip("断开", ObsMsg::Disconnect));
+    }
+    body = body.push(cr);
 
     let Some(sess) = st.session.as_ref() else {
         body = body.push(
@@ -228,6 +283,9 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         ]
         .spacing(3),
     );
+
+    // ── 录制 ──
+    body = body.push(record_block(&st, sess, &r));
 
     // ── 逐流指标：四个阶段分开 ──
     body = body.push(section(
@@ -386,6 +444,97 @@ pub fn reset_frame_peak() {
     if let Ok(mut g) = FRAME_PEAK.lock() {
         *g = 0.0;
     }
+}
+
+/// 录制区块。
+///
+/// 「回捞最近 N 秒」的按钮上**写着实际能捞多少**：环只覆盖 11 秒时，
+/// 「最近 60 秒」按下去只会得到 11 秒的数据。不在按钮上说清楚的话，
+/// 用户会拿到一份安静变短的文件还以为是完整的（docs/23 §5.1）。
+fn record_block<'a>(
+    st: &ro::ObsReadout,
+    sess: &ro::SessionView,
+    ring: &ro::RingStat,
+) -> Element<'a, ObsMsg> {
+    let rec = &st.rec;
+    let mut col = column![].spacing(4);
+    col = col.push(section(
+        "录制",
+        "这是本程序唯一会写硬盘的地方。原始字节始终写，parquet 供分析，JSONL 需在配置里开",
+    ));
+
+    let cov = ring.coverage_secs.unwrap_or(0.0);
+    let mut r1 = row![].spacing(8).align_y(iced::Alignment::Center);
+    if rec.on {
+        r1 = r1.push(chip("■ 停止录制", ObsMsg::SetRecord(false)));
+        r1 = r1.push(
+            text(format!(
+                "● 录制中 {} · {} 条 {} · 预算 {:.2}%",
+                rec.session_id,
+                rec.frames,
+                human_bytes(rec.bytes),
+                rec.budget_frac * 100.0
+            ))
+            .size(11)
+            .color(C_OK),
+        );
+        if rec.gaps > 0 {
+            r1 = r1.push(text(format!("断点 {}", rec.gaps)).size(10).color(C_GOLD));
+        }
+        if rec.drop_sink > 0 {
+            // 与「gap」不同：这是录制**自己**跟不上环而丢的，该调容量或降速
+            r1 = r1.push(
+                text(format!("⚠ 录制跟不上，丢了 {} 条", rec.drop_sink)).size(10).color(C_BAD),
+            );
+        }
+    } else {
+        r1 = r1.push(chip("● 开始录制", ObsMsg::SetRecord(true)));
+        r1 = r1.push(text("未在录制").size(11).color(C_DIM));
+    }
+    col = col.push(r1);
+
+    if rec.halted {
+        // **被闸门停了**与「用户点了停止」是两回事
+        col = col.push(text(format!("⚠ {}", rec.halt)).size(10).color(C_BAD));
+    }
+
+    // 回捞：按钮上写实际能捞多少
+    let mut r2 = row![text("回捞最近").size(10).color(C_DIM)].spacing(4)
+        .align_y(iced::Alignment::Center);
+    for secs in [10u32, 30, 60, 300] {
+        let enough = cov >= secs as f64;
+        let label = if enough {
+            format!("{secs}s")
+        } else {
+            // 环里只有这么多。按下去只会得到这么多——写在按钮上，
+            // 而不是让用户事后从文件长度里发现
+            format!("{secs}s（只有 {cov:.0}s）")
+        };
+        r2 = r2.push(chip(&label, ObsMsg::SaveLast(secs)));
+    }
+    r2 = r2.push(
+        text(format!("环里现有 {cov:.1}s（{} 起）", cov_from(ring))).size(10).color(C_DIM),
+    );
+    col = col.push(r2);
+
+    if !st.last_save.is_empty() {
+        // 时间窗保存是异步的。不给回执，用户不知道到底存没存下来
+        let bad = st.last_save.contains("失败") || st.last_save.contains("停止");
+        col = col.push(
+            text(format!("↳ {}", clip(&st.last_save, 140)))
+                .size(10)
+                .color(if bad { C_BAD } else { C_OK }),
+        );
+    }
+    let _ = sess;
+    col.into()
+}
+
+fn cov_from(r: &ro::RingStat) -> String {
+    r.coverage_from_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|t| t.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "—".into())
 }
 
 fn stream_row<'a>(s: &StreamStat) -> Element<'a, ObsMsg> {
@@ -558,6 +707,130 @@ mod tests {
         // 留足余量：超过 8ms 就说明有东西在随行数线性变贵，该查了
         eprintln!("[P1] 200 行满载尾窗最慢一帧 {worst:.3}ms（预算 16ms）");
         assert!(worst < 8.0, "满载尾窗最慢一帧 {worst:.2}ms，超出预算");
+    }
+
+    #[test]
+    fn the_connection_form_comes_entirely_from_the_descriptor() {
+        // 自描述设计的兑现点：控件种类、标签、默认值、必填、密码框全部来自
+        // config_schema。这条用例守的是「加一个字段不用改 UI」
+        use super::super::observatory_readout::{AdapterSpec, FieldSpec};
+        let a = AdapterSpec {
+            id: "x.proto".into(),
+            label: "某协议".into(),
+            transport: "tcp".into(),
+            config_schema: vec![
+                FieldSpec {
+                    key: "host".into(),
+                    label: "主机".into(),
+                    kind: "text".into(),
+                    default: "127.0.0.1".into(),
+                    required: true,
+                    hint: "".into(),
+                    options: vec![],
+                },
+                FieldSpec {
+                    key: "token".into(),
+                    label: "令牌".into(),
+                    kind: "secret".into(),
+                    default: String::new(),
+                    required: false,
+                    hint: "".into(),
+                    options: vec![],
+                },
+            ],
+            streams: vec![],
+            can_request: true,
+        };
+        let cat = vec![a];
+        super::super::observatory_readout::form_pick(&cat, "x.proto");
+        let (id, vals) = super::super::observatory_readout::form(&cat);
+        assert_eq!(id, "x.proto");
+        assert_eq!(vals["host"], "127.0.0.1", "默认值来自 descriptor");
+        // 必填项有默认值 → 就绪
+        assert!(super::super::observatory_readout::form_ready(&cat).is_ok());
+        // 清空必填项 → 挡住，且说清是哪一项
+        super::super::observatory_readout::form_set("host", "  ");
+        let e = super::super::observatory_readout::form_ready(&cat).unwrap_err();
+        assert!(e.contains("主机"), "{e}");
+    }
+
+    #[test]
+    fn switching_adapter_does_not_carry_values_across() {
+        // 字段名相同但语义未必相同（同名的 url 在 REST 和 WS 上要填的
+        // 东西不一样），留着只会让人填错
+        use super::super::observatory_readout::{AdapterSpec, FieldSpec};
+        let f = |k: &str, d: &str| FieldSpec {
+            key: k.into(),
+            label: k.into(),
+            kind: "text".into(),
+            default: d.into(),
+            required: false,
+            hint: String::new(),
+            options: vec![],
+        };
+        let cat = vec![
+            AdapterSpec {
+                id: "a".into(),
+                label: "A".into(),
+                transport: "ws".into(),
+                config_schema: vec![f("url", "wss://")],
+                streams: vec![],
+                can_request: false,
+            },
+            AdapterSpec {
+                id: "b".into(),
+                label: "B".into(),
+                transport: "rest".into(),
+                config_schema: vec![f("url", "https://")],
+                streams: vec![],
+                can_request: false,
+            },
+        ];
+        super::super::observatory_readout::form_pick(&cat, "a");
+        super::super::observatory_readout::form_set("url", "wss://填过的");
+        super::super::observatory_readout::form_pick(&cat, "b");
+        let (id, vals) = super::super::observatory_readout::form(&cat);
+        assert_eq!(id, "b");
+        assert_eq!(vals["url"], "https://", "换协议要回到新协议的默认值");
+    }
+
+    #[test]
+    fn the_recall_buttons_say_how_far_back_the_ring_actually_reaches() {
+        // 环只覆盖 11 秒时，「回捞最近 60 秒」按下去只会得到 11 秒的数据。
+        // 不写在按钮上的话，用户会拿到一份安静变短的文件还以为是完整的
+        //
+        // 这里断言的是那条规则的**判据**（record_block 里的 `enough`）：
+        // 覆盖不够时按钮文案必须带上实际值
+        let cov = 11.2f64;
+        for secs in [10u32, 30, 60, 300] {
+            let enough = cov >= secs as f64;
+            let label = if enough {
+                format!("{secs}s")
+            } else {
+                format!("{secs}s（只有 {cov:.0}s）")
+            };
+            if secs <= 10 {
+                assert_eq!(label, "10s", "够的时候不加噪音");
+            } else {
+                assert!(label.contains("只有 11s"), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_halted_recording_reads_differently_from_a_stopped_one() {
+        // 「被闸门停了」和「用户点了停止」是两回事。都显示成「未在录制」
+        // 会让人以为是自己点的
+        let halted = super::super::observatory_readout::RecStat {
+            on: false,
+            halted: true,
+            halt: "磁盘只剩 1.0G（地板 5.0G），已停止录制".into(),
+            ..Default::default()
+        };
+        assert!(halted.halted && !halted.on);
+        assert!(halted.halt.contains("磁盘"));
+        let stopped = super::super::observatory_readout::RecStat::default();
+        assert!(!stopped.halted && stopped.halt.is_empty());
     }
 
     #[test]

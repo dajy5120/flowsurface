@@ -126,6 +126,25 @@ pub struct SessionView {
     pub parse: bool,
 }
 
+/// 录制状态（docs/23 §6）。
+#[derive(Default, Clone, PartialEq)]
+pub struct RecStat {
+    pub on: bool,
+    pub dir: String,
+    pub session_id: String,
+    pub frames: i64,
+    pub bytes: i64,
+    pub gaps: i64,
+    /// 被环追上而**真的丢了**的条数。非 0 = 录制跟不上，该调环容量或降速。
+    pub drop_sink: i64,
+    /// 单次录制预算已用比例。
+    pub budget_frac: f64,
+    pub budget_cap: i64,
+    /// 被闸门停了。**与「用户点了停止」是两回事**，界面要分开说。
+    pub halted: bool,
+    pub halt: String,
+}
+
 /// 显示筛选的状态。
 #[derive(Default, Clone, PartialEq)]
 pub struct FilterStat {
@@ -151,6 +170,10 @@ pub struct ObsReadout {
     pub next_retry_secs: i64,
     pub catalog: Vec<AdapterSpec>,
     pub session: Option<SessionView>,
+    pub rec: RecStat,
+    /// 最近一次保存/收尾的回执。时间窗保存是异步的，不给回执用户
+    /// 不知道到底存没存下来。
+    pub last_save: String,
     pub refreshed: String,
     pub svc: super::svcctl::UnitState,
 }
@@ -374,6 +397,22 @@ pub fn parse(v: &serde_json::Value) -> ObsReadout {
         parse: sv.get("parse").and_then(|b| b.as_bool()).unwrap_or(false),
     });
 
+    let rec = {
+        let r = v.get("recording").cloned().unwrap_or_default();
+        RecStat {
+            on: r.get("on").and_then(|b| b.as_bool()).unwrap_or(false),
+            dir: s(&r, "dir"),
+            session_id: s(&r, "session_id"),
+            frames: i(&r, "frames"),
+            bytes: i(&r, "bytes"),
+            gaps: i(&r, "gaps"),
+            drop_sink: i(&r, "drop_sink"),
+            budget_frac: f(&r, "budget_frac"),
+            budget_cap: i(&r, "budget_cap"),
+            halted: r.get("halted").and_then(|b| b.as_bool()).unwrap_or(false),
+            halt: s(&r, "halt"),
+        }
+    };
     ObsReadout {
         stamp: s(v, "stamp"),
         present: true,
@@ -383,6 +422,8 @@ pub fn parse(v: &serde_json::Value) -> ObsReadout {
         next_retry_secs: i(v, "next_retry_secs"),
         catalog,
         session,
+        rec,
+        last_save: s(v, "last_save"),
         refreshed: String::new(),
         svc: Default::default(),
     }
@@ -472,6 +513,94 @@ pub fn request_disconnect() {
     patch(&[
         ("adapter", serde_json::json!("")),
         ("nonce", serde_json::json!(next_nonce())),
+    ]);
+}
+
+/// 连接表单的当前内容：`(adapter id, 字段值)`。
+///
+/// **密钥就在这里，是明文。** 它只在面板内存里，随「连接」发给守护；
+/// 守护在快照和清单里都会把它抹成 «已抹去»。面板**绝不**从快照回读这些值
+/// （回读会把真密钥换成那四个字，下一次连接必然失败）。
+static FORM: Mutex<Option<(String, std::collections::BTreeMap<String, String>)>> =
+    Mutex::new(None);
+
+/// 当前表单。第一次访问时用 catalog 里的默认值初始化。
+pub fn form(catalog: &[AdapterSpec]) -> (String, std::collections::BTreeMap<String, String>) {
+    let Ok(mut g) = FORM.lock() else { return Default::default() };
+    if g.is_none() {
+        if let Some(a) = catalog.first() {
+            let vals = a
+                .config_schema
+                .iter()
+                .map(|f| (f.key.clone(), f.default.clone()))
+                .collect();
+            *g = Some((a.id.clone(), vals));
+        }
+    }
+    g.clone().unwrap_or_default()
+}
+
+/// 换一个 Adapter：字段跟着换成那个 Adapter 的默认值。
+///
+/// **不保留上一个的值**：字段名相同但语义未必相同（同名的 `url` 在 REST 和 WS
+/// 上要填的东西不一样），留着只会让人填错。
+pub fn form_pick(catalog: &[AdapterSpec], id: &str) {
+    let Some(a) = catalog.iter().find(|a| a.id == id) else { return };
+    if let Ok(mut g) = FORM.lock() {
+        *g = Some((
+            id.to_string(),
+            a.config_schema.iter().map(|f| (f.key.clone(), f.default.clone())).collect(),
+        ));
+    }
+}
+
+pub fn form_set(key: &str, val: &str) {
+    if let Ok(mut g) = FORM.lock() {
+        if let Some((_, m)) = g.as_mut() {
+            m.insert(key.to_string(), val.to_string());
+        }
+    }
+}
+
+/// 表单里必填项是否都填了。空着就点连接，只会拿到一条难懂的握手错误。
+pub fn form_ready(catalog: &[AdapterSpec]) -> Result<(), String> {
+    let (id, vals) = form(catalog);
+    let Some(a) = catalog.iter().find(|a| a.id == id) else {
+        return Err("还没选 Adapter".into());
+    };
+    for f in &a.config_schema {
+        if f.required && vals.get(&f.key).is_none_or(|v| v.trim().is_empty()) {
+            return Err(format!("「{}」是必填的", f.label));
+        }
+    }
+    Ok(())
+}
+
+/// 录制专用的 nonce。**与连接那个分开**：共用的话按下「录制」会顺带把连接
+/// 重建一次，而重建正好会在数据里留下一个纯属自己制造的 gap。
+fn next_rec_nonce() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static N: AtomicI64 = AtomicI64::new(1);
+    N.fetch_add(1, Ordering::Relaxed)
+}
+
+/// 开/停录制。
+pub fn request_record(on: bool) {
+    patch(&[
+        ("record", serde_json::json!(on)),
+        ("rec_nonce", serde_json::json!(next_rec_nonce())),
+        // 清掉窗口字段：留着的话守护会把这次当成窗口保存
+        ("save_from_ms", serde_json::json!(0)),
+        ("save_to_ms", serde_json::json!(0)),
+    ]);
+}
+
+/// 从环里回捞一段**已经过去**的时间（docs/23 §5.1）。
+pub fn request_save_window(from_ms: i64, to_ms: i64) {
+    patch(&[
+        ("save_from_ms", serde_json::json!(from_ms)),
+        ("save_to_ms", serde_json::json!(to_ms)),
+        ("rec_nonce", serde_json::json!(next_rec_nonce())),
     ]);
 }
 
@@ -591,6 +720,43 @@ mod tests {
     fn the_nonce_only_ever_increases() {
         // 守护靠「变没变」判断要不要重连。回绕会让重连按钮失灵
         assert!(next_nonce() < next_nonce());
+    }
+
+    #[test]
+    fn recording_state_round_trips_including_the_halt_reason() {
+        // 「被闸门停了」和「用户点了停止」是两回事，事后必须分得清
+        let j = r#"{"stamp":"s","recording":{"on":true,"dir":"/d","session_id":"rec-1",
+          "frames":35726,"bytes":7279063,"gaps":2,"drop_sink":0,
+          "budget_frac":0.0034,"budget_cap":2147483648,
+          "halted":true,"halt":"本次录制已写 2.0G / 上限 2.0G，已停止"},
+          "last_save":"已保存 3530 条"}"#;
+        let r = parse(&serde_json::from_str(j).unwrap());
+        assert!(r.rec.on && r.rec.halted);
+        assert_eq!(r.rec.frames, 35_726);
+        assert!(r.rec.halt.contains("上限"));
+        assert_eq!(r.last_save, "已保存 3530 条");
+    }
+
+    #[test]
+    fn not_recording_is_distinguishable_from_an_old_daemon() {
+        // 守护旧版本时整段缺失；没在录时是 {"on":false}。
+        // 两者都不该让面板崩，但界面上是两句不同的话
+        let r = parse(&serde_json::from_str(r#"{"recording":{"on":false}}"#).unwrap());
+        assert!(!r.rec.on);
+        let r = parse(&serde_json::from_str(r#"{}"#).unwrap());
+        assert!(!r.rec.on);
+        assert!(r.rec.dir.is_empty());
+    }
+
+    #[test]
+    fn the_record_nonce_is_separate_from_the_connection_nonce() {
+        // 共用的话按下「录制」会顺带重建连接，而重建正好会留下一个
+        // 纯属自己制造的 gap
+        let a = next_rec_nonce();
+        let b = next_nonce();
+        let c = next_rec_nonce();
+        assert!(c > a, "录制 nonce 自己递增");
+        let _ = b;
     }
 
     #[test]

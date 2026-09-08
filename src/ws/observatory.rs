@@ -16,17 +16,20 @@ pub fn handle(m: ObsMsg) {
             let _ = ro::svc_action("stop");
         }
         ObsMsg::Connect => {
+            // 用**表单里的**值，不是快照里的：快照里的密钥已被守护抹成
+            // «已抹去»，回读等于把真密钥换成那四个字，下一次连接必然失败
             let cur = ro::snapshot();
-            let Some(s) = cur.session.as_ref() else { return };
-            let cfg: std::collections::BTreeMap<String, String> =
-                s.config.iter().cloned().collect();
-            // **抹去过的值不能回写**：快照里的密钥是 «已抹去»，原样发回去
-            // 就等于把真密钥换成了这四个字，下一次连接必然失败
-            if cfg.values().any(|v| v.contains("已抹去")) {
+            if ro::form_ready(&cur.catalog).is_err() {
                 return;
             }
-            ro::request_connect(&s.adapter, &cfg);
+            let (id, vals) = ro::form(&cur.catalog);
+            ro::request_connect(&id, &vals);
         }
+        ObsMsg::PickAdapter(id) => {
+            let cur = ro::snapshot();
+            ro::form_pick(&cur.catalog, &id);
+        }
+        ObsMsg::FieldEdited(k, v) => ro::form_set(&k, &v),
         ObsMsg::Disconnect => ro::request_disconnect(),
         // 打字**只改面板内存**：每次按键都写文件的话，守护会在你打到一半时
         // 反复重编译一条写错的表达式，日志里全是「筛选写错了」
@@ -36,6 +39,16 @@ pub fn handle(m: ObsMsg) {
             ro::request_view();
         }
         ObsMsg::ApplyFilter => ro::request_view(),
+        ObsMsg::SetRecord(on) => ro::request_record(on),
+        ObsMsg::SaveLast(secs) => {
+            // 区间的右端取**环覆盖的终点**而不是「现在」：两者差着一次快照
+            // 的时间，用「现在」会让区间右端落在还没进环的位置上
+            let cur = ro::snapshot();
+            let Some(to) = cur.session.as_ref().and_then(|s| s.ring.coverage_to_ms) else {
+                return;
+            };
+            ro::request_save_window(to - secs as i64 * 1000, to);
+        }
     }
 }
 
