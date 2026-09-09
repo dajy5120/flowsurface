@@ -25,7 +25,8 @@ pub fn handle(m: NewsMsg) {
 /// 某个源开始返回 `file:///etc/...`、`javascript:` 这类东西，
 /// 直接丢给 `xdg-open` 就是一次本地执行。
 ///
-/// 还要挡住参数注入：`-` 开头的会被 `xdg-open` 当成选项。
+/// 顺带挡住 `-` 开头（会被当成选项）——虽然「必须以 http(s):// 开头」
+/// 这一条已经隐含了它，留着是为了让规则自己说清楚。
 pub fn is_safe_url(url: &str) -> bool {
     let u = url.trim();
     (u.starts_with("https://") || u.starts_with("http://"))
@@ -36,24 +37,67 @@ pub fn is_safe_url(url: &str) -> bool {
         && u.len() < 4096
 }
 
+/// 交给 `xdg-open` 的完整参数表。
+///
+/// 抽出来是为了能测：`--` 那个 bug 的表现是「点了没反应」，
+/// 而它只要看一眼 argv 就能发现。
+pub fn open_args(url: &str) -> Vec<String> {
+    // **一个参数，不带任何选项。** 见下面的坑 ①
+    vec![url.to_string()]
+}
+
 /// 用系统默认浏览器打开原文。
+///
+/// # 两处踩过的坑
+///
+/// **① 不能加 `--`。** 一度为了防参数注入写成 `xdg-open -- URL`，
+/// 结果 `xdg-open` 根本不认这个约定，直接
+/// `xdg-open: unexpected option '--'`——功能整个失效。
+/// 它是个 shell 脚本，自己解析参数，不遵守 getopt 的惯例。
+/// 安全性由 [`is_safe_url`] 保证就够了：它要求以 `http(s)://` 开头，
+/// `-` 开头本来就进不来。
+///
+/// **② 失败不能吞。** 原来 stdout/stderr 都丢进 /dev/null 且不等退出码，
+/// 于是上面那个 bug 的表现就只是「点了没反应」——一条日志都没有。
+/// 现在起一个线程收退出码，失败就记下来。
 fn open_in_browser(url: &str) {
     if !is_safe_url(url) {
         log::warn!("拒绝打开这个链接（只放行 http/https）：{url}");
         return;
     }
-    // `--` 之后的一律当参数不当选项
-    let _ = std::process::Command::new("xdg-open")
-        .arg("--")
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let args = open_args(url);
+    // 收尸放到后台线程：`xdg-open` 在某些桌面下会等浏览器起来，
+    // 在 UI 线程里 wait 会卡住整个界面
+    std::thread::spawn(move || {
+        let url = args[0].clone();
+        match std::process::Command::new("xdg-open").args(&args).output() {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => log::warn!(
+                "xdg-open 打不开 {url}：退出码 {:?} {}",
+                o.status.code(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => log::warn!("起不了 xdg-open：{e}"),
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::is_safe_url;
+
+    #[test]
+    fn xdg_open_gets_the_url_and_nothing_else() {
+        // 一度写成 `xdg-open -- URL` 防参数注入，结果 xdg-open 根本不认
+        // 这个约定：`xdg-open: unexpected option '--'`，功能整个失效，
+        // 而失败又被 /dev/null 吞了 → 表现就是「点了没反应」。
+        //
+        // 它是个 shell 脚本，自己解析参数，不遵守 getopt 惯例
+        let a = super::open_args("https://x.com/a");
+        assert_eq!(a, vec!["https://x.com/a".to_string()]);
+        assert!(!a.iter().any(|s| s.starts_with('-')), "不许带任何选项：{a:?}");
+        assert_eq!(a.len(), 1, "多一个参数就可能被当成要打开的第二个东西");
+    }
 
     #[test]
     fn only_http_urls_are_handed_to_the_browser() {
