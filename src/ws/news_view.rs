@@ -17,6 +17,34 @@ const C_TXT: Color = Color::from_rgb(0.85, 0.87, 0.92);
 const C_GOLD: Color = Color::from_rgb(0.9, 0.8, 0.4);
 const C_BAD: Color = Color::from_rgb(0.9, 0.45, 0.4);
 const C_OK: Color = Color::from_rgb(0.35, 0.78, 0.98);
+/// 可点标题的颜色。**整行里最亮的东西**——它是唯一可交互的部分。
+const C_LINK: Color = Color::from_rgb(0.55, 0.88, 1.00);
+const C_LINK_HOVER: Color = Color::from_rgb(0.82, 0.95, 1.00);
+
+/// 标题链接的样式。
+///
+/// 「点了没反应」查了半天之后（xdg-open 那个 bug），另一半问题是
+/// **看不出哪儿能点**。所以三件事一起给：
+///
+/// 1. 静止时就用**明显不同于正文的链接色**，不用等鼠标悬上去；
+/// 2. 悬停时变亮 **并且给一块背景**——颜色变化对色觉不敏感的人不够，
+///    背景块是形状上的变化；
+/// 3. 按下时收一点，给一个按到了的回执。
+fn link_style(_t: &iced::Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
+    use iced::widget::button::Status;
+    let (text_color, bg) = match status {
+        Status::Hovered => (C_LINK_HOVER, Some(Color { a: 0.14, ..C_LINK })),
+        Status::Pressed => (C_LINK_HOVER, Some(Color { a: 0.24, ..C_LINK })),
+        Status::Disabled => (C_DIM, None),
+        Status::Active => (C_LINK, None),
+    };
+    iced::widget::button::Style {
+        text_color,
+        background: bg.map(Into::into),
+        border: iced::Border { radius: 3.0.into(), ..Default::default() },
+        ..Default::default()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NewsMsg {
@@ -51,12 +79,14 @@ fn clip(s: &str, n: usize) -> String {
 }
 
 /// 分级的颜色。一级来源要看得出来——媒体是派生的、更晚的。
+///
+/// 都比 [`C_LINK`] 暗：**整行里最亮的必须是可点的那部分**，
+/// 否则「哪儿能点」这件事又要靠猜。
 fn tier_color(tier: &str) -> Color {
     match tier {
-        "regulator" => C_OK,
-        "exchange" => C_HEAD,
-        "corporate" => C_TXT,
-        "aggregator" => C_DIM,
+        "regulator" => Color { a: 0.85, ..C_OK },
+        "exchange" => Color { a: 0.80, ..C_HEAD },
+        "corporate" => Color { a: 0.80, ..C_TXT },
         _ => C_DIM,
     }
 }
@@ -223,8 +253,10 @@ fn item_row<'a>(it: &NewsRow, now: i64) -> Element<'a, NewsMsg> {
         Element::from(text(it.title.clone()).size(11).color(C_DIM).width(Length::Fill))
     } else {
         button(text(it.title.clone()).size(11).width(Length::Fill))
-            .padding(0)
-            .style(crate::style::button::text_link)
+            // 上下留 1px、左右 4px：悬停时那块背景才有形状，
+            // padding 全 0 的话背景紧贴字，看着像渲染错误
+            .padding([1, 4])
+            .style(link_style)
             .on_press(NewsMsg::Open(it.url.clone()))
             .width(Length::Fill)
             .into()
@@ -297,6 +329,55 @@ mod tests {
     fn a_failure_outranks_staleness_because_it_is_more_actionable() {
         // 同时又失败又陈：先说失败——取不到的话，陈不陈是后话
         assert_eq!(source_lamp(&src(true, 2, Some(1))).0, "✕");
+    }
+
+    #[test]
+    fn a_clickable_title_looks_clickable_before_the_mouse_gets_there() {
+        use iced::widget::button::Status;
+        let t = iced::Theme::Dark;
+        let active = link_style(&t, Status::Active);
+        let hover = link_style(&t, Status::Hovered);
+
+        // 静止时就该和正文不一样——不能等悬停才显形
+        assert_ne!(active.text_color, C_TXT);
+        assert_ne!(active.text_color, C_DIM);
+        assert_eq!(active.text_color, C_LINK);
+
+        // 悬停有两个变化：变亮 + 出现背景块。
+        // 只靠颜色变化的话，对色觉不敏感的人等于没有反馈
+        assert_ne!(hover.text_color, active.text_color);
+        assert!(active.background.is_none());
+        assert!(hover.background.is_some(), "悬停要给一块背景，颜色变化不够");
+
+        // 按下要有回执，且比悬停更明显
+        let pressed = link_style(&t, Status::Pressed);
+        assert!(pressed.background.is_some());
+    }
+
+    #[test]
+    fn nothing_else_in_a_news_row_outshines_the_link() {
+        // 整行里最亮的必须是可点的那部分，否则「哪儿能点」又要靠猜。
+        //
+        // 比的是**这一行里实际用到的颜色**，不是全局的 C_TXT——
+        // 拿近白的正文色比，任何一个还认得出是蓝色的链接色都会输，
+        // 而正文色在新闻行里根本不出现（标题非链接时用的是 C_DIM）
+        fn lum(c: Color) -> f32 {
+            (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) * c.a
+        }
+        let in_a_row = [
+            ("时间", C_DIM),
+            ("时间是猜的 / 生效时间", C_GOLD),
+            ("分级-监管", tier_color("regulator")),
+            ("分级-交易所", tier_color("exchange")),
+            ("分级-公司", tier_color("corporate")),
+            ("分级-媒体", tier_color("media")),
+            ("标的", C_HEAD),
+        ];
+        for (what, c) in in_a_row {
+            assert!(lum(C_LINK) > lum(c), "{what} 比链接还亮");
+        }
+        // 而且要亮出可感知的差距，不是小数点后第三位
+        assert!(lum(C_LINK) - lum(C_GOLD) > 0.02, "和最亮的那个只差一点，等于没差");
     }
 
     #[test]
