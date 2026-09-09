@@ -223,6 +223,98 @@ pub fn svc_action(action: &str) -> String {
     }
 }
 
+/// 面板侧的筛选框。**只在面板内存里**——守护那边不需要知道，
+/// 它照常收全部；筛选只影响这一屏看到什么。
+static FILTER: Mutex<String> = Mutex::new(String::new());
+
+pub fn filter_text() -> String {
+    FILTER.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn set_filter_text(t: &str) {
+    if let Ok(mut g) = FILTER.lock() {
+        *g = t.to_string();
+    }
+}
+
+/// 一条新闻中不中当前筛选。
+///
+/// 语法和守护那边 `query.rs` 一致（词=AND、`"词组"`、`-排除`、
+/// `tier:`/`kind:`/`sym:`/`lang:`/`src:`）。这里是个精简实现：
+/// 面板不该为了一个搜索框去依赖守护那个 crate。
+pub fn matches(q: &str, it: &NewsRow) -> bool {
+    let terms = tokenize(q);
+    if terms.is_empty() {
+        // **空查询看到全部**，不是零条
+        return true;
+    }
+    let hay = format!(
+        "{} {} {}",
+        it.title.to_lowercase(),
+        it.source.to_lowercase(),
+        it.symbols.join(" ").to_lowercase()
+    );
+    terms.iter().all(|t| {
+        let (neg, body) = match t.strip_prefix('-') {
+            Some(r) if !r.is_empty() => (true, r),
+            _ => (false, t.as_str()),
+        };
+        let hit = match body.split_once(':') {
+            Some((f, v)) if !v.is_empty() => {
+                let v = v.to_ascii_lowercase();
+                match f.to_ascii_lowercase().as_str() {
+                    "tier" => it.tier == v,
+                    "kind" => it.kind == v,
+                    "lang" => it.lang.eq_ignore_ascii_case(&v),
+                    "src" => it.source.eq_ignore_ascii_case(&v),
+                    "sym" => it.symbols.iter().any(|s| s.eq_ignore_ascii_case(&v)),
+                    // 认不出的字段名当普通关键词，行为可预期
+                    _ => hay.contains(&body.to_lowercase()),
+                }
+            }
+            _ => hay.contains(&body.to_lowercase()),
+        };
+        hit != neg
+    })
+}
+
+fn tokenize(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut neg = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                if quoted && !cur.is_empty() {
+                    out.push(if neg { format!("-{cur}") } else { cur.clone() });
+                    cur.clear();
+                    neg = false;
+                }
+                quoted = !quoted;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                neg = false;
+            }
+            '-' if cur.is_empty() && !quoted => neg = true,
+            c => {
+                if neg && cur.is_empty() {
+                    cur.push('-');
+                    neg = false;
+                }
+                cur.push(c);
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 /// 人读的「多久以前」。
 pub fn ago(ms: i64, now_ms: i64) -> String {
     let s = ((now_ms - ms) / 1000).max(0);
@@ -301,6 +393,51 @@ mod tests {
         let r = parse(&serde_json::json!({}));
         assert!(r.sources.is_empty() && r.items.is_empty());
         assert_eq!(r.total, 0);
+    }
+
+    fn row(title: &str, source: &str, tier: &str, syms: &[&str], lang: &str) -> NewsRow {
+        NewsRow {
+            title: title.into(),
+            source: source.into(),
+            tier: tier.into(),
+            lang: lang.into(),
+            symbols: syms.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_panel_filter_behaves_like_the_daemons_query() {
+        let fed = row("Federal Reserve cuts rates", "fed", "regulator", &[], "en");
+        let cd = row("Fed rate cut explained", "coindesk", "media", &[], "en");
+        let ko = row("인젝티브(INJ) 입출금 중단", "upbit", "exchange", &["INJ"], "ko");
+
+        // 空 = 全部
+        assert!(matches("", &fed) && matches("   ", &cd));
+        // 多词 = 都要有
+        assert!(matches("federal reserve", &fed));
+        assert!(!matches("federal reserve", &cd));
+        // 词组
+        assert!(matches("\"rate cut\"", &cd));
+        assert!(!matches("\"rate cut\"", &fed), "两个词都在但不相邻");
+        // 排除
+        assert!(!matches("fed -coindesk", &cd));
+        assert!(matches("reserve -coindesk", &fed));
+        // 字段
+        assert!(matches("tier:regulator", &fed) && !matches("tier:regulator", &cd));
+        assert!(matches("src:upbit sym:inj lang:ko", &ko));
+        assert!(!matches("-tier:media", &cd));
+        // 无空格语言按子串找
+        assert!(matches("입출금", &ko));
+    }
+
+    #[test]
+    fn a_half_typed_filter_never_hides_everything_by_accident() {
+        // 搜索框一边打字一边生效。打到一半（引号没闭合）不该突然全空
+        let it = row("Binance Will List FOO", "binance", "exchange", &[], "en");
+        assert!(matches("", &it));
+        assert!(matches("\"", &it), "只打了个引号，等于还没输入");
+        assert!(matches("-", &it), "只打了个减号，等于还没输入");
     }
 
     #[test]

@@ -14,6 +14,8 @@ pub fn handle(m: NewsMsg) {
             let _ = ro::svc_action("stop");
         }
         NewsMsg::Open(url) => open_in_browser(&url),
+        // 打字只改面板内存：守护照常收全部
+        NewsMsg::FilterEdited(t) => ro::set_filter_text(&t),
         // N2 只有两区，折叠留给条目多起来之后
         NewsMsg::ToggleHealth => {}
     }

@@ -6,7 +6,7 @@
 //! 是**一个源悄悄死了而列表看起来一切正常**（§3.1 的 WSJ，实测陈了
 //! 589 天仍返回 200）。把健康藏在下面等于把这件事藏起来。
 
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length};
 
 use super::news_readout::{self as ro, ago, NewsRow, SourceRow};
@@ -54,6 +54,8 @@ pub enum NewsMsg {
     Open(String),
     /// 折叠/展开源健康区。
     ToggleHealth,
+    /// 筛选框在打字。**只改面板内存**——守护照常收全部，筛选只影响这一屏。
+    FilterEdited(String),
 }
 
 fn chip<'a>(label: &str, msg: NewsMsg) -> Element<'a, NewsMsg> {
@@ -205,19 +207,42 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
     }
 
     // ── 时间线 ──
+    let q = ro::filter_text();
+    let shown: Vec<&ro::NewsRow> = st.items.iter().filter(|i| ro::matches(&q, i)).collect();
     body = body.push(
         row![
             text("时间线").size(11).color(C_HEAD),
-            text("`~` = 源没给发布时间，这里显示的是我们抓到的时刻").size(10).color(C_DIM),
+            text_input("筛选：词=都要有 · \"词组\" · -排除 · tier:/kind:/sym:/lang:/src:", &q)
+                .on_input(NewsMsg::FilterEdited)
+                .size(11)
+                .padding([2, 6])
+                .width(Length::Fixed(420.0)),
+            // **筛掉了多少必须说**。只显示一张短表的话，
+            // 「筛选筛没了」和「本来就没有」分不出来
+            text(if q.trim().is_empty() {
+                format!("{} 条", st.items.len())
+            } else {
+                format!("{} / {} 条（筛掉 {}）", shown.len(), st.items.len(), st.items.len() - shown.len())
+            })
+            .size(10)
+            .color(if !q.trim().is_empty() && shown.is_empty() { C_GOLD } else { C_DIM }),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
     );
-    for it in st.items.iter().take(120) {
+    body = body.push(
+        text("`~` = 源没给发布时间，这里显示的是我们抓到的时刻").size(10).color(C_DIM),
+    );
+    for it in shown.iter().take(120) {
         body = body.push(item_row(it, st.now_ms));
     }
     if st.items.is_empty() {
         body = body.push(text("窗内还没有条目").size(11).color(C_DIM));
+    } else if shown.is_empty() {
+        // 空列表要说清是**筛选**筛没的，不是没新闻
+        body = body.push(
+            text(format!("这条筛选把 {} 条全筛掉了", st.items.len())).size(11).color(C_GOLD),
+        );
     }
 
     body = body.push(
