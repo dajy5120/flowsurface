@@ -62,6 +62,23 @@ pub struct TailTable {
 impl TailTable {
     /// 表格总高度。给 `canvas().height()` 用——canvas 不会自己算内容高度，
     /// 给错了要么截断要么留一大片空白。
+    /// 画完整内容需要多宽。
+    ///
+    /// 负载列不再「吃掉剩余宽度然后把超出的截掉」——按**最长那一行**给足，
+    /// 外面套一个横向滚动条。数据长的时候能滚着看全，是这个表的本分。
+    ///
+    /// 有下限：内容短的时候表格塌成窄窄一条更难看，也更难点。
+    pub fn content_width(&self) -> f32 {
+        const MIN: f32 = 900.0;
+        let fixed: f32 = COLS.iter().map(|c| c.w).sum::<f32>() + COLS.len() as f32 * 4.0 + PAD * 2.0;
+        let widest = self
+            .rows
+            .iter()
+            .map(|r| text_px(&payload_text(r, self.parsed_view)))
+            .fold(0.0f32, f32::max);
+        (fixed + widest + PAD).max(MIN)
+    }
+
     pub fn height(&self) -> f32 {
         HEAD_H + self.rows.len() as f32 * ROW_H + PAD
     }
@@ -74,6 +91,37 @@ impl TailTable {
         let i = ((y - HEAD_H) / ROW_H) as usize;
         (i < self.rows.len()).then_some(i)
     }
+}
+
+/// 一行「负载」列里显示的文本。
+///
+/// 画和量宽必须用**同一份**：两边各算一份，迟早会算出不同的宽度，
+/// 于是横向滚动条要么不够长（末尾看不到）要么多出一截空白。
+pub fn payload_text(row: &TailRow, parsed_view: bool) -> String {
+    // Parsed 视图下显示解析结果；解析不出来时**退回原文**而不是留空——
+    // 留空会让人以为这条是空帧
+    if parsed_view {
+        return match &row.parsed {
+            Some(p) if !p.is_empty() => p
+                .iter()
+                .map(|(k, v)| format!("{}={v}", k.trim_start_matches("$.")))
+                .collect::<Vec<_>>()
+                .join("  "),
+            _ => format!("«未解析» {}", row.preview),
+        };
+    }
+    if row.preview_truncated {
+        // 横着滚到头也看不到剩下的——**必须说**，否则那一截会被当成全部
+        format!("{}…（共 {} 字节，快照只带前面这段）", row.preview, row.len)
+    } else {
+        row.preview.clone()
+    }
+}
+
+/// 一段文本占多少像素（等宽字体，中文两格）。
+fn text_px(s: &str) -> f32 {
+    let cells: usize = s.chars().map(|c| if (c as u32) > 0x2E80 { 2 } else { 1 }).sum();
+    cells as f32 * FONT * 0.56
 }
 
 /// 按字符宽度粗算能放几个字。等宽字体下中文约占两格。
@@ -156,22 +204,7 @@ impl<M> canvas::Program<M> for TailTable {
                 let clock = chrono::DateTime::from_timestamp_millis(row.recv_ms)
                     .map(|t| t.with_timezone(&chrono::Local).format("%H:%M:%S%.3f").to_string())
                     .unwrap_or_else(|| "—".into());
-                // Parsed 视图下显示解析结果；解析不出来时**退回原文**而不是留空——
-                // 留空会让人以为这条是空帧
-                let body = if self.parsed_view {
-                    match &row.parsed {
-                        Some(p) if !p.is_empty() => p
-                            .iter()
-                            .map(|(k, v)| format!("{}={v}", k.trim_start_matches("$.")))
-                            .collect::<Vec<_>>()
-                            .join("  "),
-                        _ => format!("«未解析» {}", row.preview),
-                    }
-                } else if row.preview_truncated {
-                    format!("{}…（共 {} 字节）", row.preview, row.len)
-                } else {
-                    row.preview.clone()
-                };
+                let body = payload_text(row, self.parsed_view);
 
                 let cells: [(&str, Color); 6] = [
                     ("", self.pal.dim),
@@ -236,6 +269,54 @@ mod tests {
             },
             parsed_view: false,
         }
+    }
+
+    #[test]
+    fn the_canvas_is_as_wide_as_the_longest_row_so_nothing_is_cut_off() {
+        // 原来是「负载列吃掉剩余宽度，超出的截掉」——长数据永远看不全。
+        // 现在按最长那一行给足，外面套横向滚动条
+        let mut t = table(3);
+        let long = "x".repeat(240);
+        t.rows[1].preview = long.clone();
+        let w = t.content_width();
+        assert!(w > super::text_px(&long), "至少要放得下最长那一行：{w}");
+        // 内容短的时候有下限：塌成窄窄一条更难看也更难点
+        let short = table(3);
+        assert_eq!(short.content_width(), 900.0);
+        // 多一行更长的，宽度要跟着涨
+        t.rows[2].preview = "y".repeat(600);
+        assert!(t.content_width() > w);
+    }
+
+    #[test]
+    fn a_truncated_payload_says_so_because_scrolling_will_not_reveal_the_rest() {
+        // 快照只带前面一段。横着滚到头也看不到剩下的——不说的话，
+        // 那一截会被当成全部
+        let r = TailRow {
+            preview: "abc".into(),
+            preview_truncated: true,
+            len: 5000,
+            ..Default::default()
+        };
+        let t = payload_text(&r, false);
+        assert!(t.contains("5000") && t.contains("快照只带"), "{t}");
+        // 没截断的就原样，别加噪声
+        let r = TailRow { preview: "abc".into(), ..Default::default() };
+        assert_eq!(payload_text(&r, false), "abc");
+    }
+
+    #[test]
+    fn the_parsed_view_falls_back_to_the_raw_text_instead_of_going_blank() {
+        // 留空会让人以为这条是空帧
+        let r = TailRow { preview: "raw".into(), parsed: None, ..Default::default() };
+        assert!(payload_text(&r, true).contains("raw"));
+        assert!(payload_text(&r, true).contains("未解析"));
+        let r = TailRow {
+            parsed: Some(vec![("$.a".into(), "1".into()), ("$.b".into(), "2".into())]),
+            ..Default::default()
+        };
+        // `$.` 前缀在表里是噪声，每一行都一样
+        assert_eq!(payload_text(&r, true), "a=1  b=2");
     }
 
     #[test]

@@ -652,8 +652,19 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         parsed_view: sess.parse,
     };
     let h = table.height();
+    // 负载可以很长。给 canvas **按最长一行算出来的宽度**，再套一个横向
+    // 滚动条——原来是「吃掉剩余宽度，超出的截掉」，长数据永远看不全。
+    //
+    // 横向 scrollable 嵌在外层纵向 scrollable 里：两个方向各管各的，
+    // 上下滚看行、左右滚看内容
+    let cw = table.content_width();
     body = body.push(
-        canvas(table).width(Length::Fill).height(Length::Fixed(h)),
+        scrollable(canvas(table).width(Length::Fixed(cw)).height(Length::Fixed(h)))
+            .direction(iced::widget::scrollable::Direction::Horizontal(
+                iced::widget::scrollable::Scrollbar::new(),
+            ))
+            .width(Length::Fill)
+            .height(Length::Fixed(h + 14.0)),
     );
 
     // **面板自报帧时**：不自报的话，UI 变慢时没人知道是 UI 慢还是数据慢
