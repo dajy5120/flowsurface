@@ -210,9 +210,25 @@ fn item_row<'a>(it: &NewsRow, now: i64) -> Element<'a, NewsMsg> {
     if !it.symbols.is_empty() {
         r = r.push(cell(it.symbols.join(","), 70.0, C_HEAD, false));
     }
+    // **标题本身就是链接**，点了在浏览器里看原文。
+    //
+    // 不做成末尾一个小「原文」按钮：那个按钮的点击目标只有几十像素，
+    // 而标题横跨整行——用户想点的本来就是标题。
+    //
     // 标题**完整显示**，长了折行——地址那次的教训（docs/24）：
-    // 定宽格子会把区别切掉
-    r = r.push(text(it.title.clone()).size(11).color(C_TXT).width(Length::Fill));
+    // 定宽格子会把区别切掉，而新闻标题的区别常常在后半截
+    r = r.push(if it.url.is_empty() {
+        // 没有链接的（Deribit 那种没有单条页面的）显示成普通文本，
+        // 不给一个点了没反应的假按钮
+        Element::from(text(it.title.clone()).size(11).color(C_DIM).width(Length::Fill))
+    } else {
+        button(text(it.title.clone()).size(11).width(Length::Fill))
+            .padding(0)
+            .style(crate::style::button::text_link)
+            .on_press(NewsMsg::Open(it.url.clone()))
+            .width(Length::Fill)
+            .into()
+    });
 
     // 「说的那件事什么时候发生」和「什么时候说的」不是一回事
     if let Some(e) = it.effective_ms {
@@ -228,9 +244,6 @@ fn item_row<'a>(it: &NewsRow, now: i64) -> Element<'a, NewsMsg> {
     }
     if it.revised {
         r = r.push(text("改过").size(10).color(C_GOLD));
-    }
-    if !it.url.is_empty() {
-        r = r.push(chip("原文", NewsMsg::Open(it.url.clone())));
     }
     r.into()
 }
