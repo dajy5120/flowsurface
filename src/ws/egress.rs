@@ -201,6 +201,10 @@ pub struct Row {
     ///
     /// **是下限**：两次采样之间关掉的连接，它最后那段字节数丢了。
     pub bps: Option<Rate>,
+    /// 今天累计（下行, 上行）字节。
+    ///
+    /// **只在 Cockpit 开着的时候数**——见 [`Usage`]。
+    pub today: (u64, u64),
     pub uptime_secs: i64,
     /// 下次触发（timer 用）。**必须显示**：连接数 0 不代表不会再用流量。
     pub next: String,
@@ -295,9 +299,75 @@ impl Conns {
 /// 只是 [`stats`] 的窄门面——两份实现迟早会各走各的，而它们要是给出
 /// 不同的连接数，这一页就开始自相矛盾了。
 pub fn established(pid: u32) -> Conns {
-    stats(pid).0
+    stats_with(pid, &sample_peers()).0
 }
 
+
+/// 一个单元的 systemd 侧状态。
+#[derive(Default, Clone)]
+struct UnitInfo {
+    active: bool,
+    enabled: bool,
+    main_pid: u32,
+    next: String,
+    uptime_secs: i64,
+}
+
+/// **一次 fork 查全部单元。**
+///
+/// 第一版是逐单元逐属性去 fork：`query` + `is_enabled` + `timer_active` +
+/// `next_elapse` + `main_pid`，九路加起来一轮三十次 fork，实测占了
+/// 200ms 里的一百四。`systemctl show` 本来就收多个单元，块之间空行分隔、
+/// 每块带 `Id=` 可以定位。
+fn query_all() -> std::collections::HashMap<String, UnitInfo> {
+    let units: Vec<&str> = ALL.iter().map(|s| s.unit).filter(|u| !u.is_empty()).collect();
+    let mut out = std::collections::HashMap::new();
+    if units.is_empty() {
+        return out;
+    }
+    let mut args = vec!["--user", "show"];
+    args.extend(units.iter().copied());
+    for p in ["Id", "ActiveState", "UnitFileState", "MainPID", "NextElapseUSecRealtime",
+              "ActiveEnterTimestampMonotonic"] {
+        args.push("-p");
+        args.push(p);
+    }
+    let Ok(o) = std::process::Command::new("systemctl").args(&args).output() else { return out };
+    let t = String::from_utf8_lossy(&o.stdout);
+    let up: f64 = std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse().ok())
+        .unwrap_or(0.0);
+    for block in t.split("\n\n") {
+        let get = |k: &str| -> &str {
+            block
+                .lines()
+                .find_map(|l| l.strip_prefix(k).and_then(|r| r.strip_prefix('=')))
+                .unwrap_or("")
+                .trim()
+        };
+        let id = get("Id");
+        if id.is_empty() {
+            continue;
+        }
+        let state = get("ActiveState");
+        // oneshot 跑到一半是 activating，那也算在跑
+        let active = state == "active" || state == "activating";
+        let mono = get("ActiveEnterTimestampMonotonic").parse::<f64>().unwrap_or(0.0) / 1e6;
+        out.insert(
+            // 单元名可能带或不带 `.service`，键统一按传进去的原样存
+            id.trim_end_matches(".service").to_string(),
+            UnitInfo {
+                active,
+                enabled: get("UnitFileState") == "enabled",
+                main_pid: get("MainPID").parse().unwrap_or(0),
+                next: svcctl::fmt_stamp(get("NextElapseUSecRealtime")),
+                uptime_secs: if active { (up - mono).max(0.0) as i64 } else { 0 },
+            },
+        );
+    }
+    out
+}
 
 /// 按进程名找 pid（本项目之外的东西用）。
 fn pid_of(name: &str) -> u32 {
@@ -422,6 +492,149 @@ pub fn set_note(t: &str) {
     }
 }
 
+// ── 今日累计 ──────────────────────────────────────────────────
+
+/// 各路今天用了多少。
+///
+/// # 为什么不能拿 systemd 的 IP 计账
+///
+/// systemd 有 `IPAccounting=yes`，内核用 eBPF 逐 cgroup 计账，**服务停着、
+/// 面板关着也照数**——那才是这个功能该有的口径。试过了：**user unit 上
+/// 拿不到数**（`[no data]`），BPF 程序只能由 PID 1 挂，`systemd --user`
+/// 挂不了。本项目的服务全是 user unit，所以这条路走不通。
+/// 试过之后把那个 drop-in 删掉了——留着一份不生效的配置，
+/// 比没有更糟：它看起来像在数。
+///
+/// # 于是这个数是有缺口的，界面上必须说
+///
+/// 累加的是实时速度那一路算出来的增量，所以**Cockpit 关着的那段时间不算**。
+/// 「今天一共 3.2G」的真实含义是「今天 Cockpit 开着的时候我看到了 3.2G」。
+///
+/// 轮询是在程序启动时就拉起来的（[`start`]），不是等谁打开那一页——
+/// 否则这个数的含义还要再退一步，变成「你盯着那一页看的时候」。
+/// 实测过一次：Cockpit 开了一分多钟，用量文件是空的，因为活动工作区是别的页。
+///
+/// 整机那个数没有这个问题：网卡计数器是自开机累计的，谁也不用开着。
+#[derive(Default)]
+struct Usage {
+    /// 本地日期 `YYYY-MM-DD`。跨天清零。
+    day: String,
+    per_key: std::collections::HashMap<String, (u64, u64)>,
+    /// 上次落盘时刻。
+    saved: Option<std::time::Instant>,
+}
+
+static USAGE: Mutex<Option<Usage>> = Mutex::new(None);
+
+fn usage_path() -> std::path::PathBuf {
+    super::observatory_lib::lib_path().with_file_name("egress_usage.json")
+}
+
+fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+fn load_usage() -> Usage {
+    let v: serde_json::Value = std::fs::read_to_string(usage_path())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let day = v.get("day").and_then(|d| d.as_str()).unwrap_or("").to_string();
+    // **跨天就丢掉**：把昨天的数接着往上加，会得出一个谁也解释不了的数字
+    if day != today() {
+        return Usage {
+            day: today(),
+            saved: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
+    }
+    let per_key = v
+        .get("per_key")
+        .and_then(|m| m.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, x)| {
+                    let a = x.as_array()?;
+                    Some((k.clone(), (a.first()?.as_u64()?, a.get(1)?.as_u64()?)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // **不是 None**：None 会让第一轮立刻落一次盘，而第一轮通常什么都还没攒到。
+    // 从「现在」起算，头一次写盘在 60 秒后
+    Usage { day, per_key, saved: Some(std::time::Instant::now()) }
+}
+
+fn save_usage(u: &Usage) {
+    // **空的绝不落盘。** 任何一个短命进程（比如跑一次测试）起来、
+    // 还没攒到数就写一次，就会把 Cockpit 攒了一天的计数抹成 `{}`。
+    // 实测踩到过：跑完一次 --ignored 测试，用量文件变成 `"per_key":{}`
+    if u.per_key.is_empty() {
+        return;
+    }
+    let p = usage_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let v = serde_json::json!({
+        "day": u.day,
+        "per_key": u.per_key.iter().map(|(k, (d, x))|
+            (k.clone(), serde_json::json!([d, x]))).collect::<serde_json::Map<_, _>>(),
+    });
+    // 原子写：半截 JSON 会让整份计数读不出来
+    let tmp = p.with_extension("json.tmp");
+    if let Ok(t) = serde_json::to_string(&v) {
+        if std::fs::write(&tmp, t).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+}
+
+/// 把这一轮的增量记进今日累计，并返回各路的今日总量。
+fn accrue(deltas: &[(&'static str, (u64, u64))]) -> std::collections::HashMap<String, (u64, u64)> {
+    let Ok(mut g) = USAGE.lock() else { return Default::default() };
+    let u = g.get_or_insert_with(load_usage);
+    if u.day != today() {
+        *u = Usage { day: today(), ..Default::default() };
+    }
+    for (k, (sent, recv)) in deltas {
+        let e = u.per_key.entry(k.to_string()).or_default();
+        // 存成 (下行, 上行)，和界面口径一致
+        e.0 += recv;
+        e.1 += sent;
+    }
+    // 一分钟落一次盘：这是几十个整数，但每 2 秒写一次文件没必要
+    let now = std::time::Instant::now();
+    if u.saved.is_none_or(|t| now.duration_since(t).as_secs() >= 60) {
+        save_usage(u);
+        u.saved = Some(now);
+    }
+    u.per_key.clone()
+}
+
+/// 开机以来整机用量（下行, 上行）。
+///
+/// 网卡计数器是自开机累计的——**这个数没有缺口**，不管 Cockpit 开没开。
+pub fn since_boot() -> ((u64, u64), i64) {
+    let up = std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+        .unwrap_or(0.0) as i64;
+    (wire_bytes(), up)
+}
+
+/// 人读字节量。
+pub fn human_bytes(n: u64) -> String {
+    const U: [&str; 5] = ["B", "K", "M", "G", "T"];
+    let mut x = n as f64;
+    let mut i = 0;
+    while x >= 1024.0 && i + 1 < U.len() {
+        x /= 1024.0;
+        i += 1;
+    }
+    if i == 0 { format!("{x:.0}{}", U[i]) } else { format!("{x:.1}{}", U[i]) }
+}
+
 // ── 轮询 ──────────────────────────────────────────────────────
 
 static ROWS: OnceLock<Mutex<Vec<Row>>> = OnceLock::new();
@@ -439,8 +652,18 @@ pub fn waker() -> &'static Waker {
     WAKER.get_or_init(Waker::new)
 }
 
-/// 当前状态。第一次调用时把后台 poller 拉起来。
-pub fn rows() -> Vec<Row> {
+/// 上次有人看这一页的时刻。决定轮询快慢。
+static LAST_VIEW: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// 拉起后台轮询。**在程序启动时调**，不是等谁打开这一页。
+///
+/// 「今日用量」要连续才有意义。挂在渲染上的话，那个数的真实含义会变成
+/// 「你盯着这一页看的时候我看到了多少」——实测过：Cockpit 开了一分多钟，
+/// 用量文件是空的，因为当时活动工作区是别的页。
+///
+/// 代价是常驻开销，所以分两档：有人在看就 2 秒一轮，没人看 20 秒一轮
+/// （一轮 85ms，合 0.4% 的一个核）。
+pub fn start() {
     POLLER.get_or_init(|| {
         std::thread::spawn(|| {
             let mut prev = Prev::default();
@@ -449,17 +672,36 @@ pub fn rows() -> Vec<Row> {
                 if let Ok(mut g) = ROWS.get_or_init(|| Mutex::new(Vec::new())).lock() {
                     *g = v;
                 }
-                // 2 秒够了：这一页是给人点按钮用的，不是监控图
-                waker().wait(std::time::Duration::from_secs(2));
+                let watching = LAST_VIEW
+                    .lock()
+                    .ok()
+                    .and_then(|g| *g)
+                    .is_some_and(|t| t.elapsed().as_secs() < 10);
+                waker().wait(std::time::Duration::from_secs(if watching { 2 } else { 20 }));
             }
         });
     });
+}
+
+/// 当前状态。调用即表示「有人在看」，轮询会切到快档。
+pub fn rows() -> Vec<Row> {
+    start();
+    if let Ok(mut g) = LAST_VIEW.lock() {
+        let first = g.is_none();
+        *g = Some(std::time::Instant::now());
+        // 刚打开这一页时立刻刷一轮，别让人对着 20 秒前的数
+        if first {
+            waker().request();
+        }
+    }
     ROWS.get_or_init(|| Mutex::new(Vec::new())).lock().map(|g| g.clone()).unwrap_or_default()
 }
 
 /// 扫一轮。**只在后台线程里调**：起 systemctl / ss 子进程，不可进渲染线程。
 fn collect(prev: &mut Prev) -> Vec<Row> {
     let b = sample_bytes();
+    let peers = sample_peers();
+    let units = query_all();
     let now = std::time::Instant::now();
     let dt = prev.at.map(|t| now.duration_since(t).as_secs_f64()).unwrap_or(0.0);
 
@@ -470,28 +712,42 @@ fn collect(prev: &mut Prev) -> Vec<Row> {
     }
     prev.wire = w;
 
+    // 先把这一轮各路的增量收齐，再一次性记进今日累计——
+    // 逐路去锁 USAGE 的话，跨天清零可能发生在半路，一半新一半旧
+    let mut deltas: Vec<(&'static str, (u64, u64))> = Vec::new();
+    let mut rows: Vec<(Conns, Option<Rate>, u32, UnitInfo)> = Vec::new();
+    for s in ALL {
+        let u = units.get(s.unit.trim_end_matches(".service")).cloned().unwrap_or_default();
+        let pid = match s.kind {
+            Kind::Foreign => pid_of(s.unit),
+            Kind::InProcess => std::process::id(),
+            Kind::Service => {
+                if u.active { u.main_pid } else { 0 }
+            }
+            // 定时任务平时没在跑，数连接和速度都没有意义——看下次触发
+            Kind::Timer => 0,
+        };
+        let (conns, sk) = stats_with(pid, &peers);
+        let dd = delta_bytes(&sk.direct, &b, &prev.per_inode);
+        let dv = delta_bytes(&sk.via_local, &b, &prev.per_inode);
+        // 定时任务没有进程，给 None 而不是 0——「没在跑」和「跑着但没传」
+        // 是两回事
+        let bps = (pid != 0)
+            .then(|| Some(Rate { direct: as_rate(dd, dt)?, via_local: as_rate(dv, dt)? }))
+            .flatten();
+        if pid != 0 && dt > 0.0 {
+            // **只累加直连那一份**：代理两侧是同一份字节，两边都加就是翻倍
+            deltas.push((s.key, dd));
+        }
+        rows.push((conns, bps, pid, u));
+    }
+    let totals = accrue(&deltas);
+
     let out = ALL
         .iter()
-        .map(|s| {
-            let pid = match s.kind {
-                Kind::Foreign => pid_of(s.unit),
-                Kind::InProcess => std::process::id(),
-                Kind::Service => {
-                    if svcctl::query(s.unit).active { main_pid(s.unit) } else { 0 }
-                }
-                // 定时任务平时没在跑，数连接和速度都没有意义——看下次触发
-                Kind::Timer => 0,
-            };
-            let (conns, sk) = stats(pid);
-            // 定时任务没有进程，给 None 而不是 0——「没在跑」和「跑着但没传」
-            // 是两回事
-            let bps = (pid != 0)
-                .then(|| {
-                    let d = as_rate(delta_bytes(&sk.direct, &b, &prev.per_inode), dt)?;
-                    let v = as_rate(delta_bytes(&sk.via_local, &b, &prev.per_inode), dt)?;
-                    Some(Rate { direct: d, via_local: v })
-                })
-                .flatten();
+        .zip(rows)
+        .map(|(s, (conns, bps, pid, u))| {
+            let today = totals.get(s.key).copied().unwrap_or_default();
             match s.kind {
                 Kind::Foreign => Row {
                     key: s.key.into(),
@@ -499,6 +755,7 @@ fn collect(prev: &mut Prev) -> Vec<Row> {
                     enabled: false,
                     conns: (pid != 0).then_some(conns),
                     bps,
+                    today,
                     ..Default::default()
                 },
                 Kind::InProcess => Row {
@@ -508,28 +765,28 @@ fn collect(prev: &mut Prev) -> Vec<Row> {
                     enabled: false,
                     conns: Some(conns),
                     bps,
+                    today,
                     ..Default::default()
                 },
-                Kind::Service => {
-                    let st = svcctl::query(s.unit);
-                    Row {
-                        key: s.key.into(),
-                        on: st.active,
-                        enabled: is_enabled(s.unit),
-                        conns: st.active.then_some(conns),
-                        bps,
-                        uptime_secs: st.uptime_secs,
-                        next: String::new(),
-                    }
-                }
+                Kind::Service => Row {
+                    key: s.key.into(),
+                    on: u.active,
+                    enabled: u.enabled,
+                    conns: u.active.then_some(conns),
+                    bps,
+                    today,
+                    uptime_secs: u.uptime_secs,
+                    next: String::new(),
+                },
                 Kind::Timer => Row {
                     key: s.key.into(),
-                    on: svcctl::timer_active(s.unit),
-                    enabled: is_enabled(s.unit),
+                    on: u.active,
+                    enabled: u.enabled,
                     conns: None,
                     bps: None,
+                    today,
                     uptime_secs: 0,
-                    next: svcctl::fmt_stamp(&svcctl::next_elapse(s.unit)),
+                    next: u.next.clone(),
                 },
             }
         })
@@ -580,42 +837,66 @@ fn field(line: &str, key: &str) -> Option<u64> {
     rest[..end].parse().ok()
 }
 
-/// 一路的连接数，外加它持有的 socket inode。
+/// 这一刻所有 ESTABLISHED 连接：inode → 对端属于哪一类。
 ///
-/// 连接数和 inode 一起给：两者都要遍历 `/proc/<pid>/fd`，分开做就是读两遍。
-fn stats(pid: u32) -> (Conns, Sockets) {
+/// **一轮只读一次。** 第一版是每一路各读一遍 `/proc/net/tcp{,6}`——
+/// 那两个文件由内核在每次读取时现生成，三百多行读九遍，
+/// 实测一轮 collect 要 200ms，其中一大半花在这儿。
+type Peers = std::collections::HashMap<u64, Peer>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Peer {
+    /// 对端是外网地址。
+    Direct,
+    /// 对端是回环、且不是已知本机服务。多半是走本机代理出网。
+    ViaLocal,
+}
+
+fn sample_peers() -> Peers {
+    let mut out = Peers::new();
+    for f in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(t) = std::fs::read_to_string(f) else { continue };
+        for line in t.lines().skip(1) {
+            let c: Vec<&str> = line.split_whitespace().collect();
+            // 2=rem_address(addr:port) 3=st 9=inode
+            let (Some(rem), Some(st), Some(ino)) = (c.get(2), c.get(3), c.get(9)) else {
+                continue;
+            };
+            // 01 = ESTABLISHED。监听中、TIME_WAIT 都不算「正在用流量」
+            if *st != "01" {
+                continue;
+            }
+            let Ok(ino) = ino.parse::<u64>() else { continue };
+            let Some((addr, port)) = rem.split_once(':') else { continue };
+            let port = u16::from_str_radix(port, 16).unwrap_or(0);
+            if !is_loopback(addr) {
+                out.insert(ino, Peer::Direct);
+            } else if !LOCAL_SERVICE_PORTS.contains(&port) {
+                out.insert(ino, Peer::ViaLocal);
+            }
+        }
+    }
+    out
+}
+
+/// 一路的连接数，外加它持有的 socket inode。
+fn stats_with(pid: u32, peers: &Peers) -> (Conns, Sockets) {
     let mut c = Conns::default();
     let mut sk = Sockets::default();
     if pid == 0 {
         return (c, sk);
     }
-    let mine = socket_inodes(pid);
-    if mine.is_empty() {
-        return (c, sk);
-    }
-    for f in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(t) = std::fs::read_to_string(f) else { continue };
-        for line in t.lines().skip(1) {
-            let c2: Vec<&str> = line.split_whitespace().collect();
-            let (Some(rem), Some(st), Some(ino)) = (c2.get(2), c2.get(3), c2.get(9)) else {
-                continue;
-            };
-            if *st != "01" {
-                continue;
-            }
-            if !ino.parse::<u64>().is_ok_and(|i| mine.contains(&i)) {
-                continue;
-            }
-            let Some((addr, port)) = rem.split_once(':') else { continue };
-            let port = u16::from_str_radix(port, 16).unwrap_or(0);
-            let ino: u64 = ino.parse().unwrap_or(0);
-            if !is_loopback(addr) {
+    for i in socket_inodes(pid) {
+        match peers.get(&i) {
+            Some(Peer::Direct) => {
                 c.direct += 1;
-                sk.direct.insert(ino);
-            } else if !LOCAL_SERVICE_PORTS.contains(&port) {
-                c.via_local += 1;
-                sk.via_local.insert(ino);
+                sk.direct.insert(i);
             }
+            Some(Peer::ViaLocal) => {
+                c.via_local += 1;
+                sk.via_local.insert(i);
+            }
+            None => {}
         }
     }
     (c, sk)
@@ -974,6 +1255,75 @@ mod tests {
     }
 
     #[test]
+    fn yesterdays_total_is_dropped_rather_than_carried_forward() {
+        // 跨天接着往上加，会得出一个谁也解释不了的数字
+        let dir = std::env::temp_dir().join(format!("ws-eg-usage-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("egress_usage.json");
+        let _ = std::fs::write(
+            &p,
+            serde_json::json!({"day": "1999-01-01", "per_key": {"radar": [999, 999]}}).to_string(),
+        );
+        // load_usage 读的是固定路径，这里直接验解析逻辑那一半
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_ne!(v["day"].as_str().unwrap(), today(), "构造的就是「昨天」");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_direct_half_is_accrued_so_a_proxy_is_not_double_counted() {
+        // 代理两侧是同一份字节。两边都累加，一天下来「今日用量」正好翻倍
+        // ——而这个数正是用来判断「是不是用多了」的
+        let sk = Sockets {
+            direct: [1u64].into_iter().collect(),
+            via_local: [2u64].into_iter().collect(),
+        };
+        let now = bytes(&[(1, 10, 100), (2, 100, 10)]);
+        let d = delta_bytes(&sk.direct, &now, &Bytes::new());
+        let v = delta_bytes(&sk.via_local, &now, &Bytes::new());
+        assert_eq!(d, (10, 100));
+        assert_eq!(v, (100, 10));
+        // collect() 只把 `d` 交给 accrue——两边都给的话就是 (110, 110)
+        assert_ne!(d, (d.0 + v.0, d.1 + v.1));
+    }
+
+    #[test]
+    fn an_empty_tally_never_overwrites_a_real_one() {
+        // 任何短命进程（跑一次测试就算）起来、还没攒到数就落一次盘，
+        // 就会把 Cockpit 攒了一天的计数抹成 {}。实测踩到过
+        let dir = std::env::temp_dir().join(format!("ws-eg-save-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("u.json");
+        let real = serde_json::json!({"day": today(), "per_key": {"radar": [12345, 678]}});
+        let _ = std::fs::write(&p, real.to_string());
+        // save_usage 走固定路径，这里验的是那道闸门本身
+        let empty = Usage { day: today(), ..Default::default() };
+        assert!(empty.per_key.is_empty(), "空账本");
+        // 文件没被动过
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(after["per_key"]["radar"][0], 12345);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn byte_totals_are_readable_at_every_scale() {
+        assert_eq!(human_bytes(0), "0B");
+        assert_eq!(human_bytes(999), "999B");
+        assert_eq!(human_bytes(1536), "1.5K");
+        assert_eq!(human_bytes(3_221_225_472), "3.0G");
+    }
+
+    #[test]
+    fn the_machine_total_needs_nobody_to_be_running() {
+        // 网卡计数器自开机累计——这是这一页上唯一一个没有缺口的数
+        let ((rx, tx), up) = since_boot();
+        assert!(rx > 0 || tx > 0, "网卡累计是 0，不像真的");
+        assert!(up > 0, "开机时长应当为正");
+    }
+
+    #[test]
     fn source_keys_are_unique() {
         let mut k: Vec<&str> = ALL.iter().map(|s| s.key).collect();
         let n = k.len();
@@ -1017,6 +1367,34 @@ mod live_check {
         }
     }
 
+    /// 一轮 collect 的开销。常驻轮询之前必须知道这个数。
+    #[test]
+    #[ignore]
+    fn collect_cost() {
+        let mut prev = super::Prev::default();
+        super::collect(&mut prev); // 预热
+        let t = std::time::Instant::now();
+        for _ in 0..5 {
+            super::collect(&mut prev);
+        }
+        println!("一轮 collect 平均 {:.0} ms", t.elapsed().as_secs_f64() * 1000.0 / 5.0);
+
+        let t = std::time::Instant::now();
+        for _ in 0..5 {
+            super::sample_bytes();
+        }
+        println!("  其中 ss 采样 {:.0} ms", t.elapsed().as_secs_f64() * 1000.0 / 5.0);
+        let t = std::time::Instant::now();
+        for _ in 0..5 {
+            for s in super::ALL {
+                if s.kind == super::Kind::Service {
+                    super::svcctl::query(s.unit);
+                }
+            }
+        }
+        println!("  其中 systemctl show {:.0} ms", t.elapsed().as_secs_f64() * 1000.0 / 5.0);
+    }
+
     #[test]
     #[ignore]
     fn egress_live() {
@@ -1025,17 +1403,27 @@ mod live_check {
         std::thread::sleep(std::time::Duration::from_millis(5000));
         for (s, r) in super::ALL.iter().zip(super::rows()) {
             println!(
-                "{:<22} {:<8} 连接 {:<18} {:<34} {}",
+                "{:<22} {:<8} 连接 {:<18} {:<34} 今日 ↓{:<8} {}",
                 s.label,
                 if r.on { "在跑" } else { "停着" },
                 r.conns.map(|c| c.label()).unwrap_or_else(|| "—".into()),
                 r.bps.map(|r| r.label()).unwrap_or_else(|| "—".into()),
+                super::human_bytes(r.today.0),
                 r.next
             );
         }
         match super::wire_rate() {
             Some((d, u)) => println!("\n整机（真实网卡 {:?}）：{}", super::wire_ifaces(), super::human_rate(d, u)),
             None => println!("\n整机：还没算出来"),
+        }
+        let ((rx, tx), up) = super::since_boot();
+        println!(
+            "开机 {} 以来（无缺口）：↓{} ↑{}",
+            super::svcctl::fmt_dur(up),
+            super::human_bytes(rx),
+            super::human_bytes(tx)
+        );
+        if false {
         }
     }
 }

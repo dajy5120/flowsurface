@@ -79,6 +79,18 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
             })
             .size(13)
             .color(C_OK),
+            // 开机以来整机用量：网卡计数器自开机累计，**没有缺口**
+            text({
+                let ((rx, tx), up) = egress::since_boot();
+                format!(
+                    "开机 {} 以来 ↓{} ↑{}",
+                    super::svcctl::fmt_dur(up),
+                    egress::human_bytes(rx),
+                    egress::human_bytes(tx)
+                )
+            })
+            .size(11)
+            .color(C_DIM),
             text(format!("本项目 {ours} 条 · 全机 {}", total.label()))
                 .size(11)
                 .color(if ours > 0 { C_OK } else { C_DIM }),
@@ -102,6 +114,16 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
             .size(10)
             .color(C_DIM),
     );
+    // 这个缺口必须说。不说的话「今日 3.2G」会被当成一整天的真实用量
+    body = body.push(
+        text(
+            "「今日」只在 Cockpit 开着的时候数（不用停在这一页，程序一起来就在数）——\
+             但面板关掉的那段时间没人记。想要无缺口的数就看上面那个「开机以来」：\
+             网卡计数器不依赖任何程序开着。",
+        )
+        .size(10)
+        .color(C_DIM),
+    );
     if !note.is_empty() {
         body = body.push(text(note.to_string()).size(11).color(C_GOLD));
     }
@@ -114,6 +136,7 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
         ("状态", 96.0, false),
         ("连接", 130.0, true),
         ("速度", 200.0, false),
+        ("今日", 84.0, true),
         ("下次 / 已运行", 120.0, false),
         ("开机自启", 84.0, false),
         ("", 150.0, false),
@@ -155,6 +178,17 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
                 200.0,
                 if r.bps.is_some_and(|r| r.total_down() > 1024.0) { C_OK } else { C_DIM },
                 false
+            ),
+            // 今日累计。0 就留空——一列 0B 只是噪声
+            cell(
+                if r.today.0 + r.today.1 > 0 {
+                    format!("↓{}", egress::human_bytes(r.today.0))
+                } else {
+                    String::new()
+                },
+                84.0,
+                C_DIM,
+                true
             ),
             cell(when, 120.0, C_DIM, false),
         ]

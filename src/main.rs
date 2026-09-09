@@ -49,6 +49,11 @@ fn main() {
 
     std::thread::spawn(data::cleanup_old_market_data);
 
+    // 网络出口的轮询**在这里起**，不是等谁打开那一页。
+    // 「今日用量」要连续才有意义——挂在渲染上的话，那个数的真实含义
+    // 会变成「你盯着那一页看的时候我看到了多少」。没人看时 20 秒一轮
+    ws::egress::start();
+
     let daemon = iced::daemon(Flowsurface::new, Flowsurface::update, Flowsurface::view)
         .settings(iced::Settings {
             antialiasing: true,
