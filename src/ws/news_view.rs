@@ -56,6 +56,12 @@ pub enum NewsMsg {
     ToggleHealth,
     /// 筛选框在打字。**只改面板内存**——守护照常收全部，筛选只影响这一屏。
     FilterEdited(String),
+    /// 订阅框在打字。
+    WatchEdited(String),
+    /// 把输入框里的标的加进订阅。
+    WatchAdd,
+    /// 退订一个标的。
+    WatchRemove(String),
 }
 
 fn chip<'a>(label: &str, msg: NewsMsg) -> Element<'a, NewsMsg> {
@@ -203,6 +209,44 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
             ]
             .spacing(4)
             .align_y(iced::Alignment::Center),
+        );
+    }
+
+    // ── 按标的订阅（N5）──
+    let mut wr = row![
+        text("订阅").size(11).color(C_HEAD),
+        text_input("标的代码，如 AAPL（回车添加）", &ro::watch_input())
+            .on_input(NewsMsg::WatchEdited)
+            .on_submit(NewsMsg::WatchAdd)
+            .size(11)
+            .padding([2, 6])
+            .width(Length::Fixed(200.0)),
+        chip("添加", NewsMsg::WatchAdd),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center);
+    for w in &st.watch {
+        // 每一个都列，**包括一条申报都没抓到的**——不列的话，
+        // 「这只票 SEC 认不出来」会看起来像「它最近没申报」
+        let ok = w.fails == 0 && w.ok > 0;
+        wr = wr.push(
+            row![
+                text(format!("{} ({})", w.symbol, w.in_window))
+                    .size(11)
+                    .color(if ok { C_OK } else { C_GOLD }),
+                chip("×", NewsMsg::WatchRemove(w.symbol.clone())),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    body = body.push(wr.wrap());
+    if !st.watch.is_empty() {
+        body = body.push(
+            text("SEC 一手申报，默认只收重大表格（8-K/10-Q/13D…）——\
+                  Form 4 内部人交易占了申报总量的六成，收进来会把 8-K 埋掉")
+                .size(10)
+                .color(C_DIM),
         );
     }
 

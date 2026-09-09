@@ -16,6 +16,31 @@ pub fn handle(m: NewsMsg) {
         NewsMsg::Open(url) => open_in_browser(&url),
         // 打字只改面板内存：守护照常收全部
         NewsMsg::FilterEdited(t) => ro::set_filter_text(&t),
+        NewsMsg::WatchEdited(t) => ro::set_watch_input(&t),
+        NewsMsg::WatchAdd => {
+            // 一次可以贴多个：`AAPL MSFT,NVDA` 都认
+            let raw = ro::watch_input();
+            let add: Vec<String> = raw
+                .split([' ', ',', ';', '\t'])
+                .filter_map(ro::clean_symbol)
+                .collect();
+            if add.is_empty() {
+                return;
+            }
+            let mut cur = ro::read_watch();
+            for a in add {
+                if !cur.iter().any(|c| c.eq_ignore_ascii_case(&a)) {
+                    cur.push(a);
+                }
+            }
+            ro::write_watch(&cur);
+            ro::set_watch_input("");
+        }
+        NewsMsg::WatchRemove(sym) => {
+            let cur: Vec<String> =
+                ro::read_watch().into_iter().filter(|c| !c.eq_ignore_ascii_case(&sym)).collect();
+            ro::write_watch(&cur);
+        }
         // N2 只有两区，折叠留给条目多起来之后
         NewsMsg::ToggleHealth => {}
     }

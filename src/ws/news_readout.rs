@@ -64,6 +64,18 @@ pub struct NewsRow {
     pub revised: bool,
 }
 
+/// 一个订阅的标的。
+#[derive(Default, Clone, PartialEq)]
+pub struct WatchRow {
+    pub symbol: String,
+    pub ok: i64,
+    pub not_modified: i64,
+    pub fails: i64,
+    pub last_status: String,
+    pub newest_ms: Option<i64>,
+    pub in_window: i64,
+}
+
 #[derive(Default, Clone)]
 pub struct NewsReadout {
     pub present: bool,
@@ -73,6 +85,7 @@ pub struct NewsReadout {
     pub stale_sources: i64,
     pub sources: Vec<SourceRow>,
     pub items: Vec<NewsRow>,
+    pub watch: Vec<WatchRow>,
     pub refreshed: String,
     pub svc: super::svcctl::UnitState,
 }
@@ -153,9 +166,98 @@ pub fn parse(v: &serde_json::Value) -> NewsReadout {
                     .collect()
             })
             .unwrap_or_default(),
+        watch: v
+            .get("watch")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|r| WatchRow {
+                        symbol: s(r, "symbol"),
+                        ok: i(r, "ok"),
+                        not_modified: i(r, "not_modified"),
+                        fails: i(r, "fails"),
+                        last_status: s(r, "last_status"),
+                        newest_ms: oi(r, "newest_ms"),
+                        in_window: i(r, "in_window"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         refreshed: String::new(),
         svc: Default::default(),
     }
+}
+
+// ── 订阅（N5）：面板 → 守护的请求文件 ──
+
+fn request_path() -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(p) = tests::req_override() {
+        return p;
+    }
+    if let Ok(p) = std::env::var("WS_NEWS_REQUEST") {
+        return std::path::PathBuf::from(p);
+    }
+    board_path().with_file_name("news_request.json")
+}
+
+/// 订阅列表的编辑框。
+static WATCH_INPUT: Mutex<String> = Mutex::new(String::new());
+
+pub fn watch_input() -> String {
+    WATCH_INPUT.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn set_watch_input(t: &str) {
+    if let Ok(mut g) = WATCH_INPUT.lock() {
+        *g = t.to_string();
+    }
+}
+
+/// 把订阅列表写给守护。**原子写**：半截 JSON 会让守护当成没有订阅。
+pub fn write_watch(symbols: &[String]) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static N: AtomicI64 = AtomicI64::new(1);
+    let p = request_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let v = serde_json::json!({
+        "watch": symbols,
+        // 只增计数：布尔要守护读完清掉，那就得由守护写回请求文件，
+        // 于是两个进程同时写一个文件（docs/22 §7.8）
+        "nonce": N.fetch_add(1, Ordering::Relaxed),
+    });
+    let tmp = p.with_extension("json.tmp");
+    if std::fs::write(&tmp, v.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+/// 读回当前订阅（面板重启后要能接上）。
+pub fn read_watch() -> Vec<String> {
+    std::fs::read_to_string(request_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| {
+            v.get("watch")?
+                .as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        })
+        .unwrap_or_default()
+}
+
+/// 规范化一个用户输入的标的。返回 `None` = 不是个能用的 ticker。
+///
+/// 和守护那边同一套规则——**两边不一致的话，面板显示订阅了而守护没订**。
+pub fn clean_symbol(s: &str) -> Option<String> {
+    let s = s.trim().to_ascii_uppercase();
+    if s.is_empty() || s.len() > 12 {
+        return None;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        .then_some(s)
 }
 
 pub fn board_path() -> std::path::PathBuf {
@@ -329,6 +431,52 @@ pub fn ago(ms: i64, now_ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 测试期间请求文件指到临时目录。默认就改——不改的话跑一遍测试
+    /// 就会写进用户正在用的那份订阅（观察终端那次的教训，docs/23 §13k）。
+    static REQ_PATH: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+    pub(super) fn req_override() -> Option<std::path::PathBuf> {
+        Some(REQ_PATH.lock().ok().and_then(|g| g.clone()).unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join(format!("ws-news-test-{}", std::process::id()))
+                .join("news_request.json")
+        }))
+    }
+
+    #[test]
+    fn a_symbol_is_cleaned_the_same_way_on_both_sides() {
+        // 两边规则不一致的话，面板显示订阅了而守护根本没订
+        assert_eq!(clean_symbol(" aapl "), Some("AAPL".into()));
+        assert_eq!(clean_symbol("brk-b"), Some("BRK-B".into()));
+        assert_eq!(clean_symbol("ok.a"), Some("OK.A".into()));
+        for bad in ["", "  ", "A B", "../../etc", "TOOOOOOOOLONGSYM", "中文"] {
+            assert_eq!(clean_symbol(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_watch_list_round_trips_through_the_request_file() {
+        let dir = std::env::temp_dir().join(format!("ws-news-w-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("news_request.json");
+        if let Ok(mut g) = REQ_PATH.lock() {
+            *g = Some(p.clone());
+        }
+        assert!(read_watch().is_empty(), "没有文件时是空订阅，不是报错");
+        write_watch(&["AAPL".into(), "NVDA".into()]);
+        assert_eq!(read_watch(), vec!["AAPL".to_string(), "NVDA".to_string()]);
+        // nonce 要变，否则守护认不出订阅改了
+        let a: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        write_watch(&["AAPL".into()]);
+        let b: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert!(b["nonce"].as_i64() > a["nonce"].as_i64(), "nonce 只增");
+        assert_eq!(read_watch(), vec!["AAPL".to_string()]);
+        if let Ok(mut g) = REQ_PATH.lock() {
+            *g = None;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_stale_source_survives_the_trip_from_daemon_to_panel() {
