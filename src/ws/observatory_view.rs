@@ -149,6 +149,13 @@ fn health_badge(h: &str, connected: bool) -> (&'static str, Color) {
     }
 }
 
+/// 这个配置字段是不是「地址」。
+///
+/// 地址要完整显示、单独成行；别的字段截短挤在一行里就够了。
+fn is_addr_key(k: &str) -> bool {
+    matches!(k, "url" | "host" | "port" | "group")
+}
+
 /// 会话状态灯：`(灯, 颜色, 说明)`。
 ///
 /// 五个状态要分得开——尤其是**「已连接但对端安静」不能显示成故障**，
@@ -357,7 +364,19 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
                 // 守护里没有这个 Adapter 了（降级、改名）。**照旧列出来**，
                 // 但用 id 而不是假装有个标签
                 .unwrap_or_else(|| format!("{}（守护里没有）", e.adapter));
-            let mut r = row![
+            // 地址**完整显示**：定宽格子会把币安那种长 URL 切掉，
+            // 而两条只在结尾不同的历史切完长得一模一样。给 Fill 让它换行
+            let mut meta = row![
+                cell(label, 130.0, C_DIM, false),
+                cell(e.last.clone(), 84.0, C_DIM, false),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center);
+            if e.needs_secret {
+                meta = meta.push(text("🔑 要重填密钥").size(10).color(C_GOLD));
+            }
+            meta = meta.push(chip("×", ObsMsg::HistDelete(i)));
+            let r = row![
                 // 密钥要重填的那条不给「连接」按钮：点了必然失败在一条
                 // 难懂的鉴权错误上，而真正的原因是密钥没了
                 if e.needs_secret {
@@ -365,16 +384,11 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
                 } else {
                     chip("连接", ObsMsg::HistConnect(i))
                 },
-                cell(e.label(), 300.0, C_TXT, false),
-                cell(label, 130.0, C_DIM, false),
-                cell(e.last.clone(), 84.0, C_DIM, false),
+                text(e.label()).size(11).color(C_TXT).width(Length::Fill),
+                meta,
             ]
             .spacing(6)
             .align_y(iced::Alignment::Center);
-            if e.needs_secret {
-                r = r.push(text("🔑 要重填密钥").size(10).color(C_GOLD));
-            }
-            r = r.push(chip("×", ObsMsg::HistDelete(i)));
             body = body.push(r);
         }
     }
@@ -399,13 +413,37 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     ]
     .spacing(6);
     cfgline = cfgline.push(text(sess.adapter_label.clone()).size(11).color(C_TXT));
+    // 地址之外的字段留在这一行，截短——订阅报文那种能有几百字，
+    // 不截会把整行冲掉
     for (k, v) in &sess.config {
+        if is_addr_key(k) {
+            continue;
+        }
         cfgline = cfgline.push(text(format!("{k}={}", clip(v, 52))).size(10).color(C_DIM));
     }
     if sess.reconnects > 0 {
         cfgline = cfgline.push(text(format!("重连 {} 次", sess.reconnects)).size(10).color(C_GOLD));
     }
     body = body.push(cfgline.align_y(iced::Alignment::Center));
+
+    // 地址**单独一行、完整、会换行**。
+    //
+    // 挤在上面那行里的话，一条长 URL 会横着顶出去被裁掉——外层的
+    // scrollable 只滚纵向。而地址正是这一页最该看清的一个值：
+    // 币安那种地址的区别全在 `streams=` 后面。
+    for (k, v) in &sess.config {
+        if !is_addr_key(k) || v.trim().is_empty() {
+            continue;
+        }
+        body = body.push(
+            row![
+                container(text(format!("{k}")).size(10).color(C_DIM))
+                    .width(Length::Fixed(46.0)),
+                text(v.clone()).size(11).color(C_TXT).width(Length::Fill),
+            ]
+            .spacing(6),
+        );
+    }
 
     // 链路事实：从数据本身看不出来的那些。deflate 是典型——帧里存的是
     // 解压后的内容，不在这儿说的话，事后没人知道这条连接压没压

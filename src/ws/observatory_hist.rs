@@ -35,26 +35,26 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// 列表上显示的名字。
+    /// 列表上显示的地址。**完整，不省略。**
     ///
-    /// 优先用能一眼认出目标的那个字段。整条 URL 太长，取「主机 + 路径尾巴」。
+    /// 一度是「去掉协议头 + 截到 46 字」。那是错的：
+    ///
+    /// - 币安那种带一长串 `streams=` 的地址，两条只在结尾不同的历史，
+    ///   截断之后**长得一模一样**——列表就没法用了。
+    /// - `wss://` 和 `ws://` 是两回事，去掉之后看不出来。
+    ///
+    /// 太长就让它在界面上换行，不在这里裁。
     pub fn label(&self) -> String {
         for k in ["url", "group", "host"] {
             if let Some(v) = self.cfg.get(k).filter(|v| !v.trim().is_empty()) {
-                let short = v
-                    .strip_prefix("wss://")
-                    .or_else(|| v.strip_prefix("ws://"))
-                    .or_else(|| v.strip_prefix("https://"))
-                    .or_else(|| v.strip_prefix("http://"))
-                    .unwrap_or(v);
-                // 端口也带上：同一台机器上两个端口是两回事
-                let with_port = match self.cfg.get("port") {
-                    Some(p) if !p.trim().is_empty() && !short.contains(':') => {
-                        format!("{short}:{p}")
+                // 端口另存一个字段的（FIX / TWS / UDP）要拼回去：
+                // 同一台机器上两个端口是两回事
+                return match self.cfg.get("port") {
+                    Some(p) if !p.trim().is_empty() && !v.contains("://") => {
+                        format!("{v}:{p}")
                     }
-                    _ => short.to_string(),
+                    _ => v.clone(),
                 };
-                return clip(&with_port, 46);
             }
         }
         // 一个能认的字段都没有：至少别显示成空白按钮
@@ -68,13 +68,6 @@ impl Entry {
     pub fn same_as(&self, o: &Entry) -> bool {
         self.adapter == o.adapter && self.cfg == o.cfg
     }
-}
-
-fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        return s.to_string();
-    }
-    format!("{}…", s.chars().take(n).collect::<String>())
 }
 
 /// 最多留几条。**要有上限**：不限的话，一个每次换 symbol 的 URL
@@ -312,14 +305,25 @@ mod tests {
     }
 
     #[test]
-    fn the_label_is_something_a_person_can_recognise() {
-        let e = Entry { cfg: cfg(&[("url", "wss://stream.binance.com:9443/ws/btcusdt@trade")]), ..Default::default() };
-        assert!(e.label().starts_with("stream.binance.com"), "{}", e.label());
-        assert!(!e.label().contains("wss://"), "协议头占位置又没信息");
+    fn the_address_is_shown_whole_because_two_of_them_can_differ_only_at_the_end() {
+        // 截断过一版。币安那种带一长串 streams= 的地址，两条只在结尾不同的
+        // 历史截完**长得一模一样**，列表就没法用了
+        let long = "wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade";
+        let e = Entry { cfg: cfg(&[("url", long)]), ..Default::default() };
+        assert_eq!(e.label(), long, "一个字都不能少");
+        // 协议头也留着：wss:// 和 ws:// 是两回事
+        assert!(e.label().starts_with("wss://"));
 
-        // 主机 + 端口：同一台机器上两个端口是两回事
+        let a = Entry { cfg: cfg(&[("url", "wss://x/a?s=btc")]), ..Default::default() };
+        let b = Entry { cfg: cfg(&[("url", "wss://x/a?s=eth")]), ..Default::default() };
+        assert_ne!(a.label(), b.label(), "只在结尾不同的两条要能分出来");
+
+        // 端口另存一个字段的（FIX / TWS / UDP）要拼回去
         let e = Entry { cfg: cfg(&[("host", "127.0.0.1"), ("port", "7497")]), ..Default::default() };
         assert_eq!(e.label(), "127.0.0.1:7497");
+        // URL 里已经带端口的别再拼一次
+        let e = Entry { cfg: cfg(&[("url", "wss://x:9443/a"), ("port", "7497")]), ..Default::default() };
+        assert_eq!(e.label(), "wss://x:9443/a");
 
         // 一个能认的字段都没有时，别给一个空白按钮
         let e = Entry { adapter: "x.y".into(), ..Default::default() };
