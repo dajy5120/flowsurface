@@ -12,6 +12,7 @@ use std::time::Instant;
 use iced::widget::{button, canvas, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length};
 
+use super::observatory_hist as hist;
 use super::observatory_lib as lib;
 use super::observatory_readout::{self as ro, StreamStat};
 use super::observatory_table::{Palette, TailTable};
@@ -76,6 +77,12 @@ pub enum ObsMsg {
     LibDelete(String),
     /// 某个 `{{参数}}` 的值被编辑。
     LibParamEdited(String, String),
+    /// 连接历史：把第 n 条填回表单并立刻连接。
+    HistConnect(usize),
+    /// 只填回表单不连接——密钥被抹掉的那些要先补上再连。
+    HistFill(usize),
+    /// 删掉第 n 条。
+    HistDelete(usize),
 }
 
 fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, ObsMsg> {
@@ -139,6 +146,32 @@ fn health_badge(h: &str, connected: bool) -> (&'static str, Color) {
         "connecting" if connected => ("◐ 重连中", C_GOLD),
         "connecting" => ("◐ 连接中", C_GOLD),
         _ => ("✕ 未连接", C_BAD),
+    }
+}
+
+/// 会话状态灯：`(灯, 颜色, 说明)`。
+///
+/// 五个状态要分得开——尤其是**「已连接但对端安静」不能显示成故障**，
+/// 那是很多接口的常态（夜盘、低频流）；而「断了」和「正在重连」也是两回事，
+/// 后者说明退避在跑，等一会儿就好。
+fn session_lamp(st: &ro::ObsReadout) -> (&'static str, Color, String) {
+    match st.health.as_str() {
+        "live" => ("●", C_OK, "在收".into()),
+        "idle" => ("●", C_HEAD, "已连接·对端安静".into()),
+        "connecting" => (
+            "◐",
+            C_GOLD,
+            if st.next_retry_secs > 0 {
+                // 退避倒计时要给：不给的话「连不上」看起来就像卡死了
+                format!("重连中·{}s 后重试", st.next_retry_secs)
+            } else {
+                "连接中".into()
+            },
+        ),
+        "lost" => ("✕", C_BAD, "已断开".into()),
+        // 守护给了个我们不认识的状态。**别装作正常**
+        other if !other.is_empty() => ("?", C_GOLD, format!("未知状态 {other}")),
+        _ => ("○", C_DIM, "未连接".into()),
     }
 }
 
@@ -304,6 +337,48 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     }
     body = body.push(cr);
 
+    // ── 连过的 ──
+    let hist = hist::all();
+    if !hist.is_empty() {
+        body = body.push(
+            row![
+                text("连过的").size(10).color(C_DIM),
+                text("点一下直接连；密钥是明文的那条不会存密钥，要先补上").size(10).color(C_DIM),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        );
+        for (i, e) in hist.iter().enumerate() {
+            let label = st
+                .catalog
+                .iter()
+                .find(|a| a.id == e.adapter)
+                .map(|a| a.label.clone())
+                // 守护里没有这个 Adapter 了（降级、改名）。**照旧列出来**，
+                // 但用 id 而不是假装有个标签
+                .unwrap_or_else(|| format!("{}（守护里没有）", e.adapter));
+            let mut r = row![
+                // 密钥要重填的那条不给「连接」按钮：点了必然失败在一条
+                // 难懂的鉴权错误上，而真正的原因是密钥没了
+                if e.needs_secret {
+                    chip("填入表单", ObsMsg::HistFill(i))
+                } else {
+                    chip("连接", ObsMsg::HistConnect(i))
+                },
+                cell(e.label(), 300.0, C_TXT, false),
+                cell(label, 130.0, C_DIM, false),
+                cell(e.last.clone(), 84.0, C_DIM, false),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center);
+            if e.needs_secret {
+                r = r.push(text("🔑 要重填密钥").size(10).color(C_GOLD));
+            }
+            r = r.push(chip("×", ObsMsg::HistDelete(i)));
+            body = body.push(r);
+        }
+    }
+
     let Some(sess) = st.session.as_ref() else {
         body = body.push(
             text("尚未建立会话——在 radar_request 同级的 observatory_request.json 里指定 adapter 与 config")
@@ -314,7 +389,15 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     };
 
     // ── 会话 ──
-    let mut cfgline = row![text("会话 ").size(10).color(C_DIM)].spacing(8);
+    //
+    // 状态灯放在会话这一行的**最前面**：这一行是「我现在连着谁」，
+    // 那么「连没连上」就该和它在同一处，而不是让人回头去看顶栏
+    let (lamp, lc, detail) = session_lamp(&st);
+    let mut cfgline = row![
+        text(lamp.to_string()).size(13).color(lc),
+        text(detail).size(11).color(lc),
+    ]
+    .spacing(6);
     cfgline = cfgline.push(text(sess.adapter_label.clone()).size(11).color(C_TXT));
     for (k, v) in &sess.config {
         cfgline = cfgline.push(text(format!("{k}={}", clip(v, 52))).size(10).color(C_DIM));

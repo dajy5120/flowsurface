@@ -16,6 +16,7 @@ pub mod egress_view;
 pub mod c4_view;
 pub mod observatory;
 pub mod observatory_lib;
+pub mod observatory_hist;
 pub mod observatory_readout;
 pub mod observatory_table;
 pub mod observatory_view;

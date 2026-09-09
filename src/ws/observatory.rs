@@ -4,6 +4,7 @@
 //! 请求文件的写入全部走 `observatory_readout` 的局部修改路径——
 //! 重建整份请求会把 nonce/adapter 冲掉，改个筛选就变成重连或断线。
 
+use super::observatory_hist as hist;
 use super::observatory_lib as lib;
 use super::observatory_readout as ro;
 use super::observatory_view::ObsMsg;
@@ -60,6 +61,22 @@ pub fn handle(m: ObsMsg) {
                 .map(|st| st.stream_id)
                 .unwrap_or(0);
             ro::request_send(sid);
+        }
+        ObsMsg::HistConnect(i) | ObsMsg::HistFill(i) => {
+            let cur = ro::snapshot();
+            let Some(e) = hist::all().into_iter().nth(i) else { return };
+            ro::form_from(&cur.catalog, &e.adapter, &e.cfg);
+            // 密钥被抹掉的那条只填表单不发连接——发了必然失败在一条
+            // 难懂的鉴权错误上，而真正的原因是密钥没了
+            if matches!(m, ObsMsg::HistConnect(_)) && ro::form_ready(&cur.catalog).is_ok() {
+                let (id, vals) = ro::form(&cur.catalog);
+                ro::request_connect(&id, &vals);
+            }
+        }
+        ObsMsg::HistDelete(i) => {
+            if let Some(e) = hist::all().into_iter().nth(i) {
+                hist::remove(&e.adapter, &e.cfg);
+            }
         }
         ObsMsg::LibNameEdited(t) => ro::set_lib_name(&t),
         ObsMsg::LibParamEdited(k, v) => ro::set_lib_param(&k, &v),

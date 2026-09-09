@@ -287,7 +287,28 @@ fn poll_once() -> ObsReadout {
     };
     let mut r = parse(&v);
     r.refreshed = refreshed;
+    record_history(&r, &chrono::Local::now().format("%m-%d %H:%M").to_string());
     r
+}
+
+/// 连上了就记进历史。
+///
+/// **不是点击那一刻记**：点了连接但没连上的目标记进来，列表很快会被一堆
+/// 手滑打错的地址塞满——用户要的是「连接过的」。
+///
+/// 放在 poller 里而不是渲染里：写盘是副作用，不该发生在画一帧的时候。
+///
+/// 代价是这个 poller 是**懒启动**的（第一次渲染这一页时才起）。实际影响很小：
+/// 要点「连接」就得先打开这一页，poller 一起来就不再停。但从 shell 直接写
+/// 请求文件建的连接不会被记——那本来也不是面板该记的账。
+fn record_history(r: &ObsReadout, now: &str) -> bool {
+    // connecting / lost 都不算「连接过」
+    if !matches!(r.health.as_str(), "live" | "idle") {
+        return false;
+    }
+    let Some(se) = r.session.as_ref() else { return false };
+    let cfg: crate::ws::observatory_hist::Cfg = se.config.iter().cloned().collect();
+    crate::ws::observatory_hist::record(&se.adapter, &cfg, now)
 }
 
 fn s(v: &serde_json::Value, k: &str) -> String {
@@ -642,6 +663,35 @@ pub fn form_pick(catalog: &[AdapterSpec], id: &str) {
     }
 }
 
+/// 用一条历史填满表单。
+///
+/// **从该 Adapter 的默认值起步再覆盖**，而不是直接把历史那份塞进去：
+/// 历史里被抹掉密钥的那条少了字段，直接塞的话表单上那一格连出现都不会出现，
+/// 用户看不到「这里要填密钥」。
+pub fn form_from(catalog: &[AdapterSpec], adapter: &str, cfg: &std::collections::BTreeMap<String, String>) {
+    let Some(a) = catalog.iter().find(|a| a.id == adapter) else { return };
+    let mut vals: std::collections::BTreeMap<String, String> =
+        a.config_schema.iter().map(|f| (f.key.clone(), f.default.clone())).collect();
+    for (k, v) in cfg {
+        // 只认这个 Adapter 认识的字段：历史可能是旧版本存的，
+        // 塞一个它不认识的键进去，守护那边会当成「未知键」整个抹掉
+        if a.config_schema.iter().any(|f| &f.key == k) {
+            vals.insert(k.clone(), v.clone());
+        } else {
+            continue;
+        }
+    }
+    // 密钥被抹掉的：那一格要**空着出现**，让人看见要填什么
+    for f in &a.config_schema {
+        if !cfg.contains_key(&f.key) && f.kind == "secret" {
+            vals.insert(f.key.clone(), String::new());
+        }
+    }
+    if let Ok(mut g) = FORM.lock() {
+        *g = Some((adapter.to_string(), vals));
+    }
+}
+
 pub fn form_set(key: &str, val: &str) {
     if let Ok(mut g) = FORM.lock() {
         if let Some((_, m)) = g.as_mut() {
@@ -657,8 +707,16 @@ pub fn form_ready(catalog: &[AdapterSpec]) -> Result<(), String> {
         return Err("还没选 Adapter".into());
     };
     for f in &a.config_schema {
-        if f.required && vals.get(&f.key).is_none_or(|v| v.trim().is_empty()) {
+        let v = vals.get(&f.key).map(|v| v.trim()).unwrap_or("");
+        if f.required && v.is_empty() {
             return Err(format!("「{}」是必填的", f.label));
+        }
+        // **只填了个协议头等于没填。** `wss://` 是 schema 的默认值，非空，
+        // 所以「必填」那条放它过去了；守护那边拿到之后报的是
+        // 「HTTP format error: empty string」——完全看不出问题在哪。
+        // 实测踩到过：默认表单直接点连接
+        if f.required && v.ends_with("://") {
+            return Err(format!("「{}」只有协议头 {v}，后面还要写地址", f.label));
         }
     }
     Ok(())
@@ -1157,6 +1215,102 @@ mod tests {
         if let Ok(mut g) = REQ_PATH.lock() {
             *g = None;
         }
+    }
+
+    #[test]
+    fn only_a_connection_that_actually_came_up_goes_into_the_history() {
+        // 点了连接但没连上的目标记进来的话，列表很快会被一堆手滑打错的
+        // 地址塞满——用户要的是「连接过的」
+        let _g = crate::ws::observatory_hist::lock_for_test();
+        let dir = std::env::temp_dir().join(format!("ws-obs-rh-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("h.json");
+        let _ = std::fs::remove_file(&p);
+        crate::ws::observatory_hist::reset_for_test(Some(&p));
+
+        let mk = |health: &str, with_session: bool| {
+            let j = if with_session {
+                format!(
+                    r#"{{"stamp":"s","health":"{health}","session":{{"adapter":"ws.raw",
+                       "config":{{"url":"wss://a"}}}}}}"#
+                )
+            } else {
+                format!(r#"{{"stamp":"s","health":"{health}"}}"#)
+            };
+            parse(&serde_json::from_str(&j).unwrap())
+        };
+
+        assert!(!record_history(&mk("connecting", true), "09-09 10:00"), "还在连不算");
+        assert!(!record_history(&mk("lost", true), "09-09 10:00"), "断了不算");
+        assert!(!record_history(&mk("live", false), "09-09 10:00"), "没有会话就没得记");
+        assert!(crate::ws::observatory_hist::all().is_empty());
+
+        assert!(record_history(&mk("live", true), "09-09 10:00"), "连上了要记");
+        assert_eq!(crate::ws::observatory_hist::all().len(), 1);
+        // 对端安静也算连上——那是很多接口的常态，不算故障
+        assert!(record_history(&mk("idle", true), "09-09 10:01"));
+        assert_eq!(crate::ws::observatory_hist::all().len(), 1, "同目标不该攒出第二条");
+
+        crate::ws::observatory_hist::reset_for_test(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bare_scheme_is_refused_before_it_becomes_an_unreadable_handshake_error() {
+        // 实测踩到过：表单还是默认值（url = "wss://"）就点连接。
+        // 「必填」那条放它过去了（非空），守护那边报
+        // 「HTTP format error: empty string」——完全看不出问题在哪
+        let cat = vec![AdapterSpec {
+            id: "ws.raw".into(),
+            label: "WS".into(),
+            transport: "ws".into(),
+            config_schema: vec![FieldSpec {
+                key: "url".into(), label: "地址".into(), kind: "text".into(),
+                default: "wss://".into(), required: true, hint: String::new(), options: vec![],
+            }],
+            streams: vec![],
+            can_request: true,
+        }];
+        form_pick(&cat, "ws.raw");
+        let e = form_ready(&cat).unwrap_err();
+        assert!(e.contains("协议头") && e.contains("wss://"), "{e}");
+        form_set("url", "wss://stream.binance.com:9443/ws/btcusdt@trade");
+        assert!(form_ready(&cat).is_ok());
+        // 空的仍然按「必填」报，那条信息更贴切
+        form_set("url", "   ");
+        assert!(form_ready(&cat).unwrap_err().contains("必填"));
+    }
+
+    #[test]
+    fn filling_the_form_from_history_starts_from_the_adapters_defaults() {
+        let cat = vec![AdapterSpec {
+            id: "ws.raw".into(),
+            label: "WS".into(),
+            transport: "ws".into(),
+            config_schema: vec![
+                FieldSpec { key: "url".into(), label: "地址".into(), kind: "text".into(), default: "wss://".into(), required: true, hint: String::new(), options: vec![] },
+                FieldSpec { key: "api_key".into(), label: "密钥".into(), kind: "secret".into(), default: String::new(), required: false, hint: String::new(), options: vec![] },
+                FieldSpec { key: "timeout".into(), label: "超时".into(), kind: "int".into(), default: "10".into(), required: false, hint: String::new(), options: vec![] },
+            ],
+            streams: vec![],
+            can_request: true,
+        }];
+        // 历史里少了密钥（明文被抹过），还多了一个这个 Adapter 不认识的键
+        let mut h = std::collections::BTreeMap::new();
+        h.insert("url".to_string(), "wss://a".to_string());
+        h.insert("早就没有的字段".to_string(), "x".to_string());
+        form_from(&cat, "ws.raw", &h);
+        let (id, v) = form(&cat);
+        assert_eq!(id, "ws.raw");
+        assert_eq!(v["url"], "wss://a", "历史里的值要覆盖默认值");
+        assert_eq!(v["timeout"], "10", "历史里没有的字段回落到 Adapter 默认值");
+        // 密钥那一格要**空着出现**：直接塞历史那份的话它连出现都不会出现，
+        // 用户看不到「这里要填密钥」
+        assert_eq!(v["api_key"], "");
+        assert!(!v.contains_key("早就没有的字段"), "Adapter 不认识的键不能带进表单");
+        // 认不出的 adapter 不动表单，而不是造一个空表单出来
+        form_from(&cat, "根本没有这个", &h);
+        assert_eq!(form(&cat).0, "ws.raw");
     }
 
     #[test]
