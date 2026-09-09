@@ -144,6 +144,13 @@ pub static ALL: &[Source] = &[
         unit: "ws-observatory",
     },
     Source {
+        key: "news",
+        label: "新闻资讯",
+        what: "监管/交易所/媒体的 RSS·Atom·JSON 源（docs/25）",
+        kind: Kind::Service,
+        unit: "ws-news",
+    },
+    Source {
         key: "recorder",
         label: "录制器",
         what: "交易所行情 WS（落盘）",
