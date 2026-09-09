@@ -118,6 +118,8 @@ pub enum Event {
     ObsInteraction(crate::ws::observatory_view::ObsMsg),
     /// 网络出口总闸：启停各路出口。
     EgressInteraction(crate::ws::egress_view::EgressMsg),
+    /// 新闻资讯：守护启停 + 打开原文。
+    NewsInteraction(crate::ws::news_view::NewsMsg),
     /// 预测市场面板交互：夜跑手动启停 + 每日定时开关（同上，默认不自启）。
     PredictionInteraction(crate::ws::prediction::PredictionMsg),
     /// 全市场雷达交互（docs/22 P0b）：守护启停 + 窗口/排序口径切换。
@@ -426,6 +428,7 @@ impl State {
                 ContentKind::C4Shadow => (Content::C4Shadow, vec![]),
                 ContentKind::Observatory => (Content::Observatory, vec![]),
                 ContentKind::NetEgress => (Content::NetEgress, vec![]),
+                ContentKind::News => (Content::News, vec![]),
                 ContentKind::OptionsBoard => (Content::OptionsBoard, vec![]),
                 ContentKind::PredictionBoard => (Content::PredictionBoard, vec![]),
                 ContentKind::MarketMap => (Content::MarketMap, vec![]),
@@ -614,6 +617,7 @@ impl State {
                 | Content::C4Shadow
                 | Content::Observatory
                 | Content::NetEgress
+                | Content::News
                 | Content::OptionsBoard
                 | Content::PredictionBoard
                 | Content::MarketMap
@@ -733,6 +737,21 @@ impl State {
                 // ⑦ 区的 nightly 启停按钮发 FactoryMsg → 包成 pane 事件。
                 let base = crate::ws::factory_view::pane_body()
                     .map(move |m| Message::PaneEvent(id, Event::FactoryInteraction(m)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::News => {
+                // 新闻资讯（docs/25）：渲染走 ws::news_readout 旁路快照。
+                // **面板里没有一行网络代码**——连接全在 ws-news 守护里
+                let base = crate::ws::news_view::pane_body()
+                    .map(move |m| Message::PaneEvent(id, Event::NewsInteraction(m)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1381,6 +1400,7 @@ impl State {
                         | ContentKind::C4Shadow
                         | ContentKind::Observatory
                         | ContentKind::NetEgress
+                        | ContentKind::News
                         | ContentKind::OptionsBoard
                         | ContentKind::PredictionBoard
                         | ContentKind::MarketMap
@@ -1427,6 +1447,10 @@ impl State {
             Event::ObsInteraction(m) => {
                 // 接口观察终端（docs/23）：守护启停 + 连/断（副作用为 systemctl 与请求文件）。
                 crate::ws::observatory::handle(m);
+            }
+            Event::NewsInteraction(m) => {
+                // 新闻资讯：守护启停 + 打开原文（副作用为 systemctl / xdg-open）。
+                crate::ws::news::handle(m);
             }
             Event::EgressInteraction(m) => {
                 // 网络出口总闸：systemctl 启停 + Cockpit 自己的行情订阅开关。
@@ -2025,7 +2049,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult => None,
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult => None,
         }
     }
 
@@ -2054,6 +2078,7 @@ impl State {
             | Content::C4Shadow
             | Content::Observatory
             | Content::NetEgress
+            | Content::News
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::MarketMap
@@ -2159,6 +2184,9 @@ pub enum Content {
     /// 网络出口总闸：一页看全谁在往外发包，每一路都能手动启停。
     /// **面板里没有一行网络代码**——它只数 /proc 和调 systemctl。
     NetEgress,
+    /// 新闻资讯（docs/25）：无行情流，渲染走 `ws::news_readout` 旁路快照。
+    /// **面板里没有一行网络代码**——连接全在 `ws-news` 守护里。
+    News,
     /// 期权/0DTE 回测·探针（docs/18）：无行情流，渲染走 `ws::options_readout` 旁路快照。
     OptionsBoard,
     /// 预测市场 Polymarket（docs/19）：无行情流，渲染走 `ws::prediction_readout` 旁路快照。
@@ -2389,6 +2417,7 @@ impl Content {
             ContentKind::C4Shadow => Content::C4Shadow,
             ContentKind::Observatory => Content::Observatory,
             ContentKind::NetEgress => Content::NetEgress,
+            ContentKind::News => Content::News,
             ContentKind::OptionsBoard => Content::OptionsBoard,
             ContentKind::PredictionBoard => Content::PredictionBoard,
             ContentKind::MarketMap => Content::MarketMap,
@@ -2419,6 +2448,7 @@ impl Content {
             | Content::C4Shadow
             | Content::Observatory
             | Content::NetEgress
+            | Content::News
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::MarketMap
@@ -2506,6 +2536,7 @@ impl Content {
             | Content::C4Shadow
             | Content::Observatory
             | Content::NetEgress
+            | Content::News
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::MarketMap
@@ -2564,6 +2595,7 @@ impl Content {
             | Content::C4Shadow
             | Content::Observatory
             | Content::NetEgress
+            | Content::News
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::MarketMap
@@ -2641,6 +2673,7 @@ impl Content {
             Content::C4Shadow => ContentKind::C4Shadow,
             Content::Observatory => ContentKind::Observatory,
             Content::NetEgress => ContentKind::NetEgress,
+            Content::News => ContentKind::News,
             Content::OptionsBoard => ContentKind::OptionsBoard,
             Content::PredictionBoard => ContentKind::PredictionBoard,
             Content::MarketMap => ContentKind::MarketMap,
@@ -2666,7 +2699,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult => true,
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult => true,
         }
     }
 }

@@ -197,6 +197,10 @@ impl From<&pane::State> for data::Pane {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
             },
+            pane::Content::News => data::Pane::News {
+                settings: pane.settings.clone(),
+                link_group: pane.link_group,
+            },
             pane::Content::NetEgress => data::Pane::NetEgress {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
@@ -416,6 +420,15 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             link_group,
         } => Configuration::Pane(pane::State::from_config(
             pane::Content::Observatory,
+            vec![],
+            settings,
+            link_group,
+        )),
+        data::Pane::News {
+            settings,
+            link_group,
+        } => Configuration::Pane(pane::State::from_config(
+            pane::Content::News,
             vec![],
             settings,
             link_group,

@@ -126,6 +126,13 @@ pub enum Pane {
         link_group: Option<LinkGroup>,
     },
     /// 数据接口观察终端（docs/23）。无行情流、无图表状态，只有窗口设置。
+    /// 新闻资讯：交易所/监管/媒体的统一时间线 + 源健康（docs/25）。
+    News {
+        #[serde(default)]
+        settings: Settings,
+        #[serde(default)]
+        link_group: Option<LinkGroup>,
+    },
     /// 网络出口总闸：一页看全谁在往外发包，每一路都能手动启停。
     NetEgress {
         #[serde(default)]
@@ -299,6 +306,7 @@ pub enum ContentKind {
     /// **零交易所流**：全部连接在独立的 `ws-observatory` 守护里，面板只读快照。
     Observatory,
     NetEgress,
+    News,
     /// 录制驾驶舱（docs/08 F6-P3）：24/7 守护录制控制中心（服务启停 + 配置 + 实况 + 总览）。
     Recorder,
     /// Tardis 历史回放（docs/20 Phase 5）：已购 30 天逐笔按变速推进 `ws:bt:{run}:trades` 喂图。
@@ -331,7 +339,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 21] = [
+    pub const ALL: [ContentKind; 22] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -349,6 +357,7 @@ impl ContentKind {
         ContentKind::MarketMap,
         ContentKind::Observatory,
         ContentKind::NetEgress,
+        ContentKind::News,
         ContentKind::Recorder,
         ContentKind::TardisReplay,
         ContentKind::TardisBoard,
@@ -376,6 +385,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::MarketMap => "全市场雷达",
             ContentKind::Observatory => "接口观察终端",
             ContentKind::NetEgress => "网络出口",
+            ContentKind::News => "新闻资讯",
             ContentKind::Recorder => "数据录制",
             ContentKind::TardisReplay => "Tardis 历史回放",
             ContentKind::TardisBoard => "Tardis 历史面板",
@@ -458,6 +468,7 @@ impl PaneSetup {
                 | ContentKind::MarketMap
                 | ContentKind::Observatory
                 | ContentKind::NetEgress
+                | ContentKind::News
                 | ContentKind::Recorder
                 | ContentKind::TardisReplay
                 | ContentKind::TardisBoard
@@ -492,6 +503,7 @@ impl PaneSetup {
             | ContentKind::MarketMap
             | ContentKind::Observatory
             | ContentKind::NetEgress
+            | ContentKind::News
             | ContentKind::Recorder
             | ContentKind::TardisReplay
             | ContentKind::TardisBoard
