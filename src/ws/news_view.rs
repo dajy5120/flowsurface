@@ -62,6 +62,12 @@ pub enum NewsMsg {
     WatchAdd,
     /// 退订一个标的。
     WatchRemove(String),
+    /// 检索框在打字。
+    SearchEdited(String),
+    /// 跑一次检索。**按需，不轮询**——一条检索是给人看的一次动作。
+    SearchRun,
+    /// 清掉检索结果。
+    SearchClear,
 }
 
 fn chip<'a>(label: &str, msg: NewsMsg) -> Element<'a, NewsMsg> {
@@ -247,6 +253,52 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
                   Form 4 内部人交易占了申报总量的六成，收进来会把 8-K 埋掉")
                 .size(10)
                 .color(C_DIM),
+        );
+    }
+
+    // ── SEC 全文检索（N5 的另一半）──
+    //
+    // 结果**单独一段**，不混进时间线：时间线是「最近发生了什么」，
+    // 这里是「帮我找东西」。混进去的话，一次搜索会在时间线里塞几十条
+    // 几个月前的东西，而它们看起来和刚发生的一样
+    body = body.push(
+        row![
+            text("SEC 全文检索").size(11).color(C_HEAD),
+            text_input("在所有申报里找一个词，如 material weakness（回车）", &ro::search_input())
+                .on_input(NewsMsg::SearchEdited)
+                .on_submit(NewsMsg::SearchRun)
+                .size(11)
+                .padding([2, 6])
+                .width(Length::Fixed(320.0)),
+            chip("检索", NewsMsg::SearchRun),
+            chip("清空", NewsMsg::SearchClear),
+            // 失败也要说出来——空结果和「没搜到」看起来一样
+            text(st.search.status.clone())
+                .size(10)
+                .color(if st.search.status.contains("失败") || st.search.status.contains("取不到") {
+                    C_BAD
+                } else {
+                    C_DIM
+                }),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+    );
+    for h in st.search.hits.iter().take(40) {
+        let what = if h.what.is_empty() { String::new() } else { format!(" · {}", h.what) };
+        body = body.push(
+            row![
+                cell(h.date.clone(), 82.0, C_DIM, false),
+                cell(h.form.clone(), 54.0, tier_color("regulator"), false),
+                // 和时间线一致：标题就是链接
+                button(text(format!("{}{}", h.who, what)).size(11).width(Length::Fill))
+                    .padding([1, 4])
+                    .style(link_style)
+                    .on_press(NewsMsg::Open(h.url.clone()))
+                    .width(Length::Fill),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
         );
     }
 

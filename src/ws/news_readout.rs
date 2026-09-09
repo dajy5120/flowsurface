@@ -64,6 +64,27 @@ pub struct NewsRow {
     pub revised: bool,
 }
 
+/// 一条检索命中。
+#[derive(Default, Clone, PartialEq)]
+pub struct SearchHit {
+    pub who: String,
+    pub form: String,
+    pub date: String,
+    pub url: String,
+    /// 8-K 的条款码翻成人话。
+    pub what: String,
+}
+
+/// 检索结果。**和时间线分开**：时间线是「最近发生了什么」，
+/// 这里是「帮我找东西」。
+#[derive(Default, Clone, PartialEq)]
+pub struct SearchView {
+    pub q: String,
+    /// 失败也要说出来——空结果和「没搜到」看起来一样。
+    pub status: String,
+    pub hits: Vec<SearchHit>,
+}
+
 /// 一个订阅的标的。
 #[derive(Default, Clone, PartialEq)]
 pub struct WatchRow {
@@ -86,6 +107,7 @@ pub struct NewsReadout {
     pub sources: Vec<SourceRow>,
     pub items: Vec<NewsRow>,
     pub watch: Vec<WatchRow>,
+    pub search: SearchView,
     pub refreshed: String,
     pub svc: super::svcctl::UnitState,
 }
@@ -183,6 +205,28 @@ pub fn parse(v: &serde_json::Value) -> NewsReadout {
                     .collect()
             })
             .unwrap_or_default(),
+        search: v
+            .get("search")
+            .map(|x| SearchView {
+                q: s(x, "q"),
+                status: s(x, "status"),
+                hits: x
+                    .get("hits")
+                    .and_then(|h| h.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .map(|h| SearchHit {
+                                who: s(h, "who"),
+                                form: s(h, "form"),
+                                date: s(h, "date"),
+                                url: s(h, "url"),
+                                what: s(h, "what"),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+            .unwrap_or_default(),
         refreshed: String::new(),
         svc: Default::default(),
     }
@@ -199,6 +243,42 @@ fn request_path() -> std::path::PathBuf {
         return std::path::PathBuf::from(p);
     }
     board_path().with_file_name("news_request.json")
+}
+
+/// 检索框。
+static SEARCH_INPUT: Mutex<String> = Mutex::new(String::new());
+
+pub fn search_input() -> String {
+    SEARCH_INPUT.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn set_search_input(t: &str) {
+    if let Ok(mut g) = SEARCH_INPUT.lock() {
+        *g = t.to_string();
+    }
+}
+
+/// 把检索请求写给守护。保留当前订阅——**整份重写会把订阅冲掉**
+/// （docs/22 §7.7、docs/23 §13k 都栽过：局部修改要从磁盘现状起步）。
+pub fn write_search(q: &str, forms: &str) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static N: AtomicI64 = AtomicI64::new(1000);
+    let p = request_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let mut v: serde_json::Value = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(|x: &serde_json::Value| x.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    v["search"] = serde_json::json!(q);
+    v["search_forms"] = serde_json::json!(forms);
+    v["nonce"] = serde_json::json!(N.fetch_add(1, Ordering::Relaxed));
+    let tmp = p.with_extension("json.tmp");
+    if std::fs::write(&tmp, v.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
 }
 
 /// 订阅列表的编辑框。
@@ -222,12 +302,15 @@ pub fn write_watch(symbols: &[String]) {
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    let v = serde_json::json!({
-        "watch": symbols,
-        // 只增计数：布尔要守护读完清掉，那就得由守护写回请求文件，
-        // 于是两个进程同时写一个文件（docs/22 §7.8）
-        "nonce": N.fetch_add(1, Ordering::Relaxed),
-    });
+    let mut v: serde_json::Value = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(|x: &serde_json::Value| x.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    v["watch"] = serde_json::json!(symbols);
+    // 只增计数：布尔要守护读完清掉，那就得由守护写回请求文件，
+    // 于是两个进程同时写一个文件（docs/22 §7.8）
+    v["nonce"] = serde_json::json!(N.fetch_add(1, Ordering::Relaxed));
     let tmp = p.with_extension("json.tmp");
     if std::fs::write(&tmp, v.to_string()).is_ok() {
         let _ = std::fs::rename(&tmp, &p);
@@ -436,12 +519,55 @@ mod tests {
     /// 就会写进用户正在用的那份订阅（观察终端那次的教训，docs/23 §13k）。
     static REQ_PATH: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
+    /// 碰请求文件的测试都要先拿这把锁。
+    ///
+    /// 请求文件和 `REQ_PATH` 都是**进程级**的，并行跑必然互踩，
+    /// 而且踩起来是「另一个测试写的订阅出现在我的断言里」，看着像逻辑错。
+    /// 这是本项目第五次栽在同一个形状上（IPO 月份、连接表单、请求文件、
+    /// 连接历史，现在是这个）。
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_for_test() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub(super) fn req_override() -> Option<std::path::PathBuf> {
         Some(REQ_PATH.lock().ok().and_then(|g| g.clone()).unwrap_or_else(|| {
             std::env::temp_dir()
                 .join(format!("ws-news-test-{}", std::process::id()))
                 .join("news_request.json")
         }))
+    }
+
+    #[test]
+    fn writing_one_field_does_not_wipe_the_other() {
+        let _g = lock_for_test();
+        // docs/22 §7.7 和 docs/23 §13k 都栽过：局部修改要从磁盘现状起步，
+        // 整份重写会把别人写的键冲掉。这里是订阅和检索互相冲
+        let dir = std::env::temp_dir().join(format!("ws-news-x-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("news_request.json");
+        let _ = std::fs::remove_file(&p);
+        if let Ok(mut g) = REQ_PATH.lock() {
+            *g = Some(p.clone());
+        }
+        write_watch(&["AAPL".into()]);
+        write_search("material weakness", "8-K");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["watch"][0], "AAPL", "写检索把订阅冲掉了");
+        assert_eq!(v["search"], "material weakness");
+
+        write_watch(&["AAPL".into(), "NVDA".into()]);
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["search"], "material weakness", "写订阅把检索冲掉了");
+        assert_eq!(v["watch"].as_array().unwrap().len(), 2);
+
+        if let Ok(mut g) = REQ_PATH.lock() {
+            *g = None;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -457,6 +583,7 @@ mod tests {
 
     #[test]
     fn the_watch_list_round_trips_through_the_request_file() {
+        let _g = lock_for_test();
         let dir = std::env::temp_dir().join(format!("ws-news-w-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let p = dir.join("news_request.json");

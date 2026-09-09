@@ -36,6 +36,19 @@ pub fn handle(m: NewsMsg) {
             ro::write_watch(&cur);
             ro::set_watch_input("");
         }
+        NewsMsg::SearchEdited(t) => ro::set_search_input(&t),
+        NewsMsg::SearchRun => {
+            let q = ro::search_input();
+            if !q.trim().is_empty() {
+                // 表格类型先固定 8-K：全文检索不限表格的话，
+                // 一个常见词能命中上万条 Form 4，翻不完也没用
+                ro::write_search(q.trim(), "8-K");
+            }
+        }
+        NewsMsg::SearchClear => {
+            ro::set_search_input("");
+            ro::write_search("", "");
+        }
         NewsMsg::WatchRemove(sym) => {
             let cur: Vec<String> =
                 ro::read_watch().into_iter().filter(|c| !c.eq_ignore_ascii_case(&sym)).collect();
