@@ -15,6 +15,9 @@ pub struct SourceRow {
     pub label: String,
     pub tier: String,
     pub tier_label: String,
+    /// 源地址。**测试按钮要用它**——表格里的按钮只有 id，
+    /// 而要测的是地址
+    pub url: String,
     pub lang: String,
     /// 见过的最新一条（毫秒）。**不受时间窗影响**——库里出窗了它还在。
     pub newest_ms: Option<i64>,
@@ -24,6 +27,15 @@ pub struct SourceRow {
     pub stale_after_secs: i64,
     /// **这一行是这一页的理由**：HTTP 200 也可能是死的。
     pub is_stale: bool,
+    /// **源不给时间戳**（实测 ESMA 就是）。和「还没抓到」是两回事——
+    /// 都显示成「—」的话，一个好源看起来像没通。
+    pub no_timestamps: bool,
+    /// 我们上次从这个源看到新条目的时刻。源不给时间时，看门狗靠它。
+    pub last_new_ms: Option<i64>,
+    /// 内置的源**不能删只能关**：删了下次启动又被播种回来，
+    /// 那种「删不掉」比不给删更让人困惑。
+    pub builtin: bool,
+    pub enabled: bool,
     pub ok: i64,
     pub not_modified: i64,
     pub fails: i64,
@@ -62,6 +74,20 @@ pub struct NewsRow {
     /// 还有哪些源发了同一条。
     pub dupes: Vec<String>,
     pub revised: bool,
+}
+
+/// 「测试这个源」的结果。
+#[derive(Default, Clone, PartialEq)]
+pub struct ProbeView {
+    pub url: String,
+    pub status: u16,
+    pub ms: i64,
+    pub bytes: i64,
+    pub is_feed: bool,
+    pub items: i64,
+    pub newest_age_secs: Option<i64>,
+    pub verdict: String,
+    pub ok: bool,
 }
 
 /// 一条检索命中。
@@ -108,6 +134,7 @@ pub struct NewsReadout {
     pub items: Vec<NewsRow>,
     pub watch: Vec<WatchRow>,
     pub search: SearchView,
+    pub probe: Option<ProbeView>,
     pub refreshed: String,
     pub svc: super::svcctl::UnitState,
 }
@@ -148,12 +175,17 @@ pub fn parse(v: &serde_json::Value) -> NewsReadout {
                         label: s(r, "label"),
                         tier: s(r, "tier"),
                         tier_label: s(r, "tier_label"),
+                        url: s(r, "url"),
                         lang: s(r, "lang"),
                         newest_ms: oi(r, "newest_ms"),
                         in_window: i(r, "in_window"),
                         stale_secs: oi(r, "stale_secs"),
                         stale_after_secs: i(r, "stale_after_secs"),
                         is_stale: b(r, "is_stale"),
+                        no_timestamps: b(r, "no_timestamps"),
+                        last_new_ms: oi(r, "last_new_ms"),
+                        builtin: b(r, "builtin"),
+                        enabled: v.get("sources").is_some() && b(r, "enabled"),
                         ok: i(r, "ok"),
                         not_modified: i(r, "not_modified"),
                         fails: i(r, "fails"),
@@ -227,9 +259,128 @@ pub fn parse(v: &serde_json::Value) -> NewsReadout {
                     .unwrap_or_default(),
             })
             .unwrap_or_default(),
+        probe: v.get("probe").filter(|x| !x.is_null()).map(|x| ProbeView {
+            url: s(x, "url"),
+            status: i(x, "status") as u16,
+            ms: i(x, "ms"),
+            bytes: i(x, "bytes"),
+            is_feed: b(x, "is_feed"),
+            items: i(x, "items"),
+            newest_age_secs: oi(x, "newest_age_secs"),
+            verdict: s(x, "verdict"),
+            ok: b(x, "ok"),
+        }),
         refreshed: String::new(),
         svc: Default::default(),
     }
+}
+
+// ── 源管理（用户自定义源）──
+
+/// 用户那份源清单的位置。**和守护读的是同一个文件**——
+/// 两边各存一份的话，面板显示加了而守护没加。
+pub fn sources_path() -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(p) = tests::src_override() {
+        return p;
+    }
+    if let Ok(p) = std::env::var("WS_NEWS_SOURCES") {
+        return std::path::PathBuf::from(p);
+    }
+    let base = std::env::var("XDG_CONFIG_HOME").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config")
+    });
+    base.join("wealthspring").join("news_sources.json")
+}
+
+/// 用户源清单里的一条。
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UserSource {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub tier: String,
+    #[serde(default)]
+    pub lang: String,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+pub fn read_sources() -> Vec<UserSource> {
+    std::fs::read_to_string(sources_path())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn write_sources(v: &[UserSource]) {
+    let p = sources_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    // 原子写：半截 JSON 会让守护当成一个自定义源都没有
+    let tmp = p.with_extension("json.tmp");
+    if let Ok(t) = serde_json::to_string_pretty(v) {
+        if std::fs::write(&tmp, t).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+}
+
+/// 开/关一个源（内置的也能关）。
+pub fn set_enabled(id: &str, on: bool) {
+    let mut v = read_sources();
+    match v.iter_mut().find(|u| u.id == id) {
+        Some(u) => u.enabled = on,
+        None => v.push(UserSource {
+            id: id.to_string(),
+            label: String::new(),
+            url: String::new(),
+            tier: String::new(),
+            lang: String::new(),
+            enabled: on,
+        }),
+    }
+    write_sources(&v);
+}
+
+/// 加一个自定义源。返回错误消息（空 = 成功）。
+pub fn add_source(id: &str, label: &str, url: &str, tier: &str) -> String {
+    let id = id.trim().to_ascii_lowercase();
+    let url = url.trim();
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return "id 只能是字母数字和 - _".into();
+    }
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return "地址要以 http:// 或 https:// 开头".into();
+    }
+    let mut v = read_sources();
+    if v.iter().any(|u| u.id == id) {
+        return format!("已经有一个叫「{id}」的源了");
+    }
+    v.push(UserSource {
+        id,
+        label: if label.trim().is_empty() { url.to_string() } else { label.trim().to_string() },
+        url: url.to_string(),
+        tier: if tier.trim().is_empty() { "media".into() } else { tier.trim().to_string() },
+        lang: "en".into(),
+        enabled: true,
+    });
+    write_sources(&v);
+    String::new()
+}
+
+/// 删一个自定义源。**内置的删不掉**——它下次启动会被播种回来。
+pub fn remove_source(id: &str) {
+    let v: Vec<UserSource> = read_sources().into_iter().filter(|u| u.id != id).collect();
+    write_sources(&v);
 }
 
 // ── 订阅（N5）：面板 → 守护的请求文件 ──
@@ -243,6 +394,99 @@ fn request_path() -> std::path::PathBuf {
         return std::path::PathBuf::from(p);
     }
     board_path().with_file_name("news_request.json")
+}
+
+/// 面板的两个视图。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    /// 只看新闻。默认——**打开就该看到新闻**，而不是先看一屏运维信息。
+    #[default]
+    Feed,
+    /// 源健康 + 源管理。
+    Sources,
+}
+
+impl View {
+    pub const ALL: [View; 2] = [View::Feed, View::Sources];
+    pub fn label(self) -> &'static str {
+        match self {
+            View::Feed => "新闻",
+            View::Sources => "源管理",
+        }
+    }
+}
+
+static VIEW: Mutex<View> = Mutex::new(View::Feed);
+
+pub fn view() -> View {
+    VIEW.lock().map(|g| *g).unwrap_or_default()
+}
+
+pub fn set_view(v: View) {
+    if let Ok(mut g) = VIEW.lock() {
+        *g = v;
+    }
+}
+
+/// 「加源」表单：`(id, 名字, 地址, 分级)`。
+static ADD_FORM: Mutex<(String, String, String, String)> =
+    Mutex::new((String::new(), String::new(), String::new(), String::new()));
+
+pub fn add_form() -> (String, String, String, String) {
+    ADD_FORM.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn set_add_form(field: &str, v: &str) {
+    if let Ok(mut g) = ADD_FORM.lock() {
+        match field {
+            "id" => g.0 = v.to_string(),
+            "label" => g.1 = v.to_string(),
+            "url" => g.2 = v.to_string(),
+            "tier" => g.3 = v.to_string(),
+            _ => {}
+        }
+    }
+}
+
+pub fn clear_add_form() {
+    if let Ok(mut g) = ADD_FORM.lock() {
+        *g = Default::default();
+    }
+}
+
+/// 加源时的提示（错误或成功）。
+static ADD_NOTE: Mutex<String> = Mutex::new(String::new());
+
+pub fn add_note() -> String {
+    ADD_NOTE.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn set_add_note(t: &str) {
+    if let Ok(mut g) = ADD_NOTE.lock() {
+        *g = t.to_string();
+    }
+}
+
+/// 让守护测一个源。走请求文件的 `probe` 字段，**局部修改**。
+pub fn request_probe(url: &str) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static N: AtomicI64 = AtomicI64::new(5000);
+    let p = request_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let mut v: serde_json::Value = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(|x: &serde_json::Value| x.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    v["probe"] = serde_json::json!(url);
+    // 按 nonce 触发：对同一个源再点一次「测试」是想重测
+    v["nonce"] = serde_json::json!(N.fetch_add(1, Ordering::Relaxed));
+    let tmp = p.with_extension("json.tmp");
+    if std::fs::write(&tmp, v.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
 }
 
 /// 检索框。
@@ -531,12 +775,63 @@ mod tests {
         TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    static SRC_PATH: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+    pub(super) fn src_override() -> Option<std::path::PathBuf> {
+        Some(SRC_PATH.lock().ok().and_then(|g| g.clone()).unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join(format!("ws-news-test-{}", std::process::id()))
+                .join("news_sources.json")
+        }))
+    }
+
     pub(super) fn req_override() -> Option<std::path::PathBuf> {
         Some(REQ_PATH.lock().ok().and_then(|g| g.clone()).unwrap_or_else(|| {
             std::env::temp_dir()
                 .join(format!("ws-news-test-{}", std::process::id()))
                 .join("news_request.json")
         }))
+    }
+
+    #[test]
+    fn a_user_source_round_trips_and_a_builtin_can_be_turned_off_but_not_deleted() {
+        let _g = lock_for_test();
+        let dir = std::env::temp_dir().join(format!("ws-news-s-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("news_sources.json");
+        let _ = std::fs::remove_file(&p);
+        if let Ok(mut g) = SRC_PATH.lock() {
+            *g = Some(p.clone());
+        }
+        assert!(read_sources().is_empty(), "没有文件时是空清单，不是报错");
+
+        // 加一个
+        assert_eq!(add_source("myfeed", "我的源", "https://example.com/rss", "media"), "");
+        assert_eq!(read_sources().len(), 1);
+        assert_eq!(read_sources()[0].url, "https://example.com/rss");
+
+        // 挡住会变成坏 URL 或坏 id 的输入
+        assert!(!add_source("my feed", "x", "https://a/b", "").is_empty(), "id 有空格该拒");
+        assert!(!add_source("ok", "x", "ftp://a/b", "").is_empty(), "非 http 该拒");
+        assert!(!add_source("myfeed", "x", "https://c/d", "").is_empty(), "重名该拒");
+        assert_eq!(read_sources().len(), 1, "被拒的一个都不该写进去");
+
+        // **内置源：只关不删**。写进清单的是一条「关掉」记录
+        set_enabled("coindesk", false);
+        let v = read_sources();
+        assert_eq!(v.len(), 2);
+        assert!(v.iter().any(|u| u.id == "coindesk" && !u.enabled && u.url.is_empty()));
+        set_enabled("coindesk", true);
+        assert!(read_sources().iter().any(|u| u.id == "coindesk" && u.enabled));
+
+        // 自定义源可以删
+        remove_source("myfeed");
+        assert!(!read_sources().iter().any(|u| u.id == "myfeed"));
+
+        if let Ok(mut g) = SRC_PATH.lock() {
+            *g = None;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

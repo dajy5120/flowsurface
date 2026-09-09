@@ -9,7 +9,7 @@
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length};
 
-use super::news_readout::{self as ro, ago, NewsRow, SourceRow};
+use super::news_readout::{self as ro, ago, NewsRow, SourceRow, View};
 
 const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
 const C_DIM: Color = Color::from_rgb(0.55, 0.55, 0.6);
@@ -68,12 +68,32 @@ pub enum NewsMsg {
     SearchRun,
     /// 清掉检索结果。
     SearchClear,
+    /// 切视图。
+    SetView(View),
+    /// 开/关一个源。
+    ToggleSource(String, bool),
+    /// 删掉一个自定义源。
+    DeleteSource(String),
+    /// 测一个源。
+    ProbeSource(String),
+    /// 加源表单在打字。
+    AddEdited(&'static str, String),
+    /// 提交加源。
+    AddSource,
 }
 
 fn chip<'a>(label: &str, msg: NewsMsg) -> Element<'a, NewsMsg> {
     button(text(label.to_string()).size(11))
         .padding([2, 7])
         .style(|t, st| crate::style::button::modifier(t, st, false))
+        .on_press(msg)
+        .into()
+}
+
+fn chip_on<'a>(label: &str, active: bool, msg: NewsMsg) -> Element<'a, NewsMsg> {
+    button(text(label.to_string()).size(11))
+        .padding([2, 7])
+        .style(move |t, st| crate::style::button::modifier(t, st, active))
         .on_press(msg)
         .into()
 }
@@ -118,6 +138,11 @@ pub fn source_lamp(s: &SourceRow) -> (&'static str, Color, String) {
         let d = s.stale_secs.unwrap_or(0) / 86400;
         return ("⚠", C_BAD, format!("陈了 {d} 天（一直返回 200）"));
     }
+    if s.no_timestamps {
+        // 不是故障：源就是不给时间。但要说出来——看门狗对它用的是
+        // 另一套判据（我们上次见到新条目是什么时候）
+        return ("◍", C_HEAD, "源不给时间戳，按「上次有新条目」判新鲜度".into());
+    }
     if s.never_seen() {
         return ("○", C_DIM, "还没抓到".into());
     }
@@ -153,6 +178,26 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
         .align_y(iced::Alignment::Center),
     );
 
+    // ── 视图切换 ──
+    //
+    // 默认是「新闻」：**打开就该看到新闻**，而不是先看一屏运维信息。
+    // 源健康和源管理放到第二个视图里——它们重要，但不是每次打开都要看的
+    let v = ro::view();
+    let mut vr = row![].spacing(4).align_y(iced::Alignment::Center);
+    for x in View::ALL {
+        vr = vr.push(chip_on(x.label(), x == v, NewsMsg::SetView(x)));
+    }
+    // 有源出问题时，在「新闻」视图上也要看得见——否则一个源死了
+    // 而用户从不切到第二页，就永远不知道
+    if v == View::Feed && st.stale_sources > 0 {
+        vr = vr.push(
+            text(format!("⚠ {} 个源已陈，去「源管理」看", st.stale_sources))
+                .size(10)
+                .color(C_BAD),
+        );
+    }
+    body = body.push(vr);
+
     if !st.present || st.sources.is_empty() {
         body = body.push(
             text("还没有快照——守护没起，或者刚起还没抓完第一轮").size(11).color(C_DIM),
@@ -160,62 +205,8 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
 
-    // ── 源健康 ──
-    body = body.push(
-        row![
-            text("源健康").size(11).color(C_HEAD),
-            text("HTTP 200 不等于有新闻——「陈了」这一列才是这一页的理由").size(10).color(C_DIM),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center),
-    );
-    let mut h = row![].spacing(4);
-    for (t, w, n) in [
-        ("", 20.0, false),
-        ("源", 120.0, false),
-        ("分级", 56.0, false),
-        ("见过的最新", 84.0, false),
-        ("窗内", 44.0, true),
-        ("拉/未变/失败", 108.0, false),
-        ("状态", 260.0, false),
-    ] {
-        h = h.push(cell(t.into(), w, C_HEAD, n));
-    }
-    body = body.push(h);
-
-    // 有问题的排在前面：一片正常里混着一行红，很容易被翻过去
-    let mut rows: Vec<&SourceRow> = st.sources.iter().collect();
-    rows.sort_by_key(|s| (!(s.is_stale || s.failing()), s.label.clone()));
-    for s in rows {
-        let (lamp, lc, why) = source_lamp(s);
-        let newest = match s.newest_ms {
-            Some(m) => ago(m, st.now_ms),
-            // 「从没抓到」和「陈了」是两回事
-            None => "—".into(),
-        };
-        body = body.push(
-            row![
-                cell(lamp.into(), 20.0, lc, false),
-                cell(s.label.clone(), 120.0, C_TXT, false),
-                cell(s.tier_label.clone(), 56.0, tier_color(&s.tier), false),
-                cell(newest, 84.0, if s.is_stale { C_BAD } else { C_DIM }, false),
-                cell(s.in_window.to_string(), 44.0, C_DIM, true),
-                cell(
-                    format!("{}/{}/{}", s.ok, s.not_modified, s.fails),
-                    108.0,
-                    if s.fails > 0 { C_GOLD } else { C_DIM },
-                    false
-                ),
-                cell(
-                    if why.is_empty() { clip(&s.last_status, 34) } else { why },
-                    260.0,
-                    lc,
-                    false
-                ),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center),
-        );
+    if v == View::Sources {
+        return sources_view(&st);
     }
 
     // ── 按标的订阅（N5）──
@@ -347,6 +338,143 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
     scrollable(body).width(Length::Fill).height(Length::Fill).into()
 }
 
+/// 第二个视图：**源健康 + 源管理**。
+///
+/// 两件事放一起是有理由的：判断一个源该不该留，靠的就是它的健康
+/// （多久没更新、失败几次）。分成两页的话，用户得在两页之间来回对。
+fn sources_view<'a>(st: &ro::NewsReadout) -> Element<'a, NewsMsg> {
+    let mut body = column![].spacing(4).padding(8);
+
+    // ── 加一个源 ──
+    let (id, label, url, tier) = ro::add_form();
+    body = body.push(
+        row![
+            text("加源").size(11).color(C_HEAD),
+            text_input("id", &id).on_input(|t| NewsMsg::AddEdited("id", t)).size(11).padding([2, 6]).width(Length::Fixed(96.0)),
+            text_input("显示名", &label).on_input(|t| NewsMsg::AddEdited("label", t)).size(11).padding([2, 6]).width(Length::Fixed(120.0)),
+            text_input("RSS / Atom 地址", &url)
+                .on_input(|t| NewsMsg::AddEdited("url", t))
+                .on_submit(NewsMsg::AddSource)
+                .size(11).padding([2, 6]).width(Length::Fixed(300.0)),
+            text_input("分级(media)", &tier).on_input(|t| NewsMsg::AddEdited("tier", t)).size(11).padding([2, 6]).width(Length::Fixed(96.0)),
+            chip("先测一下", NewsMsg::ProbeSource(url.clone())),
+            chip("添加", NewsMsg::AddSource),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .wrap(),
+    );
+    let note = ro::add_note();
+    if !note.is_empty() {
+        body = body.push(
+            text(note.clone()).size(10).color(if note.starts_with('✔') { C_OK } else { C_BAD }),
+        );
+    }
+    body = body.push(
+        text("只能加 RSS / Atom。JSON 接口（交易所公告那种）要写提取规则，那是代码不是配置——\
+              在配置里填错一个字段的表现是「这个源什么都抓不到」，查不出为什么")
+            .size(10)
+            .color(C_DIM),
+    );
+
+    // ── 测试结果 ──
+    if let Some(p) = &st.probe {
+        body = body.push(
+            row![
+                text(if p.ok { "✔" } else { "✗" }).size(13).color(if p.ok { C_OK } else { C_BAD }),
+                text(clip(&p.url, 52)).size(10).color(C_DIM),
+                text(format!("HTTP {} · {}ms · {}B", p.status, p.ms, p.bytes)).size(10).color(C_DIM),
+                text(p.verdict.clone()).size(11).color(if p.ok { C_OK } else { C_GOLD }),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .wrap(),
+        );
+    }
+
+    // ── 源健康 + 管理 ──
+    body = body.push(
+        row![
+            text("源").size(11).color(C_HEAD),
+            text(format!("{} 个，{} 个开着", st.sources.len(), st.sources.iter().filter(|s| s.enabled).count()))
+                .size(10)
+                .color(C_DIM),
+            text("HTTP 200 不等于有新闻——「见过的最新」那一列才是判断依据").size(10).color(C_DIM),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+    );
+    let mut h = row![].spacing(4);
+    for (t, w, n) in [
+        ("", 20.0, false),
+        ("源", 118.0, false),
+        ("分级", 52.0, false),
+        ("见过的最新", 80.0, false),
+        ("窗内", 40.0, true),
+        ("拉/未变/失败", 100.0, false),
+        ("状态", 210.0, false),
+        ("", 150.0, false),
+    ] {
+        h = h.push(cell(t.into(), w, C_HEAD, n));
+    }
+    body = body.push(h);
+
+    // 有问题的排在前面：一片正常里混着一行红，很容易被翻过去
+    let mut rows: Vec<&SourceRow> = st.sources.iter().collect();
+    rows.sort_by_key(|s| (!(s.is_stale || s.failing()), !s.enabled, s.label.clone()));
+    for s in rows {
+        let (lamp, lc, why) = source_lamp(s);
+        // 关掉的源仍然列出来——删掉和关掉是两回事
+        let (lamp, lc) = if s.enabled { (lamp, lc) } else { ("◌", C_DIM) };
+        // 三种「没有时间」要分开：源不给时间 / 还没抓到 / 真的陈了
+        let newest = match (s.newest_ms, s.no_timestamps, s.last_new_ms) {
+            (Some(m), _, _) => ago(m, st.now_ms),
+            // 源根本不给时间戳（实测 ESMA）。显示成「—」的话，
+            // 一个好源看起来像没通
+            (None, true, Some(t)) => format!("源无时间·{}", ago(t, st.now_ms)),
+            (None, true, None) => "源无时间".into(),
+            _ => "—".into(),
+        };
+        let mut r = row![
+            cell(lamp.into(), 20.0, lc, false),
+            cell(s.label.clone(), 118.0, if s.enabled { C_TXT } else { C_DIM }, false),
+            cell(s.tier_label.clone(), 52.0, tier_color(&s.tier), false),
+            cell(newest, 80.0, if s.is_stale { C_BAD } else { C_DIM }, false),
+            cell(s.in_window.to_string(), 40.0, C_DIM, true),
+            cell(
+                format!("{}/{}/{}", s.ok, s.not_modified, s.fails),
+                100.0,
+                if s.fails > 0 { C_GOLD } else { C_DIM },
+                false
+            ),
+            cell(
+                if !s.enabled {
+                    "已关闭".into()
+                } else if why.is_empty() {
+                    clip(&s.last_status, 26)
+                } else {
+                    why
+                },
+                210.0,
+                lc,
+                false
+            ),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+        r = r.push(chip(if s.enabled { "关闭" } else { "启用" }, NewsMsg::ToggleSource(s.id.clone(), !s.enabled)));
+        r = r.push(chip("测试", NewsMsg::ProbeSource(s.id.clone())));
+        // **内置的不给删按钮**：删了下次启动又被播种回来，
+        // 那种「删不掉」比不给删更让人困惑
+        if !s.builtin {
+            r = r.push(chip("删除", NewsMsg::DeleteSource(s.id.clone())));
+        }
+        body = body.push(r);
+    }
+
+    scrollable(body).width(Length::Fill).height(Length::Fill).into()
+}
+
 fn item_row<'a>(it: &NewsRow, now: i64) -> Element<'a, NewsMsg> {
     // 时间是猜的就打个记号。一条三天前的公告显示成刚刚发布，
     // 比不显示时间糟得多
@@ -426,6 +554,17 @@ mod tests {
         assert_eq!(lamp, "⚠");
         assert_eq!(c, C_BAD, "必须是红的");
         assert!(why.contains("589") && why.contains("200"), "{why}");
+    }
+
+    #[test]
+    fn a_source_without_timestamps_is_not_shown_as_broken() {
+        // 实测 ESMA 的条目只有 title/link/description。显示成「还没抓到」
+        // 或者一个红叉的话，一个好源看起来像坏的
+        let s = SourceRow { no_timestamps: true, ok: 50, ..Default::default() };
+        let (lamp, c, why) = source_lamp(&s);
+        assert_eq!(lamp, "◍");
+        assert_ne!(c, C_BAD, "不给时间戳不是故障");
+        assert!(why.contains("不给时间"), "{why}");
     }
 
     #[test]

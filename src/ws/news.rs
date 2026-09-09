@@ -36,6 +36,42 @@ pub fn handle(m: NewsMsg) {
             ro::write_watch(&cur);
             ro::set_watch_input("");
         }
+        NewsMsg::SetView(v) => ro::set_view(v),
+        NewsMsg::ToggleSource(id, on) => ro::set_enabled(&id, on),
+        NewsMsg::DeleteSource(id) => ro::remove_source(&id),
+        NewsMsg::ProbeSource(id_or_url) => {
+            // 表格里的按钮给的是源 id，加源表单给的是 URL。
+            // 从当前快照里把 id 翻成 URL——**翻不到就按 URL 处理**，
+            // 而不是静默什么都不做
+            let cur = ro::snapshot();
+            let url = cur
+                .sources
+                .iter()
+                .find(|s| s.id == id_or_url)
+                .map(|s| s.url.clone())
+                .unwrap_or(id_or_url);
+            if url.starts_with("http") {
+                ro::request_probe(&url);
+            } else {
+                ro::set_add_note("要测的地址得是 http:// 或 https://");
+            }
+        }
+        NewsMsg::AddEdited(f, t) => {
+            ro::set_add_form(f, &t);
+            ro::set_add_note("");
+        }
+        NewsMsg::AddSource => {
+            let (id, label, url, tier) = ro::add_form();
+            let e = ro::add_source(&id, &label, &url, &tier);
+            if e.is_empty() {
+                ro::clear_add_form();
+                // 加完立刻测一下：加进去才发现连不上，不如加的时候就说
+                ro::request_probe(&url);
+                ro::set_add_note(&format!("✔ 已添加「{}」，正在测试…", id.trim()));
+            } else {
+                ro::set_add_note(&e);
+            }
+        }
         NewsMsg::SearchEdited(t) => ro::set_search_input(&t),
         NewsMsg::SearchRun => {
             let q = ro::search_input();
