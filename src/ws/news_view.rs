@@ -206,7 +206,14 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
     }
 
     if v == View::Sources {
-        return sources_view(&st);
+        // **只追加内容，不 return 一整棵树。**
+        // 一度是 `return sources_view(...)`，那棵树里没有上面那行视图切换——
+        // 进了源管理就再也回不去新闻页。现在头部由这里统一画，
+        // 分支只能产出「内容」，结构上没有漏掉切换器的可能
+        for e in sources_view(&st) {
+            body = body.push(e);
+        }
+        return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
 
     // ── 按标的订阅（N5）──
@@ -342,12 +349,12 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
 ///
 /// 两件事放一起是有理由的：判断一个源该不该留，靠的就是它的健康
 /// （多久没更新、失败几次）。分成两页的话，用户得在两页之间来回对。
-fn sources_view<'a>(st: &ro::NewsReadout) -> Element<'a, NewsMsg> {
-    let mut body = column![].spacing(4).padding(8);
+fn sources_view<'a>(st: &ro::NewsReadout) -> Vec<Element<'a, NewsMsg>> {
+    let mut body: Vec<Element<'a, NewsMsg>> = Vec::new();
 
     // ── 加一个源 ──
     let (id, label, url, tier) = ro::add_form();
-    body = body.push(
+    body.push((
         row![
             text("加源").size(11).color(C_HEAD),
             text_input("id", &id).on_input(|t| NewsMsg::AddEdited("id", t)).size(11).padding([2, 6]).width(Length::Fixed(96.0)),
@@ -362,24 +369,21 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> Element<'a, NewsMsg> {
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center)
-        .wrap(),
-    );
+        .wrap()).into());
     let note = ro::add_note();
     if !note.is_empty() {
-        body = body.push(
-            text(note.clone()).size(10).color(if note.starts_with('✔') { C_OK } else { C_BAD }),
-        );
+        body.push((
+            text(note.clone()).size(10).color(if note.starts_with('✔') { C_OK } else { C_BAD })).into());
     }
-    body = body.push(
+    body.push((
         text("只能加 RSS / Atom。JSON 接口（交易所公告那种）要写提取规则，那是代码不是配置——\
               在配置里填错一个字段的表现是「这个源什么都抓不到」，查不出为什么")
             .size(10)
-            .color(C_DIM),
-    );
+            .color(C_DIM)).into());
 
     // ── 测试结果 ──
     if let Some(p) = &st.probe {
-        body = body.push(
+        body.push((
             row![
                 text(if p.ok { "✔" } else { "✗" }).size(13).color(if p.ok { C_OK } else { C_BAD }),
                 text(clip(&p.url, 52)).size(10).color(C_DIM),
@@ -388,12 +392,11 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> Element<'a, NewsMsg> {
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center)
-            .wrap(),
-        );
+            .wrap()).into());
     }
 
     // ── 源健康 + 管理 ──
-    body = body.push(
+    body.push((
         row![
             text("源").size(11).color(C_HEAD),
             text(format!("{} 个，{} 个开着", st.sources.len(), st.sources.iter().filter(|s| s.enabled).count()))
@@ -402,8 +405,7 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> Element<'a, NewsMsg> {
             text("HTTP 200 不等于有新闻——「见过的最新」那一列才是判断依据").size(10).color(C_DIM),
         ]
         .spacing(8)
-        .align_y(iced::Alignment::Center),
-    );
+        .align_y(iced::Alignment::Center)).into());
     let mut h = row![].spacing(4);
     for (t, w, n) in [
         ("", 20.0, false),
@@ -417,7 +419,7 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> Element<'a, NewsMsg> {
     ] {
         h = h.push(cell(t.into(), w, C_HEAD, n));
     }
-    body = body.push(h);
+    body.push((h).into());
 
     // 有问题的排在前面：一片正常里混着一行红，很容易被翻过去
     let mut rows: Vec<&SourceRow> = st.sources.iter().collect();
@@ -469,10 +471,10 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> Element<'a, NewsMsg> {
         if !s.builtin {
             r = r.push(chip("删除", NewsMsg::DeleteSource(s.id.clone())));
         }
-        body = body.push(r);
+        body.push(r.into());
     }
 
-    scrollable(body).width(Length::Fill).height(Length::Fill).into()
+    body
 }
 
 fn item_row<'a>(it: &NewsRow, now: i64) -> Element<'a, NewsMsg> {
@@ -554,6 +556,28 @@ mod tests {
         assert_eq!(lamp, "⚠");
         assert_eq!(c, C_BAD, "必须是红的");
         assert!(why.contains("589") && why.contains("200"), "{why}");
+    }
+
+    /// 视图切换器**必须每个视图都在**。
+    ///
+    /// 踩过一次：`sources_view` 直接 `return` 了自己的一整棵树，那棵树里
+    /// 没有切换器——**点进源管理就再也回不去新闻页**。
+    ///
+    /// 修法不是「记得也画一份」，是让它结构上不可能：头部由 `pane_body`
+    /// 统一画，分支只能产出**内容**（`Vec<Element>`），没有 return 一整棵树
+    /// 的机会。这条测试钉的就是那个签名。
+    #[test]
+    fn a_sub_view_returns_content_not_a_whole_tree() {
+        let src = include_str!("news_view.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            body.contains("fn sources_view<'a>(st: &ro::NewsReadout) -> Vec<Element<'a, NewsMsg>>"),
+            "子视图必须只产出内容行；返回整棵 Element 的话，头部（含视图切换）会被丢掉"
+        );
+        // 而且切换器要在分支**之前**画
+        let switcher = body.find("NewsMsg::SetView").expect("要有视图切换");
+        let branch = body.find("if v == View::Sources").expect("要有分支");
+        assert!(switcher < branch, "视图切换必须画在分支之前，否则某个视图会没有它");
     }
 
     #[test]
