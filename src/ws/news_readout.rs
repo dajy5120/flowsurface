@@ -396,6 +396,40 @@ fn request_path() -> std::path::PathBuf {
     board_path().with_file_name("news_request.json")
 }
 
+/// 下拉里的一项：一个源，或者「全部」。
+///
+/// 带上条数——**哪些源现在真的有新闻**，比源的名字更有用。
+/// 一个常年 0 条的源出现在下拉里而没有任何提示，用户会以为是筛选坏了。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourcePick {
+    /// `None` = 全部。
+    pub id: Option<String>,
+    pub label: String,
+    pub count: i64,
+}
+
+impl std::fmt::Display for SourcePick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.id.is_none() {
+            return write!(f, "{}（{}）", self.label, self.count);
+        }
+        write!(f, "{}（{}）", self.label, self.count)
+    }
+}
+
+/// 下拉当前选中的源 id。`None` = 全部。
+static SOURCE_PICK: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn source_pick() -> Option<String> {
+    SOURCE_PICK.lock().ok().and_then(|g| g.clone())
+}
+
+pub fn set_source_pick(id: Option<String>) {
+    if let Ok(mut g) = SOURCE_PICK.lock() {
+        *g = id;
+    }
+}
+
 /// 面板的两个视图。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
@@ -663,6 +697,21 @@ pub fn filter_text() -> String {
 pub fn set_filter_text(t: &str) {
     if let Ok(mut g) = FILTER.lock() {
         *g = t.to_string();
+    }
+}
+
+/// 一条新闻中不中当前的**源下拉**。
+///
+/// 和文本筛选是 **AND**：下拉选了「美联储」再打个关键词，
+/// 人的预期是「美联储的、并且含这个词的」。
+///
+/// 转载也算：一条被 CoinDesk 转载的 Fed 新闻，主条目是 fed，
+/// 选 CoinDesk 时也该看得到——否则「CoinDesk 今天发了什么」这个问题
+/// 会漏掉它转载的那些。
+pub fn matches_source(pick: &Option<String>, it: &NewsRow) -> bool {
+    match pick {
+        None => true,
+        Some(id) => it.source == *id || it.dupes.iter().any(|d| d == id),
     }
 }
 
@@ -999,6 +1048,28 @@ mod tests {
         assert!(!matches("-tier:media", &cd));
         // 无空格语言按子串找
         assert!(matches("입출금", &ko));
+    }
+
+    #[test]
+    fn the_source_dropdown_also_catches_what_that_source_reprinted() {
+        // 一条被 CoinDesk 转载的 Fed 新闻，主条目是 fed。选 CoinDesk 时
+        // 也该看得到——否则「CoinDesk 今天发了什么」会漏掉它转载的那些
+        let mut it = row("Fed cuts rates", "fed", "regulator", &[], "en");
+        it.dupes = vec!["coindesk".into(), "cnbc".into()];
+        assert!(matches_source(&None, &it), "「全部」看到一切");
+        assert!(matches_source(&Some("fed".into()), &it));
+        assert!(matches_source(&Some("coindesk".into()), &it), "转载方也该命中");
+        assert!(!matches_source(&Some("bloomberg".into()), &it));
+    }
+
+    #[test]
+    fn the_dropdown_label_says_how_many_that_source_has() {
+        // 一个常年 0 条的源出现在下拉里而没有任何提示，
+        // 用户会以为是筛选坏了
+        let p = SourcePick { id: Some("fed".into()), label: "美联储".into(), count: 0 };
+        assert!(p.to_string().contains('0'), "{p}");
+        let p = SourcePick { id: None, label: "全部".into(), count: 324 };
+        assert!(p.to_string().contains("324"));
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub fn handle(m: NewsMsg) {
             ro::set_watch_input("");
         }
         NewsMsg::SetView(v) => ro::set_view(v),
+        NewsMsg::PickSource(p) => ro::set_source_pick(p.id),
         NewsMsg::ToggleSource(id, on) => ro::set_enabled(&id, on),
         NewsMsg::DeleteSource(id) => ro::remove_source(&id),
         NewsMsg::ProbeSource(id_or_url) => {

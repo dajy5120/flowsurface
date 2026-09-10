@@ -6,10 +6,10 @@
 //! 是**一个源悄悄死了而列表看起来一切正常**（§3.1 的 WSJ，实测陈了
 //! 589 天仍返回 200）。把健康藏在下面等于把这件事藏起来。
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Color, Element, Length};
 
-use super::news_readout::{self as ro, ago, NewsRow, SourceRow, View};
+use super::news_readout::{self as ro, ago, NewsRow, SourcePick, SourceRow, View};
 
 const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
 const C_DIM: Color = Color::from_rgb(0.55, 0.55, 0.6);
@@ -80,6 +80,8 @@ pub enum NewsMsg {
     AddEdited(&'static str, String),
     /// 提交加源。
     AddSource,
+    /// 下拉选了一个源（`None` = 全部）。
+    PickSource(SourcePick),
 }
 
 fn chip<'a>(label: &str, msg: NewsMsg) -> Element<'a, NewsMsg> {
@@ -302,10 +304,52 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
 
     // ── 时间线 ──
     let q = ro::filter_text();
-    let shown: Vec<&ro::NewsRow> = st.items.iter().filter(|i| ro::matches(&q, i)).collect();
+    let pick = ro::source_pick();
+    // 下拉和文本筛选是 **AND**：选了「美联储」再打个关键词，
+    // 人的预期是「美联储的、并且含这个词的」
+    let shown: Vec<&ro::NewsRow> = st
+        .items
+        .iter()
+        .filter(|i| ro::matches_source(&pick, i) && ro::matches(&q, i))
+        .collect();
+
+    // 下拉的选项：带条数。**哪些源现在真的有新闻**比源的名字更有用
+    let mut opts: Vec<SourcePick> = vec![SourcePick {
+        id: None,
+        label: "全部来源".into(),
+        count: st.items.len() as i64,
+    }];
+    {
+        let mut per: std::collections::HashMap<&str, i64> = Default::default();
+        for i in &st.items {
+            *per.entry(i.source.as_str()).or_default() += 1;
+            for d in &i.dupes {
+                *per.entry(d.as_str()).or_default() += 1;
+            }
+        }
+        // 有新闻的排前面，其次按名字——一个 0 条的源沉在下面就够了，
+        // 但**不能不列**：不列的话用户以为这个源没配上
+        let mut ss: Vec<&SourceRow> = st.sources.iter().collect();
+        ss.sort_by_key(|s| (-per.get(s.id.as_str()).copied().unwrap_or(0), s.label.clone()));
+        for s in ss {
+            opts.push(SourcePick {
+                id: Some(s.id.clone()),
+                label: s.label.clone(),
+                count: per.get(s.id.as_str()).copied().unwrap_or(0),
+            });
+        }
+    }
+    let selected = opts
+        .iter()
+        .find(|o| o.id == pick)
+        // 选中的源被删掉/关掉之后，下拉会指向一个不存在的项。
+        // 回落到「全部」而不是留个空框
+        .cloned()
+        .unwrap_or_else(|| opts[0].clone());
     body = body.push(
         row![
             text("时间线").size(11).color(C_HEAD),
+            pick_list(opts.clone(), Some(selected), NewsMsg::PickSource).text_size(11).padding([2, 6]),
             text_input("筛选：词=都要有 · \"词组\" · -排除 · tier:/kind:/sym:/lang:/src:", &q)
                 .on_input(NewsMsg::FilterEdited)
                 .size(11)
@@ -313,13 +357,13 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
                 .width(Length::Fixed(420.0)),
             // **筛掉了多少必须说**。只显示一张短表的话，
             // 「筛选筛没了」和「本来就没有」分不出来
-            text(if q.trim().is_empty() {
+            text(if q.trim().is_empty() && pick.is_none() {
                 format!("{} 条", st.items.len())
             } else {
                 format!("{} / {} 条（筛掉 {}）", shown.len(), st.items.len(), st.items.len() - shown.len())
             })
             .size(10)
-            .color(if !q.trim().is_empty() && shown.is_empty() { C_GOLD } else { C_DIM }),
+            .color(if shown.is_empty() && !st.items.is_empty() { C_GOLD } else { C_DIM }),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
@@ -333,9 +377,15 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
     if st.items.is_empty() {
         body = body.push(text("窗内还没有条目").size(11).color(C_DIM));
     } else if shown.is_empty() {
-        // 空列表要说清是**筛选**筛没的，不是没新闻
+        // 空列表要说清是**筛选**筛没的，不是没新闻——
+        // 而且要说清是哪一个筛的：下拉还是关键词
+        let who = match (pick.is_some(), !q.trim().is_empty()) {
+            (true, true) => "这个来源 + 这条关键词",
+            (true, false) => "这个来源",
+            _ => "这条筛选",
+        };
         body = body.push(
-            text(format!("这条筛选把 {} 条全筛掉了", st.items.len())).size(11).color(C_GOLD),
+            text(format!("{who}把 {} 条全筛掉了", st.items.len())).size(11).color(C_GOLD),
         );
     }
 
