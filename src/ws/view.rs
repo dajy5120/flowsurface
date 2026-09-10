@@ -227,7 +227,7 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
 
     if !has_any(&r) {
         body = body.push(
-            text("等待 WealthSpring 数据…（需 run_all 起 ws_signals / factory_bridge / live_paper）")
+            text("等待 WealthSpring 数据…（需 ws-signals / ws-factory-bridge 在跑；实盘读数还要从 Studio 发起 run）")
                 .size(style::text_size::SMALL),
         );
     }

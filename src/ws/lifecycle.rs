@@ -46,7 +46,7 @@ pub const TARGET: &str = "ws-stack.target";
 /// （`ws-cockpit.service`），target 上的 `BindsTo=` 覆盖**任何**结束方式。
 /// 本钩子只覆盖 panic——`kill -9`、OOM、段错误都轮不到它跑。
 ///
-/// 为什么还是要装：直接跑二进制（开发时、run_all.sh）是常态，
+/// 为什么还是要装：开发时直接跑 target/release 下的二进制是常态，
 /// 而实测就撞到过一次 wgpu panic 导致十一个守护全留着。
 /// 覆盖 90% 比覆盖 0% 强，前提是别把它当成覆盖了 100%。
 pub fn install_panic_hook() {
