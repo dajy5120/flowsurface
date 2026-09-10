@@ -32,9 +32,10 @@ pub const WS_GLOBAL: &str = "全球市场"; // 全市场雷达 + 树图（docs/2
 pub const WS_OBSERVATORY: &str = "接口观察终端"; // REST/WS/TCP/FIX 统一观察与录制（docs/23）
 pub const WS_EGRESS: &str = "网络出口"; // 谁在往外发包 + 手动启停（一页看全）
 pub const WS_NEWS: &str = "新闻资讯"; // 交易所/监管/媒体统一时间线（docs/25）
-pub const WORKSPACES: [&str; 14] = [
+pub const WS_PROCS: &str = "进程"; // 常驻单元状态与启停（docs/26 S4）——「网络出口」的邻居
+pub const WORKSPACES: [&str; 15] = [
     WS_OFFICIAL, WS_LIVE, WS_RECORDED, WS_SELFDATA, WS_RECORDER, WS_FACTORY, WS_C4, WS_OPTIONS,
-    WS_PREDICTION, WS_TARDIS, WS_GLOBAL, WS_OBSERVATORY, WS_EGRESS, WS_NEWS,
+    WS_PREDICTION, WS_TARDIS, WS_GLOBAL, WS_OBSERVATORY, WS_EGRESS, WS_PROCS, WS_NEWS,
 ];
 
 /// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
@@ -57,6 +58,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
         WS_GLOBAL => Icon::Search,        // 全市场扫描
         WS_OBSERVATORY => Icon::Search,   // 接口观察（docs/23）
         WS_EGRESS => Icon::Link,          // 网络出口总闸
+        WS_PROCS => Icon::Cog,            // 进程：常驻单元状态与启停
         WS_NEWS => Icon::Star,            // 新闻资讯（docs/25）
         _ => Icon::Layout,
     }
@@ -103,6 +105,9 @@ fn pane_template(name: &str) -> &'static str {
         // 网络出口总闸：**零交易所连接**——它只数 /proc 和调 systemctl。
         // 这个工作区本身要是也拉行情，那就荒唐了
         WS_EGRESS => r#"{"NetEgress":{"settings":{},"link_group":null}}"#,
+        // 进程（docs/26 S4）：**零交易所连接**——只调 systemctl。
+        // 和「网络出口」是邻居：一个管进程、一个管出口。
+        WS_PROCS => r#"{"Procs":{"settings":{},"link_group":null}}"#,
         // 新闻资讯：**零交易所连接**——全部在 ws-news 守护里，这个 pane 只读快照
         WS_NEWS => r#"{"News":{"settings":{},"link_group":null}}"#,
         _ => r#"{"Starter":{"link_group":null}}"#,
@@ -167,6 +172,35 @@ mod tests {
             assert!(
                 serde_json::from_str::<data::Pane>(raw).is_ok(),
                 "工作区 `{name}` 模板不是合法 data::Pane: {raw}"
+            );
+        }
+    }
+
+    /// **每个只读面板类的 pane 都必须有工作区入口。**
+    ///
+    /// 这条是补出来的：docs/26 S4 做完「进程」页——后端、渲染、pane 接线、
+    /// 持久化往返测试全绿——却漏了在这里注册工作区。后果是页面**没有任何入口**：
+    /// 编译过、测试过、`ContentKind::ALL` 里也有它，但侧边栏没有图标，
+    /// 而 pane 选择器只在空白 pane 上出现，用户根本走不到。
+    ///
+    /// 「做完了但用户到不了」不会有任何一处报错——正是本项目反复栽的那类
+    /// 「什么都没有 被判成 什么问题都没有」。
+    ///
+    /// 判据用的是 pane 模板里出现的 `ContentKind` 名字：面板类 pane（无 ticker、
+    /// 只读快照）必须至少被一个工作区模板引用。行情/图表类不在此列——
+    /// 它们是工作区的组成部分，不各自独占一个。
+    #[test]
+    fn every_panel_kind_has_a_workspace_to_reach_it() {
+        let templates: String = WORKSPACES.iter().map(|n| pane_template(n)).collect();
+        // 只读面板类：没有 ticker、不吃行情流，各自是一个独立用途的页面。
+        for kind in [
+            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "TardisBoard",
+            "MarketMap", "Observatory", "NetEgress", "Procs", "News",
+        ] {
+            assert!(
+                templates.contains(&format!("\"{kind}\"")),
+                "面板 `{kind}` 没有任何工作区模板引用它——用户没有入口能打开这一页。\n\
+                 加一个 WS_* 常量 + WORKSPACES 一项 + icon() 一臂 + pane_template() 一臂。"
             );
         }
     }
