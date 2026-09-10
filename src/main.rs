@@ -49,6 +49,16 @@ fn main() {
 
     std::thread::spawn(data::cleanup_old_market_data);
 
+    // 后台守护跟随本进程的生命周期（docs/26 S4b，用户要求）：
+    // 启动即拉起全部守护，退出即停掉。用 `--no-block`，不让 GUI 卡在
+    // 启动画面上等十一个服务依次起来——各面板本来就能处理「守护还没起」。
+    // 崩溃时也停掉守护。只覆盖 panic——SIGKILL 那一档要靠
+    // `systemctl --user start ws-cockpit`（那时 BindsTo 接管）。
+    ws::lifecycle::install_panic_hook();
+    if let Err(e) = ws::lifecycle::start_all() {
+        log::warn!("拉起后台守护失败（{}）：{e}", ws::lifecycle::TARGET);
+    }
+
     // 网络出口的轮询**在这里起**，不是等谁打开那一页。
     // 「今日用量」要连续才有意义——挂在渲染上的话，那个数的真实含义
     // 会变成「你盯着那一页看的时候我看到了多少」。没人看时 20 秒一轮
@@ -347,6 +357,12 @@ impl Flowsurface {
             },
             Message::ExitRequested(windows) => {
                 self.save_state_to_disk(&windows);
+                // 关界面 = 关掉全部后台守护（docs/26 S4b）。**先存盘再停**：
+                // 反过来的话，停服务那几十毫秒里用户已经看不到窗口了，
+                // 而布局还没落盘——崩在这中间就丢布局。
+                if let Err(e) = ws::lifecycle::stop_all() {
+                    log::warn!("停止后台守护失败（{}）：{e}", ws::lifecycle::TARGET);
+                }
                 return iced::exit();
             }
             Message::SaveStateRequested(windows) => {

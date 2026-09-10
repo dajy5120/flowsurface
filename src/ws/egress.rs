@@ -120,6 +120,9 @@ pub static NO_EGRESS: &[(&str, &str)] = &[
     ("ws-control", "只绑本地 UDS 收 Studio 命令；往外发包的是它拉起的子进程"),
     ("ws-signals", "数据从通道② ring 来，结果写本地 Redis"),
     ("ws-factory-bridge", "读本地 Factory 池文件 → 本地 Redis"),
+    // 它确实连外网，但那些连接已经由上面的「Cockpit 行情图」一行代表了
+    // （`Kind::InProcess`）。在这里再列一行会把同一批连接数两遍。
+    ("ws-cockpit", "面板自身；它的出口是「Cockpit 行情图」那一行（进程内订阅）"),
 ];
 
 /// 全部出口。**加了新的对外连接就要往这里加一行**——
@@ -137,6 +140,13 @@ pub static ALL: &[Source] = &[
         key: "cockpit",
         label: "Cockpit 行情图",
         what: "各交易所行情 WS（币安 / Bybit / OKX / MEXC / Hyperliquid）",
+        kind: Kind::InProcess,
+        unit: "",
+    },
+    Source {
+        key: "deps-check",
+        label: "依赖版本检查",
+        what: "PyPI / crates.io / GitHub API——**只在「进程」页点「检查更新」时发一次**，无后台轮询",
         kind: Kind::InProcess,
         unit: "",
     },
@@ -1185,7 +1195,9 @@ mod tests {
         let known: Vec<&str> = ALL.iter().map(|s| s.unit).collect();
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().to_string();
-            if !(n.starts_with("ws-") || n.starts_with("wealthspring-")) {
+            // `.target` 不是进程，是一组单元的分组（ws-stack.target 把全部守护
+            // 绑成一个可原子启停的东西，docs/26 S4b）。它自己不发包也不能「停」出意义。
+            if !(n.starts_with("ws-") || n.starts_with("wealthspring-")) || n.ends_with(".target") {
                 continue;
             }
             let stem = n.trim_end_matches(".service");

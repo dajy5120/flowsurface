@@ -29,12 +29,23 @@ use super::svcctl::{self, UnitState, Waker};
 
 /// 一个受管单元。**加了新的常驻服务就要往这里加一行**——
 /// 漏一行，这一页就从「系统全貌」退化成「一份不完整的清单」。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// 常驻守护。**跟随本窗口**：Cockpit 关掉时一并停止（`PartOf=ws-stack.target`）。
+    Daemon,
+    /// 按点触发的研究任务。**不跟随窗口**——绑进来等于「Cockpit 没开着就永远不跑」，
+    /// 那不是关掉后台，是把夜跑废掉。列在这里是为了让它「已知」：
+    /// 用户要的是不留**未知**的后台进程，不是不留后台进程。
+    Timer,
+}
+
 pub struct Proc {
     pub key: &'static str,
     pub label: &'static str,
     /// 干什么。写清楚才能让人判断该不该停。
     pub what: &'static str,
     pub unit: &'static str,
+    pub kind: Kind,
     /// 停了会怎样。**「进程还活着」不等于「功能还在」**——
     /// 有些服务停掉是静默降级，不报错，所以必须写出来。
     pub if_stopped: &'static str,
@@ -46,6 +57,7 @@ pub static ALL: &[Proc] = &[
         label: "控制服务端",
         what: "绑本地 UDS 收 Studio 命令 → 拉起回测/实盘，回 run_id",
         unit: "ws-control",
+        kind: Kind::Daemon,
         if_stopped: "Studio 的「运行 / 跑回测」按钮会回「连不上 control_server」",
     },
     Proc {
@@ -53,6 +65,7 @@ pub static ALL: &[Proc] = &[
         label: "信号发布器",
         what: "通道② ring → 微结构信号 + Factory combo → Redis ws:signals",
         unit: "ws-signals",
+        kind: Kind::Daemon,
         if_stopped: "Cockpit「实盘」读数的「引擎」行不再更新",
     },
     Proc {
@@ -60,6 +73,7 @@ pub static ALL: &[Proc] = &[
         label: "L2 增量 feed",
         what: "Binance @depth → 通道② ring（有外连，需 VPN）",
         unit: "ws-l2-feed",
+        kind: Kind::Daemon,
         if_stopped: "signals 收不到盘口增量，信号全线停更",
     },
     Proc {
@@ -67,6 +81,7 @@ pub static ALL: &[Proc] = &[
         label: "成交 feed",
         what: "Binance @aggTrade → 通道② ring（有外连，需 VPN）",
         unit: "ws-trades-feed",
+        kind: Kind::Daemon,
         if_stopped: "**静默降级**：撤补退化成「总移除量」近似，combo 缺成交类特征",
     },
     Proc {
@@ -74,6 +89,7 @@ pub static ALL: &[Proc] = &[
         label: "Factory 池桥",
         what: "本地 Factory 现役池 → Redis ws:factory:pool（每 5s）",
         unit: "ws-factory-bridge",
+        kind: Kind::Daemon,
         if_stopped: "combo 实时值用的是最后一次同步的池，会悄悄过期",
     },
     Proc {
@@ -81,6 +97,7 @@ pub static ALL: &[Proc] = &[
         label: "Redis（通道①）",
         what: "MessageBus 总线。无持久化，容器随服务启停",
         unit: "ws-redis",
+        kind: Kind::Daemon,
         if_stopped: "上面全部服务的写入端都会开始报连接失败",
     },
     Proc {
@@ -88,6 +105,7 @@ pub static ALL: &[Proc] = &[
         label: "全市场雷达",
         what: "5s 一轮全市场扫描 → radar_board.json",
         unit: "ws-radar",
+        kind: Kind::Daemon,
         if_stopped: "雷达面板停在最后一张快照上",
     },
     Proc {
@@ -95,6 +113,7 @@ pub static ALL: &[Proc] = &[
         label: "新闻聚合",
         what: "RSS/Atom/JSON 多源抓取 → news_board.json",
         unit: "ws-news",
+        kind: Kind::Daemon,
         if_stopped: "新闻面板停更；源健康页的陈旧判定会开始变红",
     },
     Proc {
@@ -102,6 +121,7 @@ pub static ALL: &[Proc] = &[
         label: "接口观察终端",
         what: "REST/WS/TCP/FIX 探针 → observatory.json",
         unit: "ws-observatory",
+        kind: Kind::Daemon,
         if_stopped: "观察终端面板停更，正在录的帧会中断",
     },
     Proc {
@@ -109,16 +129,60 @@ pub static ALL: &[Proc] = &[
         label: "行情录制器",
         what: "Binance USDS-M L2/成交/标记价 → ~/ws-data parquet",
         unit: "wealthspring-recorder",
+        kind: Kind::Daemon,
         if_stopped: "**录制出现空洞**，且事后无法补——研究数据是一次性的",
+    },
+    Proc {
+        key: "factory-nightly",
+        label: "Alpha 工厂夜跑",
+        what: "每日跑数据管线 + 因子挖掘（按点触发，不跟随窗口）",
+        unit: "ws-factory-nightly.timer",
+        kind: Kind::Timer,
+        if_stopped: "停 timer 才真的停；停 service 什么都没停，到点照样被拉起",
+    },
+    Proc {
+        key: "prediction-nightly",
+        label: "预测市场夜跑",
+        what: "Polymarket Gamma API 拉取 + AI 决策支持（按点触发）",
+        unit: "ws-prediction-nightly.timer",
+        kind: Kind::Timer,
+        if_stopped: "同上：要停的是 timer，不是 service",
+    },
+    Proc {
+        key: "f0-accept",
+        label: "F0 验收检查",
+        what: "读本地录制做验收（一般不出网，按点触发）",
+        unit: "ws-f0-accept.timer",
+        kind: Kind::Timer,
+        if_stopped: "录制质量的每日体检停掉；问题会攒到你手动看的时候才发现",
+    },
+    Proc {
+        key: "obs-check",
+        label: "观察终端日检",
+        what: "接口探针的每日健康检查（按点触发）",
+        unit: "ws-observatory-check.timer",
+        kind: Kind::Timer,
+        if_stopped: "接口失效不会主动告诉你",
     },
     Proc {
         key: "maker-shadow",
         label: "做市影子",
         what: "SOLUSDT 实盘排队仿真（不下真单）",
         unit: "wealthspring-maker-shadow",
+        kind: Kind::Daemon,
         if_stopped: "C4 合格日的连续统计会断档",
     },
 ];
+
+/// **有意不列在这一页上**的单元，附理由。
+///
+/// 下面那条清点测试要求每个已安装的常驻单元要么在 [`ALL`] 里、要么在这里——
+/// 新加一个服务时**必须有人分类一次**，不能靠沉默混过去。
+pub static NOT_LISTED: &[(&str, &str)] = &[(
+    "ws-cockpit",
+    "面板自己。给你正在看的这个窗口配一个「停止」按钮，点下去窗口就没了——\
+     那是「关闭」，不是进程管理；关窗口本来就会停掉全部守护（BindsTo）。",
+)];
 
 static ROWS: OnceLock<Mutex<Vec<Row>>> = OnceLock::new();
 static WAKER: Waker = Waker::new();
@@ -132,6 +196,10 @@ pub struct Row {
     pub what: String,
     pub unit: String,
     pub if_stopped: String,
+    pub timer: bool,
+    /// 下次触发（仅 timer）。**这一列不能省**：一个此刻没在跑的 timer
+    /// 不等于「不会再跑」，只看状态会得出「已经全停了」的错误结论。
+    pub next: String,
     pub st: UnitState,
 }
 
@@ -165,13 +233,19 @@ pub fn start() {
     std::thread::spawn(|| loop {
         let rows: Vec<Row> = ALL
             .iter()
-            .map(|p| Row {
-                key: p.key.into(),
-                label: p.label.into(),
-                what: p.what.into(),
-                unit: p.unit.into(),
-                if_stopped: p.if_stopped.into(),
-                st: svcctl::query(p.unit),
+            .map(|p| {
+                let timer = p.kind == Kind::Timer;
+                Row {
+                    key: p.key.into(),
+                    label: p.label.into(),
+                    what: p.what.into(),
+                    unit: p.unit.into(),
+                    if_stopped: p.if_stopped.into(),
+                    timer,
+                    // timer 的「已运行」没有意义（它本来就不在跑），要的是下次触发
+                    next: if timer { svcctl::fmt_stamp(&svcctl::next_elapse(p.unit)) } else { String::new() },
+                    st: svcctl::query(p.unit),
+                }
             })
             .collect();
         if let Ok(mut g) = ROWS.get_or_init(|| Mutex::new(Vec::new())).lock() {
@@ -222,6 +296,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_two_irreversible_ones_are_the_ones_we_think() {
+        // 渲染层按 key 给这两行加「停掉就是永久缺口」的警示。
+        // key 改名而警示没跟着改 = 警示挂在错的行上，比没有更糟。
+        for k in ["recorder", "maker-shadow"] {
+            assert!(ALL.iter().any(|p| p.key == k), "key `{k}` 没了——渲染层的不可逆警示会落空");
+        }
+    }
+
+    #[test]
+    fn a_timer_is_never_bound_to_the_window() {
+        // 把 timer 绑进 ws-stack.target 等于「Cockpit 没开着夜跑就不跑」。
+        // 这条钉住分类：timer 的 unit 名必须以 .timer 结尾，
+        // 而 lifecycle 的那条测试只检查 Daemon 是否都在 target 里。
+        for p in ALL {
+            match p.kind {
+                Kind::Timer => assert!(p.unit.ends_with(".timer"), "{} 标成 Timer 但不是 .timer", p.key),
+                Kind::Daemon => assert!(!p.unit.ends_with(".timer"), "{} 标成 Daemon 但是个 .timer", p.key),
+            }
+        }
+    }
+
+    #[test]
     fn every_installed_unit_shows_up_on_this_page() {
         // 这一页的价值全在「全」。漏一行，它就从系统全貌退化成
         // 一份不完整的清单——而后者比没有更糟，会让人以为已经全停了。
@@ -231,7 +327,13 @@ mod tests {
         let known: Vec<&str> = ALL.iter().map(|p| p.unit).collect();
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().to_string();
-            if !(n.starts_with("ws-") || n.starts_with("wealthspring-")) || n.ends_with(".timer") {
+            // `.timer` 由 procs::ALL 里的 Timer 行代表（下面用 known 一起比对）；
+            // `.target` 不是进程，是分组（ws-stack.target），不该出现在进程清单上。
+            if !(n.starts_with("ws-") || n.starts_with("wealthspring-")) || n.ends_with(".target") {
+                continue;
+            }
+            if n.ends_with(".timer") {
+                assert!(known.contains(&n.as_str()), "定时任务 {n} 没在进程页上");
                 continue;
             }
             let stem = n.trim_end_matches(".service");
@@ -240,7 +342,12 @@ mod tests {
             if dir.join(format!("{stem}.timer")).exists() {
                 continue;
             }
-            assert!(known.contains(&stem), "常驻单元 {stem} 没在进程页上——加一行到 procs::ALL");
+            let classified = known.contains(&stem) || NOT_LISTED.iter().any(|(u, _)| *u == stem);
+            assert!(
+                classified,
+                "常驻单元 {stem} 没被分类——要么加一行到 procs::ALL，\
+                 要么加进 NOT_LISTED（附不列的理由）"
+            );
         }
     }
 
