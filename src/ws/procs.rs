@@ -11,11 +11,17 @@
 //! 恰好共用一个动作。真正要避免的是**漏**：`super::egress` 里的清点测试
 //! 要求每个已安装单元要么在出口清单里、要么在 `NO_EGRESS` 里被显式判定过。
 //!
-//! # 为什么不显示 Cockpit 和 Studio
+//! # 为什么不显示 Cockpit（Studio 现在显示）
 //!
-//! 它们不是 systemd 单元，systemctl 停不掉。出口页把 Cockpit 单列为
-//! 「进程内出口」是因为它确实在发包、必须给人一个关法；这一页没有那个必要，
-//! 列一行「无法操作」只会让人以为按钮坏了。
+//! Cockpit 是你正在看的这个窗口：给它配一个「停止」按钮，点下去窗口就没了——
+//! 那是「关闭」，不是进程管理。出口页把它单列为「进程内出口」是因为它确实在
+//! 发包、必须给人一个关法；这一页没有那个必要。
+//!
+//! **Studio 原先也不列，理由是「它不是 systemd 单元，systemctl 停不掉」。
+//! 那条理由已经作废**：docs/26 S4b 补了 `ws-studio.service`（S4 建 target 时
+//! 漏了 P3，症状是重启后「后台全回来了、P3 面板没了」，且看不出是故障还是
+//! 没人管——是后者）。它现在受 systemd 管，于是这一页能真的启停它，
+//! 列出来就不再是「一行按不动的按钮」。
 //!
 //! # 编排从 P0 交给 systemd（docs/26 S4）
 //!
@@ -171,6 +177,15 @@ pub static ALL: &[Proc] = &[
         unit: "wealthspring-maker-shadow",
         kind: Kind::Daemon,
         if_stopped: "C4 合格日的连续统计会断档",
+    },
+    Proc {
+        key: "studio",
+        label: "P3 Studio",
+        what: "GPUI IDE：文件树 / 编辑器 / 终端 / 监控，也是发起回测与实盘 run 的入口",
+        unit: "ws-studio",
+        kind: Kind::Daemon,
+        if_stopped: "写码与发起 run 的入口没了；**已经在跑的 run 不受影响**——\
+                     它们是 ws-control 的子进程，不在 Studio 名下",
     },
 ];
 

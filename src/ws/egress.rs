@@ -123,6 +123,10 @@ pub static NO_EGRESS: &[(&str, &str)] = &[
     // 它确实连外网，但那些连接已经由上面的「Cockpit 行情图」一行代表了
     // （`Kind::InProcess`）。在这里再列一行会把同一批连接数两遍。
     ("ws-cockpit", "面板自身；它的出口是「Cockpit 行情图」那一行（进程内订阅）"),
+    // 与 ws-control 同一形状：Studio 自己只连本机（control UDS / Redis / rust-analyzer
+    // stdio / PTY），往外发包的是它拉起的子进程（回测/实盘 run），那些已由
+    // 「P1 Nautilus」一行代表。终端 pane 里用户手敲的命令不算程序出口。
+    ("ws-studio", "面板自身；只连本机 UDS/Redis/LSP，外连发生在它拉起的 run 子进程里"),
 ];
 
 /// 全部出口。**加了新的对外连接就要往这里加一行**——
