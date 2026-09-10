@@ -216,11 +216,9 @@ pub struct ObsReadout {
 
 pub const SERVICE: &str = "ws-observatory";
 
+/// 原先兜底写死 `/run/user/1000`——换个用户就串到别人的目录。见 `ws::paths`。
 fn runtime_dir() -> PathBuf {
-    match std::env::var("XDG_RUNTIME_DIR") {
-        Ok(x) if !x.is_empty() => PathBuf::from(x).join("wealthspring"),
-        _ => PathBuf::from("/run/user/1000/wealthspring"),
-    }
+    super::paths::runtime_dir()
 }
 
 fn board_path() -> PathBuf {

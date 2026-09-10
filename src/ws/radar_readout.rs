@@ -600,29 +600,13 @@ pub const RADAR_SVC: &str = "ws-radar.service";
 ///   2. `/dev/shm/wealthspring-$USER`（tmpfs 兜底）
 ///   3. `$HOME/ws-data/live`（**会写盘**，只在系统没有 tmpfs 时走到）
 ///
-/// ⚠ 守护侧 `wealthspring-radar/src/runtime.rs` 有一份**逐字相同**的实现。
-/// 两个 crate 互不依赖，只能各写一份，靠两边同名的单测钉住同样的行为——
-/// 一边改了另一边没改，表现是面板永远「等待数据」而守护日志一切正常。
+/// 定义在 `ws::paths`（docs/26 S3 统一），那里另有守护侧的孪生说明。
 fn runtime_dir_from(xdg: Option<&str>, user: Option<&str>, home: Option<&str>) -> PathBuf {
-    // 空字符串按「没设」处理：systemd 里未设的变量常常是空串而不是不存在
-    fn ok(s: Option<&str>) -> Option<&str> {
-        s.filter(|v| !v.is_empty())
-    }
-    if let Some(x) = ok(xdg) {
-        return PathBuf::from(x).join("wealthspring");
-    }
-    if std::path::Path::new("/dev/shm").is_dir() {
-        return PathBuf::from(format!("/dev/shm/wealthspring-{}", ok(user).unwrap_or("ws")));
-    }
-    PathBuf::from(ok(home).unwrap_or("/tmp")).join("ws-data/live")
+    super::paths::runtime_dir_from(xdg, user, home, std::path::Path::new("/dev/shm").is_dir())
 }
 
 fn runtime_dir() -> PathBuf {
-    runtime_dir_from(
-        std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
-        std::env::var("USER").ok().as_deref(),
-        std::env::var("HOME").ok().as_deref(),
-    )
+    super::paths::runtime_dir()
 }
 
 /// 抓取进度文件。守护每抓完一个来源就更新一次（文件很小，在 tmpfs 上）。

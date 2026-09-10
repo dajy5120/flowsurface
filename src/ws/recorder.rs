@@ -18,10 +18,27 @@ pub const PRESETS: [&str; 10] = [
     "LINKUSDT", "LTCUSDT",
 ];
 
+/// 录制配置的落点。
+///
+/// `WS_RECORDER_TOML` → `$XDG_CONFIG_HOME/wealthspring/recorder.toml`（存在才用）
+/// → 仓库内那份。配置该跟用户走，但**仓库内那份是现网正在用的**（unit 里传的就是
+/// 它的绝对路径），所以不能直接改默认值——已配的品种会静默变回预设。
+///
+/// ⚠ 守护侧 `crates/wealthspring-recorder/src/main.rs` 的 `DEFAULT_CONFIG`
+/// 必须与这里落到同一个文件，否则面板改的和守护读的不是一份，
+/// 表现是「面板显示已保存，重启后设置没了」。
 pub fn toml_path() -> String {
-    std::env::var("WS_RECORDER_TOML").unwrap_or_else(|_| {
-        "/home/dajy/dev/WealthSpring/crates/wealthspring-recorder/recorder.toml".to_string()
-    })
+    if let Ok(p) = std::env::var("WS_RECORDER_TOML") {
+        return p;
+    }
+    let user = super::paths::config_dir().join("recorder.toml");
+    if user.is_file() {
+        return user.to_string_lossy().into_owned();
+    }
+    super::paths::repo_root()
+        .join("crates/wealthspring-recorder/recorder.toml")
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

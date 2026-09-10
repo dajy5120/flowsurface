@@ -25,16 +25,14 @@ pub fn tardis_root() -> PathBuf {
 fn repo() -> PathBuf {
     std::env::var("WS_REPO")
         .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dajy".into());
-            format!("{home}/dev/WealthSpring")
+            super::paths::repo_root().to_string_lossy().into_owned()
         })
         .into()
 }
 
 fn venv_py() -> String {
     std::env::var("WS_VENV_PY").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dajy".into());
-        format!("{home}/ws-venv/bin/python")
+        super::paths::python().to_string_lossy().into_owned()
     })
 }
 

@@ -12,8 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 fn base() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dajy".into());
-    PathBuf::from(home).join("ws-data/cockpit")
+    super::paths::data_dir().join("cockpit")
 }
 
 pub fn catalog_path() -> PathBuf {

@@ -15,16 +15,14 @@ use super::tardis_board_readout as ro;
 fn repo() -> std::path::PathBuf {
     std::env::var("WS_REPO")
         .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dajy".into());
-            format!("{home}/dev/WealthSpring")
+            super::paths::repo_root().to_string_lossy().into_owned()
         })
         .into()
 }
 
 fn venv_py() -> String {
     std::env::var("WS_VENV_PY").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dajy".into());
-        format!("{home}/ws-venv/bin/python")
+        super::paths::python().to_string_lossy().into_owned()
     })
 }
 
@@ -484,8 +482,7 @@ fn stop_play() -> String {
 /// 与加载共用后台槽位：两者都改面板输入，同时跑没有意义。
 /// 导出目录（与 Python 侧默认一致）。
 fn export_root() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dajy".into());
-    std::path::PathBuf::from(home).join("ws-data/cockpit/export")
+    super::paths::data_dir().join("cockpit/export")
 }
 
 /// 导 CSV：交给 `factory.replay.export` 从已加载的面板 JSON 生成（每图一表）。
