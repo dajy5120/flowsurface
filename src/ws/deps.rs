@@ -211,6 +211,11 @@ pub fn refresh_local() {
         root.join("vendor/flowsurface/Cargo.lock").to_string_lossy().into_owned(),
         root.join("Cargo.lock").to_string_lossy().into_owned(),
         root.join("crates/wealthspring-studio/Cargo.lock").to_string_lossy().into_owned(),
+        // wealthspring-py 也是独立 workspace（根 Cargo.toml 的 exclude：PyO3 的
+        // extension-module cdylib 在 `cargo test --workspace` 下会链接失败）。
+        // 漏了这一份，PyO3 那行就显示「读不到」——依赖区第一次在真实窗口里
+        // 看就是这个症状（docs/26 S4c 的「未做」那条）。
+        root.join("crates/wealthspring-py/Cargo.lock").to_string_lossy().into_owned(),
     ];
     let lockrefs: Vec<&str> = locks.iter().map(String::as_str).collect();
     let crates = lock_versions(&lockrefs);
@@ -484,6 +489,29 @@ mod tests {
     #[test]
     fn an_unknown_key_does_not_silently_do_nothing() {
         assert!(update("没有这个").starts_with("✗"));
+    }
+
+    #[test]
+    fn every_rust_dep_is_actually_findable_in_some_lock_file() {
+        // PyO3 曾经常年显示「读不到」：它住在 crates/wealthspring-py/Cargo.lock，
+        // 而那个 crate 是独立 workspace（根 Cargo.toml exclude），扫描列表里没有它。
+        // 症状只是一行红字，界面照常渲染——正是本项目反复栽的那种坏法。
+        // 这条测试把「扫描列表覆盖了所有 Rust 依赖」变成会红的东西。
+        let root = crate::ws::paths::repo_root();
+        if !root.join("Cargo.lock").exists() {
+            return; // 别的机器上没有这个仓库就跳过
+        }
+        refresh_local();
+        for d in ALL.iter().filter(|d| d.src == Src::CratesIo) {
+            let v = rows().into_iter().find(|r| r.key == d.key).map(|r| r.current).unwrap_or_default();
+            assert!(
+                !v.is_empty(),
+                "{} 在所有被扫描的 Cargo.lock 里都找不到——\
+                 要么它住在一个没被扫的独立 workspace 里（往 refresh_local 的 locks 加一份），\
+                 要么这一行已经过时该删",
+                d.key
+            );
+        }
     }
 
     #[test]
