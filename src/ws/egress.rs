@@ -111,6 +111,17 @@ pub struct Source {
     pub unit: &'static str,
 }
 
+/// **确认过没有外部连接**的单元。它们不在这一页上，但也不能就这么消失——
+/// 下面那条清点测试要求每个已安装的 `ws-*` 单元要么在 [`ALL`] 里、要么在这里，
+/// 于是新加一个单元时**必须有人分类一次**，不能靠沉默混过去。
+///
+/// 它们在 Cockpit 的「进程」页上（[`super::procs`]）。
+pub static NO_EGRESS: &[(&str, &str)] = &[
+    ("ws-control", "只绑本地 UDS 收 Studio 命令；往外发包的是它拉起的子进程"),
+    ("ws-signals", "数据从通道② ring 来，结果写本地 Redis"),
+    ("ws-factory-bridge", "读本地 Factory 池文件 → 本地 Redis"),
+];
+
 /// 全部出口。**加了新的对外连接就要往这里加一行**——
 /// 漏一行，这一页就从「总闸」退化成「一份不完整的清单」，
 /// 而后者比没有更糟：它会让人以为已经全停了。
@@ -128,6 +139,20 @@ pub static ALL: &[Source] = &[
         what: "各交易所行情 WS（币安 / Bybit / OKX / MEXC / Hyperliquid）",
         kind: Kind::InProcess,
         unit: "",
+    },
+    Source {
+        key: "l2-feed",
+        label: "L2 增量 feed",
+        what: "Binance USDS-M @depth WS（喂通道② → ws-signals）；需 VPN",
+        kind: Kind::Service,
+        unit: "ws-l2-feed",
+    },
+    Source {
+        key: "trades-feed",
+        label: "成交 feed",
+        what: "Binance USDS-M @aggTrade WS（喂通道② → ws-signals）；需 VPN",
+        kind: Kind::Service,
+        unit: "ws-trades-feed",
     },
     Source {
         key: "radar",
@@ -1139,6 +1164,18 @@ mod tests {
     /// 所以拿磁盘上真实存在的 unit 文件对一遍：新加了服务却忘了往
     /// [`ALL`] 里加一行，这条会红。
     #[test]
+    fn a_unit_is_never_on_both_lists() {
+        // 同时出现在两边 = 有人改了性质却没删旧的那条，
+        // 而「它到底有没有外连」正是这一页存在的理由。
+        for (u, _) in NO_EGRESS {
+            assert!(
+                !ALL.iter().any(|s| s.unit == *u),
+                "{u} 同时在 ALL 和 NO_EGRESS 里——它到底有没有外部连接？"
+            );
+        }
+    }
+
+    #[test]
     fn no_installed_unit_is_missing_from_the_inventory() {
         let dir = match std::env::var("HOME") {
             Ok(h) => std::path::PathBuf::from(h).join(".config/systemd/user"),
@@ -1157,7 +1194,13 @@ mod tests {
             if n.ends_with(".timer") {
                 assert!(known.contains(&n.as_str()), "定时任务 {n} 不在总闸清单里");
             } else if !std::path::Path::new(&dir).join(format!("{stem}.timer")).exists() {
-                assert!(known.contains(&stem), "服务 {stem} 不在总闸清单里——加一行到 egress::ALL");
+                // 要么是出口，要么**明确判定过没有外连**。两边都不在 = 没人分类过。
+                let classified =
+                    known.contains(&stem) || NO_EGRESS.iter().any(|(u, _)| *u == stem);
+                assert!(
+                    classified,
+                    "服务 {stem} 没被分类——有外连就加进 egress::ALL，没有就加进 NO_EGRESS（附理由）"
+                );
             }
         }
     }

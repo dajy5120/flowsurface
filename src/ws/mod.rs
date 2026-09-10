@@ -13,6 +13,8 @@ pub mod c4;
 pub mod c4_readout;
 pub mod egress;
 pub mod paths;
+pub mod procs;
+pub mod procs_view;
 pub mod egress_view;
 pub mod c4_view;
 pub mod observatory;

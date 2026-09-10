@@ -205,6 +205,10 @@ impl From<&pane::State> for data::Pane {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
             },
+            pane::Content::Procs => data::Pane::Procs {
+                settings: pane.settings.clone(),
+                link_group: pane.link_group,
+            },
             pane::Content::PredictionBoard => data::Pane::PredictionBoard {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
@@ -442,6 +446,15 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             settings,
             link_group,
         )),
+        data::Pane::Procs {
+            settings,
+            link_group,
+        } => Configuration::Pane(pane::State::from_config(
+            pane::Content::Procs,
+            vec![],
+            settings,
+            link_group,
+        )),
         data::Pane::Recorder {
             settings,
             link_group,
@@ -580,6 +593,21 @@ mod tests {
 
     /// Tardis 回放 pane 的持久化往返（docs/20 Phase 5）：
     /// `data::Pane::TardisReplay` → `configuration()` → `pane::State` → `data::Pane`。
+    /// 进程页 pane 的持久化往返（docs/26 S4）。理由同下：两个方向各有一个
+    /// match，写漏任一个都编译得过，症状是「重启 Cockpit 后这一页没了」。
+    #[test]
+    fn procs_pane_roundtrips() {
+        let original = data::Pane::Procs {
+            settings: data::layout::pane::Settings::default(),
+            link_group: None,
+        };
+        let Configuration::Pane(state) = configuration(original) else {
+            panic!("configuration() 未产出 Pane 配置");
+        };
+        assert!(matches!(state.content, pane::Content::Procs));
+        assert!(matches!(data::Pane::from(&state), data::Pane::Procs { .. }));
+    }
+
     /// 锁住 [`From<&pane::State> for data::Pane`] 的对应臂——写漏了会让该 pane
     /// 在下次启动时静默丢失（退化成别的 content），编译期发现不了。
     /// 历史面板 pane 的持久化往返（docs/20 §9）。
