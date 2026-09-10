@@ -436,15 +436,21 @@ pub enum View {
     /// 只看新闻。默认——**打开就该看到新闻**，而不是先看一屏运维信息。
     #[default]
     Feed,
+    /// 按标的订阅 + SEC 全文检索。
+    ///
+    /// 和「新闻」分开是因为它们是**两种动作**：新闻是「让我看看发生了什么」，
+    /// 这一页是「我要找某个东西」。混在一屏里，前者的入口被后者的表单挤下去。
+    Watch,
     /// 源健康 + 源管理。
     Sources,
 }
 
 impl View {
-    pub const ALL: [View; 2] = [View::Feed, View::Sources];
+    pub const ALL: [View; 3] = [View::Feed, View::Watch, View::Sources];
     pub fn label(self) -> &'static str {
         match self {
             View::Feed => "新闻",
+            View::Watch => "订阅与检索",
             View::Sources => "源管理",
         }
     }
