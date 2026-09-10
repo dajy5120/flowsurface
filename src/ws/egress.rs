@@ -144,6 +144,16 @@ pub static ALL: &[Source] = &[
         unit: "ws-observatory",
     },
     Source {
+        key: "redis",
+        label: "Redis 总线",
+        // **连接数会是 0，那是对的**：容器的 socket 不在这个 unit 的进程名下，
+        // /proc/<pid>/fd 里数不到。写清「不出网」就是为了让那个 0
+        // 不被读成「没通」（docs/26 §S1）
+        what: "本机总线，不出网（通道① Nautilus 事件 + 面板状态）",
+        kind: Kind::Service,
+        unit: "ws-redis",
+    },
+    Source {
         key: "news",
         label: "新闻资讯",
         what: "监管/交易所/媒体的 RSS·Atom·JSON 源（docs/25）",
