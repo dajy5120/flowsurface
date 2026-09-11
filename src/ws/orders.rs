@@ -334,6 +334,13 @@ pub fn subscription(redis_url: String) -> iced::Subscription<OrderState> {
                     let mut consumer: Option<EventsConsumer> = None;
                     let mut state = OrderState::default();
                     loop {
+                        // 对端存活探测：**每轮无条件做一次**。
+                        // 原先唯一的检测点是 `tx.blocking_send(..).is_err()`，而它嵌在
+                        // 「值发生变化」的分支里——值冻住时（恰恰是上游守护挂掉的表现）
+                        // 这个线程永远发现不了订阅已被销毁，以固定间隔永久空转。
+                        if tx.is_closed() {
+                            break;
+                        }
                         let want = watcher
                             .as_mut()
                             .and_then(|w| w.poll().ok().flatten())
