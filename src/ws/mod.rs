@@ -143,3 +143,67 @@ mod subscription_liveness_tests {
         assert!(checked >= 6, "只扫到 {checked} 个订阅模块，预期至少 6 个——扫描逻辑可能失效了");
     }
 }
+
+#[cfg(test)]
+mod data_lake_date_tests {
+    //! 数据湖索引日期必须与写入端同口径（RELEASE_REMEDIATION_PLAN F-01）。
+    //!
+    //! 录制器把 parquet 落在 `~/ws-data/raw/{stream}/{SYM}/{YYYY-MM-DD}/` 下，
+    //! 目录名由**数据自己的 UTC 时间戳**决定
+    //! （`crates/wealthspring-recorder/src/writer.rs` 的 `partition_date`，
+    //!  那边有一条对应的行为测试 `partition_date_is_utc_not_local`）。
+    //!
+    //! 面板这一侧要算「今天」去索引那些目录。**只要有一边用本地时间，
+    //! 在本地日界前后就会各错位几小时——而且不报错**，只是「今日行数」
+    //! 显示成 0 或翻倍。这正是本项目反复栽的静默错误。
+    //!
+    //! 这条守卫是源码级的：面板侧的「今天」是内联算的，没有可测函数，
+    //! 而为了测它去重构一个跨 workspace 的公共函数，代价远大于收益
+    //! （fork 刻意不依赖任何 wealthspring crate，见 Do Not Change）。
+
+    /// 扫数据湖的模块里，**算日期不许用 `Local`**。
+    #[test]
+    fn lake_readers_compute_dates_in_utc() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ws");
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return; // 非源码树布局就跳过
+        };
+        let mut checked = 0;
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            // 跳过本文件：这条测试自己的源码里就有那个字面量锚点，
+            // 不跳过就会扫到自己（源码级扫描的经典自指问题，实测踩到）。
+            if p.file_name().and_then(|n| n.to_str()) == Some("mod.rs") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&p) else { continue };
+            // 匹配锚点必须**精确**：`.join("raw")` 是数据湖根目录的实际拼接。
+            // 初版写的是 `contains("raw") && contains("%Y-%m-%d")`，当场误报——
+            // `customchart.rs` 因为一个叫 `xs_raw` 的变量名和一个日期**解析**格式
+            // 被判成数据湖读者。**源码级守卫的锚点不精确，就会变成噪音源，
+            // 而一条会乱叫的守卫比没有守卫更糟：人会开始无视它。**
+            if !src.contains(".join(\"raw\")") {
+                continue;
+            }
+            checked += 1;
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            assert!(
+                !src.contains("Local::now().format(\"%Y-%m-%d\")"),
+                "{name} 用本地时间算数据湖日期——录制器按 **UTC** 分目录，\
+                 两边不同口径会在本地日界前后错位几小时且不报错（F-01）"
+            );
+            assert!(
+                src.contains("Utc::now().format(\"%Y-%m-%d\")"),
+                "{name} 扫数据湖却没有显式的 UTC 日期计算——\
+                 若确实不需要算「今天」，把这个文件从本测试的匹配条件里排除并说明理由"
+            );
+        }
+        assert!(
+            checked >= 1,
+            "一个扫数据湖的模块都没扫到——匹配条件可能失效了"
+        );
+    }
+}
