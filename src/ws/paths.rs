@@ -108,10 +108,16 @@ pub fn repo_root() -> PathBuf {
 }
 /// 装了 Nautilus/factory 的 venv python。
 ///
-/// 阶梯里**只有第一档是声明，后面几档要求文件真的存在**：机器上同时有
-/// `~/ws-venv`（systemd unit 在用）和 `~/dev/ws-venv`（脚本在用），而历史默认值
+/// 阶梯里**只有第一档是声明，后面几档要求文件真的存在**：历史默认值
 /// `/tmp/ws-venv/bin/python` 指向的东西根本不存在（`/tmp` 重启即失）——
 /// 返回一个不存在的解释器，错误要到子进程 spawn 失败时才浮出来。
+///
+/// **`~/dev/ws-venv` 这一档已删除（2026-09-11，整改 E-01）**：机器上原本并存两个
+/// venv，numpy 分别是 2.2.6 与 2.4.6，而它们共享同一份计算代码。现已合并为唯一的
+/// `~/ws-venv`；留着那一档等于给「哪天有人重建了那个目录、代码又悄悄选错」留一扇门。
+///
+/// ⚠ 本文件是 `crates/wealthspring-paths` 的**逐字孪生**（docs/26 S3）——
+/// 那边改了这里必须跟着改，两边同名的单测就是钉住这件事的。
 pub fn python_from(ws_python: Option<&str>, home: Option<&str>, exists: &dyn Fn(&str) -> bool) -> PathBuf {
     if let Some(p) = ok(ws_python) {
         return PathBuf::from(p);
@@ -119,7 +125,6 @@ pub fn python_from(ws_python: Option<&str>, home: Option<&str>, exists: &dyn Fn(
     let mut cands = vec!["/usr/lib/wealthspring/venv/bin/python".to_string()];
     if let Some(h) = ok(home) {
         cands.push(format!("{h}/ws-venv/bin/python"));
-        cands.push(format!("{h}/dev/ws-venv/bin/python"));
     }
     for c in &cands {
         if exists(c) {
@@ -210,8 +215,19 @@ mod tests {
 
     #[test]
     fn an_unset_python_picks_one_that_actually_exists() {
-        let only_dev = |p: &str| p == "/home/x/dev/ws-venv/bin/python";
+        let only_home = |p: &str| p == "/home/x/ws-venv/bin/python";
         assert_eq!(
+            python_from(None, Some("/home/x"), &only_home),
+            PathBuf::from("/home/x/ws-venv/bin/python")
+        );
+    }
+
+    /// E-01：合并成唯一 venv 之后，`~/dev/ws-venv` 不再是候选。
+    /// 与 `crates/wealthspring-paths` 同名测试成对——两边行为必须一致。
+    #[test]
+    fn the_retired_dev_venv_is_never_picked() {
+        let only_dev = |p: &str| p == "/home/x/dev/ws-venv/bin/python";
+        assert_ne!(
             python_from(None, Some("/home/x"), &only_dev),
             PathBuf::from("/home/x/dev/ws-venv/bin/python")
         );
