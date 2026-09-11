@@ -194,11 +194,10 @@ fn store(v: Vec<Entry>) {
     }
     // 原子写：半截 JSON 会让整份历史读不出来
     let tmp = p.with_extension("json.tmp");
-    if let Ok(t) = serde_json::to_string_pretty(&to_json(&v)) {
-        if std::fs::write(&tmp, t).is_ok() {
+    if let Ok(t) = serde_json::to_string_pretty(&to_json(&v))
+        && std::fs::write(&tmp, t).is_ok() {
             let _ = std::fs::rename(&tmp, &p);
         }
-    }
     if let Ok(mut g) = HIST.lock() {
         *g = Some(v);
     }

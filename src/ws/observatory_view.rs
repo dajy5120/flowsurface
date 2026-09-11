@@ -437,7 +437,7 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         }
         body = body.push(
             row![
-                container(text(format!("{k}")).size(10).color(C_DIM))
+                container(text(k.to_string()).size(10).color(C_DIM))
                     .width(Length::Fixed(46.0)),
                 text(v.clone()).size(11).color(C_TXT).width(Length::Fill),
             ]
@@ -508,7 +508,7 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
 
     // ── 录制 ──（录制模式才占版面；观察模式给一行摘要就够了）
     if mode == ro::Mode::Record {
-        body = body.push(record_block(&st, sess, &r));
+        body = body.push(record_block(&st, sess, r));
         body = body.push(trigger_block(sess));
     } else if st.rec.on {
         // 别的模式下**仍然要显示正在录**：不显示的话，用户切走之后
@@ -732,15 +732,14 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
         // 载入的这条是给别的 Adapter 写的时候说一声。**不拦**——
         // 同一段 JSON 在两个交易所的 WS 上都能发
         let cur = ro::lib_name();
-        if let Some(e) = saved.iter().find(|e| e.name == cur) {
-            if !e.adapter.is_empty() && e.adapter != sess.adapter {
+        if let Some(e) = saved.iter().find(|e| e.name == cur)
+            && !e.adapter.is_empty() && e.adapter != sess.adapter {
                 col = col.push(
                     text(format!("「{}」是在 {} 上存的，当前是 {}", e.name, e.adapter, sess.adapter))
                         .size(10)
                         .color(C_DIM),
                 );
             }
-        }
     }
 
     col = col.push(section("发送", "出站帧也会进信封——「我发了什么」和「它回了什么」能对上"));

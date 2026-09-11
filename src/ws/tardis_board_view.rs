@@ -104,7 +104,7 @@ mod probe {
     pub fn record(ns: u64) {
         let n = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
         let tot = NANOS.fetch_add(ns, Ordering::Relaxed) + ns;
-        if n % 3000 == 0 {
+        if n.is_multiple_of(3000) {
             log::info!(
                 "[tardis-board] 近 3000 次 canvas draw 平均 {:.3} ms（累计 {n} 次）",
                 tot as f64 / n as f64 / 1e6
@@ -197,7 +197,7 @@ impl ChartCanvas {
         let axis = Stroke::default().with_color(C_AXIS).with_width(1.0);
         frame.stroke(
             &Path::line(Point::new(ML, MT + ph), Point::new(ML + pw, MT + ph)),
-            axis.clone(),
+            axis,
         );
         frame.stroke(&Path::line(Point::new(ML, MT), Point::new(ML, MT + ph)), axis);
         // Y 网格 4 格

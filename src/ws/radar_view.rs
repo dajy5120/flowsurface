@@ -253,11 +253,10 @@ fn area_weight(r: &RadarRow, v: ViewState) -> f64 {
 /// `BTCUSDT` → `BTC`。TV 的加密热图显示基础币，格子里放得下且更好认。
 pub(crate) fn base_asset(sym: &str) -> &str {
     for q in ["USDT", "USDC", "FDUSD", "BTC", "ETH", "BNB"] {
-        if let Some(b) = sym.strip_suffix(q) {
-            if !b.is_empty() {
+        if let Some(b) = sym.strip_suffix(q)
+            && !b.is_empty() {
                 return b;
             }
-        }
     }
     sym
 }
@@ -1167,7 +1166,7 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
                     r = r.push(text(format!("+{}", sel.len() - 3)).size(10).color(C_DIM));
                 }
                 n_shown += 1;
-                if n_shown % 4 == 0 {
+                if n_shown.is_multiple_of(4) {
                     col = col.push(std::mem::replace(
                         &mut r,
                         row![].spacing(6).align_y(iced::Alignment::Center),
@@ -1200,14 +1199,14 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
                 }
             }
             n_shown += 1;
-            if n_shown % 4 == 0 {
+            if n_shown.is_multiple_of(4) {
                 col = col.push(std::mem::replace(
                     &mut r,
                     row![].spacing(6).align_y(iced::Alignment::Center),
                 ));
             }
         }
-        if n_shown % 4 != 0 {
+        if !n_shown.is_multiple_of(4) {
             col = col.push(r);
         }
         col = col.push(
@@ -1394,7 +1393,7 @@ impl MarketOpt {
 
 /// 字符串驻留：同一份文本只泄漏一次，避免每帧重建下拉时无界泄漏。
 /// 当前资产类的列组。目录里没有这一类（旧守护）就退回全局那套。
-pub(crate) fn asset_tabs<'a>(cat: &'a Catalog, a: AssetFilter) -> &'a [ColumnTab] {
+pub(crate) fn asset_tabs(cat: &Catalog, a: AssetFilter) -> &[ColumnTab] {
     cat.assets
         .iter()
         .find(|x| x.kind == a.kind())
@@ -1435,7 +1434,7 @@ fn zh_asset_class(en: &str) -> Option<String> {
 
 /// 该资产类的分组维度（目录下发）。官方股票只有「没有分组/板块」、
 /// ETF 是「没有分组/资产类别」、加密**没有分组下拉**。
-pub(crate) fn asset_groups<'a>(cat: &'a Catalog, a: AssetFilter) -> &'a [CatalogItem] {
+pub(crate) fn asset_groups(cat: &Catalog, a: AssetFilter) -> &[CatalogItem] {
     cat.assets
         .iter()
         .find(|x| x.kind == a.kind())
@@ -1478,10 +1477,10 @@ pub(crate) fn group_of(key: &str) -> GroupBy {
     }
 }
 
-pub(crate) fn asset_opts<'a>(
-    cat: &'a Catalog,
+pub(crate) fn asset_opts(
+    cat: &Catalog,
     a: AssetFilter,
-) -> Option<(&'a [CatalogItem], &'a [CatalogItem])> {
+) -> Option<(&[CatalogItem], &[CatalogItem])> {
     cat.assets
         .iter()
         .find(|x| x.kind == a.kind())
@@ -3290,13 +3289,13 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
                 // 一个本来就没有标的的来源会一直显示「正在抓取」
                 match st.progress.of(v.source) {
                     Some(f) if f.done && !f.err.is_empty() => {
-                        format!("「{}」抓取失败：{}", cur.to_string(), f.err)
+                        format!("「{}」抓取失败：{}", cur, f.err)
                     }
                     Some(f) if f.done => format!(
                         "「{}」已抓取，但没有符合条件的标的（0 行）",
-                        cur.to_string()
+                        cur
                     ),
-                    _ => format!("「{}」正在抓取", cur.to_string()),
+                    _ => format!("「{}」正在抓取", cur),
                 }
             })
             .size(11)
@@ -3540,12 +3539,11 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // 切到 TV 列组后，原排序键（如 5m 速度z）可能不在显示的列里——表头上就没有
     // 排序指示，用户看不出表是按什么排的。退到该列组的第一个数值列。
     let mut ev = v;
-    if !cols.iter().any(|c| c.key == v.sort) {
-        if let Some(c) = cols.iter().find(|c| is_numeric(c.key)) {
+    if !cols.iter().any(|c| c.key == v.sort)
+        && let Some(c) = cols.iter().find(|c| is_numeric(c.key)) {
             ev.sort = c.key;
             ev.desc = true;
         }
-    }
     let idx = memo_order(st.generation, ev, &st.rows, &st.catalog.coin_presets);
     // **只列官方的列组**。雷达自有的三组（涨跌幅 / 速度 z / 参考）已移除——
     // 官方筛选器没有它们，摆在一起让人以为是官方的。

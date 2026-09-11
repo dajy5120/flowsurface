@@ -634,8 +634,8 @@ static FORM: Mutex<Option<(String, std::collections::BTreeMap<String, String>)>>
 /// 当前表单。第一次访问时用 catalog 里的默认值初始化。
 pub fn form(catalog: &[AdapterSpec]) -> (String, std::collections::BTreeMap<String, String>) {
     let Ok(mut g) = FORM.lock() else { return Default::default() };
-    if g.is_none() {
-        if let Some(a) = catalog.first() {
+    if g.is_none()
+        && let Some(a) = catalog.first() {
             let vals = a
                 .config_schema
                 .iter()
@@ -643,7 +643,6 @@ pub fn form(catalog: &[AdapterSpec]) -> (String, std::collections::BTreeMap<Stri
                 .collect();
             *g = Some((a.id.clone(), vals));
         }
-    }
     g.clone().unwrap_or_default()
 }
 
@@ -691,11 +690,10 @@ pub fn form_from(catalog: &[AdapterSpec], adapter: &str, cfg: &std::collections:
 }
 
 pub fn form_set(key: &str, val: &str) {
-    if let Ok(mut g) = FORM.lock() {
-        if let Some((_, m)) = g.as_mut() {
+    if let Ok(mut g) = FORM.lock()
+        && let Some((_, m)) = g.as_mut() {
             m.insert(key.to_string(), val.to_string());
         }
-    }
 }
 
 /// 表单里必填项是否都填了。空着就点连接，只会拿到一条难懂的握手错误。

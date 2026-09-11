@@ -659,11 +659,10 @@ pub fn matches_source_with(r: &RadarRow, source: &str, presets: &[CoinPreset]) -
 /// 「不包括比特币」这类排除按它判断。
 fn base_of(sym: &str) -> &str {
     for q in ["USDT", "USDC", "USD", "BUSD", "FDUSD"] {
-        if let Some(b) = sym.strip_suffix(q) {
-            if !b.is_empty() {
+        if let Some(b) = sym.strip_suffix(q)
+            && !b.is_empty() {
                 return b;
             }
-        }
     }
     sym
 }
@@ -1220,7 +1219,7 @@ mod board_control_tests {
             apply(ViewState::DEFAULT, RadarMsg::IpoMonth(-1));
         }
         let back = ipo_month();
-        assert!(back > "2000-01".to_string(), "下限之外：{back}");
+        assert!(back.as_str() > "2000-01", "下限之外：{back}");
         reset_ipo();
     }
 

@@ -611,11 +611,10 @@ pub fn toggle_enum(fi: usize, i: usize) -> bool {
 
 /// 清空一个枚举筛选的选中集。
 pub fn clear_enum(fi: usize) {
-    if let Ok(mut g) = ENUM_SEL.lock() {
-        if let Some(m) = g.as_mut() {
+    if let Ok(mut g) = ENUM_SEL.lock()
+        && let Some(m) = g.as_mut() {
             m.remove(&fi);
         }
-    }
 }
 
 /// 枚举下拉的**搜索串**。官方就是靠「搜索框 + 虚拟滚动」装下上万项的

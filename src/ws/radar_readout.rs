@@ -901,7 +901,7 @@ fn ensure_poller() {
                 // `systemctl show` 是一次 **fork+exec**。每 2s 一次的话，光它就贡献了
                 // 每秒近百次读系统调用（实测），而服务状态几乎不变。降到 10s 一次，
                 // 中间沿用上次结果；面板按钮启停后会立刻 WAKER 唤醒，不必靠轮询看到。
-                if tick % 5 == 0 {
+                if tick.is_multiple_of(5) {
                     svc = super::svcctl::query(RADAR_SVC);
                 }
                 tick = tick.wrapping_add(1);

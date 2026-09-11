@@ -59,8 +59,8 @@ pub fn placeholders(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
     while i + 4 <= b.len() {
-        if b[i] == b'{' && b[i + 1] == b'{' {
-            if let Some(rel) = body[i + 2..].find("}}") {
+        if b[i] == b'{' && b[i + 1] == b'{'
+            && let Some(rel) = body[i + 2..].find("}}") {
                 let name = body[i + 2..i + 2 + rel].trim();
                 // 空的、带花括号的都不是干净的占位符，不猜
                 if !name.is_empty() && !name.contains(['{', '}']) {
@@ -71,7 +71,6 @@ pub fn placeholders(body: &str) -> Vec<String> {
                     continue;
                 }
             }
-        }
         i += 1;
     }
     out
@@ -122,8 +121,8 @@ fn strip_env_refs(v: &str) -> String {
     let mut i = 0;
     let mut last = 0;
     while i + 2 < b.len() {
-        if b[i] == b'$' && b[i + 1] == b'{' {
-            if let Some(rel) = v[i + 2..].find('}') {
+        if b[i] == b'$' && b[i + 1] == b'{'
+            && let Some(rel) = v[i + 2..].find('}') {
                 let name = &v[i + 2..i + 2 + rel];
                 if !name.is_empty() && !name.contains(['{', '$']) {
                     out.push_str(&v[last..i]);
@@ -132,7 +131,6 @@ fn strip_env_refs(v: &str) -> String {
                     continue;
                 }
             }
-        }
         i += 1;
     }
     out.push_str(&v[last..]);
@@ -230,11 +228,10 @@ fn store(v: Vec<Saved>) {
     // 原子写：同目录 tmp + rename。半截的 JSON 会让整个库读不出来，
     // 而这个文件是用户自己攒起来的，丢了没处找
     let tmp = p.with_extension("json.tmp");
-    if let Ok(t) = serde_json::to_string_pretty(&to_json(&v)) {
-        if std::fs::write(&tmp, t.as_bytes()).is_ok() {
+    if let Ok(t) = serde_json::to_string_pretty(&to_json(&v))
+        && std::fs::write(&tmp, t.as_bytes()).is_ok() {
             let _ = std::fs::rename(&tmp, &p);
         }
-    }
     if let Ok(mut g) = LIB.lock() {
         *g = Some(v);
     }

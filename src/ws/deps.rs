@@ -179,13 +179,12 @@ fn lock_versions(paths: &[&str]) -> HashMap<String, String> {
         for line in s.lines() {
             if let Some(v) = line.strip_prefix("name = ") {
                 name = Some(v.trim_matches('"').to_string());
-            } else if let Some(v) = line.strip_prefix("version = ") {
-                if let Some(n) = name.take() {
+            } else if let Some(v) = line.strip_prefix("version = ")
+                && let Some(n) = name.take() {
                     // 同名多版本时保留**先出现的**：两个 lock 文件里
                     // flowsurface 那份更贴近面板实际跑的东西
                     m.entry(norm(&n)).or_insert_with(|| v.trim_matches('"').to_string());
                 }
-            }
         }
     }
     m

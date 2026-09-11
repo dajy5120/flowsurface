@@ -327,11 +327,10 @@ fn write_sources(v: &[UserSource]) {
     }
     // 原子写：半截 JSON 会让守护当成一个自定义源都没有
     let tmp = p.with_extension("json.tmp");
-    if let Ok(t) = serde_json::to_string_pretty(v) {
-        if std::fs::write(&tmp, t).is_ok() {
+    if let Ok(t) = serde_json::to_string_pretty(v)
+        && std::fs::write(&tmp, t).is_ok() {
             let _ = std::fs::rename(&tmp, &p);
         }
-    }
 }
 
 /// 开/关一个源（内置的也能关）。

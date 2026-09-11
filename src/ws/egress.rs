@@ -294,11 +294,10 @@ fn socket_inodes(pid: u32) -> HashSet<u64> {
         if let Ok(t) = std::fs::read_link(e.path()) {
             // `socket:[12345]`
             let s = t.to_string_lossy();
-            if let Some(n) = s.strip_prefix("socket:[").and_then(|r| r.strip_suffix(']')) {
-                if let Ok(i) = n.parse() {
+            if let Some(n) = s.strip_prefix("socket:[").and_then(|r| r.strip_suffix(']'))
+                && let Ok(i) = n.parse() {
                     out.insert(i);
                 }
-            }
         }
     }
     out
@@ -639,11 +638,10 @@ fn save_usage(u: &Usage) {
     });
     // 原子写：半截 JSON 会让整份计数读不出来
     let tmp = p.with_extension("json.tmp");
-    if let Ok(t) = serde_json::to_string(&v) {
-        if std::fs::write(&tmp, t).is_ok() {
+    if let Ok(t) = serde_json::to_string(&v)
+        && std::fs::write(&tmp, t).is_ok() {
             let _ = std::fs::rename(&tmp, &p);
         }
-    }
 }
 
 /// 把这一轮的增量记进今日累计，并返回各路的今日总量。
