@@ -781,6 +781,7 @@ impl Flowsurface {
                 realized_net: o.realized_net,
                 fee_total: o.fee_total,
                 trades: o.trades.clone(),
+                working: o.working.values().cloned().collect(),
                 cvd: f.cvd,
                 imbalance: f.imbalance,
                 divergence: f.divergence,

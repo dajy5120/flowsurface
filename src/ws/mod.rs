@@ -28,6 +28,7 @@ pub mod observatory_view;
 pub mod news;
 pub mod news_readout;
 pub mod news_view;
+pub mod orders_view;
 pub mod options_readout;
 pub mod options_view;
 pub mod prediction;

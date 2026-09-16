@@ -7,7 +7,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use super::factory::PoolMember;
-use super::orders::Trade;
+use super::orders::{Trade, WorkingOrder};
 
 /// 给 pane 渲染用的合并快照（镜像原悬浮框的全部字段）。
 #[derive(Clone, Default)]
@@ -33,6 +33,9 @@ pub struct Readout {
     pub realized_net: f64,
     pub fee_total: f64,
     pub trades: Vec<Trade>, // 逐笔订单明细（新→旧由 view 取尾部）
+    /// 活动挂单（docs/27 §10）。订单面板要显示「已接受但还没成交」的那些——
+    /// 此前没往快照里带，因为也没有面板要用它。
+    pub working: Vec<WorkingOrder>,
 
     // 订单流（F4a，flow）
     pub cvd: f64,

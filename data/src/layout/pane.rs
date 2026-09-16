@@ -178,6 +178,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    Orders {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
 }
 
 impl Default for Pane {
@@ -327,6 +333,9 @@ pub enum ContentKind {
     TardisBoard,
     /// 回测结果（docs/08 F6-P7）：收益曲线 / 回撤 / 各维度统计（读回测导出的 result.json）。
     BacktestResult,
+    /// 订单（docs/27 §10）：持仓/收益读数 + 活动挂单 + 逐笔明细，回测与实盘过程中实时更新。
+    /// 数据走通道① `trader-{run}:stream:events.*`，渲染读 `ws::readout` 旁路快照。
+    Orders,
     /// 自有数据图（docs/08）：读 CSV/JSON 数据文件的通用自适应图（多列折线/散点）。
     /// 实为 Content::WealthSpring(SelfChart)；列入内容选择器便于自由摆放。无行情数据源。
     SelfChart,
@@ -349,7 +358,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 23] = [
+    pub const ALL: [ContentKind; 24] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -373,6 +382,7 @@ impl ContentKind {
         ContentKind::TardisReplay,
         ContentKind::TardisBoard,
         ContentKind::BacktestResult,
+        ContentKind::Orders,
     ];
 }
 
@@ -402,6 +412,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::TardisReplay => "Tardis 历史回放",
             ContentKind::TardisBoard => "Tardis 历史面板",
             ContentKind::BacktestResult => "回测结果",
+            ContentKind::Orders => "订单",
         };
         write!(f, "{s}")
     }
@@ -485,7 +496,8 @@ impl PaneSetup {
                 | ContentKind::Recorder
                 | ContentKind::TardisReplay
                 | ContentKind::TardisBoard
-                | ContentKind::BacktestResult => None,
+                | ContentKind::BacktestResult
+                | ContentKind::Orders => None,
             };
 
         let tick_multiplier = match content_kind {
@@ -522,6 +534,7 @@ impl PaneSetup {
             | ContentKind::TardisReplay
             | ContentKind::TardisBoard
             | ContentKind::BacktestResult
+            | ContentKind::Orders
             | ContentKind::Starter => current_tick_multiplier,
         };
 

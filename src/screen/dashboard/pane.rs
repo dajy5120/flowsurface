@@ -447,6 +447,7 @@ impl State {
                     vec![],
                 ),
                 ContentKind::BacktestResult => (Content::BacktestResult, vec![]),
+            ContentKind::Orders => (Content::Orders, vec![]),
                 ContentKind::Starter => unreachable!(),
             }
         };
@@ -629,6 +630,7 @@ impl State {
                 | Content::TardisReplay(_)
                 | Content::TardisBoard(_)
                 | Content::BacktestResult
+            | Content::Orders
         ) && !self.has_stream()
         {
             let content = row![
@@ -908,6 +910,10 @@ impl State {
                     None,
                     tickers_table,
                 )
+            }
+            Content::Orders => {
+                // 只渲染、不发消息——数据走 ws::readout 旁路快照。
+                crate::ws::orders_view::pane_body()
             }
             Content::BacktestResult => {
                 // 回测结果（docs/08 F6-P7）：渲染走 ws::backtest_readout 旁路快照。
@@ -2072,7 +2078,8 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult => None,
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            | Content::Orders => None,
         }
     }
 
@@ -2109,7 +2116,8 @@ impl State {
             | Content::Recorder(_)
             | Content::TardisReplay(_)
             | Content::TardisBoard(_)
-            | Content::BacktestResult => None,
+            | Content::BacktestResult
+            | Content::Orders => None,
         }
     }
 
@@ -2229,6 +2237,9 @@ pub enum Content {
     TardisBoard(crate::ws::tardis_board::TardisBoardState),
     /// 回测结果（docs/08 F6-P7）：收益曲线/回撤/统计，渲染走 `ws::backtest_readout` 旁路快照。
     BacktestResult,
+    /// 订单（docs/27 §10）：持仓/收益读数 + 活动挂单 + 逐笔明细，回测/实盘过程中实时更新。
+    /// 无行情流，渲染走 `ws::readout` 旁路快照。
+    Orders,
 }
 
 impl Content {
@@ -2459,6 +2470,7 @@ impl Content {
                 Content::TardisBoard(crate::ws::tardis_board::TardisBoardState::load())
             }
             ContentKind::BacktestResult => Content::BacktestResult,
+            ContentKind::Orders => Content::Orders,
         }
     }
 
@@ -2484,7 +2496,8 @@ impl Content {
             | Content::Recorder(_)
             | Content::TardisReplay(_)
             | Content::TardisBoard(_)
-            | Content::BacktestResult => None,
+            | Content::BacktestResult
+            | Content::Orders => None,
         }
     }
 
@@ -2574,6 +2587,7 @@ impl Content {
             | Content::TardisReplay(_)
             | Content::TardisBoard(_)
             | Content::BacktestResult
+            | Content::Orders
             | Content::ShaderHeatmap { .. } => {
                 panic!("indicator reorder on {} pane", self)
             }
@@ -2634,6 +2648,7 @@ impl Content {
             | Content::TardisReplay(_)
             | Content::TardisBoard(_)
             | Content::BacktestResult
+            | Content::Orders
             | Content::Comparison(_) => None,
         }
     }
@@ -2713,6 +2728,7 @@ impl Content {
             Content::TardisReplay(_) => ContentKind::TardisReplay,
             Content::TardisBoard(_) => ContentKind::TardisBoard,
             Content::BacktestResult => ContentKind::BacktestResult,
+            Content::Orders => ContentKind::Orders,
         }
     }
 
@@ -2731,7 +2747,8 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult => true,
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            | Content::Orders => true,
         }
     }
 }
