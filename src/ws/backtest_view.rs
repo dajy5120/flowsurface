@@ -23,6 +23,11 @@ const C_BUY: Color = Color::from_rgb(0.3, 0.85, 0.45);
 const C_SELL: Color = Color::from_rgb(0.92, 0.45, 0.42);
 const C_BLUE: Color = Color::from_rgb(0.5, 0.7, 0.95);
 const C_SECT: Color = Color::from_rgba(0.45, 0.6, 0.9, 0.16);
+// 溯源横幅：高可信（Tardis + 体检过 + 队列位置撮合）绿底，其余琥珀。
+const C_PROV_OK: Color = Color::from_rgba(0.30, 0.70, 0.45, 0.18);
+const C_PROV_WARN: Color = Color::from_rgba(0.95, 0.65, 0.20, 0.20);
+const C_PROV_OK_FG: Color = Color::from_rgb(0.45, 0.85, 0.55);
+const C_PROV_WARN_FG: Color = Color::from_rgb(0.95, 0.72, 0.35);
 
 const ML: f32 = 46.0; // 左边距（y 轴标签）
 const MB: f32 = 16.0; // 下边距（x 轴标签）
@@ -412,6 +417,46 @@ fn heatmap<'a, M: 'a>(m: &super::backtest_readout::Monthly) -> Element<'a, M> {
 }
 
 /// 渲染回测结果：仿官方 tearsheet 版式（表在上、图按序在下）。
+/// 溯源横幅（docs/27 S5）——**放在最顶上**。
+///
+/// 这一段回答的是「这组数字能不能当真」：数据是已购高质量还是自录、窗口体检是几级、
+/// 撮合开没开队列位置、费率是多少。没有它，A 级数据 + 真实撮合的结果和覆盖不全的自录数据
+/// + 一触价即成交的结果，**长得一模一样**。
+///
+/// 旧结果没有这一段 → 明说「来源未标注」，而不是留空当作没问题。
+fn provenance_banner<'a, M: 'a>(r: &BacktestResult) -> Element<'a, M> {
+    let (line1, line2, low) = match &r.data_provenance {
+        Some(p) => (p.summary(), p.execution_summary(), p.is_low_confidence()),
+        None => (
+            "⚠ 来源未标注（此结果早于数据溯源落地）".to_string(),
+            "无法判断数据成色与撮合假设——重跑一次即可获得溯源信息".to_string(),
+            true,
+        ),
+    };
+    let (bg, fg) = if low { (C_PROV_WARN, C_PROV_WARN_FG) } else { (C_PROV_OK, C_PROV_OK_FG) };
+    let flags = r
+        .data_provenance
+        .as_ref()
+        .map(|p| p.quality_flags.clone())
+        .unwrap_or_default();
+    let mut col = column![
+        text(format!("{} {line1}", if low { "⚠" } else { "✓" })).size(12).color(fg),
+        text(line2).size(10).color(C_DIM),
+    ]
+    .spacing(2);
+    if !flags.is_empty() {
+        col = col.push(text(format!("体检标记：{}", flags.join("  "))).size(10).color(fg));
+    }
+    container(col)
+        .padding(8)
+        .width(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(bg)),
+            ..Default::default()
+        })
+        .into()
+}
+
 pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     let r: BacktestResult = super::backtest_readout::snapshot();
 
@@ -452,6 +497,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         },
     ]
     .spacing(2);
+    let header = column![header, provenance_banner::<M>(&r)].spacing(6);
 
     // —— 上方两表 —— Run Information（+ Account Summary）/ Performance Statistics（分节）
     let run_table = table_card(
