@@ -55,6 +55,13 @@ impl KlineAgg {
 pub struct ReplayId {
     pub redis_url: String,
     pub ticker: TickerInfo,
+    /// 当前活动 run。**必须进订阅身份**（docs/27 §12）：run 一变 iced 就重建订阅，
+    /// 新消费端从 `"0"` 重读整条流——于是「清空图表」与「重放数据」有了确定的先后
+    /// （清空在 `update()` 里发生，订阅重建在其之后），不再相互竞争。
+    ///
+    /// 不带它的话：清空与 replay 各由一条独立线程触发，清空若晚于首批数据到达，
+    /// 那批数据被抹掉且 `last_id` 已前移，**永远不会重发**——图上就此空着。
+    pub run: String,
 }
 
 impl std::hash::Hash for ReplayId {
@@ -62,13 +69,14 @@ impl std::hash::Hash for ReplayId {
         "ws-bt-replay".hash(state);
         self.redis_url.hash(state);
         self.ticker.ticker.hash(state);
+        self.run.hash(state);
     }
 }
 
 /// 为某 ticker 建一条回测 replay 订阅。builder 必须非捕获（fn ptr）：参数经 ReplayId 传入，
 /// 闭包从 id 取（不捕获环境）；返回的流不借用 id（内部 clone/copy）。
-pub fn subscription(redis_url: String, ticker_info: TickerInfo) -> Subscription<Event> {
-    Subscription::run_with(ReplayId { redis_url, ticker: ticker_info }, |id: &ReplayId| {
+pub fn subscription(redis_url: String, ticker_info: TickerInfo, run: String) -> Subscription<Event> {
+    Subscription::run_with(ReplayId { redis_url, ticker: ticker_info, run }, |id: &ReplayId| {
         let redis_url = id.redis_url.clone();
         let ticker_info = id.ticker;
         iced::stream::channel(256, move |mut output: iced::futures::channel::mpsc::Sender<Event>| async move {

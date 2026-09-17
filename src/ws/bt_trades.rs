@@ -65,3 +65,32 @@ impl BtTradeConsumer {
         Ok(out)
     }
 }
+
+/// 回测进度（docs/27 §12）：`ws:bt:{run}:progress`，由 `RunTap` 按回测时钟定期 SET。
+#[derive(serde::Deserialize, Clone, Default, Debug)]
+pub struct BtProgress {
+    #[serde(default)]
+    pub run_id: String,
+    /// 0~100。
+    #[serde(default)]
+    pub pct: f32,
+    /// 回测时钟（毫秒 epoch）——不是墙钟。
+    #[serde(default)]
+    pub clock_ms: u64,
+    #[serde(default)]
+    pub ticks: u64,
+}
+
+pub fn progress_key(run_id: &str) -> String {
+    format!("ws:bt:{run_id}:progress")
+}
+
+/// 读某 run 的进度。读不到（还没开始 / 已过期）返回 None。
+///
+/// **用 GET 而非 stream**：面板只关心当前进度，不需要历史；key 带 1 小时过期，跑完也不留垃圾。
+pub fn fetch_progress(redis_url: &str, run_id: &str) -> Option<BtProgress> {
+    let client = Client::open(redis_url).ok()?;
+    let mut conn = client.get_connection().ok()?;
+    let raw: Option<String> = conn.get(progress_key(run_id)).ok()?;
+    serde_json::from_str(&raw?).ok()
+}

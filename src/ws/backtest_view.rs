@@ -417,6 +417,31 @@ fn heatmap<'a, M: 'a>(m: &super::backtest_readout::Monthly) -> Element<'a, M> {
 }
 
 /// 渲染回测结果：仿官方 tearsheet 版式（表在上、图按序在下）。
+/// 进度条：固定宽度的轨道 + 按百分比填充。
+///
+/// 自绘而不用 iced 的 `ProgressBar`：这个面板整体是自绘风格（tearsheet 的图都是 canvas），
+/// 混进一个主题化控件会显得突兀，而且这里只需要一根填充条。
+fn progress_bar<'a, M: 'a>(pct: f32) -> Element<'a, M> {
+    let frac = (pct / 100.0).clamp(0.0, 1.0);
+    container(
+        container(text(""))
+            .width(Length::FillPortion((frac * 1000.0) as u16 + 1))
+            .style(|_: &Theme| container::Style {
+                background: Some(Background::Color(C_EQUITY)),
+                border: iced::border::rounded(3),
+                ..Default::default()
+            }),
+    )
+    .width(Length::Fixed(320.0))
+    .height(Length::Fixed(10.0))
+    .style(|_: &Theme| container::Style {
+        background: Some(Background::Color(C_SECT)),
+        border: iced::border::rounded(3),
+        ..Default::default()
+    })
+    .into()
+}
+
 /// 溯源横幅（docs/27 S5）——**放在最顶上**。
 ///
 /// 这一段回答的是「这组数字能不能当真」：数据是已购高质量还是自录、窗口体检是几级、
@@ -469,14 +494,36 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         && !super::active_run::is_current_run(&r.meta.run_id)
     {
         let run = super::active_run::current().map(|a| a.run_id).unwrap_or_default();
+        let p = super::backtest_readout::progress_snapshot();
+        // 进度属于**本次** run 才画——上一次残留的百分比比不画更误导。
+        let bar: Element<'a, M> = if p.run_id == run && run != "" {
+            let clock = chrono::DateTime::from_timestamp((p.clock_ms / 1000) as i64, 0)
+                .map(|d| d.format("%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "—".into());
+            column![
+                progress_bar::<M>(p.pct),
+                text(format!(
+                    "{:.1}%   回测时钟 {clock}   已处理 {} 笔成交",
+                    p.pct, p.ticks
+                ))
+                .size(11)
+                .color(C_DIM),
+            ]
+            .spacing(6)
+            .align_x(Alignment::Center)
+            .into()
+        } else {
+            text("正在装载数据…（进度在引擎开跑后出现）").size(11).color(C_DIM).into()
+        };
         return container(iced::widget::center(
             column![
                 text("回测进行中…").size(16).color(C_HEAD),
                 text(format!("run {run}")).size(12).color(C_DIM),
+                bar,
                 text("结果在回测跑完后写入 result.json，这里随即刷新").size(11).color(C_DIM),
                 text("过程中的持仓与收益看「订单」面板，行情看 K 线图").size(11).color(C_DIM),
             ]
-            .spacing(6)
+            .spacing(8)
             .align_x(Alignment::Center),
         ))
         .padding(12)

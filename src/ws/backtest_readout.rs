@@ -521,3 +521,45 @@ mod crossend_tests {
         assert!(!p.is_low_confidence());
     }
 }
+
+// ── 回测进度旁路（docs/27 §12）─────────────────────────────────────────────
+use super::bt_trades::BtProgress;
+
+static PROGRESS: OnceLock<Mutex<BtProgress>> = OnceLock::new();
+static PROGRESS_POLLER: std::sync::Once = std::sync::Once::new();
+
+/// 进度快照，供「回测进行中」那一页画进度条。
+///
+/// **不在渲染里直接读 Redis**：那是阻塞 IO，每帧一次会把 UI 拖住。后台线程轮询，
+/// 渲染只读内存快照——与本文件其余部分同一套路。
+pub fn progress_snapshot() -> BtProgress {
+    ensure_progress_poller();
+    PROGRESS
+        .get()
+        .and_then(|m| m.lock().ok().map(|g| g.clone()))
+        .unwrap_or_default()
+}
+
+fn ensure_progress_poller() {
+    PROGRESS_POLLER.call_once(|| {
+        let url = std::env::var("WS_REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        std::thread::spawn(move || {
+            loop {
+                // 只在回测跑着时才去读——没在跑的话连 run_id 都没有，白跑一次 Redis 往返。
+                let run = super::active_run::current()
+                    .filter(|a| a.mode == "backtest")
+                    .map(|a| a.run_id);
+                if let Some(run) = run
+                    && let Some(p) = super::bt_trades::fetch_progress(&url, &run)
+                {
+                    let lock = PROGRESS.get_or_init(|| Mutex::new(BtProgress::default()));
+                    if let Ok(mut g) = lock.lock() {
+                        *g = p;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        });
+    });
+}

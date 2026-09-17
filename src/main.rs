@@ -971,7 +971,10 @@ impl Flowsurface {
         // 跑完后的定稿（含完整价格序列与成交点）。
         let ws_replay_streams = if is_replay || is_selfdata {
             self.active_dashboard()
-                .ws_replay_subscriptions(ws_redis_url.clone())
+                .ws_replay_subscriptions(
+                    ws_redis_url.clone(),
+                    self.ws_active.as_ref().map(|a| a.run_id.clone()).unwrap_or_default(),
+                )
                 .map(Message::MarketWsEvent)
         } else {
             Subscription::none()

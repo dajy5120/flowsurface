@@ -1331,14 +1331,20 @@ impl Dashboard {
     ///
     /// `replay` 本身早就把逐笔聚合成 M1 K 线发 `KlineReceived`（见其模块注释），设计意图就是
     /// 支持标准蜡烛图——是这里取错了 ticker 来源。
-    pub fn ws_replay_subscriptions(&self, redis_url: String) -> Subscription<exchange::Event> {
+    pub fn ws_replay_subscriptions(
+        &self,
+        redis_url: String,
+        run: String,
+    ) -> Subscription<exchange::Event> {
         let subs = self
             .streams
             .combined_used()
             .flat_map(|(_exchange, specs)| {
                 tickers_of(specs)
                     .into_iter()
-                    .map(|ticker| crate::ws::replay::subscription(redis_url.clone(), ticker))
+                    .map(|ticker| {
+                        crate::ws::replay::subscription(redis_url.clone(), ticker, run.clone())
+                    })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<Subscription<exchange::Event>>>();
