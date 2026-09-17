@@ -422,17 +422,21 @@ fn heatmap<'a, M: 'a>(m: &super::backtest_readout::Monthly) -> Element<'a, M> {
 /// 自绘而不用 iced 的 `ProgressBar`：这个面板整体是自绘风格（tearsheet 的图都是 canvas），
 /// 混进一个主题化控件会显得突兀，而且这里只需要一根填充条。
 fn progress_bar<'a, M: 'a>(pct: f32) -> Element<'a, M> {
+    const W: f32 = 320.0;
     let frac = (pct / 100.0).clamp(0.0, 1.0);
+    // **用固定宽度而不是 FillPortion**：只有一个子元素时 FillPortion 会占满整个父容器，
+    // 无论比例写多少——那正是「进度条一开始就是 100%」的原因（docs/27 §12）。
     container(
         container(text(""))
-            .width(Length::FillPortion((frac * 1000.0) as u16 + 1))
+            .width(Length::Fixed((W * frac).max(1.0)))
+            .height(Length::Fixed(10.0))
             .style(|_: &Theme| container::Style {
                 background: Some(Background::Color(C_EQUITY)),
                 border: iced::border::rounded(3),
                 ..Default::default()
             }),
     )
-    .width(Length::Fixed(320.0))
+    .width(Length::Fixed(W))
     .height(Length::Fixed(10.0))
     .style(|_: &Theme| container::Style {
         background: Some(Background::Color(C_SECT)),
@@ -615,4 +619,36 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
 
     let body = column![header, run_table, stats_table, charts].spacing(12).padding(4);
     container(scrollable(body)).padding(12).width(Length::Fill).height(Length::Fill).into()
+}
+
+#[cfg(test)]
+mod progress_tests {
+    /// 进度条已填充宽度（像素）。抽出来是为了能测——上一版用 `FillPortion`，只有一个
+    /// 子元素时它会占满整个父容器，于是**进度条从头到尾都是满的**，而百分比文字是对的，
+    /// 两者矛盾却没人会当成 bug 报。
+    fn filled_px(pct: f32, w: f32) -> f32 {
+        ((pct / 100.0).clamp(0.0, 1.0) * w).max(1.0)
+    }
+
+    #[test]
+    fn 零进度时几乎不填充() {
+        assert!(filled_px(0.0, 320.0) <= 1.0, "0% 不该显示成一大截");
+    }
+
+    #[test]
+    fn 半程填一半() {
+        assert!((filled_px(50.0, 320.0) - 160.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn 满进度填满() {
+        assert!((filled_px(100.0, 320.0) - 320.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn 越界值被夹住() {
+        // 上游若因浮点误差给出 100.0001 或 -0.1，不该画出超宽/负宽。
+        assert!((filled_px(150.0, 320.0) - 320.0).abs() < 0.01);
+        assert!(filled_px(-10.0, 320.0) <= 1.0);
+    }
 }

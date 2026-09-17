@@ -663,6 +663,18 @@ pub struct ViewState {
 }
 
 impl ViewState {
+    /// 复位「最新位置」与平移量，让图表重新锚定到下一批到来的数据。
+    ///
+    /// **清空数据时必须一起做**（docs/27 §12）：`update_latest_kline` 只在新 K 线时间
+    /// **大于** `latest_x` 时才更新它。清空前若 `latest_x` 停在实时时间（当下），
+    /// 而新数据是几个月前的回测区间——K 线进得去，视窗却不动，蜡烛全在屏幕外。
+    /// tick 基图表按笔数索引、不看绝对时间，所以只有时间基会中招。
+    pub fn reset_anchor(&mut self) {
+        self.latest_x = 0;
+        self.translation = Vector::default();
+        self.scaling = 1.0;
+    }
+
     pub fn new(
         basis: Basis,
         tick_size: PriceStep,

@@ -598,6 +598,8 @@ impl KlineChart {
     /// 和本次毫无关系（docs/27 §12）。
     pub fn clear_data(&mut self) -> Option<Action> {
         self.raw_trades.clear();
+        // 视窗锚点也要复位，否则清空后视窗还停在旧数据的时间位置，新数据进得去但看不见。
+        self.chart.reset_anchor();
         self.set_basis(self.chart.basis)
     }
 
