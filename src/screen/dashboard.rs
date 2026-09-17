@@ -1293,17 +1293,31 @@ impl Dashboard {
         Subscription::batch(unique_streams)
     }
 
-    /// WealthSpring 回测行情入图（docs/08 F1.2b）：对每个活动 trade ticker 建一条回测 replay 订阅。
-    /// 各订阅内部仅在回测态（ws:active_run mode=backtest）产数据，复用现有 ingest_trades 喂图。
+    /// WealthSpring 回测行情入图（docs/08 F1.2b）：对每个**用到的 ticker** 建一条回测 replay
+    /// 订阅。各订阅内部仅在回测态（ws:active_run mode=backtest）产数据，复用现有 ingest 路径。
+    ///
+    /// **trade 与 kline 两类都要取**（docs/27 §12）。原先只遍历 `specs.trade`，而一个普通蜡烛图
+    /// 声明的是 kline 流、`specs.trade` 是空的——于是一条订阅都建不起来，回测跑完 Redis 里躺着
+    /// 二十万条逐笔，图上什么也没有，且不报任何错。
+    ///
+    /// `replay` 本身早就把逐笔聚合成 M1 K 线发 `KlineReceived`（见其模块注释），设计意图就是
+    /// 支持标准蜡烛图——是这里取错了 ticker 来源。
     pub fn ws_replay_subscriptions(&self, redis_url: String) -> Subscription<exchange::Event> {
         let subs = self
             .streams
             .combined_used()
             .flat_map(|(_exchange, specs)| {
-                specs
-                    .trade
-                    .iter()
-                    .map(|ticker| crate::ws::replay::subscription(redis_url.clone(), *ticker))
+                let mut tickers: Vec<exchange::TickerInfo> = specs.trade.clone();
+                for (t, _tf) in &specs.kline {
+                    // 同一 ticker 可能既有 trade 又有 kline（如足迹图 + 蜡烛图并存）。
+                    // 建两条订阅会让同一批逐笔喂进图两次，成交量直接翻倍。
+                    if !tickers.iter().any(|x| x.ticker == t.ticker) {
+                        tickers.push(*t);
+                    }
+                }
+                tickers
+                    .into_iter()
+                    .map(|ticker| crate::ws::replay::subscription(redis_url.clone(), ticker))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<Subscription<exchange::Event>>>();
