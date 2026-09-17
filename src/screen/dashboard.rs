@@ -1158,6 +1158,11 @@ impl Dashboard {
                     state.notifications.push(Toast::error(err.to_string()));
                 }
                 chart::Action::RequestFetch(reqs) => {
+                    // 回放/回测工作区不补拉交易所历史：拉回来的是真实市场 K 线，
+                    // 与本次回测毫无关系，却和回测蜡烛混在一起分不出来（docs/27 §12）。
+                    if crate::ws::workspace::replay_mode() {
+                        return;
+                    }
                     let pane_id = state.unique_id();
                     let ready_streams = state
                         .streams

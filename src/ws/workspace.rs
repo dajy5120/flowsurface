@@ -216,3 +216,52 @@ mod tests {
         }
     }
 }
+
+// ── 回放模式开关（docs/27 §12）─────────────────────────────────────────────
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// 当前工作区是否是「回放/回测」类（录制数据 / Tardis 回放 / 自有数据回测）。
+///
+/// **用途：禁止图表向交易所补拉历史 K 线。** 图表发现视窗里有空缺就会去 fetch，
+/// 拉回来的是真实市场历史——在回测工作区里那些蜡烛与本次回测毫无关系，
+/// 混在回测数据旁边看着却一模一样（docs/27 §12）。
+///
+/// 放进程级原子量而不是层层传参：判定点在 `dashboard` 深处，那里拿不到 layout 名字。
+static REPLAY_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_replay_mode(on: bool) {
+    REPLAY_MODE.store(on, Ordering::Relaxed);
+}
+
+pub fn replay_mode() -> bool {
+    REPLAY_MODE.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod replay_mode_tests {
+    use super::*;
+
+    /// 合在一个测试里：`REPLAY_MODE` 是进程级全局，拆开会并行互相踩。
+    #[test]
+    fn 回放模式开关() {
+        // 默认关：普通看盘工作区要能正常补拉历史。
+        set_replay_mode(false);
+        assert!(!replay_mode());
+
+        // 三个回放类工作区都该开——开着时图表不去交易所拉历史 K 线，
+        // 否则真实市场蜡烛会混进回测数据里，长得一模一样却毫不相干。
+        set_replay_mode(true);
+        assert!(replay_mode());
+
+        set_replay_mode(false);
+        assert!(!replay_mode());
+    }
+
+    #[test]
+    fn 回放类工作区常量齐全() {
+        // 漏掉任何一个，那个工作区就会偷偷补拉历史。
+        for n in [WS_SELFDATA, WS_RECORDED, WS_TARDIS] {
+            assert!(!n.is_empty());
+        }
+    }
+}

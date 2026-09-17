@@ -247,18 +247,17 @@ impl Flowsurface {
                 return Task::none();
             }
             Message::WsOrders(st) => {
-                // 自有数据回测工作区：图上 ▲▼/持仓/挂单由 selfdata 桥（result.json）喂，
-                // 不让 events.* 旁路覆盖（否则两源相争）。其余工作区照常。
-                let is_selfdata = self
-                    .layout_manager
-                    .active_layout_id()
-                    .map(|l| l.name == ws::workspace::WS_SELFDATA)
-                    .unwrap_or(false);
-                if !is_selfdata {
-                    ws::orders::publish_chart_fills(&st.fills); // F3b：图上 ▲▼ 标记旁路给 kline 画布
-                    ws::orders::publish_chart_position(&st); // §11.1：图上持仓线 + 费后 PnL 读数
-                    ws::orders::publish_chart_working(&st.working); // §11.1：图上活动挂单线标注
-                }
+                // **一律从实时 events.* 喂图上标注**（docs/27 §12）。
+                //
+                // 原先自有数据回测工作区被排除在外，理由是「由 selfdata 桥（result.json）喂，
+                // 免得两源相争」——但 result.json 要等回测整个跑完才存在，于是成交标记
+                // **全程不出现、结束瞬间一次性糊上去**，看不到过程。
+                //
+                // 两源其实不冲突：events.* 是实时且更全的那一份（带数量与序号），
+                // selfdata 在跑完后推的是同一批成交，覆盖上去结果一致。
+                ws::orders::publish_chart_fills(&st.fills); // F3b：图上 ▲▼ 标记旁路给 kline 画布
+                ws::orders::publish_chart_position(&st); // §11.1：图上持仓线 + 费后 PnL 读数
+                ws::orders::publish_chart_working(&st.working); // §11.1：图上活动挂单线标注
                 self.ws_orders = st; // 订单/PnL 聚合（view() 叠加显示）
                 return Task::none();
             }
@@ -951,6 +950,9 @@ impl Flowsurface {
         // 实时时间窗之外根本看不见——Tardis 数据距今数月，这一条是必须的）。
         let is_replay = is_recorded || is_tardis;
         let is_selfdata = active_ws.as_deref() == Some(ws::workspace::WS_SELFDATA);
+        // 回放类工作区：禁止图表向交易所补拉历史 K 线（那些蜡烛与本次回测无关，
+        // 混在旁边看着却一模一样）。判定点在 dashboard 深处，走进程级旁路。
+        ws::workspace::set_replay_mode(is_replay || is_selfdata);
         let ws_redis_url = std::env::var("WS_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
