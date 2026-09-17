@@ -5,6 +5,23 @@ pub mod tickers_table;
 
 pub use sidebar::Sidebar;
 
+/// 一个 exchange 下**所有被用到的 ticker**（trade + kline，按 ticker 去重）。
+///
+/// 回放/自有数据两条入图路都要它：只取 `specs.trade` 的话，普通蜡烛图（声明的是 kline 流）
+/// 一条订阅都建不起来——数据全在，图上空白，且不报任何错。
+///
+/// 去重是必须的：同一 ticker 可能既有 trade 又有 kline（足迹图 + 蜡烛图并存），
+/// 建两条订阅会让同一批逐笔喂进图两次，成交量直接翻倍。
+fn tickers_of(specs: &exchange::adapter::StreamSpecs) -> Vec<exchange::TickerInfo> {
+    let mut out: Vec<exchange::TickerInfo> = specs.trade.clone();
+    for (t, _tf) in &specs.kline {
+        if !out.iter().any(|x| x.ticker == t.ticker) {
+            out.push(*t);
+        }
+    }
+    out
+}
+
 use super::DashboardError;
 use crate::{
     chart,
@@ -1307,15 +1324,7 @@ impl Dashboard {
             .streams
             .combined_used()
             .flat_map(|(_exchange, specs)| {
-                let mut tickers: Vec<exchange::TickerInfo> = specs.trade.clone();
-                for (t, _tf) in &specs.kline {
-                    // 同一 ticker 可能既有 trade 又有 kline（如足迹图 + 蜡烛图并存）。
-                    // 建两条订阅会让同一批逐笔喂进图两次，成交量直接翻倍。
-                    if !tickers.iter().any(|x| x.ticker == t.ticker) {
-                        tickers.push(*t);
-                    }
-                }
-                tickers
+                tickers_of(specs)
                     .into_iter()
                     .map(|ticker| crate::ws::replay::subscription(redis_url.clone(), ticker))
                     .collect::<Vec<_>>()
@@ -1331,10 +1340,12 @@ impl Dashboard {
             .streams
             .combined_used()
             .flat_map(|(_exchange, specs)| {
-                specs
-                    .trade
-                    .iter()
-                    .map(|ticker| crate::ws::selfdata::subscription(*ticker))
+                // trade 与 kline 两类都取——**与 replay 同一处错，上一轮只修了那边**：
+                // 普通蜡烛图声明的是 kline 流，`specs.trade` 是空的，于是一条订阅都建不起来，
+                // result.json 里价格/成交都齐了，图上仍然什么也没有且不报错（docs/27 §12）。
+                tickers_of(specs)
+                    .into_iter()
+                    .map(crate::ws::selfdata::subscription)
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<Subscription<exchange::Event>>>();
@@ -1385,5 +1396,49 @@ impl From<fetcher::FetchUpdate> for Message {
                 Message::ErrorOccurred(Some(pane_id), DashboardError::Fetch(error))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ticker_tests {
+    use super::*;
+    use exchange::adapter::{Exchange, StreamSpecs};
+    use exchange::{Ticker, TickerInfo, Timeframe};
+
+    fn info(sym: &str) -> TickerInfo {
+        TickerInfo::new(Ticker::new(sym, Exchange::BinanceLinear), 0.1, 0.001, None)
+    }
+
+    #[test]
+    fn 只有kline流时也要建订阅() {
+        // 回归：replay 与 selfdata 两条入图路原先都只遍历 specs.trade，而一个普通蜡烛图
+        // 声明的是 kline 流——于是一条订阅都建不起来，Redis/result.json 里数据全在，
+        // 图上空白，且不报任何错。
+        let specs = StreamSpecs { depth: vec![], trade: vec![], kline: vec![(info("BTCUSDT"), Timeframe::M1)] };
+        assert_eq!(tickers_of(&specs).len(), 1);
+    }
+
+    #[test]
+    fn 同一ticker两种流只建一条() {
+        // 建两条会让同一批逐笔喂进图两次，成交量直接翻倍。
+        let t = info("BTCUSDT");
+        let specs = StreamSpecs { depth: vec![], trade: vec![t], kline: vec![(t, Timeframe::M1)] };
+        assert_eq!(tickers_of(&specs).len(), 1);
+    }
+
+    #[test]
+    fn 不同ticker各建一条() {
+        let specs = StreamSpecs {
+            depth: vec![],
+            trade: vec![info("BTCUSDT")],
+            kline: vec![(info("ETHUSDT"), Timeframe::M1)],
+        };
+        assert_eq!(tickers_of(&specs).len(), 2);
+    }
+
+    #[test]
+    fn 都没有时返回空() {
+        let specs = StreamSpecs { depth: vec![], trade: vec![], kline: vec![] };
+        assert!(tickers_of(&specs).is_empty());
     }
 }
