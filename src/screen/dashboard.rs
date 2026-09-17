@@ -991,6 +991,18 @@ impl Dashboard {
         }
     }
 
+    /// 清空所有 K 线 pane 的数据（开始新一次回测时用）。
+    ///
+    /// 图表跨 run 累积：不清的话上一次回测的蜡烛还留在左边，与本次毫无关系——
+    /// 截图里 00:00 之前那截就是这么来的（docs/27 §12）。
+    pub fn clear_kline_charts(&mut self, main_window: window::Id) {
+        self.iter_all_panes_mut(main_window).for_each(|(_, _, pane_state)| {
+            if let pane::Content::Kline { chart: Some(c), .. } = &mut pane_state.content {
+                c.clear_data();
+            }
+        });
+    }
+
     pub fn update_latest_klines(
         &mut self,
         stream: &StreamKind,

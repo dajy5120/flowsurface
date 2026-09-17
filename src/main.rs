@@ -236,6 +236,10 @@ impl Flowsurface {
                 // run 变更则重置订单流累计（CVD 等按 run/会话重新计）。
                 if self.ws_active.as_ref().map(|a| &a.run_id) != ar.as_ref().map(|a| &a.run_id) {
                     self.ws_flow = ws::flow::FlowState::default();
+                    // 换了 run → 清空 K 线，只留本次回测的数据。图表本来会跨 run 累积，
+                    // 上一次回测的蜡烛留在左边，与本次毫无关系（docs/27 §12）。
+                    let main_window_id = self.main_window.id;
+                    self.active_dashboard_mut().clear_kline_charts(main_window_id);
                 }
                 self.ws_active = ar;
                 return Task::none();
@@ -957,7 +961,13 @@ impl Flowsurface {
         } else {
             self.active_dashboard().market_subscriptions(&self.handles).map(Message::MarketWsEvent)
         };
-        let ws_replay_streams = if is_replay {
+        // 「自有数据回测」也开 replay（docs/27 §12）：TradeTap 在**回测跑的过程中**就往
+        // `ws:bt:{run}:trades` 推逐笔，图因此能边跑边画。
+        //
+        // 只靠 selfdata 桥不行——它读的是 `result.json`，那东西要等回测整个跑完才存在，
+        // 于是全程一片空白、结束瞬间才一次性出现。两者并存：replay 管过程，selfdata 管
+        // 跑完后的定稿（含完整价格序列与成交点）。
+        let ws_replay_streams = if is_replay || is_selfdata {
             self.active_dashboard()
                 .ws_replay_subscriptions(ws_redis_url.clone())
                 .map(Message::MarketWsEvent)

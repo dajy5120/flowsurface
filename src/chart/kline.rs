@@ -589,6 +589,18 @@ impl KlineChart {
         self.invalidate(Some(Instant::now()))
     }
 
+    /// 清空已有数据，保留当前 basis / 指标 / 视图设置。
+    ///
+    /// 复用 `set_basis`（它本就会用空 `TimeSeries` 重建 `data_source`），不自己动数据结构
+    /// ——那条路是换时间周期时天天在走的，已经被用熟了。
+    ///
+    /// 用在「开始新一次回测」：图表会跨 run 累积，不清的话上一次回测的蜡烛还留在左边，
+    /// 和本次毫无关系（docs/27 §12）。
+    pub fn clear_data(&mut self) -> Option<Action> {
+        self.raw_trades.clear();
+        self.set_basis(self.chart.basis)
+    }
+
     pub fn studies(&self) -> Option<Vec<FootprintStudy>> {
         match &self.kind {
             KlineChartKind::Footprint { studies, .. } => Some(studies.clone()),
