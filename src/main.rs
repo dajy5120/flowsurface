@@ -241,6 +241,8 @@ impl Flowsurface {
                     let main_window_id = self.main_window.id;
                     self.active_dashboard_mut().clear_kline_charts(main_window_id);
                 }
+                // 旁路给各面板：它们据此判断手上的数据属不属于当前这次运行。
+                ws::active_run::publish_current(ar.clone());
                 self.ws_active = ar;
                 return Task::none();
             }

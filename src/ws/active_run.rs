@@ -70,3 +70,66 @@ pub fn subscription(redis_url: String) -> iced::Subscription<Option<ActiveRun>> 
         )
     })
 }
+
+use std::sync::{Mutex, OnceLock};
+
+/// 进程级「当前活动 run」。App 收到 `ws:active_run` 变化时发布到这里。
+///
+/// pane 视图深嵌在 dashboard 内、拿不到 `&App`，沿用 `orders::CHART_FILLS` 的旁路模式。
+/// **存在的理由**：多个面板要判断「手上这份数据属不属于当前正在跑的这一次」——
+/// 没有这个判据，新回测跑完之前，面板会把上一次的结论当本次显示（docs/27 §12）。
+static CURRENT: OnceLock<Mutex<Option<ActiveRun>>> = OnceLock::new();
+
+pub fn publish_current(ar: Option<ActiveRun>) {
+    let lock = CURRENT.get_or_init(|| Mutex::new(None));
+    if let Ok(mut g) = lock.lock() {
+        *g = ar;
+    }
+}
+
+pub fn current() -> Option<ActiveRun> {
+    CURRENT.get().and_then(|m| m.lock().ok().map(|g| g.clone()))?
+}
+
+/// 当前是否正跑着回测。
+pub fn backtest_running() -> bool {
+    current().is_some_and(|a| a.mode == "backtest")
+}
+
+/// `run_id` 是否就是当前活动的那次运行。空串（旧结果没有该字段）一律判否。
+pub fn is_current_run(run_id: &str) -> bool {
+    !run_id.is_empty() && current().is_some_and(|a| a.run_id == run_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ar(run: &str, mode: &str) -> ActiveRun {
+        ActiveRun { run_id: run.into(), mode: mode.into(), symbol: "BTCUSDT".into() }
+    }
+
+    /// 全部断言合在一个测试里**是有意的**：`CURRENT` 是进程级全局，拆成多个测试会并行
+    /// 互相踩（第一版就这么挂的——一个测试刚 publish，另一个把它清成 None）。
+    #[test]
+    fn 本次运行的判定() {
+        // 旧结果没有 run_id → 空串 → 一律判非本次。判成「是」的话，运行期间面板会把
+        // 上一次的结论当本次显示，数字看着正常却完全不相干。
+        publish_current(Some(ar("BT-1", "backtest")));
+        assert!(!is_current_run(""), "空 run_id 不该判为本次");
+        assert!(is_current_run("BT-1"));
+        assert!(!is_current_run("BT-2"));
+        assert!(backtest_running());
+
+        // 实盘/停止态都不算「回测进行中」——那个判据只用来决定回测报告面板是否显示占位。
+        publish_current(Some(ar("LIVE-1", "live")));
+        assert!(!backtest_running());
+        publish_current(Some(ar("BT-5", "stopped")));
+        assert!(!backtest_running());
+
+        // 没有活动 run 时一律判非本次。
+        publish_current(None);
+        assert!(!is_current_run("BT-1"));
+        assert!(!backtest_running());
+    }
+}

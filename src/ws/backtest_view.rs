@@ -460,6 +460,31 @@ fn provenance_banner<'a, M: 'a>(r: &BacktestResult) -> Element<'a, M> {
 pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     let r: BacktestResult = super::backtest_readout::snapshot();
 
+    // 正在跑、而手上这份结果属于**别的**运行 → 明说「进行中」，不要把上一次的结论当本次。
+    //
+    // result.json 是回测跑完才写的，所以运行期间 latest.json 指向的一定是上一次。
+    // 照原样渲染的话，那些数字看着完全正常，却与正在跑的这一次毫无关系——
+    // 这比显示「暂无数据」危险得多（docs/27 §12）。
+    if super::active_run::backtest_running()
+        && !super::active_run::is_current_run(&r.meta.run_id)
+    {
+        let run = super::active_run::current().map(|a| a.run_id).unwrap_or_default();
+        return container(iced::widget::center(
+            column![
+                text("回测进行中…").size(16).color(C_HEAD),
+                text(format!("run {run}")).size(12).color(C_DIM),
+                text("结果在回测跑完后写入 result.json，这里随即刷新").size(11).color(C_DIM),
+                text("过程中的持仓与收益看「订单」面板，行情看 K 线图").size(11).color(C_DIM),
+            ]
+            .spacing(6)
+            .align_x(Alignment::Center),
+        ))
+        .padding(12)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+    }
+
     if !r.loaded {
         return container(iced::widget::center(
             column![

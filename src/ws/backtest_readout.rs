@@ -23,6 +23,13 @@ pub struct Meta {
     pub bars: i64,
     #[serde(default)]
     pub run: String,
+    /// **本次运行的 trader id**（如 BT-619605），与 `run` 那个结果目录时间戳不是一回事。
+    ///
+    /// 面板靠它判断「这份结果属不属于当前正在跑的这一次」。没有它的话，新回测跑完之前
+    /// 面板会一直把**上一次**的结论当本次显示——数字看着正常，其实完全不相干
+    /// （docs/27 §12）。旧结果没有这个字段 → 空串 → 一律视为「非本次」。
+    #[serde(default)]
+    pub run_id: String,
     #[serde(default)]
     pub finished_at: String,
 }

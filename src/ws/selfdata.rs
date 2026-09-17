@@ -51,7 +51,11 @@ pub fn subscription(ticker_info: TickerInfo) -> Subscription<Event> {
             move |mut output: iced::futures::channel::mpsc::Sender<Event>| async move {
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<backtest_readout::BacktestResult>(4);
 
-                // 轮询 result.json 快照：dir 变化（新结果）且有 price 才推。
+                // 轮询 result.json 快照：**属于当前这次运行**、dir 变化、且有 price 才推。
+                //
+                // `is_current_run` 这道闸是必须的（docs/27 §12）：订阅刚建立时 last_dir 是空的，
+                // 于是会立刻把**上一次**回测的 result.json 推进图里——刚按 run 清空的图表
+                // 转眼又被旧数据填满，看起来就像「清空没生效」。
                 std::thread::spawn(move || {
                     let mut last_dir = String::new();
                     loop {
@@ -63,7 +67,11 @@ pub fn subscription(ticker_info: TickerInfo) -> Subscription<Event> {
                             break;
                         }
                         let snap = backtest_readout::snapshot();
-                        if snap.loaded && snap.dir != last_dir && !snap.price.v.is_empty() {
+                        if snap.loaded
+                            && super::active_run::is_current_run(&snap.meta.run_id)
+                            && snap.dir != last_dir
+                            && !snap.price.v.is_empty()
+                        {
                             last_dir = snap.dir.clone();
                             if tx.blocking_send(snap).is_err() {
                                 break; // 订阅已 drop
