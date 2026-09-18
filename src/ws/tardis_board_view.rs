@@ -123,14 +123,14 @@ mod probe {
 ///    会画出上一份数据，故按 `Panel.generation` 作废整张表。
 /// 2. **回放中不能用缓存**——播放头逐帧推进、几何逐帧变化，而 Cache 不感知内容变化，
 ///    复用会让图冻住不动。故 `playhead.is_some()` 时退回每帧新建。
-type CacheRef = std::rc::Rc<Cache>;
+pub(super) type CacheRef = std::rc::Rc<Cache>;
 
 thread_local! {
     static CACHES: std::cell::RefCell<(u64, std::collections::HashMap<String, CacheRef>)> =
         std::cell::RefCell::new((u64::MAX, std::collections::HashMap::new()));
 }
 
-fn cache_for(generation: u64, id: &str) -> CacheRef {
+pub(super) fn cache_for(generation: u64, id: &str) -> CacheRef {
     CACHES.with(|c| {
         let mut c = c.borrow_mut();
         if c.0 != generation {
@@ -143,16 +143,16 @@ fn cache_for(generation: u64, id: &str) -> CacheRef {
     })
 }
 
-struct ChartCanvas {
-    ch: std::sync::Arc<ro::Chart>,
-    cache: CacheRef,
+pub(super) struct ChartCanvas {
+    pub(super) ch: std::sync::Arc<ro::Chart>,
+    pub(super) cache: CacheRef,
     /// 时间步进回放的播放头（ms）；None=不裁剪，显示全窗口。
-    playhead: Option<f64>,
+    pub(super) playhead: Option<f64>,
 }
 
 /// 按播放头裁剪出「≤ 游标」的部分（docs/20 §10）。x 轴范围**保持整窗不变**，
 /// 这样回放过程中坐标轴不会来回跳动，只是曲线从左往右生长。
-fn clip_to(ch: &ro::Chart, head: f64) -> ro::Chart {
+pub(super) fn clip_to(ch: &ro::Chart, head: f64) -> ro::Chart {
     if !ch.x_is_time || ch.x.is_empty() {
         return ch.clone();
     }

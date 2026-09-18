@@ -156,8 +156,16 @@ fn pane_template(name: &str) -> &'static str {
         // SelfChart 原在「自有数据回测」，但它与回测无关——纯展示任意二维数据。
         // 挪到这里是因为两者同属「看数据」，而托管工作区的布局每次启动按模板重置，
         // 不进模板就等于用户实际用不到（加了也活不过重启）。
+        //
+        // 预测市场回放是**第三个独立 pane**，不是 TardisBoard 的第四个数据源：
+        // 那套的类型词汇（trades/l2/deriv/强平/BBO）是给交易所行情设计的，预测市场
+        // 一个都不对应——没有成交流、没有中间价、没有资金费，有的是两本独立的簿
+        // 加一个二元结局。并进去要么类型名撒谎，要么到处是空列。
+        // 复用发生在下面一层：图表 JSON 契约、绘图部件、播放头裁剪都是同一套。
+        //
+        // 布局：左 Tardis 历史面板，右上预测市场回放，右下自有数据图。
         WS_TARDIS => {
-            r#"{"Split":{"axis":"Vertical","ratio":0.68,"a":{"TardisBoard":{"settings":{},"link_group":null}},"b":{"WealthSpring":{"mode":"SelfChart","settings":{},"link_group":null}}}}"#
+            r#"{"Split":{"axis":"Vertical","ratio":0.56,"a":{"TardisBoard":{"settings":{},"link_group":null}},"b":{"Split":{"axis":"Horizontal","ratio":0.62,"a":{"PmReplay":{"settings":{},"link_group":null}},"b":{"WealthSpring":{"mode":"SelfChart","settings":{},"link_group":null}}}}}}"#
         }
         WS_GLOBAL => r#"{"MarketMap":{"settings":{},"link_group":null}}"#,
         // 接口观察终端（docs/23 P0）：**零交易所连接**——全部连接在
@@ -269,7 +277,7 @@ mod tests {
         let templates: String = WORKSPACES.iter().map(|n| pane_template(n)).collect();
         // 只读面板类：没有 ticker、不吃行情流，各自是一个独立用途的页面。
         for kind in [
-            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "TardisBoard",
+            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "TardisBoard",
             "MarketMap", "Observatory", "NetEgress", "Procs", "News",
         ] {
             assert!(

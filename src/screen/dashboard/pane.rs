@@ -110,6 +110,7 @@ pub enum Event {
     TardisReplayInteraction(crate::ws::tardis_replay::TardisReplayMsg),
     /// Tardis 历史面板交互（docs/20 §9）：选源/类型/窗口 + 加载。
     TardisBoardInteraction(crate::ws::tardis_board::TardisBoardMsg),
+    PmReplayInteraction(crate::ws::pm_replay::PmReplayMsg),
     /// Factory 面板交互（docs/20 §26）：nightly 手动启停。
     FactoryInteraction(crate::ws::factory::FactoryMsg),
     /// C4 活体影子交互：maker 影子守护启停（服务默认不自启，全由面板控制）。
@@ -435,6 +436,9 @@ impl State {
                 ContentKind::OptionsBoard => (Content::OptionsBoard, vec![]),
                 ContentKind::PredictionBoard => (Content::PredictionBoard, vec![]),
                 ContentKind::PmBinance => (Content::PmBinance, vec![]),
+                ContentKind::PmReplay => {
+                    (Content::PmReplay(crate::ws::pm_replay::PmReplayState::load()), vec![])
+                }
                 ContentKind::MarketMap => (Content::MarketMap, vec![]),
                 ContentKind::Recorder => {
                     (Content::Recorder(crate::ws::recorder::RecorderPaneState::load()), vec![])
@@ -631,6 +635,7 @@ impl State {
                 | Content::OptionsBoard
                 | Content::PredictionBoard
                 | Content::PmBinance
+                | Content::PmReplay(_)
                 | Content::MarketMap
                 | Content::Recorder(_)
                 | Content::TardisReplay(_)
@@ -835,6 +840,20 @@ impl State {
             Content::OptionsBoard => {
                 // 期权/0DTE 回测（docs/18）：渲染走 ws::options_readout 旁路快照（options_board.json）。
                 let base = crate::ws::options_view::pane_body();
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::PmReplay(pr) => {
+                // 预测市场回放：读自录 parquet 生成的图表 JSON，**零交易所连接**。
+                let base = crate::ws::pm_replay_view::pane_body(pr)
+                    .map(move |m| Message::PaneEvent(id, Event::PmReplayInteraction(m)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1448,6 +1467,7 @@ impl State {
                         | ContentKind::OptionsBoard
                         | ContentKind::PredictionBoard
                         | ContentKind::PmBinance
+                        | ContentKind::PmReplay
                         | ContentKind::MarketMap
                         | ContentKind::Recorder
                         | ContentKind::TardisReplay
@@ -1519,6 +1539,12 @@ impl State {
                 // Tardis 历史面板（docs/20 §9）：改选择 + 副作用（调 Python 生成面板 JSON）。
                 if let Content::TardisBoard(tb) = &mut self.content {
                     crate::ws::tardis_board::handle(tb, m);
+                }
+            }
+            Event::PmReplayInteraction(m) => {
+                // 预测市场回放：改选择 + 副作用（调 Python 生成图表 JSON、本地推播放头）。
+                if let Content::PmReplay(pr) = &mut self.content {
+                    crate::ws::pm_replay::handle(pr, m);
                 }
             }
             Event::TardisReplayInteraction(m) => {
@@ -2098,7 +2124,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => None,
         }
     }
@@ -2133,6 +2159,7 @@ impl State {
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::PmBinance
+            | Content::PmReplay(_)
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2251,6 +2278,8 @@ pub enum Content {
     /// **独立于 [`Content::PredictionBoard`]**——那个是 Polymarket 的日线级决策支持，
     /// 这个是逐笔盘口（约 5 条/秒），两者放一个 pane 里谁都看不清。
     PmBinance,
+    /// 预测市场回放（自录 pm_book）：携带 日期/轮次/倍速/播放位置 的可编辑状态。
+    PmReplay(crate::ws::pm_replay::PmReplayState),
     /// 全市场雷达（docs/22 P0）：无行情流，渲染走 `ws::radar_readout` 旁路快照。
     /// ⚠ 与 `Content::Heatmap`（订单簿深度热图）无关，别混（docs/22 §10 坑 1）。
     MarketMap,
@@ -2485,6 +2514,9 @@ impl Content {
             ContentKind::OptionsBoard => Content::OptionsBoard,
             ContentKind::PredictionBoard => Content::PredictionBoard,
             ContentKind::PmBinance => Content::PmBinance,
+            ContentKind::PmReplay => {
+                Content::PmReplay(crate::ws::pm_replay::PmReplayState::load())
+            }
             ContentKind::MarketMap => Content::MarketMap,
             ContentKind::Recorder => {
                 Content::Recorder(crate::ws::recorder::RecorderPaneState::load())
@@ -2519,6 +2551,7 @@ impl Content {
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::PmBinance
+            | Content::PmReplay(_)
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2610,6 +2643,7 @@ impl Content {
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::PmBinance
+            | Content::PmReplay(_)
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2672,6 +2706,7 @@ impl Content {
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::PmBinance
+            | Content::PmReplay(_)
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2753,6 +2788,7 @@ impl Content {
             Content::OptionsBoard => ContentKind::OptionsBoard,
             Content::PredictionBoard => ContentKind::PredictionBoard,
             Content::PmBinance => ContentKind::PmBinance,
+            Content::PmReplay(_) => ContentKind::PmReplay,
             Content::MarketMap => ContentKind::MarketMap,
             Content::Recorder(_) => ContentKind::Recorder,
             Content::TardisReplay(_) => ContentKind::TardisReplay,
@@ -2777,7 +2813,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => true,
         }
     }

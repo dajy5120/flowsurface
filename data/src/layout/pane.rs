@@ -113,6 +113,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    PmReplay {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     MarketMap {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -328,6 +334,12 @@ pub enum ContentKind {
     /// 只读 `~/ws-data/live/pm_binance.json` 旁路——**零交易所流**，WS 连接在
     /// `ws-pm-recorder` 守护里。
     PmBinance,
+    /// 预测市场回放：按「日期 → 轮次」回放自录的两本簿（`raw/pm_book`）。
+    ///
+    /// **与 [`ContentKind::TardisBoard`] 并列而不是并入**：那套的类型词汇
+    /// （trades/l2/deriv/强平/BBO）是给交易所行情设计的，预测市场一个都不对应——
+    /// 它没有成交流、没有中间价、没有资金费，有的是两本独立的簿 + 一个二元结局。
+    PmReplay,
     /// 全市场雷达（docs/22 P0）：加密全市场树图 + 涨跌速度/量异常排行。
     /// 只读 radar_board.json 旁路，**零交易所流**（数据来自独立的 ws-radar 守护）。
     MarketMap,
@@ -373,7 +385,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 25] = [
+    pub const ALL: [ContentKind; 26] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -389,6 +401,7 @@ impl ContentKind {
         ContentKind::OptionsBoard,
         ContentKind::PredictionBoard,
         ContentKind::PmBinance,
+        ContentKind::PmReplay,
         ContentKind::MarketMap,
         ContentKind::Observatory,
         ContentKind::NetEgress,
@@ -420,6 +433,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::OptionsBoard => "期权/0DTE",
             ContentKind::PredictionBoard => "预测市场",
             ContentKind::PmBinance => "币安预测(BTC 5m)",
+            ContentKind::PmReplay => "预测市场回放",
             ContentKind::MarketMap => "全市场雷达",
             ContentKind::Observatory => "接口观察终端",
             ContentKind::NetEgress => "网络出口",
@@ -506,6 +520,7 @@ impl PaneSetup {
                 | ContentKind::OptionsBoard
                 | ContentKind::PredictionBoard
                 | ContentKind::PmBinance
+                | ContentKind::PmReplay
                 | ContentKind::MarketMap
                 | ContentKind::Observatory
                 | ContentKind::NetEgress
@@ -544,6 +559,7 @@ impl PaneSetup {
             | ContentKind::OptionsBoard
             | ContentKind::PredictionBoard
             | ContentKind::PmBinance
+            | ContentKind::PmReplay
             | ContentKind::MarketMap
             | ContentKind::Observatory
             | ContentKind::NetEgress
