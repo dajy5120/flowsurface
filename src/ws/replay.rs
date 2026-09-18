@@ -115,11 +115,12 @@ pub fn subscription(redis_url: String, ticker_info: TickerInfo, run: String) -> 
                         Ok(b) if !b.is_empty() => {
                             let trades: Box<[Trade]> = b
                                 .iter()
+                                // 定点直传：不经 f32/f64（docs/28 §5.2）。
                                 .map(|t| Trade {
                                     time: UnixMs(t.ts),
                                     is_sell: t.side == 2,
-                                    price: Price::from_f32(t.px as f32),
-                                    qty: Qty::from_f32(t.qty as f32),
+                                    price: t.price(),
+                                    qty: t.qty(),
                                 })
                                 .collect();
                             if tx.blocking_send(trades).is_err() {

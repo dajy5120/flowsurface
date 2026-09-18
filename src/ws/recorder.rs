@@ -235,7 +235,7 @@ pub fn config_exchange() -> String {
     match host {
         "fstream.binance.com" => "Binance 永续(USDT-M)".into(),
         "stream.binance.com" => "Binance 现货".into(),
-        h if h.is_empty() => "—".into(),
+        "" => "—".into(),
         h => h.to_string(),
     }
 }

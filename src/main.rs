@@ -950,9 +950,21 @@ impl Flowsurface {
         // 实时时间窗之外根本看不见——Tardis 数据距今数月，这一条是必须的）。
         let is_replay = is_recorded || is_tardis;
         let is_selfdata = active_ws.as_deref() == Some(ws::workspace::WS_SELFDATA);
+        // 「实时数据回测」工作区 + **有实盘 run 正在跑** → 图切到 Nautilus 管线（docs/28 §5）。
+        //
+        // 目的不是「多一个源可选」，是**让图表显示策略眼里看到的东西**：策略在 Nautilus 里
+        // 看到的簿，和图表用 flowsurface 自己那条流画出来的，永远有细微差异；调策略时
+        // 那个差异就是噪音。
+        //
+        // 只在跑起来时切（docs/28 §5.1）：没有活动 run 时仍走原生实时，否则这个工作区
+        // 平时就是一片空白。
+        let is_live_ws = active_ws.as_deref() == Some(ws::workspace::WS_LIVE);
+        let live_feed =
+            is_live_ws && self.ws_active.as_ref().is_some_and(|a| a.mode == "live");
         // 回放类工作区：禁止图表向交易所补拉历史 K 线（那些蜡烛与本次回测无关，
         // 混在旁边看着却一模一样）。判定点在 dashboard 深处，走进程级旁路。
-        ws::workspace::set_replay_mode(is_replay || is_selfdata);
+        // `live_feed` 也算在内——它同样是「图上的数据不来自交易所原生流」。
+        ws::workspace::set_replay_mode(is_replay || is_selfdata || live_feed);
         let ws_redis_url = std::env::var("WS_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
@@ -960,7 +972,11 @@ impl Flowsurface {
         // iced 会把订阅连同底下的 WS 一起丢掉——**连接是真的断**，
         // 不是「界面不显示了」。这是面板上唯一能停掉 Cockpit 自身出口的地方，
         // systemctl 管不着本进程
-        let exchange_streams = if is_replay || is_selfdata || !ws::egress::streams_enabled() {
+        let exchange_streams = if is_replay
+            || is_selfdata
+            || live_feed
+            || !ws::egress::streams_enabled()
+        {
             Subscription::none()
         } else {
             self.active_dashboard().market_subscriptions(&self.handles).map(Message::MarketWsEvent)
@@ -971,17 +987,21 @@ impl Flowsurface {
         // 只靠 selfdata 桥不行——它读的是 `result.json`，那东西要等回测整个跑完才存在，
         // 于是全程一片空白、结束瞬间才一次性出现。两者并存：replay 管过程，selfdata 管
         // 跑完后的定稿（含完整价格序列与成交点）。
-        let ws_replay_streams = if is_replay || is_selfdata {
+        let ws_replay_streams = if is_replay || is_selfdata || live_feed {
             self.active_dashboard()
                 .ws_replay_subscriptions(
                     ws_redis_url.clone(),
-                    // **只在回测态传 run**。这个过滤以前在 replay 线程内部做，
+                    // **回测与实盘都传**。这个过滤以前在 replay 线程内部做，
                     // 随「订阅只服务自身 run」一起挪到这里（docs/28 §4.4）——
                     // 判据留在一处，否则两处各自演化迟早对不上。
-                    // 空串 = 没有活动回测，订阅建起来即空转退出。
+                    //
+                    // 实盘也算：docs/28 §5 的 Nautilus 管线走的是同一条
+                    // `ws:bt:{run}:trades`（TradeTap 回测/实盘同用）。
+                    // `stopped` 态不传——那时没有数据在产。
+                    // 空串 = 没有活动运行，订阅建起来即退出，不空转。
                     self.ws_active
                         .as_ref()
-                        .filter(|a| a.mode == "backtest")
+                        .filter(|a| a.mode == "backtest" || a.mode == "live")
                         .map(|a| a.run_id.clone())
                         .unwrap_or_default(),
                 )
