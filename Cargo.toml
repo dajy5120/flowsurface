@@ -74,9 +74,15 @@ redis = { version = "1", features = ["streams"] }
 tokio = { version = "1", features = ["sync"] } # replay：阻塞 redis 线程 → async 订阅的桥
 rmpv = "1" # 解码通道① events.* msgpack（OrderFilled/Position），F3 订单/PnL
 rusqlite = { version = "0.32", features = ["bundled"] } # F6-P2 Factory pane：只读轮询 registry.sqlite
-# F6-P3 Recorder pane「今日行数」：只读 parquet footer 取 num_rows（default-features=false：
-# 不引入 arrow/压缩重依赖——num_rows 在 Thrift 页脚元数据里，无需解压列数据）。
-parquet = { version = "55", default-features = false }
+# F6-P3 Recorder pane：① 页脚取 num_rows（不需解压）；② ⑤ 按日覆盖要读 `ts_recv` 列。
+#
+# **必须开 zstd**：录制器用 ZSTD 写（`wealthspring-recorder/src/writer.rs`），
+# 不开的话列读取全部静默失败（返回 Err，一行数据都读不出来）。
+# 仍不引入 arrow——列读走 parquet 自己的 `ColumnReader`，不需要 arrow 那套。
+#
+# 为什么非读列不可：只读页脚 min/max 算出的「最长无洞段」比真值**高估 1.27~4.61 倍**
+# （实测 2026-09-18：页脚 49.2 分钟 vs 真值 10.7 分钟）——段内的洞页脚看不见。
+parquet = { version = "55", default-features = false, features = ["zstd"] }
 
 [features]
 debug = ["iced/hot"]

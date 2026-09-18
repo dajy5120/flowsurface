@@ -159,6 +159,134 @@ fn details(
     col.into()
 }
 
+fn hm(ns: i64) -> String {
+    let secs = ns / 1_000_000_000;
+    let (h, m) = ((secs / 3600) % 24, (secs % 3600) / 60);
+    format!("{h:02}:{m:02}")
+}
+
+fn dur(secs: i64) -> String {
+    if secs >= 3600 {
+        format!("{:.1}h", secs as f64 / 3600.0)
+    } else {
+        format!("{}分", secs / 60)
+    }
+}
+
+/// ⑤ 按日覆盖：**那天到底录到了哪些时间段、洞在哪、能不能跑**。
+///
+/// ④ 回答「哪天有多少数据」，回答不了「那天能不能跑回测」——实测 2026-09-18 有
+/// 6.1 小时数据却被打成 12 段、最长无洞段只有 10.7 分钟；2026-08-14 同样一整天，
+/// 最长无洞段是 762 分钟。同样叫「有数据」，一个能跑一个不能。
+///
+/// **不打 A/B/C 等级**，这是有意的：回测入口的窗口体检已经在用这三个字母
+/// （`recorder_health`，判据含延迟/量纲/跨流验证）。同一个字母在两处表示不同的东西，
+/// 比不标还糟——那正是 docs/28 §3.3 立「判级口径必须源无关」时要消灭的。
+/// 这里给的是**最长可跑窗口**：一个能直接抄进策略文件的数，不需要翻译。
+fn coverage(app: &RecorderPaneState, st: &super::recorder_readout::SvcState) -> Element<'static, RecorderMsg> {
+    let hit: Vec<&super::recorder_readout::DayCoverage> = st
+        .coverage
+        .iter()
+        .filter(|c| app.det_sym == ALL || c.sym == app.det_sym)
+        .collect();
+
+    let mut col = column![
+        text("⑤ 按日覆盖（那天真正录到的时间段 · 洞在哪 · 最长可跑窗口）")
+            .size(16)
+            .color(Color::from_rgb(0.55, 0.9, 0.75)),
+        text(
+            "区间取自 parquet 页脚统计，只看得见**段间**的洞（段是 600 秒轮转）——             数字是「至少这么碎」。能不能跑最终由回测入口的窗口体检说了算。"
+        )
+        .size(11)
+        .color(Color::from_rgb(0.55, 0.6, 0.65)),
+    ]
+    .spacing(6);
+
+    col = col.push(
+        row![
+            cell("币种", 90.0),
+            cell("日期", 100.0),
+            cell("覆盖时长", 80.0),
+            cell("连续段", 60.0),
+            cell("缺口", 55.0),
+            cell("最长可跑窗口", 150.0),
+            cell("录到的时间段 / 缺失的时间段", 420.0),
+        ]
+        .spacing(6),
+    );
+
+    for c in hit.iter().take(app.det_limit) {
+        // 最长可跑窗口是这一行里最该被看见的数：不足 60 分钟基本挑不出可用回测窗口。
+        let (lw, lc) = if c.longest_s >= 3600 {
+            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), Color::from_rgb(0.45, 0.85, 0.5))
+        } else if c.longest_s >= 600 {
+            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), Color::from_rgb(0.85, 0.8, 0.4))
+        } else {
+            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), Color::from_rgb(0.9, 0.5, 0.4))
+        };
+        let runs: String = c
+            .runs
+            .iter()
+            .take(3)
+            .map(|&(a, b)| format!("{}~{}", hm(a), hm(b)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let gaps: String = c
+            .gaps
+            .iter()
+            .take(3)
+            .map(|&(a, b)| format!("{}~{}({})", hm(a), hm(b), dur((b - a) / 1_000_000_000)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let more = |n: usize, k: usize| if n > k { format!(" +{}", n - k) } else { String::new() };
+        col = col.push(
+            row![
+                cell(&c.sym, 90.0),
+                cell(&c.date, 100.0),
+                cell(&dur(c.covered_s), 80.0),
+                cell(&c.runs.len().to_string(), 60.0),
+                container(
+                    text(c.gaps.len().to_string()).size(12).color(if c.gaps.is_empty() {
+                        Color::from_rgb(0.45, 0.85, 0.5)
+                    } else {
+                        Color::from_rgb(0.85, 0.8, 0.4)
+                    })
+                )
+                .width(Length::Fixed(55.0)),
+                container(text(lw).size(12).color(lc)).width(Length::Fixed(150.0)),
+                cell(
+                    &format!(
+                        "✓ {}{}   ✗ {}{}",
+                        runs,
+                        more(c.runs.len(), 3),
+                        if gaps.is_empty() { "无".into() } else { gaps },
+                        more(c.gaps.len(), 3)
+                    ),
+                    420.0
+                ),
+            ]
+            .spacing(6),
+        );
+    }
+    if hit.is_empty() {
+        // 首轮要读约 1.2 万个 parquet 的 ts_recv 列（~21 秒），期间 `started` 还是 false。
+        // 这时显示「无覆盖数据」会让人以为坏了——它只是还没算完。
+        let msg = if st.started {
+            "(无覆盖数据)"
+        } else {
+            "首次扫描中…（要读一遍各段的时间戳列，约 20 秒；之后按 mtime 缓存，几乎零成本）"
+        };
+        col = col.push(text(msg).size(12).color(Color::from_rgb(0.5, 0.5, 0.5)));
+    } else if hit.len() > app.det_limit {
+        col = col.push(
+            text(format!("（还有 {} 天未显示，用上方「显示更多」）", hit.len() - app.det_limit))
+                .size(11)
+                .color(Color::from_rgb(0.55, 0.6, 0.65)),
+        );
+    }
+    col.into()
+}
+
 /// 渲染录制驾驶舱（控制 + 实况 + 总览 + 明细）。
 pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     let st = super::recorder_readout::snapshot();
@@ -381,9 +509,19 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     let body = row![left, right].spacing(18).height(Length::Shrink);
 
     container(scrollable(
-        column![config, vgap(8.0), syms_col, vgap(14.0), body, vgap(14.0), details(app, &st)]
-            .spacing(10)
-            .padding(14),
+        column![
+            config,
+            vgap(8.0),
+            syms_col,
+            vgap(14.0),
+            body,
+            vgap(14.0),
+            details(app, &st),
+            vgap(14.0),
+            coverage(app, &st),
+        ]
+        .spacing(10)
+        .padding(14),
     ))
     .width(Length::Fill)
     .height(Length::Fill)
