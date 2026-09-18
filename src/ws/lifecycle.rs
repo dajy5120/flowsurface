@@ -103,30 +103,26 @@ mod tests {
         }
     }
 
-    /// **故意不进 target 的守护**，附理由。
+    /// **这个名单必须是空的。**
     ///
-    /// `ws-stack.target` 带 `BindsTo=ws-cockpit.service`：重启界面会连带停掉每个成员。
-    /// 对大多数守护这没关系（数据事后能从交易所补），但对下面这些不行。
+    /// 它曾经有一项：`ws-pm-recorder`，理由是「预测市场数据没有第三方历史源，
+    /// 绑进 target 等于每次重启 Cockpit 都在数据里打一个补不回来的洞」。
     ///
-    /// 写成名单而不是放宽断言：豁免要**逐个说清理由**，否则下一个人加服务时
-    /// 漏绑 target，测试也照样绿。
-    const NOT_IN_TARGET: &[(&str, &str)] = &[(
-        "ws-pm-recorder",
-        "预测市场数据没有第三方历史源，5 分钟市场结束即消失。绑进 target 意味着         每次重启 Cockpit 都在数据里打一个洞，而那个洞永远补不回来。         宁可关界面时它继续跑——多跑一会儿的代价只是几 MB 盘。",
-    )];
+    /// 那个理由本身是真的，但**取舍不是由代码来做的**。用户要的是「关闭窗口停止录制，
+    /// 不要程序关了还在后台跑」——这条优先于数据连续性。写成豁免等于拿一个技术理由
+    /// 推翻了产品决定，而且是悄悄推翻的：界面关了，进程还在，用户不会知道。
+    ///
+    /// 留着这个空名单和这段话，是为了下次再想加豁免时先读一遍：
+    /// 代价该写在 unit 文件的注释里让人看见，不该变成代码里的例外。
+    const NOT_IN_TARGET: &[(&str, &str)] = &[];
 
     #[test]
-    fn 豁免名单不与target重复() {
-        // 两边都列 = 到底该不该被连带停，没有答案。
-        let Ok(h) = std::env::var("HOME") else { return };
-        let p = std::path::PathBuf::from(h).join(".config/systemd/user").join(TARGET);
-        let Ok(target) = std::fs::read_to_string(&p) else { return };
-        for (u, _) in NOT_IN_TARGET {
-            assert!(
-                !target.contains(&format!("{u}.service")),
-                "{u} 既在豁免名单里又在 {TARGET} 里——删掉其中一处"
-            );
-        }
+    fn 豁免名单为空() {
+        assert!(
+            NOT_IN_TARGET.is_empty(),
+            "又给某个守护开了豁免——先读 NOT_IN_TARGET 上面那段。\n\
+             「关窗即停」是用户的取舍，数据连续性的代价写进 unit 注释，不写成代码例外。"
+        );
     }
 
     #[test]
