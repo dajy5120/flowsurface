@@ -16,6 +16,7 @@ pub mod egress;
 pub mod paths;
 pub mod lifecycle;
 pub mod procs;
+pub mod provenance;
 pub mod procs_view;
 pub mod egress_view;
 pub mod c4_view;

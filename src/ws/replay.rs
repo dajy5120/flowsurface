@@ -13,7 +13,6 @@ use exchange::{Kline, TickerInfo, Timeframe, Trade, Volume};
 use iced::Subscription;
 use iced::futures::SinkExt;
 
-use super::active_run::ActiveRunWatcher;
 use super::bt_trades::BtTradeConsumer;
 
 fn now_ms() -> u64 {
@@ -79,14 +78,24 @@ pub fn subscription(redis_url: String, ticker_info: TickerInfo, run: String) -> 
     Subscription::run_with(ReplayId { redis_url, ticker: ticker_info, run }, |id: &ReplayId| {
         let redis_url = id.redis_url.clone();
         let ticker_info = id.ticker;
+        let run = id.run.clone();
         iced::stream::channel(256, move |mut output: iced::futures::channel::mpsc::Sender<Event>| async move {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Box<[Trade]>>(64);
 
-            // 阻塞线程：跟随回测 run 轮询 ws:bt:{run}:trades，转 Trade 批量回传。
+            // 阻塞线程：只读**本订阅身份对应的那一个 run**，转 Trade 批量回传。
+            //
+            // 这里以前还自己轮询 `ws:active_run` 并在 run 变化时换 consumer——
+            // 与 `ReplayId.run` 进订阅身份是**同一件事的两套机制**，而且互相打架：
+            // 线程可以悄悄切去服务另一个 run，于是这条订阅发出的帧与它的身份不符，
+            // 上一次运行的成交会落进本次的图里（docs/28 §4.4）。
+            //
+            // 现在只有一套：run 变 → App 重发 → `ReplayId` 变 → iced 丢掉旧订阅重建新的。
+            // 「丢弃来源不符的帧」因此是**结构性保证**，不靠运行时比对。
             std::thread::spawn(move || {
-                let mut watcher = ActiveRunWatcher::connect(&redis_url).ok();
-                let mut active: Option<String> = None;
-                let mut consumer: Option<BtTradeConsumer> = None;
+                if run.is_empty() {
+                    return; // 没有活动回测：本订阅无事可做，直接退出而不是空转轮询
+                }
+                let mut consumer = BtTradeConsumer::connect(&redis_url, &run).ok();
                 loop {
                     // 对端存活探测：**每轮无条件做一次**。
                     // 原先唯一的检测点是 `tx.blocking_send(..).is_err()`，而它嵌在
@@ -95,16 +104,8 @@ pub fn subscription(redis_url: String, ticker_info: TickerInfo, run: String) -> 
                     if tx.is_closed() {
                         break;
                     }
-                    let want = watcher
-                        .as_mut()
-                        .and_then(|w| w.poll().ok().flatten())
-                        .filter(|ar| ar.mode == "backtest")
-                        .map(|ar| ar.run_id);
-                    if want != active {
-                        active = want.clone();
-                        consumer = active
-                            .as_ref()
-                            .and_then(|r| BtTradeConsumer::connect(&redis_url, r).ok());
+                    if consumer.is_none() {
+                        consumer = BtTradeConsumer::connect(&redis_url, &run).ok();
                     }
                     let Some(c) = consumer.as_mut() else {
                         std::thread::sleep(Duration::from_millis(300));
@@ -127,8 +128,7 @@ pub fn subscription(redis_url: String, ticker_info: TickerInfo, run: String) -> 
                         }
                         Ok(_) => {}
                         Err(_) => {
-                            consumer = None;
-                            active = None;
+                            consumer = None; // 下一轮重连同一个 run，不改服务对象
                             std::thread::sleep(Duration::from_millis(500));
                         }
                     }
@@ -188,4 +188,46 @@ pub fn subscription(redis_url: String, ticker_info: TickerInfo, run: String) -> 
             }
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hash::{Hash, Hasher};
+
+    use crate::ws::bt_trades::bt_trades_key;
+
+    fn hash_of(id: &ReplayId) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut h);
+        h.finish()
+    }
+
+    fn id(run: &str) -> ReplayId {
+        use exchange::adapter::Exchange;
+        use exchange::Ticker;
+        ReplayId {
+            redis_url: "redis://127.0.0.1:6379".into(),
+            ticker: TickerInfo::new(Ticker::new("BTCUSDT", Exchange::BinanceLinear), 0.1, 0.001, None),
+            run: run.into(),
+        }
+    }
+
+    /// run 必须进订阅身份——这是「丢弃来源不符的帧」的**结构性保证**（docs/28 §4.4）。
+    ///
+    /// 身份里带了 run，iced 才会在 run 变化时丢掉旧订阅重建新的；旧订阅连同它那条
+    /// 到 `ws:bt:{旧run}:trades` 的连接一起消失，上一次的成交不可能再落进本次的图。
+    /// 不带的话就得在运行时逐帧比对，而帧本身不携带 run——比无可比。
+    #[test]
+    fn run_进订阅身份() {
+        assert_ne!(hash_of(&id("BT-1")), hash_of(&id("BT-2")), "run 不同必须换身份");
+        assert_eq!(hash_of(&id("BT-1")), hash_of(&id("BT-1")), "同 run 必须同身份");
+        assert_ne!(hash_of(&id("")), hash_of(&id("BT-1")), "空 run（无活动回测）也是一种身份");
+    }
+
+    #[test]
+    fn 流键按_run_分开() {
+        assert_eq!(bt_trades_key("BT-1"), "ws:bt:BT-1:trades");
+        assert_ne!(bt_trades_key("BT-1"), bt_trades_key("BT-2"));
+    }
 }

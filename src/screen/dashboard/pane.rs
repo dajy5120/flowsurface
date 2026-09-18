@@ -613,6 +613,10 @@ impl State {
                 .height(widget::PANE_CONTROL_BTN_HEIGHT);
 
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
+            // 数据来源徽标（docs/28 §4.2）：**只给吃行情的面板，且常驻显示**。
+            // 本分支的条件就是 `stream_pair_kind()` 非空——恰好是那 7 个面板；
+            // 其余 17 个是零交易所流的读数面板，给它们加徽标是纯噪音。
+            top_left_buttons = top_left_buttons.push(provenance_badge());
         } else if !matches!(
             self.content,
             Content::Starter
@@ -2770,6 +2774,38 @@ impl PartialEq for Content {
                 | (Content::Ladder(_), Content::Ladder(_))
         )
     }
+}
+
+/// 渲染数据来源徽标（docs/28 §4.2）。
+///
+/// 常驻而非藏进菜单：最贵的误会不是「选错源」，是**不知道自己在比两个源**——
+/// 图上是管线 A 的实时、旁边的特征算的是管线 B 的历史，差异细微到足以让人
+/// 追几天不存在的 bug（docs/20 §4、docs/27 §2.1 各踩过一次）。
+///
+/// tooltip 直接用 iced 原生而不走 `widget::tooltip` 助手：后者要 `&'a str`，
+/// 而徽标详情是现算出来的 `String`，借不到那个生命周期。
+fn provenance_badge<'a>() -> Element<'a, Message> {
+    use crate::ws::provenance::{self, Tone};
+
+    let b = provenance::badge(crate::ws::workspace::replay_mode());
+    let color = match b.tone {
+        Tone::Live => iced::Color::from_rgb(0.45, 0.72, 0.55),
+        Tone::Replay => iced::Color::from_rgb(0.55, 0.65, 0.95),
+        Tone::Warn => iced::Color::from_rgb(0.90, 0.72, 0.35),
+    };
+    let chip = container(
+        text(b.label).size(style::text_size::BODY).color(color).align_y(Alignment::Center),
+    )
+    .padding(padding::left(6).right(6))
+    .height(widget::PANE_CONTROL_BTN_HEIGHT)
+    .align_y(Alignment::Center);
+
+    iced::widget::tooltip(
+        chip,
+        container(text(b.detail).size(style::text_size::BODY)).style(style::tooltip).padding(8),
+        tooltip::Position::Bottom,
+    )
+    .into()
 }
 
 fn link_group_modal<'a>(

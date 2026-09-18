@@ -975,7 +975,15 @@ impl Flowsurface {
             self.active_dashboard()
                 .ws_replay_subscriptions(
                     ws_redis_url.clone(),
-                    self.ws_active.as_ref().map(|a| a.run_id.clone()).unwrap_or_default(),
+                    // **只在回测态传 run**。这个过滤以前在 replay 线程内部做，
+                    // 随「订阅只服务自身 run」一起挪到这里（docs/28 §4.4）——
+                    // 判据留在一处，否则两处各自演化迟早对不上。
+                    // 空串 = 没有活动回测，订阅建起来即空转退出。
+                    self.ws_active
+                        .as_ref()
+                        .filter(|a| a.mode == "backtest")
+                        .map(|a| a.run_id.clone())
+                        .unwrap_or_default(),
                 )
                 .map(Message::MarketWsEvent)
         } else {

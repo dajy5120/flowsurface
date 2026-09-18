@@ -12,6 +12,16 @@ pub struct ActiveRun {
     pub mode: String,
     #[serde(default)]
     pub symbol: String,
+    /// 数据来源（`"tardis"` / `"recorder"`；docs/28 §4.2）。
+    ///
+    /// **可缺省**：control_server 拉起进程时那一次广播还不知道策略声明了什么源，
+    /// runner 读完策略文件后会订正一次（`run_common.republish_active_run`）。
+    /// 缺省时面板显示「来源未声明」而不是猜一个——猜错比不显示更误导。
+    #[serde(default)]
+    pub source: String,
+    /// 入口体检等级（`"A"`/`"B"`/`"C"`）。同样可缺省。
+    #[serde(default)]
+    pub grade: String,
 }
 
 /// 持久连接轮询活动 run。
@@ -106,7 +116,29 @@ mod tests {
     use super::*;
 
     fn ar(run: &str, mode: &str) -> ActiveRun {
-        ActiveRun { run_id: run.into(), mode: mode.into(), symbol: "BTCUSDT".into() }
+        ActiveRun {
+            run_id: run.into(),
+            mode: mode.into(),
+            symbol: "BTCUSDT".into(),
+            source: "tardis".into(),
+            grade: "A".into(),
+        }
+    }
+
+    /// 旧格式（没有 source/grade）必须还能解析——control_server 那一次广播就是旧格式。
+    #[test]
+    fn 缺省字段可解析() {
+        let old: ActiveRun =
+            serde_json::from_str(r#"{"run_id":"BT-1","mode":"backtest","symbol":"BTCUSDT"}"#)
+                .expect("旧格式应可解析");
+        assert_eq!(old.source, "");
+        assert_eq!(old.grade, "");
+        let new: ActiveRun = serde_json::from_str(
+            r#"{"run_id":"BT-1","mode":"backtest","symbol":"BTCUSDT","source":"tardis","grade":"B"}"#,
+        )
+        .expect("新格式应可解析");
+        assert_eq!(new.source, "tardis");
+        assert_eq!(new.grade, "B");
     }
 
     /// 全部断言合在一个测试里**是有意的**：`CURRENT` 是进程级全局，拆成多个测试会并行
