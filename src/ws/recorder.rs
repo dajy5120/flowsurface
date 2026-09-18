@@ -71,7 +71,21 @@ pub struct RecorderPaneState {
     pub syms: BTreeMap<String, SymSel>,
     pub custom: String,
     pub hint: String,
+    /// 明细表筛选：币种（[`ALL`] = 不筛）。
+    pub det_sym: String,
+    /// 明细表筛选：数据类型（[`ALL`] = 不筛）。
+    pub det_stream: String,
+    /// 明细表当前显示的行数上限。数据湖铺开是几千行，一次全渲染会把帧率拖垮，
+    /// 所以默认只出一屏，点「显示更多」再加。
+    pub det_limit: usize,
 }
+
+/// 筛选下拉里的「不筛选」项。用字面量而不是 `Option<String>`：
+/// `pick_list` 要求选项类型 `Display + Clone + Eq`，多包一层 Option 得自己实现，不值当。
+pub const ALL: &str = "全部";
+
+/// 明细表默认行数（约一屏）。
+pub const DET_PAGE: usize = 60;
 
 impl Default for RecorderPaneState {
     fn default() -> Self {
@@ -106,6 +120,9 @@ impl RecorderPaneState {
             syms,
             custom: String::new(),
             hint: "24/7 守护录制:启停服务、改保存位置/币种、看已录总览".into(),
+            det_sym: ALL.into(),
+            det_stream: ALL.into(),
+            det_limit: DET_PAGE,
         }
     }
 }
@@ -126,6 +143,12 @@ pub enum RecorderMsg {
     Refresh,
     /// 跑一次 F0 72h 验收（覆盖率 ≥99% × 2 整日，报告写数据目录）。
     RunAccept,
+    /// 明细表按币种筛选。
+    DetailSym(String),
+    /// 明细表按数据类型筛选。
+    DetailStream(String),
+    /// 明细表多显示一页。
+    DetailMore,
 }
 
 /// 处理一条交互:改状态 + 必要的副作用(systemctl / 写 toml)。
@@ -159,6 +182,17 @@ pub fn handle(st: &mut RecorderPaneState, msg: RecorderMsg) {
             st.hint.clear(); // 刷新无需反馈文字，时间戳自己会跳
         }
         RecorderMsg::RunAccept => st.hint = super::recorder_readout::accept_start(),
+        // 换筛选条件要把行数上限打回一页：上一轮翻开的几百行对新条件没有意义，
+        // 留着只会让人以为「筛完还是这么多」。
+        RecorderMsg::DetailSym(s) => {
+            st.det_sym = s;
+            st.det_limit = DET_PAGE;
+        }
+        RecorderMsg::DetailStream(s) => {
+            st.det_stream = s;
+            st.det_limit = DET_PAGE;
+        }
+        RecorderMsg::DetailMore => st.det_limit += DET_PAGE,
     }
 }
 
@@ -177,6 +211,33 @@ pub fn config_data_dir() -> String {
         .ok()
         .and_then(|c| parse_toml(&c).0)
         .unwrap_or_else(|| "~/ws-data".into())
+}
+
+/// 录制来源交易所的展示名。
+///
+/// 从 recorder.toml 的 `ws_url` 推，**不写死**：端点是可配的
+/// （`crates/wealthspring-recorder/src/config.rs` 默认 `wss://fstream.binance.com`），
+/// 写死的话改了端点面板还显示 Binance，等于在说谎。
+pub fn config_exchange() -> String {
+    let url = std::fs::read_to_string(toml_path())
+        .ok()
+        .and_then(|c| {
+            c.lines()
+                .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+                .find_map(|l| {
+                    l.strip_prefix("ws_url").and_then(|r| {
+                        r.trim_start().strip_prefix('=').map(|v| v.trim().trim_matches('"').to_string())
+                    })
+                })
+        })
+        .unwrap_or_else(|| "wss://fstream.binance.com".into());
+    let host = url.split("//").nth(1).unwrap_or(&url).split('/').next().unwrap_or("");
+    match host {
+        "fstream.binance.com" => "Binance 永续(USDT-M)".into(),
+        "stream.binance.com" => "Binance 现货".into(),
+        h if h.is_empty() => "—".into(),
+        h => h.to_string(),
+    }
 }
 
 /// 展开 `~` 前缀为绝对路径(供 poller 扫数据湖)。
