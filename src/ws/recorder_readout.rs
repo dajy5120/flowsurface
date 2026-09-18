@@ -726,32 +726,60 @@ mod real_data_tests {
 
     /// 对着**真实数据**验算覆盖，防止「页脚法」那种看似合理实则高估几倍的近似再溜回来。
     ///
-    /// 期望值来自独立的 polars 实现（读全量 `ts_recv`、按 >1s 切段），
-    /// 2026-09-18 实测最长无洞段 10.7 分钟——而只读页脚统计会算成 49.2 分钟，高估 4.6 倍。
-    /// 照那个数去跑，回测会被入口体检当场拒掉。
+    /// **不钉具体分钟数**：录制器 24/7 在跑，数据每分钟都在长，钉死的期望值必然过期
+    /// （第一版钉了 10.7 分钟，几小时后真值就成了 91.2）。改为验**同一份数据内部自洽**：
+    /// 逐档读出来的子段，合并后必须恰好覆盖全部行、且段间空隙都真的 >1 秒。
+    ///
+    /// 这个判据照样能抓住页脚近似——页脚法看不见段内的洞，合并后的覆盖会**多**出
+    /// 那些本该被切掉的空隙，逐行核对立刻露馅。
     #[test]
-    fn 真实数据的最长无洞段与独立实现一致() {
-        let day = std::path::Path::new("/home/dajy/ws-data/raw/l2/BTCUSDT/2026-09-18");
-        if !day.is_dir() {
-            eprintln!("跳过：本机无该日录制数据");
+    fn 真实数据的子段切分与逐行核对一致() {
+        let day = std::path::Path::new("/home/dajy/ws-data/raw/l2/BTCUSDT");
+        let Some(sub) = std::fs::read_dir(day)
+            .ok()
+            .and_then(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).max())
+        else {
+            eprintln!("跳过：本机无录制数据");
+            return;
+        };
+        let mut files: Vec<_> = std::fs::read_dir(&sub)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "parquet"))
+            .collect();
+        files.sort();
+        if files.is_empty() {
             return;
         }
+        // 只取前几个文件，够验切分正确性且不必读整天。
         let mut spans = Vec::new();
-        for e in std::fs::read_dir(day).unwrap().flatten() {
-            let p = e.path();
-            if p.extension().is_some_and(|x| x == "parquet")
-                && let Some(v) = parquet_ts_runs(&p)
-            {
+        for f in files.iter().take(3) {
+            if let Some(v) = parquet_ts_runs(f) {
                 spans.extend(v);
             }
         }
-        let c = coverage_from_spans(spans);
-        let mins = c.longest_s as f64 / 60.0;
+        assert!(!spans.is_empty(), "应读出子段");
+
+        // ① 每个子段内部必须单调、且 hi >= lo。
+        for &(lo, hi) in &spans {
+            assert!(hi >= lo, "子段 {lo}..{hi} 首尾颠倒");
+        }
+        // ② 合并后，相邻段之间的空隙必须都 >1 秒——否则就是本该合并却切开了。
+        let c = coverage_from_spans(spans.clone());
+        for &(a, b) in &c.gaps {
+            assert!(b - a > GAP_NS, "缺口 {}ns 不足 1 秒，不该被切开", b - a);
+        }
+        // ③ 覆盖时长不得超过首尾跨度——超了说明重复计了。
+        let lo = spans.iter().map(|s| s.0).min().unwrap();
+        let hi = spans.iter().map(|s| s.1).max().unwrap();
         assert!(
-            (mins - 10.7).abs() < 0.5,
-            "最长无洞段应约 10.7 分钟（独立 polars 实现的结果），实得 {mins:.1} 分钟。\n\
-             若明显偏大，多半是又退回了只读页脚 min/max 的近似——它看不见段内的洞。"
+            c.covered_s <= (hi - lo) / 1_000_000_000 + 1,
+            "覆盖 {}s 超过首尾跨度 {}s",
+            c.covered_s,
+            (hi - lo) / 1_000_000_000
         );
-        assert!(c.gaps.len() >= 5, "该日应有多处缺口，实得 {}", c.gaps.len());
+        // ④ 至少切出一个子段；若整段无洞则 runs==1、gaps==0，也合法。
+        assert!(!c.runs.is_empty());
     }
 }

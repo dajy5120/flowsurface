@@ -33,6 +33,7 @@ pub mod orders_view;
 pub mod options_readout;
 pub mod options_view;
 pub mod prediction;
+pub mod pm_binance_readout;
 pub mod prediction_readout;
 pub mod prediction_view;
 pub mod customchart;
