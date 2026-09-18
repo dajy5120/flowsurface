@@ -941,15 +941,20 @@ impl Flowsurface {
         // 不再跟全局三态——「回测」工作区只走回测 replay（replay 自身已按 active_run mode=backtest
         // 自门控：无回测运行时空闲，绝不混入实时），其余工作区（官方/实盘…）只走 FS 原生实时。
         // 故即便后台正跑回测，「实盘」工作区图表仍是实时；切到「回测」才看回测行情。
-        // 数据源跟随活动工作区：录制数据回测 / Tardis 历史回放→replay；自有数据回测→result.json 桥；
-        // 其余→实时。两个回放工作区共用同一条 `ws:bt:{run}:trades` 入图链路（docs/20 Phase 5）。
+        // 数据源跟随活动工作区：回测 / Tardis 历史回放→replay；回测另加 result.json 桥；
+        // 其余→实时。回放工作区共用同一条 `ws:bt:{run}:trades` 入图链路（docs/20 Phase 5）。
         let active_ws = self.layout_manager.active_layout_id().map(|l| l.name.clone());
-        let is_recorded = active_ws.as_deref() == Some(ws::workspace::WS_RECORDED);
+        let is_backtest = active_ws.as_deref() == Some(ws::workspace::WS_BACKTEST);
         let is_tardis = active_ws.as_deref() == Some(ws::workspace::WS_TARDIS);
         // 回放态：开 replay 订阅 + 关实时流（否则实时行情会盖掉回放，且历史 K 线落在
         // 实时时间窗之外根本看不见——Tardis 数据距今数月，这一条是必须的）。
-        let is_replay = is_recorded || is_tardis;
-        let is_selfdata = active_ws.as_deref() == Some(ws::workspace::WS_SELFDATA);
+        let is_replay = is_backtest || is_tardis;
+        // 「回测」工作区**两条都开**（docs/28 §4.3 合并）：replay 管过程（边跑边画）、
+        // selfdata 管跑完后的定稿（完整价格序列与成交点）。
+        //
+        // 合并前只有「自有数据回测」开 selfdata，「录制数据回测」没开——于是录制路跑完
+        // 之后图上只有过程中 replay 推过的那些，没有定稿。合并顺带补上了这个缺口。
+        let is_selfdata = is_backtest;
         // 「实时数据回测」工作区 + **有实盘 run 正在跑** → 图切到 Nautilus 管线（docs/28 §5）。
         //
         // 目的不是「多一个源可选」，是**让图表显示策略眼里看到的东西**：策略在 Nautilus 里

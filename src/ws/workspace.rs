@@ -20,8 +20,13 @@ use crate::screen::dashboard::Dashboard;
 /// 工作区固定名字（侧边栏顺序）。三种「回测」按数据来源区分：自有 / 录制 / 实时。
 pub const WS_OFFICIAL: &str = "官方原生";
 pub const WS_LIVE: &str = "实时数据回测"; // 实时 Binance 行情 + Sandbox/live
-pub const WS_SELFDATA: &str = "自有数据回测"; // 脚本自带数据（result.json）
-pub const WS_RECORDED: &str = "录制数据回测"; // 录制历史 ~/ws-data（replay）
+/// 回测（已购 Tardis 与自录数据**合一**，docs/28 §4.3）。
+///
+/// 合并前是「自有数据回测」「录制数据回测」两个。管线统一之后它们已经是同一件事的两个源：
+/// 同一个 `BacktestSource` 契约、同一套判级口径、同一条流式喂法、同样的 result.json 与
+/// tearsheet，布局也几乎一样。当前用的是哪个源由图表上的**来源徽标**显示（docs/28 §4.2），
+/// 比用工作区名字区分可信——徽标说的是本次运行**实际用的**源与体检等级。
+pub const WS_BACKTEST: &str = "回测";
 pub const WS_RECORDER: &str = "数据录制";
 pub const WS_FACTORY: &str = "Alpha Factory";
 pub const WS_C4: &str = "C4 影子"; // maker 影子守护实时/影子日/活体vs重放（docs/14 §2）
@@ -33,13 +38,24 @@ pub const WS_OBSERVATORY: &str = "接口观察终端"; // REST/WS/TCP/FIX 统一
 pub const WS_EGRESS: &str = "网络出口"; // 谁在往外发包 + 手动启停（一页看全）
 pub const WS_NEWS: &str = "新闻资讯"; // 交易所/监管/媒体统一时间线（docs/25）
 pub const WS_PROCS: &str = "进程"; // 常驻单元状态与启停（docs/26 S4）——「网络出口」的邻居
-pub const WORKSPACES: [&str; 15] = [
-    WS_OFFICIAL, WS_LIVE, WS_RECORDED, WS_SELFDATA, WS_RECORDER, WS_FACTORY, WS_C4, WS_OPTIONS,
+pub const WORKSPACES: [&str; 14] = [
+    WS_OFFICIAL, WS_LIVE, WS_BACKTEST, WS_RECORDER, WS_FACTORY, WS_C4, WS_OPTIONS,
     WS_PREDICTION, WS_TARDIS, WS_GLOBAL, WS_OBSERVATORY, WS_EGRESS, WS_PROCS, WS_NEWS,
 ];
 
 /// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
-const RENAMES: [(&str, &str); 2] = [("实盘", WS_LIVE), ("回测", WS_SELFDATA)];
+///
+/// ⚠ 这里曾有一条 `("回测", WS_SELFDATA)`——很久以前把名为「回测」的工作区迁到
+/// 「自有数据回测」。合并之后 [`WS_BACKTEST`] 就叫「回测」，那条规则会**把新工作区
+/// 改名走**（旧名恰好等于新名，而目标又不存在）。删掉它是本次合并的必做项。
+const RENAMES: [(&str, &str); 1] = [("实盘", WS_LIVE)];
+
+/// 多个旧工作区 → 同一个新工作区（本次合并）。
+///
+/// 与 [`RENAMES`] 的区别：这里是**多对一**。第一个存在的旧名就地改名，
+/// 其余的**删掉**而不是留着——留着会变成侧边栏看不见、配置文件里却一直躺着的孤儿
+/// （侧边栏按 `WORKSPACES` 列，不在列里就不显示，但 layout 对象还在）。
+const MERGES: [(&str, &str); 2] = [("录制数据回测", WS_BACKTEST), ("自有数据回测", WS_BACKTEST)];
 
 /// 工作区在侧边栏的图标（合并进 FS 原生侧边栏，docs/08 F6 — P1）。
 pub fn icon(name: &str) -> crate::style::Icon {
@@ -47,8 +63,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
     match name {
         WS_OFFICIAL => Icon::BinanceLogo, // 官方直连 Binance
         WS_LIVE => Icon::ChartOutline,    // 实时图表 + 交易
-        WS_RECORDED => Icon::Return,      // 回放/重放
-        WS_SELFDATA => Icon::Layout,      // 自有数据回测
+        WS_BACKTEST => Icon::Return,      // 回放/重放（两个数据源合一）
         WS_RECORDER => Icon::Folder,      // 数据湖
         WS_FACTORY => Icon::Star,         // alpha 因子
         WS_C4 => Icon::Checkmark,         // C4 判定进度（合格影子日）
@@ -76,14 +91,13 @@ fn pane_template(name: &str) -> &'static str {
         WS_LIVE => {
             r#"{"Split":{"axis":"Vertical","ratio":0.62,"a":{"ShaderHeatmap":{"studies":[{"VolumeProfile":"VisibleRange"}],"stream_type":[{"Depth":{"ticker":"BinanceLinear:BTCUSDT","depth_aggr":"Client","push_freq":"ServerDefault"}},{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":5,"visual_config":null,"selected_basis":{"Time":"MS100"}},"indicators":["Volume"],"link_group":null}},"b":{"WealthSpring":{"mode":"Live","settings":{},"link_group":null}}}}"#
         }
-        // 录制数据回测：M1 K 线（录制 replay 喂，含成交 ▲▼）∣ 右侧上下：订单明细(Backtest) + 回测结果 tearsheet。
-        WS_RECORDED => {
+        // 回测：M1 K 线（replay 边跑边画，含成交 ▲▼）∣ 右侧上下：订单明细 + 回测结果 tearsheet。
+        //
+        // 取的是原「录制数据回测」的布局——原「自有数据回测」那边多一个 SelfChart
+        // （读 CSV/JSON 的通用图），与回测无关，已挪去「Tardis 历史回放」（都是看数据的）。
+        // 反过来原「录制数据回测」有订单明细而「自有数据回测」没有，合并后都有。
+        WS_BACKTEST => {
             r#"{"Split":{"axis":"Vertical","ratio":0.58,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"Split":{"axis":"Horizontal","ratio":0.5,"a":{"WealthSpring":{"mode":"Backtest","settings":{},"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}}}"#
-        }
-        // 自有数据回测：左侧上下两面板——上 自有数据自适应图（CSV/JSON）+ 下 result.json→K 线
-        // （selfdata 桥，含成交 ▲▼），两种测试方式并存；右侧 回测结果 tearsheet。
-        WS_SELFDATA => {
-            r#"{"Split":{"axis":"Vertical","ratio":0.58,"a":{"Split":{"axis":"Horizontal","ratio":0.5,"a":{"WealthSpring":{"mode":"SelfChart","settings":{},"link_group":null}},"b":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}}}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}"#
         }
         // Alpha Factory 仪表盘（docs/08 F6-P2）。
         WS_FACTORY => r#"{"Factory":{"settings":{},"link_group":null}}"#,
@@ -97,7 +111,13 @@ fn pane_template(name: &str) -> &'static str {
         WS_PREDICTION => r#"{"PredictionBoard":{"settings":{},"link_group":null}}"#,
         // Tardis 历史回放（docs/20 §9）：单一历史面板 —— 数据源(3) → 数据类型(8) → 图表。
         // **不声明任何 ticker/stream**，故本工作区零交易所连接（用户明确要求不接实时流）。
-        WS_TARDIS => r#"{"TardisBoard":{"settings":{},"link_group":null}}"#,
+        // Tardis 历史面板 ∣ 自有数据自适应图（读 CSV/JSON）。
+        // SelfChart 原在「自有数据回测」，但它与回测无关——纯展示任意二维数据。
+        // 挪到这里是因为两者同属「看数据」，而托管工作区的布局每次启动按模板重置，
+        // 不进模板就等于用户实际用不到（加了也活不过重启）。
+        WS_TARDIS => {
+            r#"{"Split":{"axis":"Vertical","ratio":0.68,"a":{"TardisBoard":{"settings":{},"link_group":null}},"b":{"WealthSpring":{"mode":"SelfChart","settings":{},"link_group":null}}}}"#
+        }
         WS_GLOBAL => r#"{"MarketMap":{"settings":{},"link_group":null}}"#,
         // 接口观察终端（docs/23 P0）：**零交易所连接**——全部连接在
         // ws-observatory 守护里，这个 pane 只读快照
@@ -131,6 +151,20 @@ fn dashboard_from_template(name: &str) -> Option<Dashboard> {
 /// 模板**就地刷新内容**（保留 LayoutId.unique，激活态不丢），使模板更新重启即生效。
 /// 缺失则新建；非管理的用户 layout 一律不动。返回新建数量。
 pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
+    // 合并迁移：多个旧工作区 → 同一个新工作区。第一个就地改名，其余删掉。
+    for (old, new) in MERGES {
+        let has_new = manager.layouts.iter().any(|l| l.id.name == new);
+        if let Some(l) = manager.layouts.iter_mut().find(|l| l.id.name == old) {
+            if has_new {
+                // 新名已存在（前一条 MERGES 已改过名）→ 这个是多余的，删掉不留孤儿。
+                manager.layouts.retain(|l| l.id.name != old);
+                log::info!("WS workspaces: 合并移除 `{old}`（已有 `{new}`）");
+            } else {
+                l.id.name = new.to_string();
+                log::info!("WS workspaces: 合并 `{old}` → `{new}`");
+            }
+        }
+    }
     // 迁移：把旧名工作区改名到新名（避免新旧并存）。
     for (old, new) in RENAMES {
         let has_new = manager.layouts.iter().any(|l| l.id.name == new);
@@ -260,8 +294,107 @@ mod replay_mode_tests {
     #[test]
     fn 回放类工作区常量齐全() {
         // 漏掉任何一个，那个工作区就会偷偷补拉历史。
-        for n in [WS_SELFDATA, WS_RECORDED, WS_TARDIS] {
-            assert!(!n.is_empty());
+        for n in [WS_BACKTEST, WS_TARDIS] {
+            assert!(WORKSPACES.contains(&n), "{n} 不在 WORKSPACES 里");
         }
+    }
+
+    /// **迁移表不得把活着的工作区改名走。**
+    ///
+    /// 合并时真踩到过：`RENAMES` 里躺着一条 `("回测", WS_SELFDATA)`——很久以前把名为
+    /// 「回测」的工作区迁去「自有数据回测」。合并后新工作区恰好就叫「回测」，
+    /// 那条规则会在下次启动把它改名走，而且**不报任何错**：侧边栏少一个图标，
+    /// 用户只会觉得「怎么没了」。
+    #[test]
+    fn 迁移表不得以现役工作区名作为源() {
+        for (old, new) in RENAMES {
+            assert!(
+                !WORKSPACES.contains(&old),
+                "RENAMES 的源 `{old}` 是现役工作区名——下次启动它会被改名成 `{new}` 而消失"
+            );
+        }
+        for (old, _) in MERGES {
+            assert!(
+                !WORKSPACES.contains(&old),
+                "MERGES 的源 `{old}` 是现役工作区名——它会被就地改名或删掉"
+            );
+        }
+    }
+
+    /// 迁移的目标必须是真实存在的工作区，否则旧 layout 被改成一个侧边栏列不出的名字，
+    /// 等于**消失且带不回来**（`WORKSPACES` 里没有 = 不显示，也不会被模板刷新）。
+    #[test]
+    fn 迁移目标必须是现役工作区() {
+        for (old, new) in RENAMES.iter().chain(MERGES.iter()) {
+            assert!(
+                WORKSPACES.contains(new),
+                "迁移 `{old}` → `{new}`，但 `{new}` 不在 WORKSPACES 里"
+            );
+        }
+    }
+
+    /// 合并后不该再有「自有数据回测」「录制数据回测」这两个名字出现在现役列表里。
+    #[test]
+    fn 两个旧回测工作区已合并() {
+        for gone in ["自有数据回测", "录制数据回测"] {
+            assert!(!WORKSPACES.contains(&gone), "`{gone}` 应已并入 `{WS_BACKTEST}`");
+            assert!(
+                MERGES.iter().any(|(o, _)| *o == gone),
+                "`{gone}` 没有迁移规则——用户机器上那个 layout 会变成看不见的孤儿"
+            );
+        }
+    }
+
+    /// **合并迁移真的把两个旧工作区收拢成一个，且不留孤儿。**
+    ///
+    /// 这条走的是 `ensure_seeded` 本身，不是对着常量表做同义反复——迁移的坑
+    /// （改名 vs 删除的先后、`has_new` 的判定时机）只有跑一遍才看得出来。
+    #[test]
+    fn 合并迁移收拢两个旧工作区且不留孤儿() {
+        let mut m = LayoutManager::new();
+        for old in ["录制数据回测", "自有数据回测"] {
+            let dash = dashboard_from_template(WS_BACKTEST).expect("模板应可解析");
+            m.insert_layout(LayoutId { unique: Uuid::new_v4(), name: old.to_string() }, dash);
+        }
+        let before = m.layouts.len();
+        ensure_seeded(&mut m);
+
+        let names: Vec<&str> = m.layouts.iter().map(|l| l.id.name.as_str()).collect();
+        assert_eq!(
+            names.iter().filter(|n| **n == WS_BACKTEST).count(),
+            1,
+            "应恰好一个 `{WS_BACKTEST}`，实得 {names:?}"
+        );
+        for gone in ["录制数据回测", "自有数据回测"] {
+            assert!(!names.contains(&gone), "`{gone}` 应已被收拢，实得 {names:?}");
+        }
+        // 两个旧的收拢成一个 → 净减一；其余工作区按缺补齐。
+        assert!(m.layouts.len() >= before - 1);
+    }
+
+    /// 只有一个旧工作区时也要正确改名（用户可能只播种过其中一个）。
+    #[test]
+    fn 只存在一个旧工作区时就地改名() {
+        for only in ["录制数据回测", "自有数据回测"] {
+            let mut m = LayoutManager::new();
+            let dash = dashboard_from_template(WS_BACKTEST).expect("模板应可解析");
+            m.insert_layout(LayoutId { unique: Uuid::new_v4(), name: only.to_string() }, dash);
+            ensure_seeded(&mut m);
+            let names: Vec<&str> = m.layouts.iter().map(|l| l.id.name.as_str()).collect();
+            assert!(!names.contains(&only), "`{only}` 应已改名");
+            assert_eq!(names.iter().filter(|n| **n == WS_BACKTEST).count(), 1);
+        }
+    }
+
+    /// SelfChart 与回测无关，但也不能顺手删掉——它是读 CSV/JSON 的通用图。
+    /// 托管工作区的布局每次启动按模板重置，所以「不进模板」= 用户实际用不到
+    /// （手动加了也活不过重启）。
+    #[test]
+    fn selfchart_仍有工作区容身() {
+        let templates: String = WORKSPACES.iter().map(|n| pane_template(n)).collect();
+        assert!(
+            templates.contains("\"SelfChart\""),
+            "SelfChart 没有任何工作区模板引用它——用户加了也活不过重启"
+        );
     }
 }
