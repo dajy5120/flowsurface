@@ -38,9 +38,40 @@ pub const WS_OBSERVATORY: &str = "接口观察终端"; // REST/WS/TCP/FIX 统一
 pub const WS_EGRESS: &str = "网络出口"; // 谁在往外发包 + 手动启停（一页看全）
 pub const WS_NEWS: &str = "新闻资讯"; // 交易所/监管/媒体统一时间线（docs/25）
 pub const WS_PROCS: &str = "进程"; // 常驻单元状态与启停（docs/26 S4）——「网络出口」的邻居
+/// **这个数组的顺序就是侧边栏从上到下的顺序**（`main.rs` 按它取 layout）。
+///
+/// 当前排法（2026-09-18 按用户指定）大致是「看世界 → 备数据 → 做研究 → 管机器」：
+///
+/// | 段 | 工作区 |
+/// |---|---|
+/// | 外部信息 | 新闻资讯 · 全球市场 · 官方原生 · 预测市场 · 期权/0DTE |
+/// | 数据 | 数据录制 · Tardis 历史回放 · 接口观察终端 |
+/// | 跑策略 | 回测 · 实时数据回测 |
+/// | 研究产线 | Alpha Factory · C4 影子 |
+/// | 机器自身 | 进程 · 网络出口 |
+///
+/// 改顺序只改这里。**加/删项要同时改 `icon()` 与 `pane_template()` 的 match 臂**，
+/// 漏了会落到 `_ => Starter` 兜底（有测试钉住）。
 pub const WORKSPACES: [&str; 14] = [
-    WS_OFFICIAL, WS_LIVE, WS_BACKTEST, WS_RECORDER, WS_FACTORY, WS_C4, WS_OPTIONS,
-    WS_PREDICTION, WS_TARDIS, WS_GLOBAL, WS_OBSERVATORY, WS_EGRESS, WS_PROCS, WS_NEWS,
+    // 外部信息
+    WS_NEWS,
+    WS_GLOBAL,
+    WS_OFFICIAL,
+    WS_PREDICTION,
+    WS_OPTIONS,
+    // 数据
+    WS_RECORDER,
+    WS_TARDIS,
+    WS_OBSERVATORY,
+    // 跑策略
+    WS_BACKTEST,
+    WS_LIVE,
+    // 研究产线
+    WS_FACTORY,
+    WS_C4,
+    // 机器自身
+    WS_PROCS,
+    WS_EGRESS,
 ];
 
 /// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
@@ -236,6 +267,32 @@ mod tests {
                 "面板 `{kind}` 没有任何工作区模板引用它——用户没有入口能打开这一页。\n\
                  加一个 WS_* 常量 + WORKSPACES 一项 + icon() 一臂 + pane_template() 一臂。"
             );
+        }
+    }
+
+    /// 侧边栏顺序里不得有重复项。
+    ///
+    /// 手改顺序时最容易的两种错：漏一项、复制粘贴多一项。多的那项会在侧边栏出现两个
+    /// 一样的图标（点哪个都是同一个 layout），而 `[&str; 14]` 的长度约束看起来还是满的
+    /// ——因为漏和重复往往同时发生，正好抵消。
+    #[test]
+    fn 侧边栏顺序无重复() {
+        let mut seen = std::collections::BTreeSet::new();
+        for n in WORKSPACES {
+            assert!(seen.insert(n), "`{n}` 在 WORKSPACES 里出现了两次");
+        }
+        assert_eq!(seen.len(), WORKSPACES.len());
+    }
+
+    /// 三个图表类工作区不得在重排中丢失。
+    ///
+    /// 只读面板类由 [`every_panel_kind_has_a_workspace_to_reach_it`] 守着，但那条判据看的是
+    /// pane 模板里的 `ContentKind` 名字——图表类（`KlineChart`/`ShaderHeatmap`）不在它的
+    /// 名单里（它们是工作区的组成部分，不各自独占一个），所以漏掉这三个不会被它发现。
+    #[test]
+    fn 图表类工作区不得在重排中丢失() {
+        for n in [WS_OFFICIAL, WS_LIVE, WS_BACKTEST] {
+            assert!(WORKSPACES.contains(&n), "`{n}` 不在侧边栏里——用户没有入口");
         }
     }
 
