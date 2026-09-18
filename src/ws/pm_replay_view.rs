@@ -223,6 +223,68 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
                 text("⚠ 图上是上次加载的那一轮，点「加载」换成当前选择").size(11).color(C_WARN),
             );
         }
+        // ── 那一刻的盘口 ──
+        //
+        // 渲染走实时面板那套函数（`pm_binance_view::{imbalance_block, ladder_block}`），
+        // 不另写一份：回放看到的盘口要和当时实时看到的一模一样，否则「回放」名不副实。
+        // 两边各写一份的话，改了一边忘了另一边，差异会悄悄存在很久。
+        let at = head.unwrap_or(p.end_ms);
+        match p.frame_at(at) {
+            None if p.frames.is_empty() => {
+                body = body.push(
+                    text("（这份面板没有逐帧盘口——用旧版 pm_replay.py 生成的，重新「加载」一次）")
+                        .size(11)
+                        .color(C_WARN),
+                );
+            }
+            None => {
+                // 播放头在第一帧之前：还没有任何一刻两本簿都到齐。
+                body = body.push(text("两本簿还没凑齐").size(11).color(C_DIM));
+            }
+            Some(f) => {
+                let lag = (at - f.ts) / 1000.0;
+                body = body.push(
+                    row![
+                        text("盘口 @ ").size(12).color(C_DIM),
+                        text(hms(f.ts - p.start_ms)).size(13).color(C_TXT),
+                        // 帧是降采样过的，播放头落在两帧之间很正常。说出滞后多少，
+                        // 好过让人以为看到的是精确那一刻。
+                        text(format!("  (帧滞后 {lag:.2}s)")).size(10).color(C_DIM),
+                        text(format!(
+                            "　费率 {:.2}%　{} 人　量 {}　流动性 {}",
+                            p.round.fee_bps / 100.0,
+                            p.round.participants,
+                            super::pm_binance_view::usd(p.round.volume),
+                            super::pm_binance_view::usd(p.round.liquidity),
+                        ))
+                        .size(10)
+                        .color(C_DIM),
+                    ]
+                    .align_y(Alignment::Center),
+                );
+                body = body.push(super::pm_binance_view::imbalance_block(&f.book));
+                body = body.push(
+                    row![
+                        container(super::pm_binance_view::ladder_block(
+                            "押涨 Up",
+                            "买这本 = 押 BTC 涨",
+                            &f.book.up,
+                            C_UP,
+                        ))
+                        .width(Length::FillPortion(1)),
+                        container(super::pm_binance_view::ladder_block(
+                            "押跌 Down",
+                            "独立的一本簿，不是 Up 的另一侧",
+                            &f.book.down,
+                            C_DOWN,
+                        ))
+                        .width(Length::FillPortion(1)),
+                    ]
+                    .spacing(14),
+                );
+            }
+        }
+
         for ch in &p.charts {
             let cv: Element<'_, PmReplayMsg> = canvas_widget(ChartCanvas {
                 ch: ch.clone(),

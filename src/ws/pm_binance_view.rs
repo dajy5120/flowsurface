@@ -43,7 +43,7 @@ fn cell<'a, M: 'a>(t: String, w: f32, c: Color) -> Element<'a, M> {
     container(text(t).size(11).color(c)).width(Length::Fixed(w)).into()
 }
 
-fn usd(v: f64) -> String {
+pub(super) fn usd(v: f64) -> String {
     if v >= 1e6 {
         format!("${:.2}M", v / 1e6)
     } else if v >= 1e3 {
@@ -54,7 +54,7 @@ fn usd(v: f64) -> String {
 }
 
 /// 倒计时。轮次只有 5 分钟，秒级精度是必要的。
-fn countdown(s: i64) -> (String, Color) {
+pub(super) fn countdown(s: i64) -> (String, Color) {
     if s < 0 {
         return ("—".into(), C_DIM);
     }
@@ -86,7 +86,7 @@ fn lvl_bar<'a, M: 'a>(px: f64, sz: f64, max_notional: f64, c: Color) -> Element<
 
 /// 一本簿：卖盘在上（价从高到低），买盘在下——和交易所盘口同一个方向，
 /// 中间那条线就是价差。
-fn ladder_block<'a, M: 'a>(title: &str, sub: &str, l: &Ladder, tint: Color) -> Element<'a, M> {
+pub(super) fn ladder_block<'a, M: 'a>(title: &str, sub: &str, l: &Ladder, tint: Color) -> Element<'a, M> {
     let mx = l.max_notional();
     let mut c = column![
         text(title.to_string()).size(12).color(tint),
@@ -158,7 +158,7 @@ fn round_block<'a, M: 'a>(r: &RoundView) -> Element<'a, M> {
 ///
 /// 实测两者会反号：临近结算时便宜一侧（0.01–0.05）用很少的钱就能堆出大量份额，
 /// 那是彩票式挂单不是共识。只显示一个数字的话，看的人没法察觉这件事。
-fn imbalance_block<'a, M: 'a>(b: &BookView) -> Element<'a, M> {
+pub(super) fn imbalance_block<'a, M: 'a>(b: &BookView) -> Element<'a, M> {
     let fmt = |v: Option<f64>| v.map(|x| format!("{x:+.3}")).unwrap_or_else(|| "—".into());
     let dir = |v: Option<f64>| match v {
         Some(x) if x > 0.0 => ("押涨占优", C_GREEN),
