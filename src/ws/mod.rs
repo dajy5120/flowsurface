@@ -34,6 +34,7 @@ pub mod options_readout;
 pub mod options_view;
 pub mod prediction;
 pub mod pm_binance_readout;
+pub mod pm_binance_view;
 pub mod prediction_readout;
 pub mod prediction_view;
 pub mod customchart;
@@ -189,6 +190,22 @@ mod data_lake_date_tests {
             // 被判成数据湖读者。**源码级守卫的锚点不精确，就会变成噪音源，
             // 而一条会乱叫的守卫比没有守卫更糟：人会开始无视它。**
             if !src.contains(".join(\"raw\")") {
+                continue;
+            }
+            // **只列出「从不算今天」的读者**，且逐个写明理由。
+            //
+            // `pm_binance_readout` 的日期全部来自目录名与文件名（`scan_days` 遍历
+            // `raw/pm_book/<sym>/<date>/`，`count_rounds` 拿同一个 date 去找
+            // `pm_round/<sym>/<date>.parquet`），从头到尾没有「今天是哪天」这个概念，
+            // 也就无从错位。它要是哪天开始算今天了，就得从这里删掉。
+            const NO_TODAY: &[&str] = &["pm_binance_readout.rs"];
+            if NO_TODAY.contains(&p.file_name().unwrap().to_string_lossy().as_ref()) {
+                let src2 = &src;
+                assert!(
+                    !src2.contains("now().format(\"%Y-%m-%d\")"),
+                    "{} 在豁免名单里却算了「今天」——把它从 NO_TODAY 删掉",
+                    p.display()
+                );
                 continue;
             }
             checked += 1;

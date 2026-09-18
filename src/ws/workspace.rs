@@ -138,8 +138,18 @@ fn pane_template(name: &str) -> &'static str {
         WS_RECORDER => r#"{"Recorder":{"settings":{},"link_group":null}}"#,
         // 期权/0DTE 回测·探针（docs/18）。
         WS_OPTIONS => r#"{"OptionsBoard":{"settings":{},"link_group":null}}"#,
-        // 预测市场 Polymarket（docs/19）。
-        WS_PREDICTION => r#"{"PredictionBoard":{"settings":{},"link_group":null}}"#,
+        // 预测市场：**两个独立视图并排**，不是一个面板切换数据源。
+        //
+        // 左边币安钱包（BTC 5 分钟，秒级逐笔盘口），右边 Polymarket（天级决策支持）。
+        // 它们只是名字里都有「预测市场」——节奏差三个数量级，信息形态也不同：
+        // 盘口要竖着排档位，市场列表要横着排行。塞进同一个 pane 的结果是两边都只
+        // 剩几行。左边给稍大的份额，因为两本簿的档位是这一页最占竖向空间的东西。
+        //
+        // **零交易所连接**：两个 pane 都只读旁路快照（pm_binance.json /
+        // prediction_board.json），网络连接分别在 ws-pm-recorder 与 ws-prediction 守护里。
+        WS_PREDICTION => {
+            r#"{"Split":{"axis":"Vertical","ratio":0.54,"a":{"PmBinance":{"settings":{},"link_group":null}},"b":{"PredictionBoard":{"settings":{},"link_group":null}}}}"#
+        }
         // Tardis 历史回放（docs/20 §9）：单一历史面板 —— 数据源(3) → 数据类型(8) → 图表。
         // **不声明任何 ticker/stream**，故本工作区零交易所连接（用户明确要求不接实时流）。
         // Tardis 历史面板 ∣ 自有数据自适应图（读 CSV/JSON）。
@@ -259,7 +269,7 @@ mod tests {
         let templates: String = WORKSPACES.iter().map(|n| pane_template(n)).collect();
         // 只读面板类：没有 ticker、不吃行情流，各自是一个独立用途的页面。
         for kind in [
-            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "TardisBoard",
+            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "TardisBoard",
             "MarketMap", "Observatory", "NetEgress", "Procs", "News",
         ] {
             assert!(

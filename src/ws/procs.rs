@@ -139,6 +139,15 @@ pub static ALL: &[Proc] = &[
         if_stopped: "**录制出现空洞**，且事后无法补——研究数据是一次性的",
     },
     Proc {
+        key: "pm-recorder",
+        label: "预测市场录制器",
+        what: "币安钱包 BTC 5 分钟涨跌：WS 盘口(Up) + REST(Down) → ~/ws-data/raw/pm_book",
+        unit: "ws-pm-recorder",
+        kind: Kind::Daemon,
+        if_stopped: "**这份数据没有第三方历史源**——5 分钟市场结束即消失，不录就永远没有，\
+                     事后一秒都补不回来。也是「预测市场」页 Binance 视图的唯一数据来源",
+    },
+    Proc {
         key: "factory-nightly",
         label: "Alpha 工厂夜跑",
         what: "每日跑数据管线 + 因子挖掘（按点触发，不跟随窗口）",

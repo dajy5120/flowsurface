@@ -213,6 +213,10 @@ impl From<&pane::State> for data::Pane {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
             },
+            pane::Content::PmBinance => data::Pane::PmBinance {
+                settings: pane.settings.clone(),
+                link_group: pane.link_group,
+            },
             pane::Content::MarketMap => data::Pane::MarketMap {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
@@ -392,6 +396,15 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             link_group,
         } => Configuration::Pane(pane::State::from_config(
             pane::Content::PredictionBoard,
+            vec![],
+            settings,
+            link_group,
+        )),
+        data::Pane::PmBinance {
+            settings,
+            link_group,
+        } => Configuration::Pane(pane::State::from_config(
+            pane::Content::PmBinance,
             vec![],
             settings,
             link_group,

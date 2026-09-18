@@ -353,7 +353,7 @@ fn scan_lake(st: &mut SvcState, data_dir: &Path, ts_cache: &mut TsCache) {
                             });
                             let got = match hit {
                                 Some(v) => Some(v),
-                                None => parquet_ts_runs(&path).inspect(|v| {
+                                None => parquet_ts_runs(&path, GAP_NS).inspect(|v| {
                                     if let Some(mt) = mt {
                                         ts_cache.insert(path.clone(), (mt, v.clone()));
                                     }
@@ -383,7 +383,7 @@ fn scan_lake(st: &mut SvcState, data_dir: &Path, ts_cache: &mut TsCache) {
                     }
                 }
                 if cover_stream && !spans.is_empty() {
-                    let mut cov = coverage_from_spans(spans);
+                    let mut cov = coverage_from_spans(spans, GAP_NS);
                     cov.sym = sym.clone();
                     cov.date = date.clone();
                     st.coverage.push(cov);
@@ -459,7 +459,10 @@ type TsCache = BTreeMap<std::path::PathBuf, (std::time::SystemTime, Vec<(i64, i6
 ///
 /// 抽成纯函数是为了能测：区间合并的边界（相邻段首尾相接、段重叠、单段、空）
 /// 每一种都容易悄悄算错，而错了的表现只是「缺口数字怪怪的」，没人会当成 bug 报。
-fn coverage_from_spans(mut spans: Vec<(i64, i64)>) -> DayCoverage {
+/// `gap_ns`：超过多久算一个洞。**不同的流该用不同的值**——行情流是连续推送，
+/// 1 秒没动静就是断了；而预测市场那条 REST 本来就 1 秒一拍，同样的阈值会把
+/// 正常的采样间隔全判成洞。
+pub(super) fn coverage_from_spans(mut spans: Vec<(i64, i64)>, gap_ns: i64) -> DayCoverage {
     let mut c = DayCoverage::default();
     if spans.is_empty() {
         return c;
@@ -467,7 +470,7 @@ fn coverage_from_spans(mut spans: Vec<(i64, i64)>) -> DayCoverage {
     spans.sort_unstable();
     let mut cur = spans[0];
     for &(lo, hi) in &spans[1..] {
-        if lo - cur.1 <= GAP_NS {
+        if lo - cur.1 <= gap_ns {
             cur.1 = cur.1.max(hi); // 相接或重叠 → 并进当前段
         } else {
             c.runs.push(cur);
@@ -503,7 +506,7 @@ fn coverage_from_spans(mut spans: Vec<(i64, i64)>) -> DayCoverage {
 ///
 /// 代价：单列读约 1.7ms/文件 × 1.2 万个 ≈ 21 秒，**一次性**——
 /// 封档的段永不改变，结果按 (路径, mtime) 缓存。
-fn parquet_ts_runs(path: &Path) -> Option<Vec<(i64, i64)>> {
+pub(super) fn parquet_ts_runs(path: &Path, gap_ns: i64) -> Option<Vec<(i64, i64)>> {
     use parquet::column::reader::ColumnReader;
     use parquet::file::reader::{FileReader, SerializedFileReader};
 
@@ -512,6 +515,11 @@ fn parquet_ts_runs(path: &Path) -> Option<Vec<(i64, i64)>> {
     let md = r.metadata();
     let col = (0..md.file_metadata().schema_descr().num_columns())
         .find(|&i| md.file_metadata().schema_descr().column(i).name() == "ts_recv")?;
+    // **可空列必须传 definition levels**，否则 `read_records` 直接报
+    // 「must specify definition levels」。本机录制器写的是必填列，所以这一条
+    // 一直没暴露；polars 写的段（预测市场那条流）默认可空，当场全军覆没——
+    // 而外层只看到 `None`，表现是「覆盖 0 秒」，不报错。
+    let nullable = md.file_metadata().schema_descr().column(col).max_def_level() > 0;
 
     let mut runs: Vec<(i64, i64)> = Vec::new();
     let mut cur: Option<(i64, i64)> = None;
@@ -520,6 +528,7 @@ fn parquet_ts_runs(path: &Path) -> Option<Vec<(i64, i64)>> {
     // 表现是每个文件多出一个 `0 ~ 0` 的假子段、且真数据被截断，**不报任何错**。
     // 必须传空 Vec 并每轮 clear。
     let mut buf: Vec<i64> = Vec::with_capacity(8192);
+    let mut defs: Vec<i16> = Vec::with_capacity(8192);
     let mut total = 0usize;
     for g in 0..md.num_row_groups() {
         let rg = r.get_row_group(g).ok()?;
@@ -528,14 +537,21 @@ fn parquet_ts_runs(path: &Path) -> Option<Vec<(i64, i64)>> {
         };
         loop {
             buf.clear();
-            let (_, read, _) = cr.read_records(8192, None, None, &mut buf).ok()?;
-            if read == 0 {
+            defs.clear();
+            let (records, values, _) = if nullable {
+                cr.read_records(8192, Some(&mut defs), None, &mut buf).ok()?
+            } else {
+                cr.read_records(8192, None, None, &mut buf).ok()?
+            };
+            if records == 0 {
                 break;
             }
-            total += read;
-            for &t in &buf[..read] {
+            // 对账数**记录**、取值数**取值**：可空列里 values < records（空值不占值位）。
+            // 混用会让对账在有空值时假性失败。
+            total += records;
+            for &t in &buf[..values] {
                 match cur {
-                    Some((lo, hi)) if t - hi <= GAP_NS => cur = Some((lo, t.max(hi))),
+                    Some((lo, hi)) if t - hi <= gap_ns => cur = Some((lo, t.max(hi))),
                     Some(seg) => {
                         runs.push(seg);
                         cur = Some((t, t));
@@ -578,7 +594,7 @@ mod tests {
 
     #[test]
     fn 覆盖_单段无缺口() {
-        let c = coverage_from_spans(vec![(0, 600 * S)]);
+        let c = coverage_from_spans(vec![(0, 600 * S)], GAP_NS);
         assert_eq!(c.runs.len(), 1);
         assert!(c.gaps.is_empty());
         assert_eq!(c.covered_s, 600);
@@ -589,7 +605,7 @@ mod tests {
     fn 覆盖_相接的段要合并而不是算成两段() {
         // 600 秒轮转的相邻段首尾相接（间隔 0）——那是同一段连续录制，不是两段。
         // 当成两段的话「连续段」数会等于文件数，这一列就完全没有信息量了。
-        let c = coverage_from_spans(vec![(0, 600 * S), (600 * S, 1200 * S)]);
+        let c = coverage_from_spans(vec![(0, 600 * S), (600 * S, 1200 * S)], GAP_NS);
         assert_eq!(c.runs.len(), 1, "相接应合并：{:?}", c.runs);
         assert!(c.gaps.is_empty());
         assert_eq!(c.longest_s, 1200);
@@ -599,13 +615,13 @@ mod tests {
     fn 覆盖_一秒以内的间隔不算洞() {
         // 与 tardis_health 的 GAP_WARN_US 同口径。抖动几百毫秒算成洞的话，
         // 每天会报出成百上千个「缺口」，真正的 4 小时断流反而被淹没。
-        let c = coverage_from_spans(vec![(0, 600 * S), (600 * S + S / 2, 1200 * S)]);
+        let c = coverage_from_spans(vec![(0, 600 * S), (600 * S + S / 2, 1200 * S)], GAP_NS);
         assert_eq!(c.runs.len(), 1, "0.5 秒不该算洞");
     }
 
     #[test]
     fn 覆盖_真断流要算成洞且时长正确() {
-        let c = coverage_from_spans(vec![(0, 600 * S), (4200 * S, 4800 * S)]);
+        let c = coverage_from_spans(vec![(0, 600 * S), (4200 * S, 4800 * S)], GAP_NS);
         assert_eq!(c.runs.len(), 2);
         assert_eq!(c.gaps.len(), 1);
         assert_eq!(c.gaps[0], (600 * S, 4200 * S));
@@ -621,7 +637,7 @@ mod tests {
             (0, 60 * S),                    // 1 分钟
             (3600 * S, 3600 * S + 900 * S), // 15 分钟 ← 最长
             (9000 * S, 9000 * S + 120 * S), // 2 分钟
-        ]);
+        ], GAP_NS);
         assert_eq!(c.longest_s, 900);
         assert_eq!(c.longest_at, 3600 * S, "起点要指向最长那段");
         assert_eq!(c.runs.len(), 3);
@@ -631,22 +647,22 @@ mod tests {
     #[test]
     fn 覆盖_乱序输入也要正确() {
         // 目录遍历顺序不保证；按文件名排序在跨零点或异常命名时也未必对。
-        let a = coverage_from_spans(vec![(3600 * S, 4200 * S), (0, 600 * S)]);
-        let b = coverage_from_spans(vec![(0, 600 * S), (3600 * S, 4200 * S)]);
+        let a = coverage_from_spans(vec![(3600 * S, 4200 * S), (0, 600 * S)], GAP_NS);
+        let b = coverage_from_spans(vec![(0, 600 * S), (3600 * S, 4200 * S)], GAP_NS);
         assert_eq!(a.runs, b.runs);
         assert_eq!(a.gaps, b.gaps);
     }
 
     #[test]
     fn 覆盖_重叠的段不重复计时长() {
-        let c = coverage_from_spans(vec![(0, 600 * S), (300 * S, 900 * S)]);
+        let c = coverage_from_spans(vec![(0, 600 * S), (300 * S, 900 * S)], GAP_NS);
         assert_eq!(c.runs.len(), 1);
         assert_eq!(c.covered_s, 900, "重叠部分只算一次");
     }
 
     #[test]
     fn 覆盖_空输入不崩() {
-        let c = coverage_from_spans(vec![]);
+        let c = coverage_from_spans(vec![], GAP_NS);
         assert!(c.runs.is_empty() && c.gaps.is_empty());
         assert_eq!(c.covered_s, 0);
     }
@@ -755,7 +771,7 @@ mod real_data_tests {
         // 只取前几个文件，够验切分正确性且不必读整天。
         let mut spans = Vec::new();
         for f in files.iter().take(3) {
-            if let Some(v) = parquet_ts_runs(f) {
+            if let Some(v) = parquet_ts_runs(f, GAP_NS) {
                 spans.extend(v);
             }
         }
@@ -766,7 +782,7 @@ mod real_data_tests {
             assert!(hi >= lo, "子段 {lo}..{hi} 首尾颠倒");
         }
         // ② 合并后，相邻段之间的空隙必须都 >1 秒——否则就是本该合并却切开了。
-        let c = coverage_from_spans(spans.clone());
+        let c = coverage_from_spans(spans.clone(), GAP_NS);
         for &(a, b) in &c.gaps {
             assert!(b - a > GAP_NS, "缺口 {}ns 不足 1 秒，不该被切开", b - a);
         }

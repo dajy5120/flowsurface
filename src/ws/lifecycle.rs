@@ -103,6 +103,32 @@ mod tests {
         }
     }
 
+    /// **故意不进 target 的守护**，附理由。
+    ///
+    /// `ws-stack.target` 带 `BindsTo=ws-cockpit.service`：重启界面会连带停掉每个成员。
+    /// 对大多数守护这没关系（数据事后能从交易所补），但对下面这些不行。
+    ///
+    /// 写成名单而不是放宽断言：豁免要**逐个说清理由**，否则下一个人加服务时
+    /// 漏绑 target，测试也照样绿。
+    const NOT_IN_TARGET: &[(&str, &str)] = &[(
+        "ws-pm-recorder",
+        "预测市场数据没有第三方历史源，5 分钟市场结束即消失。绑进 target 意味着         每次重启 Cockpit 都在数据里打一个洞，而那个洞永远补不回来。         宁可关界面时它继续跑——多跑一会儿的代价只是几 MB 盘。",
+    )];
+
+    #[test]
+    fn 豁免名单不与target重复() {
+        // 两边都列 = 到底该不该被连带停，没有答案。
+        let Ok(h) = std::env::var("HOME") else { return };
+        let p = std::path::PathBuf::from(h).join(".config/systemd/user").join(TARGET);
+        let Ok(target) = std::fs::read_to_string(&p) else { return };
+        for (u, _) in NOT_IN_TARGET {
+            assert!(
+                !target.contains(&format!("{u}.service")),
+                "{u} 既在豁免名单里又在 {TARGET} 里——删掉其中一处"
+            );
+        }
+    }
+
     #[test]
     fn every_managed_service_is_in_the_target() {
         // 「进程」页上列着的常驻服务，必须都真的被 target 管着——
@@ -114,6 +140,9 @@ mod tests {
             // timer 有意不绑（绑了等于把夜跑废掉），只检查常驻守护
             if proc.kind == super::super::procs::Kind::Timer {
                 continue;
+            }
+            if NOT_IN_TARGET.iter().any(|(u, _)| *u == proc.unit) {
+                continue; // 见 NOT_IN_TARGET：逐个写明了为什么不该被连带停
             }
             assert!(
                 target.contains(&format!("{}.service", proc.unit)),

@@ -200,6 +200,16 @@ pub static ALL: &[Source] = &[
         unit: "ws-news",
     },
     Source {
+        key: "pm-recorder",
+        label: "预测市场录制器",
+        // 两条连接、两个协议：WS 推 Up 那本（约 5 条/秒），REST 每秒补 Down 那本
+        // 兼跟踪轮次。停掉它 = 预测市场页的 Binance 视图立刻变空，且**当下这轮的
+        // 盘口永久丢失**（5 分钟市场结束即消失，没有第三方历史源可补）。
+        what: "币安钱包预测市场 WS(盘口推送) + REST(另一本簿/轮次)，api.binance.com",
+        kind: Kind::Service,
+        unit: "ws-pm-recorder",
+    },
+    Source {
         key: "recorder",
         label: "录制器",
         what: "交易所行情 WS（落盘）",

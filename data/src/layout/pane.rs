@@ -107,6 +107,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    PmBinance {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     MarketMap {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -313,6 +319,15 @@ pub enum ContentKind {
     OptionsBoard,
     /// 预测市场 Polymarket（docs/19）：市场列表 + 基线关注 + AI 决策支持。只读 prediction_board.json 旁路。
     PredictionBoard,
+    /// 币安钱包预测市场（BTC 5 分钟涨跌）：两本簿的完整档位 + 轮次 + 失衡 + 录制状态。
+    ///
+    /// **与 [`ContentKind::PredictionBoard`] 是两个面板，不是一个面板的两个源**：
+    /// Polymarket 那边是「市场列表 + 日线级决策支持」，这边是**逐笔盘口**（WS 约 5 条/秒）。
+    /// 刷新节奏、信息密度、要占的屏幕面积都不是一回事，挤在一个 pane 里两边都看不清。
+    ///
+    /// 只读 `~/ws-data/live/pm_binance.json` 旁路——**零交易所流**，WS 连接在
+    /// `ws-pm-recorder` 守护里。
+    PmBinance,
     /// 全市场雷达（docs/22 P0）：加密全市场树图 + 涨跌速度/量异常排行。
     /// 只读 radar_board.json 旁路，**零交易所流**（数据来自独立的 ws-radar 守护）。
     MarketMap,
@@ -358,7 +373,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 24] = [
+    pub const ALL: [ContentKind; 25] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -373,6 +388,7 @@ impl ContentKind {
         ContentKind::C4Shadow,
         ContentKind::OptionsBoard,
         ContentKind::PredictionBoard,
+        ContentKind::PmBinance,
         ContentKind::MarketMap,
         ContentKind::Observatory,
         ContentKind::NetEgress,
@@ -403,6 +419,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::C4Shadow => "C4 影子(SOL)",
             ContentKind::OptionsBoard => "期权/0DTE",
             ContentKind::PredictionBoard => "预测市场",
+            ContentKind::PmBinance => "币安预测(BTC 5m)",
             ContentKind::MarketMap => "全市场雷达",
             ContentKind::Observatory => "接口观察终端",
             ContentKind::NetEgress => "网络出口",
@@ -488,6 +505,7 @@ impl PaneSetup {
                 | ContentKind::C4Shadow
                 | ContentKind::OptionsBoard
                 | ContentKind::PredictionBoard
+                | ContentKind::PmBinance
                 | ContentKind::MarketMap
                 | ContentKind::Observatory
                 | ContentKind::NetEgress
@@ -525,6 +543,7 @@ impl PaneSetup {
             | ContentKind::C4Shadow
             | ContentKind::OptionsBoard
             | ContentKind::PredictionBoard
+            | ContentKind::PmBinance
             | ContentKind::MarketMap
             | ContentKind::Observatory
             | ContentKind::NetEgress

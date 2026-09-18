@@ -288,6 +288,130 @@ fn coverage(app: &RecorderPaneState, st: &super::recorder_readout::SvcState) -> 
 }
 
 /// 渲染录制驾驶舱（控制 + 实况 + 总览 + 明细）。
+/// ⑥ 预测市场录制（币安钱包 BTC 5 分钟涨跌）。
+///
+/// **和上面几区是两条独立的录制线**：①–⑤ 说的是 `wealthspring-recorder`
+/// （交易所行情 → `raw/<sym>`），这一区说的是 `ws-pm-recorder`
+/// （预测市场盘口 → `raw/pm_book` + `raw/pm_round`）。两个守护、两套目录、
+/// 两个启停开关，混在一起看会让人以为停了一个就都停了。
+///
+/// 启停不在这里做，在「进程」页——那一页才是所有常驻单元的总开关，
+/// 在两个地方都放按钮会让「到底停没停」变成一个要对照两处才能回答的问题。
+fn pm_section<'a>() -> Element<'a, RecorderMsg> {
+    use super::pm_binance_readout as pm;
+
+    let st = pm::snapshot();
+    let head = Color::from_rgb(0.85, 0.72, 0.95);
+    let dimc = Color::from_rgb(0.55, 0.6, 0.65);
+    let mut col = column![
+        text("⑥ 预测市场录制 — 币安钱包 BTC 5 分钟涨跌（ws-pm-recorder，独立于上面的行情录制）")
+            .size(16)
+            .color(head),
+        text(
+            "这份数据**没有第三方历史源**：5 分钟市场结束即消失，不录就永远没有，             事后一秒都补不回来。启停在「进程」页，连接在「网络出口」页。"
+        )
+        .size(11)
+        .color(dimc),
+    ]
+    .spacing(6);
+
+    // 活着没有——用两条流都新鲜来判，只看一条会漏掉「WS 在推但 REST 挂了」。
+    let alive = pm::recording_alive(&st);
+    let (dot, dc, t) = if !st.present {
+        ("○", Color::from_rgb(0.6, 0.6, 0.6), "无快照（守护没跑过，或数据目录不对）".to_string())
+    } else if alive {
+        (
+            "●",
+            Color::from_rgb(0.4, 0.85, 0.45),
+            format!(
+                "录制中  本次 {} 条簿 / {} 轮  WS {} 条（重订 {} 次）",
+                st.rec.book_rows, st.rec.rounds, st.rec.ws_msgs, st.rec.resubs
+            ),
+        )
+    } else {
+        (
+            "✗",
+            Color::from_rgb(0.9, 0.45, 0.4),
+            format!(
+                "未在录  Up 陈旧 {}ms / Down 陈旧 {}ms{}",
+                st.rec.up_stale_ms,
+                st.rec.down_stale_ms,
+                if st.rec.last_error.is_empty() {
+                    String::new()
+                } else {
+                    format!("  最后错误 {}", st.rec.last_error)
+                }
+            ),
+        )
+    };
+    col = col.push(
+        row![text(format!("{dot} ")).size(16).color(dc), text(t).size(13).color(dc)]
+            .align_y(Alignment::Center),
+    );
+
+    col = col.push(
+        row![
+            cell("日期", 100.0),
+            cell("段数", 55.0),
+            cell("大小", 80.0),
+            cell("覆盖时长", 85.0),
+            cell("缺口", 50.0),
+            cell("最长可跑窗口", 150.0),
+            cell("轮次(已判/总)", 110.0),
+            cell("录到的时间段", 300.0),
+        ]
+        .spacing(6),
+    );
+    if st.days.is_empty() {
+        col = col.push(text("(还没有已封档的分段)").size(12).color(dimc));
+    }
+    for d in &st.days {
+        // 一轮 5 分钟，所以「够不够跑」的门槛比行情流低得多：
+        // 30 分钟已能覆盖 6 轮，2 小时以上才谈得上有点样本。
+        let (lc, _) = if d.longest_s >= 7200 {
+            (Color::from_rgb(0.45, 0.85, 0.5), 0)
+        } else if d.longest_s >= 1800 {
+            (Color::from_rgb(0.85, 0.8, 0.4), 0)
+        } else {
+            (Color::from_rgb(0.9, 0.5, 0.4), 0)
+        };
+        let runs: String = d
+            .runs
+            .iter()
+            .take(3)
+            .map(|(a, b)| format!("{}~{}", hm(*a), hm(*b)))
+            .collect::<Vec<_>>()
+            .join("  ");
+        let more = if d.runs.len() > 3 { format!("  …共 {} 段", d.runs.len()) } else { String::new() };
+        col = col.push(
+            row![
+                cell(&d.date, 100.0),
+                cell(&d.segs.to_string(), 55.0),
+                cell(&fmt_size(d.bytes), 80.0),
+                cell(&dur(d.covered_s), 85.0),
+                cell(&d.gaps.to_string(), 50.0),
+                container(
+                    text(format!("{} @{}", dur(d.longest_s), hm(d.longest_at))).size(12).color(lc)
+                )
+                .width(Length::Fixed(150.0)),
+                cell(&format!("{}/{}", d.rounds_resolved, d.rounds), 110.0),
+                cell(&format!("{runs}{more}"), 300.0),
+            ]
+            .spacing(6),
+        );
+    }
+    col = col.push(
+        text(format!(
+            "洞的判据是相邻两条记录相隔超过 {} 秒——比行情流宽，因为 Down 那本走 REST              本来就 1 秒一拍。按日明细扫描于 {}（扫盘要读每段的时间列，不是每秒刷新）",
+            pm::PM_GAP_NS / 1_000_000_000,
+            if st.days_scanned.is_empty() { "—" } else { &st.days_scanned }
+        ))
+        .size(10)
+        .color(dimc),
+    );
+    col.into()
+}
+
 pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     let st = super::recorder_readout::snapshot();
 
@@ -519,6 +643,8 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
             details(app, &st),
             vgap(14.0),
             coverage(app, &st),
+            vgap(14.0),
+            pm_section(),
         ]
         .spacing(10)
         .padding(14),

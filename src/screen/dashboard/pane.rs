@@ -434,6 +434,7 @@ impl State {
                 ContentKind::News => (Content::News, vec![]),
                 ContentKind::OptionsBoard => (Content::OptionsBoard, vec![]),
                 ContentKind::PredictionBoard => (Content::PredictionBoard, vec![]),
+                ContentKind::PmBinance => (Content::PmBinance, vec![]),
                 ContentKind::MarketMap => (Content::MarketMap, vec![]),
                 ContentKind::Recorder => {
                     (Content::Recorder(crate::ws::recorder::RecorderPaneState::load()), vec![])
@@ -629,6 +630,7 @@ impl State {
                 | Content::News
                 | Content::OptionsBoard
                 | Content::PredictionBoard
+                | Content::PmBinance
                 | Content::MarketMap
                 | Content::Recorder(_)
                 | Content::TardisReplay(_)
@@ -835,6 +837,19 @@ impl State {
                 let base = crate::ws::options_view::pane_body();
                 self.compose_stack_view(
                     base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::PmBinance => {
+                // 币安钱包预测市场：只读 ~/ws-data/live/pm_binance.json 旁路快照。
+                // **零交易所流**——WS 连接在 ws-pm-recorder 守护里，面板里没有一行网络代码。
+                self.compose_stack_view(
+                    crate::ws::pm_binance_view::pane_body(),
                     id,
                     None,
                     compact_controls,
@@ -1432,6 +1447,7 @@ impl State {
                         | ContentKind::News
                         | ContentKind::OptionsBoard
                         | ContentKind::PredictionBoard
+                        | ContentKind::PmBinance
                         | ContentKind::MarketMap
                         | ContentKind::Recorder
                         | ContentKind::TardisReplay
@@ -2082,7 +2098,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => None,
         }
     }
@@ -2116,6 +2132,7 @@ impl State {
             | Content::News
             | Content::OptionsBoard
             | Content::PredictionBoard
+            | Content::PmBinance
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2230,6 +2247,10 @@ pub enum Content {
     OptionsBoard,
     /// 预测市场 Polymarket（docs/19）：无行情流，渲染走 `ws::prediction_readout` 旁路快照。
     PredictionBoard,
+    /// 币安钱包预测市场（BTC 5 分钟涨跌）：无行情流，渲染走 `ws::pm_binance_readout` 旁路快照。
+    /// **独立于 [`Content::PredictionBoard`]**——那个是 Polymarket 的日线级决策支持，
+    /// 这个是逐笔盘口（约 5 条/秒），两者放一个 pane 里谁都看不清。
+    PmBinance,
     /// 全市场雷达（docs/22 P0）：无行情流，渲染走 `ws::radar_readout` 旁路快照。
     /// ⚠ 与 `Content::Heatmap`（订单簿深度热图）无关，别混（docs/22 §10 坑 1）。
     MarketMap,
@@ -2463,6 +2484,7 @@ impl Content {
             ContentKind::News => Content::News,
             ContentKind::OptionsBoard => Content::OptionsBoard,
             ContentKind::PredictionBoard => Content::PredictionBoard,
+            ContentKind::PmBinance => Content::PmBinance,
             ContentKind::MarketMap => Content::MarketMap,
             ContentKind::Recorder => {
                 Content::Recorder(crate::ws::recorder::RecorderPaneState::load())
@@ -2496,6 +2518,7 @@ impl Content {
             | Content::News
             | Content::OptionsBoard
             | Content::PredictionBoard
+            | Content::PmBinance
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2586,6 +2609,7 @@ impl Content {
             | Content::News
             | Content::OptionsBoard
             | Content::PredictionBoard
+            | Content::PmBinance
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2647,6 +2671,7 @@ impl Content {
             | Content::News
             | Content::OptionsBoard
             | Content::PredictionBoard
+            | Content::PmBinance
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2727,6 +2752,7 @@ impl Content {
             Content::News => ContentKind::News,
             Content::OptionsBoard => ContentKind::OptionsBoard,
             Content::PredictionBoard => ContentKind::PredictionBoard,
+            Content::PmBinance => ContentKind::PmBinance,
             Content::MarketMap => ContentKind::MarketMap,
             Content::Recorder(_) => ContentKind::Recorder,
             Content::TardisReplay(_) => ContentKind::TardisReplay,
@@ -2751,7 +2777,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => true,
         }
     }
