@@ -78,6 +78,8 @@ pub enum PmReplayMsg {
     Rewind,
     Seek(f32),
     RefreshCatalog,
+    /// 只列已结算的轮次。一天 68 轮排满屏，而未结算的看不到结局、回放价值低。
+    ToggleOnlyResolved(bool),
     /// 只跳到上一轮/下一轮并加载——扫一串轮次时省得每次点三下。
     Step(i32),
 }
@@ -90,6 +92,8 @@ pub struct PmReplayState {
     pub speed: Speed,
     /// 拖动进度条留下的位置（0–1）。静止时图停在这里，不回到整窗。
     pub seek_pct: Option<f32>,
+    /// 轮次列表只列已结算的。默认开——未结算的看不到结局，没法判断当时的失衡指对没指对。
+    pub only_resolved: bool,
     pub hint: String,
 }
 
@@ -101,6 +105,7 @@ impl Default for PmReplayState {
             market_id: String::new(),
             speed: Speed::X20,
             seek_pct: None,
+            only_resolved: true,
             hint: String::new(),
         }
     }
@@ -141,7 +146,20 @@ impl PmReplayState {
         }
     }
 
+    /// 当前该列出来的轮次（已过滤）。
+    ///
+    /// **过滤后为空时退回全部**：一天里可能一轮都还没判出来，那时给个空列表
+    /// 等于告诉用户「没有数据」，而实际上有——只是都还没结算。
     pub fn rounds(&self) -> Vec<ro::RoundEntry> {
+        let all = self.all_rounds();
+        if !self.only_resolved {
+            return all;
+        }
+        let kept: Vec<_> = all.iter().filter(|r| !r.resolved.is_empty()).cloned().collect();
+        if kept.is_empty() { all } else { kept }
+    }
+
+    pub fn all_rounds(&self) -> Vec<ro::RoundEntry> {
         ro::catalog().date(&self.symbol, &self.date).map(|d| d.rounds.clone()).unwrap_or_default()
     }
 }
@@ -310,6 +328,9 @@ pub fn handle(st: &mut PmReplayState, msg: PmReplayMsg) {
             st.market_id = r;
             stop();
             st.seek_pct = None;
+            // **点一下就加载**，与「上/下一轮」一致。否则选完还要回到别处点「加载」，
+            // 而轮次列表在一天几十轮时很长，那一趟来回每次都要走。
+            st.hint = load_round(st);
         }
         PmReplayMsg::PickSpeed(s) => {
             st.speed = s;
@@ -324,6 +345,7 @@ pub fn handle(st: &mut PmReplayState, msg: PmReplayMsg) {
                 }
             }
         }
+        PmReplayMsg::ToggleOnlyResolved(b) => st.only_resolved = b,
         PmReplayMsg::Load => st.hint = load_round(st),
         PmReplayMsg::RefreshCatalog => st.hint = refresh_catalog(),
         PmReplayMsg::Play => {
@@ -441,5 +463,47 @@ mod tests {
         handle(&mut s, PmReplayMsg::PickSymbol("别的".into()));
         // fill_defaults 会试图补，但 catalog 里没有「别的」，故应留空而不是留着上一个符号的轮次
         assert!(s.market_id.is_empty() || s.symbol == "别的");
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    use super::super::pm_replay_readout::RoundEntry;
+
+    fn r(id: &str, resolved: &str) -> RoundEntry {
+        RoundEntry {
+            market_id: id.into(),
+            label: id.into(),
+            start_ms: 0,
+            end_ms: 0,
+            resolved: resolved.into(),
+        }
+    }
+
+    /// `rounds()` 读全局 catalog，测不动；这里测它的判定本体。
+    fn keep(all: &[RoundEntry], only: bool) -> Vec<RoundEntry> {
+        if !only {
+            return all.to_vec();
+        }
+        let k: Vec<_> = all.iter().filter(|x| !x.resolved.is_empty()).cloned().collect();
+        if k.is_empty() { all.to_vec() } else { k }
+    }
+
+    #[test]
+    fn 只看已结算会过滤掉未判出的() {
+        let all = vec![r("1", "UP"), r("2", ""), r("3", "DOWN")];
+        let k = keep(&all, true);
+        assert_eq!(k.len(), 2);
+        assert!(k.iter().all(|x| !x.resolved.is_empty()));
+        assert_eq!(keep(&all, false).len(), 3);
+    }
+
+    #[test]
+    fn 一个都没结算时退回全部而不是给空列表() {
+        // 一天里可能一轮都还没判出来（比如刚开录）。给空列表等于告诉用户
+        // 「没有数据」，而实际上有——只是都还没结算。
+        let all = vec![r("1", ""), r("2", "")];
+        assert_eq!(keep(&all, true).len(), 2, "过滤后为空必须退回全部");
     }
 }

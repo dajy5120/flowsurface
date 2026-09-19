@@ -99,44 +99,9 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
         body = body.push(dates);
     }
 
-    let rounds = app.rounds();
-    if rounds.is_empty() {
-        body = body.push(
-            text("这一天没有轮次记录。录制器跑过吗？（「进程」页可启停，清单要点「刷新清单」重扫）")
-                .size(11)
-                .color(C_WARN),
-        );
-    } else {
-        // 轮次多（一天几十上百），横着排会溢出 → 可滚的一行。
-        let mut rr = row![].spacing(4).align_y(Alignment::Center);
-        for r in &rounds {
-            let (v, c) = verdict(&r.resolved);
-            rr = rr.push(chip(
-                format!("{} {}", r.label, v),
-                r.market_id == app.market_id,
-                c,
-                PmReplayMsg::PickRound(r.market_id.clone()),
-            ));
-        }
-        body = body.push(
-            column![
-                row![
-                    text(format!("轮次（{} 个，绿=涨 红=跌 灰=未判）", rounds.len()))
-                        .size(12)
-                        .color(C_DIM),
-                    chip("◀ 上一轮".into(), false, C_TXT, PmReplayMsg::Step(-1)),
-                    chip("下一轮 ▶".into(), false, C_TXT, PmReplayMsg::Step(1)),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-                scrollable(rr).direction(scrollable::Direction::Horizontal(Default::default())),
-            ]
-            .spacing(4),
-        );
-    }
-
     // ── 加载 + 播放 ──
-    let mut ctl = row![chip("加载".into(), false, C_TXT, PmReplayMsg::Load)]
+    // 点轮次已自动加载，这颗按钮是给「录了更多数据后重取当前这一轮」用的。
+    let mut ctl = row![chip("↻ 重新加载".into(), false, C_DIM, PmReplayMsg::Load)]
         .spacing(6)
         .align_y(Alignment::Center);
     ctl = ctl.push(if playing {
@@ -173,6 +138,69 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
         );
     }
 
+    let rounds = app.rounds();
+    if rounds.is_empty() {
+        body = body.push(
+            text("这一天没有轮次记录。录制器跑过吗？（「进程」页可启停，清单要点「刷新清单」重扫）")
+                .size(11)
+                .color(C_WARN),
+        );
+    } else {
+        // **换行排，不用横向滚动条。**
+        //
+        // 第一版是 `scrollable(row).direction(Horizontal)`，套在整页的竖向
+        // scrollable 里 → 高度被压成一条缝，还被下面的控制行盖住。嵌套两层方向
+        // 相反的滚动本来就难摆，而这里根本不需要：换行之后由外层竖向滚动统一管。
+        let n_all = app.all_rounds().len();
+        let per_row = 6; // 一行 6 个：标签形如「8:55AM-9AM ET 跌」，再多就换行了
+        let mut grid = column![].spacing(4);
+        let mut line = row![].spacing(4).align_y(Alignment::Center);
+        for (i, r) in rounds.iter().enumerate() {
+            let (v, c) = verdict(&r.resolved);
+            line = line.push(chip(
+                format!("{} {}", r.label, v),
+                r.market_id == app.market_id,
+                c,
+                PmReplayMsg::PickRound(r.market_id.clone()),
+            ));
+            if (i + 1) % per_row == 0 {
+                grid = grid.push(line);
+                line = row![].spacing(4).align_y(Alignment::Center);
+            }
+        }
+        grid = grid.push(line);
+
+        let filtered = n_all - rounds.len();
+        body = body.push(
+            column![
+                row![
+                    text(format!("轮次 {} / {n_all}　绿=涨 红=跌 灰=未判", rounds.len()))
+                        .size(12)
+                        .color(C_DIM),
+                    chip("◀ 上一轮".into(), false, C_TXT, PmReplayMsg::Step(-1)),
+                    chip("下一轮 ▶".into(), false, C_TXT, PmReplayMsg::Step(1)),
+                    chip(
+                        if app.only_resolved { "只看已结算 ✓".into() } else { "只看已结算".to_string() },
+                        app.only_resolved,
+                        C_TXT,
+                        PmReplayMsg::ToggleOnlyResolved(!app.only_resolved),
+                    ),
+                    text(if filtered > 0 {
+                        format!("（隐藏 {filtered} 个未判出的）")
+                    } else {
+                        String::new()
+                    })
+                    .size(10)
+                    .color(C_DIM),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+                grid,
+            ]
+            .spacing(4),
+        );
+    }
+
     let msg = super::pm_replay::message();
     let hint = if app.hint.is_empty() { msg } else { app.hint.clone() };
     if !hint.is_empty() {
@@ -188,7 +216,7 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
         body = body.push(text(e.clone()).size(12).color(C_DOWN));
     } else if !p.loaded {
         body = body.push(
-            text("选一轮，点「加载」。").size(12).color(C_DIM),
+            text("在下面点一个轮次即可加载。").size(12).color(C_DIM),
         );
     } else {
         // 已加载的是不是当前选的那一轮——不是就说出来，别让人以为在看当前选择。
@@ -220,7 +248,7 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
         }
         if stale {
             body = body.push(
-                text("⚠ 图上是上次加载的那一轮，点「加载」换成当前选择").size(11).color(C_WARN),
+                text("⚠ 图上是上次加载的那一轮，点「↻ 重新加载」换成当前选择").size(11).color(C_WARN),
             );
         }
         // ── 那一刻的盘口 ──
