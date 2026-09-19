@@ -119,6 +119,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    FeatureLab {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     MarketMap {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -340,6 +346,11 @@ pub enum ContentKind {
     /// （trades/l2/deriv/强平/BBO）是给交易所行情设计的，预测市场一个都不对应——
     /// 它没有成交流、没有中间价、没有资金费，有的是两本独立的簿 + 一个二元结局。
     PmReplay,
+    /// 订单流与微观结构**特征库**（docs/30）：注册表 + 覆盖健康 + FDR 控制的条件检验。
+    ///
+    /// **它是研究仪器，不是行情图。** 面板上最重要的不是特征值，而是
+    /// 「做了多少次检验、朴素命中几个、FDR 之后还剩几个、样本还差多少」。
+    FeatureLab,
     /// 全市场雷达（docs/22 P0）：加密全市场树图 + 涨跌速度/量异常排行。
     /// 只读 radar_board.json 旁路，**零交易所流**（数据来自独立的 ws-radar 守护）。
     MarketMap,
@@ -385,7 +396,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 26] = [
+    pub const ALL: [ContentKind; 27] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -402,6 +413,7 @@ impl ContentKind {
         ContentKind::PredictionBoard,
         ContentKind::PmBinance,
         ContentKind::PmReplay,
+        ContentKind::FeatureLab,
         ContentKind::MarketMap,
         ContentKind::Observatory,
         ContentKind::NetEgress,
@@ -434,6 +446,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::PredictionBoard => "预测市场",
             ContentKind::PmBinance => "币安预测(BTC 5m)",
             ContentKind::PmReplay => "预测市场回放",
+            ContentKind::FeatureLab => "特征库",
             ContentKind::MarketMap => "全市场雷达",
             ContentKind::Observatory => "接口观察终端",
             ContentKind::NetEgress => "网络出口",
@@ -521,6 +534,7 @@ impl PaneSetup {
                 | ContentKind::PredictionBoard
                 | ContentKind::PmBinance
                 | ContentKind::PmReplay
+                | ContentKind::FeatureLab
                 | ContentKind::MarketMap
                 | ContentKind::Observatory
                 | ContentKind::NetEgress
@@ -560,6 +574,7 @@ impl PaneSetup {
             | ContentKind::PredictionBoard
             | ContentKind::PmBinance
             | ContentKind::PmReplay
+            | ContentKind::FeatureLab
             | ContentKind::MarketMap
             | ContentKind::Observatory
             | ContentKind::NetEgress

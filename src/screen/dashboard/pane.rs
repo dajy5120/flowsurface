@@ -436,6 +436,7 @@ impl State {
                 ContentKind::OptionsBoard => (Content::OptionsBoard, vec![]),
                 ContentKind::PredictionBoard => (Content::PredictionBoard, vec![]),
                 ContentKind::PmBinance => (Content::PmBinance, vec![]),
+                ContentKind::FeatureLab => (Content::FeatureLab, vec![]),
                 ContentKind::PmReplay => {
                     (Content::PmReplay(crate::ws::pm_replay::PmReplayState::load()), vec![])
                 }
@@ -636,6 +637,7 @@ impl State {
                 | Content::PredictionBoard
                 | Content::PmBinance
                 | Content::PmReplay(_)
+                | Content::FeatureLab
                 | Content::MarketMap
                 | Content::Recorder(_)
                 | Content::TardisReplay(_)
@@ -842,6 +844,19 @@ impl State {
                 let base = crate::ws::options_view::pane_body();
                 self.compose_stack_view(
                     base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::FeatureLab => {
+                // 特征库（docs/30）：只读 ~/ws-data/cockpit/feature_lab.json。
+                // **零交易所流**——数据由 factory.prediction.feature_lab 批量算好落盘。
+                self.compose_stack_view(
+                    crate::ws::feature_lab_view::pane_body(),
                     id,
                     None,
                     compact_controls,
@@ -1468,6 +1483,7 @@ impl State {
                         | ContentKind::PredictionBoard
                         | ContentKind::PmBinance
                         | ContentKind::PmReplay
+                        | ContentKind::FeatureLab
                         | ContentKind::MarketMap
                         | ContentKind::Recorder
                         | ContentKind::TardisReplay
@@ -2124,7 +2140,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => None,
         }
     }
@@ -2160,6 +2176,7 @@ impl State {
             | Content::PredictionBoard
             | Content::PmBinance
             | Content::PmReplay(_)
+            | Content::FeatureLab
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2280,6 +2297,8 @@ pub enum Content {
     PmBinance,
     /// 预测市场回放（自录 pm_book）：携带 日期/轮次/倍速/播放位置 的可编辑状态。
     PmReplay(crate::ws::pm_replay::PmReplayState),
+    /// 特征库（docs/30）：只读 feature_lab.json 旁路快照，零交易所流。
+    FeatureLab,
     /// 全市场雷达（docs/22 P0）：无行情流，渲染走 `ws::radar_readout` 旁路快照。
     /// ⚠ 与 `Content::Heatmap`（订单簿深度热图）无关，别混（docs/22 §10 坑 1）。
     MarketMap,
@@ -2514,6 +2533,7 @@ impl Content {
             ContentKind::OptionsBoard => Content::OptionsBoard,
             ContentKind::PredictionBoard => Content::PredictionBoard,
             ContentKind::PmBinance => Content::PmBinance,
+            ContentKind::FeatureLab => Content::FeatureLab,
             ContentKind::PmReplay => {
                 Content::PmReplay(crate::ws::pm_replay::PmReplayState::load())
             }
@@ -2552,6 +2572,7 @@ impl Content {
             | Content::PredictionBoard
             | Content::PmBinance
             | Content::PmReplay(_)
+            | Content::FeatureLab
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2644,6 +2665,7 @@ impl Content {
             | Content::PredictionBoard
             | Content::PmBinance
             | Content::PmReplay(_)
+            | Content::FeatureLab
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2707,6 +2729,7 @@ impl Content {
             | Content::PredictionBoard
             | Content::PmBinance
             | Content::PmReplay(_)
+            | Content::FeatureLab
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2789,6 +2812,7 @@ impl Content {
             Content::PredictionBoard => ContentKind::PredictionBoard,
             Content::PmBinance => ContentKind::PmBinance,
             Content::PmReplay(_) => ContentKind::PmReplay,
+            Content::FeatureLab => ContentKind::FeatureLab,
             Content::MarketMap => ContentKind::MarketMap,
             Content::Recorder(_) => ContentKind::Recorder,
             Content::TardisReplay(_) => ContentKind::TardisReplay,
@@ -2813,7 +2837,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => true,
         }
     }

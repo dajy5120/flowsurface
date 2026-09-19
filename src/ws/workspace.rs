@@ -130,8 +130,14 @@ fn pane_template(name: &str) -> &'static str {
         WS_BACKTEST => {
             r#"{"Split":{"axis":"Vertical","ratio":0.58,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":"Candles","stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"Split":{"axis":"Horizontal","ratio":0.5,"a":{"WealthSpring":{"mode":"Backtest","settings":{},"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}}}"#
         }
-        // Alpha Factory 仪表盘（docs/08 F6-P2）。
-        WS_FACTORY => r#"{"Factory":{"settings":{},"link_group":null}}"#,
+        // Alpha Factory 仪表盘（docs/08 F6-P2）∣ 特征库（docs/30）。
+        //
+        // 特征库放这里而不是「预测市场」：它是**研究仪器**，与 Alpha 工厂同属
+        // 「找信号」这件事，而预测市场那两页是在看市场本身。放一起也让
+        // 「多重比较账」这类纪律显示紧挨着因子流水线——那正是最容易忘记它的地方。
+        WS_FACTORY => {
+            r#"{"Split":{"axis":"Vertical","ratio":0.42,"a":{"Factory":{"settings":{},"link_group":null}},"b":{"FeatureLab":{"settings":{},"link_group":null}}}}"#
+        }
         // C4 活体影子（docs/14 §2）：守护实时 + 影子日 + 活体vs重放 + 判定进度。
         WS_C4 => r#"{"C4Shadow":{"settings":{},"link_group":null}}"#,
         // 录制驾驶舱（docs/08 F6-P3）。
@@ -277,7 +283,7 @@ mod tests {
         let templates: String = WORKSPACES.iter().map(|n| pane_template(n)).collect();
         // 只读面板类：没有 ticker、不吃行情流，各自是一个独立用途的页面。
         for kind in [
-            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "TardisBoard",
+            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "TardisBoard",
             "MarketMap", "Observatory", "NetEgress", "Procs", "News",
         ] {
             assert!(
