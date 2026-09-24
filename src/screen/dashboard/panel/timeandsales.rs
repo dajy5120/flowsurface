@@ -179,12 +179,44 @@ impl TimeAndSales {
         self.stacked_bar_height().max(METRICS_HEIGHT_COMPACT) + TRADE_ROW_HEIGHT
     }
 
+    /// 保留窗口的「现在」。
+    ///
+    /// 实时态是墙钟；**回放态必须是数据自己的时钟**。
+    ///
+    /// 这一条是 docs/31 §8.2 顶出来的：特征引擎的图表流喂进来的是几天前录制的成交，
+    /// 而保留窗口按墙钟算 → 每一笔进来的瞬间就已经「太老」，被 `prune_by_time`
+    /// 当场清掉。表现是 Tape 面板永远显示 `Waiting for data...`，
+    /// 而热图、Ladder、足迹全都有数据——**没有任何一处报错**。
+    ///
+    /// `prune_by_time` 的签名一直收 `Option<UnixMs>`，只是所有调用点都传 `None`；
+    /// 这里补上那个缺失的调用方。
+    fn retention_now(&self, explicit: Option<UnixMs>) -> UnixMs {
+        if let Some(t) = explicit {
+            return t;
+        }
+        if crate::ws::workspace::replay_mode() {
+            // 已收到的最新一笔就是回放里的「现在」。一笔都还没有时退回墙钟
+            // （此时两个 prune 都会提前返回，取什么都不影响）。
+            if let Some(latest) = self
+                .recent_trades
+                .back()
+                .map(|t| t.ts_ms)
+                .into_iter()
+                .chain(self.paused_trades_buffer.back().map(|t| t.ts_ms))
+                .max()
+            {
+                return latest;
+            }
+        }
+        UnixMs::now()
+    }
+
     fn prune_by_time(&mut self, now_epoch_ms: Option<UnixMs>) {
         if self.recent_trades.is_empty() {
             return;
         }
 
-        let now_ms = now_epoch_ms.unwrap_or_else(UnixMs::now);
+        let now_ms = self.retention_now(now_epoch_ms);
 
         let trade_retention_ms = self.config.trade_retention.as_millis() as u64;
         let prune_slack_ms = trade_retention_ms / 10;
@@ -246,7 +278,7 @@ impl TimeAndSales {
         let trade_retention_ms = self.config.trade_retention.as_millis() as u64;
         let prune_slack_ms = trade_retention_ms / 10;
 
-        let now_ms = now_epoch_ms.unwrap_or_else(UnixMs::now);
+        let now_ms = self.retention_now(now_epoch_ms);
 
         let low_cutoff = now_ms.saturating_sub(trade_retention_ms);
         let high_cutoff = now_ms.saturating_sub(trade_retention_ms.saturating_add(prune_slack_ms));
@@ -628,5 +660,80 @@ impl canvas::Program<Message> for TimeAndSales {
         }
 
         mouse::Interaction::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // `is_empty` 在 Panel trait 上——面板「有没有东西可画」就是它判的。
+    use super::super::Panel;
+    use exchange::adapter::Exchange;
+    use exchange::unit::Price;
+    use exchange::{Ticker, TickerInfo};
+
+    fn ti() -> TickerInfo {
+        TickerInfo::new(Ticker::new("BTCUSDT", Exchange::BinanceLinear), 0.1, 0.001, None)
+    }
+
+    fn trade(ts_ms: u64) -> Trade {
+        Trade {
+            time: UnixMs(ts_ms),
+            is_sell: false,
+            price: Price::from_f32(81_262.0),
+            qty: Qty::from_f32(0.01),
+        }
+    }
+
+    /// 回放的历史成交必须留得住（docs/31 §8.2）。
+    ///
+    /// 保留窗口按**墙钟**算的话，几天前录制的成交在进来的那一瞬就已经过期，
+    /// 被当场清掉——Tape 面板永远 `Waiting for data...`，而同一条流喂的
+    /// 热图/Ladder/足迹全都有数据，且没有任何一处报错。
+    #[test]
+    fn 回放态按数据自己的时钟保留成交() {
+        let _g = crate::ws::workspace::replay_mode_test_lock();
+        crate::ws::workspace::set_replay_mode(true);
+        let mut p = TimeAndSales::new(None, ti());
+        // 2026-09-19 前后的录制时间戳，远早于墙钟。
+        let base = 1_789_778_999_455u64;
+        let batch: Vec<Trade> = (0..50).map(|i| trade(base + i * 10)).collect();
+        p.insert_buffer(&batch);
+        assert!(
+            !p.is_empty(),
+            "历史成交被墙钟保留窗口清空了——Tape 会一直显示 Waiting for data..."
+        );
+        crate::ws::workspace::set_replay_mode(false);
+    }
+
+    /// 回放态下**过老的那一段仍然要被裁掉**——否则 30 分钟的流会把内存吃光。
+    #[test]
+    fn 回放态仍然按保留窗口裁剪() {
+        let _g = crate::ws::workspace::replay_mode_test_lock();
+        crate::ws::workspace::set_replay_mode(true);
+        let mut p = TimeAndSales::new(None, ti());
+        let base = 1_789_778_999_455u64;
+        let retention = p.config.trade_retention.as_millis() as u64;
+        // 一笔很老的 + 一批新的：老的那笔相对**数据时钟**也已经出窗。
+        let mut batch = vec![trade(base)];
+        batch.extend((0..10).map(|i| trade(base + retention * 3 + i)));
+        p.insert_buffer(&batch);
+        assert!(!p.is_empty());
+        assert!(
+            p.recent_trades.front().unwrap().ts_ms.as_u64() > base,
+            "出窗的老成交没有被裁掉，回放久了会把内存吃光"
+        );
+        crate::ws::workspace::set_replay_mode(false);
+    }
+
+    /// 实时态不受影响：仍然按墙钟裁。
+    #[test]
+    fn 实时态仍然按墙钟裁剪() {
+        let _g = crate::ws::workspace::replay_mode_test_lock();
+        crate::ws::workspace::set_replay_mode(false);
+        let mut p = TimeAndSales::new(None, ti());
+        // 几天前的成交，在实时态下就该被清掉。
+        p.insert_buffer(&[trade(1_789_778_999_455)]);
+        assert!(p.is_empty(), "实时态把过期成交留下了");
     }
 }

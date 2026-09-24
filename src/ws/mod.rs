@@ -45,6 +45,7 @@ pub mod bt_trades;
 pub mod factory;
 pub mod factory_readout;
 pub mod factory_view;
+pub mod feature_feed;
 pub mod feature_lab_readout;
 pub mod feature_matrix;
 pub mod feature_matrix_readout;

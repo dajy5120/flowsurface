@@ -47,6 +47,15 @@ pub enum Tone {
 /// 即便后台正跑回测，「实盘」工作区的图仍是实时的，切到回测工作区才看回测行情。
 /// 徽标必须跟着同一个判据走，否则它说的和图上画的是两回事。
 pub fn badge(replay_mode: bool) -> Badge {
+    // 特征工作区优先判：它也是 `replay_mode`，但徽标要说的话不同（docs/31 §8.2）。
+    if super::workspace::feature_feed() {
+        return Badge {
+            label: "特征引擎".into(),
+            detail: "管线 C：订单流特征引擎的图表事件流（docs/31 §8.2）。\n                     逐笔成交与深度快照都取自引擎重建出来的簿——\n                     图上看到的那一笔，就是引擎算出那个特征值的那一笔。\n                     零交易所连接；数据来自 feature_chart.jsonl。"
+                .into(),
+            tone: Tone::Replay,
+        };
+    }
     if !replay_mode {
         return Badge {
             label: "实时".into(),
@@ -124,6 +133,10 @@ mod tests {
     /// 拆成多个测试会并行互相踩（`active_run` 那边踩过同一个坑，见其测试注释）。
     #[test]
     fn 徽标随来源与成色变化() {
+        // 这个测试改**两份进程级全局**（active_run 与 FEATURE_FEED 的读端），
+        // 与同模块另一个测试并行时会互相把状态翻掉。取同一把锁排队。
+        let _g = crate::ws::workspace::replay_mode_test_lock();
+        crate::ws::workspace::set_feature_feed(false);
         // 非回放工作区：恒为实时，与后台有没有在跑回测无关。
         active_run::publish_current(Some(run("backtest", "tardis", "A")));
         let b = badge(false);
@@ -167,5 +180,30 @@ mod tests {
         let b = badge(true);
         assert_eq!(b.label, "等待运行");
         assert_eq!(b.tone, Tone::Warn);
+    }
+
+    /// 特征工作区的徽标不能说「等待运行」（docs/31 §8.2）。
+    ///
+    /// 那句话在这里是错的：没有回测、没有按钮可点，数据来自引擎写的
+    /// `feature_chart.jsonl`。徽标模块的立身之本是「来源一眼可见」，
+    /// 它自己说错来源最不能接受。
+    #[test]
+    fn 特征工作区说特征引擎而不是等待运行() {
+        let _g = crate::ws::workspace::replay_mode_test_lock();
+        active_run::publish_current(None);
+        crate::ws::workspace::set_feature_feed(true);
+        let b = badge(true);
+        assert_eq!(b.label, "特征引擎");
+        assert_ne!(b.tone, Tone::Warn, "它不是一个「有问题」的状态");
+        assert!(
+            !b.detail.contains("点运行条"),
+            "详情里仍然叫人去点一个这里不存在的按钮"
+        );
+        assert!(b.detail.contains("feature_chart.jsonl"), "详情要说清数据从哪来");
+
+        // 关掉之后回到原来的判定——这个标志不能粘住。
+        crate::ws::workspace::set_feature_feed(false);
+        assert_eq!(badge(true).label, "等待运行");
+        assert_eq!(badge(false).label, "实时");
     }
 }

@@ -1357,6 +1357,42 @@ impl Dashboard {
         Subscription::batch(subs)
     }
 
+    /// 订单流特征引擎的图表事件流入图（docs/31 §8.2）。
+    ///
+    /// 与 replay / selfdata 的关键差别：**必须把面板声明的 `StreamKind` 原样回传**。
+    /// `matches_stream` 走的是**完全相等**（`s == stream`），而 `Depth` 带着
+    /// `depth_aggr` / `push_freq`、`Kline` 带着 `timeframe`——自己拼一个
+    /// 「看起来一样」的出来，它与面板声明的那个不等，事件被静静丢掉，
+    /// 图上什么也没有且不报错。
+    ///
+    /// 也因此这里不能用 `tickers_of`：它只看 `trade` 与 `kline` 两类，
+    /// 而热图与 Ladder 声明的是 **depth**（前两次「一条订阅都建不起来」
+    /// 的同一类错，只是漏的是第三类）。
+    pub fn ws_feature_feed_subscriptions(&self, path: String) -> Subscription<exchange::Event> {
+        let mut kinds: Vec<exchange::adapter::StreamKind> = Vec::new();
+        for (ticker_info, depth_aggr, push_freq) in self.streams.depth_streams(None) {
+            kinds.push(exchange::adapter::StreamKind::Depth {
+                ticker_info,
+                depth_aggr,
+                push_freq,
+            });
+        }
+        for ticker_info in self.streams.trade_streams(None) {
+            kinds.push(exchange::adapter::StreamKind::Trades { ticker_info });
+        }
+        for (ticker_info, timeframe) in self.streams.kline_streams(None) {
+            kinds.push(exchange::adapter::StreamKind::Kline {
+                ticker_info,
+                timeframe,
+            });
+        }
+        if kinds.is_empty() {
+            // 一个图都没开：订阅建起来也无事可做，而空订阅会让读盘线程白转。
+            return Subscription::none();
+        }
+        crate::ws::feature_feed::subscription(path, kinds)
+    }
+
     /// 自有数据回测入图：与 replay 对称，源自 result.json（self-data 桥）。
     pub fn ws_selfdata_subscriptions(&self) -> Subscription<exchange::Event> {
         let subs = self

@@ -969,7 +969,11 @@ impl Flowsurface {
         // 回放类工作区：禁止图表向交易所补拉历史 K 线（那些蜡烛与本次回测无关，
         // 混在旁边看着却一模一样）。判定点在 dashboard 深处，走进程级旁路。
         // `live_feed` 也算在内——它同样是「图上的数据不来自交易所原生流」。
-        ws::workspace::set_replay_mode(is_replay || is_selfdata || live_feed);
+        // 订单流特征工作区（docs/31 §8.2）：四张图全部由特征引擎的事件流驱动。
+        let is_features = active_ws.as_deref() == Some(ws::workspace::WS_FEATURES);
+        ws::workspace::set_replay_mode(is_replay || is_selfdata || live_feed || is_features);
+        // 来源徽标要说「特征引擎」而不是「等待运行」——后者在这个工作区里是错的。
+        ws::workspace::set_feature_feed(is_features);
         let ws_redis_url = std::env::var("WS_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
@@ -980,6 +984,7 @@ impl Flowsurface {
         let exchange_streams = if is_replay
             || is_selfdata
             || live_feed
+            || is_features
             || !ws::egress::streams_enabled()
         {
             Subscription::none()
@@ -1010,6 +1015,19 @@ impl Flowsurface {
                         .map(|a| a.run_id.clone())
                         .unwrap_or_default(),
                 )
+                .map(Message::MarketWsEvent)
+        } else {
+            Subscription::none()
+        };
+        // 特征图表流（docs/31 §8.2）：只在这个工作区开。
+        //
+        // 它与 `exchange_streams` 是**互斥**的：上面那一支已经把交易所流关掉了。
+        // 两条同时开的话，图上会混进交易所实时的簿与成交，而它们与引擎算特征
+        // 用的那条流不是同一条——那个差异正好是这个工作区要消除的东西。
+        let ws_feature_feed = if is_features {
+            let path = crate::ws::feature_feed::feed_path().to_string_lossy().into_owned();
+            self.active_dashboard()
+                .ws_feature_feed_subscriptions(path)
                 .map(Message::MarketWsEvent)
         } else {
             Subscription::none()
@@ -1046,6 +1064,7 @@ impl Flowsurface {
             exchange_streams,
             ws_replay_streams,
             ws_selfdata_streams,
+            ws_feature_feed,
             ws_active_run,
             ws_orders,
             ws_factory,

@@ -33,6 +33,7 @@ pub const WS_C4: &str = "C4 影子"; // maker 影子守护实时/影子日/活�
 pub const WS_OPTIONS: &str = "期权/0DTE"; // 期权回测·探针面板（docs/18）
 pub const WS_PREDICTION: &str = "预测市场"; // Polymarket 决策支持面板（docs/19）
 pub const WS_TARDIS: &str = "Tardis 历史回放"; // 已购 30 天逐笔变速回放（docs/20 Phase 5）
+pub const WS_FEATURES: &str = "订单流特征"; // 特征矩阵 + 引擎同源的 Footprint/热图/Ladder/Tape（docs/31）
 pub const WS_GLOBAL: &str = "全球市场"; // 全市场雷达 + 树图（docs/22）
 pub const WS_OBSERVATORY: &str = "接口观察终端"; // REST/WS/TCP/FIX 统一观察与录制（docs/23）
 pub const WS_EGRESS: &str = "网络出口"; // 谁在往外发包 + 手动启停（一页看全）
@@ -52,7 +53,7 @@ pub const WS_PROCS: &str = "进程"; // 常驻单元状态与启停（docs/26 S4
 ///
 /// 改顺序只改这里。**加/删项要同时改 `icon()` 与 `pane_template()` 的 match 臂**，
 /// 漏了会落到 `_ => Starter` 兜底（有测试钉住）。
-pub const WORKSPACES: [&str; 14] = [
+pub const WORKSPACES: [&str; 15] = [
     // 外部信息
     WS_NEWS,
     WS_GLOBAL,
@@ -60,6 +61,7 @@ pub const WORKSPACES: [&str; 14] = [
     WS_PREDICTION,
     WS_OPTIONS,
     // 数据
+    WS_FEATURES,
     WS_RECORDER,
     WS_TARDIS,
     WS_OBSERVATORY,
@@ -102,6 +104,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
         WS_PREDICTION => Icon::Layout,    // 预测市场 Polymarket 面板
         WS_TARDIS => Icon::Return,        // 历史回放（同「录制数据回测」语义）
         WS_GLOBAL => Icon::Search,        // 全市场扫描
+        WS_FEATURES => Icon::ChartOutline, // 订单流特征：矩阵 + 同源图表（docs/31）
         WS_OBSERVATORY => Icon::Search,   // 接口观察（docs/23）
         WS_EGRESS => Icon::Link,          // 网络出口总闸
         WS_PROCS => Icon::Cog,            // 进程：常驻单元状态与启停
@@ -172,6 +175,19 @@ fn pane_template(name: &str) -> &'static str {
         // 布局：左 Tardis 历史面板，右上预测市场回放，右下自有数据图。
         WS_TARDIS => {
             r#"{"Split":{"axis":"Vertical","ratio":0.56,"a":{"TardisBoard":{"settings":{},"link_group":null}},"b":{"Split":{"axis":"Horizontal","ratio":0.62,"a":{"PmReplay":{"settings":{},"link_group":null}},"b":{"WealthSpring":{"mode":"SelfChart","settings":{},"link_group":null}}}}}}"#
+        }
+        // 订单流特征（docs/31）：左特征矩阵，右四张图——**全部由特征引擎的
+        // 图表事件流驱动**（`ws::feature_feed` 读 feature_chart.jsonl），
+        // **零交易所连接**。图上看到的那一笔，就是引擎算出那个值的那一笔（§8.2）。
+        //
+        // 四张图各答一个问题：Footprint「这一格的买卖是怎么成的」、
+        // Ladder「此刻簿长什么样」、热图（含 Volume Profile）「流动性怎么迁移的」、
+        // Tape「逐笔顺序」。它们都是**人用来理解特征的**，不是特征本身。
+        //
+        // ticker 写 BinanceLinear:BTCUSDT 是因为录制流就是它；换标的要连模板一起改
+        // （feed 按面板声明的 StreamKind 原样回传，ticker 对不上则一格都不画）。
+        WS_FEATURES => {
+            r#"{"Split":{"axis":"Vertical","ratio":0.38,"a":{"FeatureMatrix":{"settings":{},"link_group":null}},"b":{"Split":{"axis":"Horizontal","ratio":0.58,"a":{"Split":{"axis":"Vertical","ratio":0.62,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":{"Footprint":{"clusters":"BidAsk","scaling":"VisibleRange","studies":[{"Imbalance":{"threshold":200,"color_scale":null,"ignore_zeros":true}}]}},"stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}},{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":5,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"Ladder":{"stream_type":[{"Depth":{"ticker":"BinanceLinear:BTCUSDT","depth_aggr":"Client","push_freq":"ServerDefault"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":null},"link_group":null}}}},"b":{"Split":{"axis":"Vertical","ratio":0.68,"a":{"ShaderHeatmap":{"studies":[{"VolumeProfile":"VisibleRange"}],"stream_type":[{"Depth":{"ticker":"BinanceLinear:BTCUSDT","depth_aggr":"Client","push_freq":"ServerDefault"}},{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":5,"visual_config":null,"selected_basis":{"Time":"MS100"}},"indicators":["Volume"],"link_group":null}},"b":{"TimeAndSales":{"stream_type":[{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":null},"link_group":null}}}}}}}}"#
         }
         WS_GLOBAL => r#"{"MarketMap":{"settings":{},"link_group":null}}"#,
         // 接口观察终端（docs/23 P0）：**零交易所连接**——全部连接在
@@ -283,7 +299,7 @@ mod tests {
         let templates: String = WORKSPACES.iter().map(|n| pane_template(n)).collect();
         // 只读面板类：没有 ticker、不吃行情流，各自是一个独立用途的页面。
         for kind in [
-            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "TardisBoard",
+            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "FeatureMatrix", "TardisBoard",
             "MarketMap", "Observatory", "NetEgress", "Procs", "News",
         ] {
             assert!(
@@ -344,12 +360,46 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// 放进程级原子量而不是层层传参：判定点在 `dashboard` 深处，那里拿不到 layout 名字。
 static REPLAY_MODE: AtomicBool = AtomicBool::new(false);
 
+/// 当前工作区的图表是否由**特征引擎的图表事件流**驱动（docs/31 §8.2）。
+///
+/// 与 [`replay_mode`] 分开而不是复用它：两者都意味着「图上的数据不来自交易所」，
+/// 但来源徽标要说的话完全不同。回放态说的是「等待运行，点按钮开始跑回测」——
+/// 在特征工作区里那句话是错的：这里没有回测，也没有按钮可点，
+/// 数据来自引擎写的 `feature_chart.jsonl`。
+///
+/// 徽标模块的立身之本就是「来源一眼可见」，它自己说错来源是最不能接受的。
+static FEATURE_FEED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_feature_feed(on: bool) {
+    FEATURE_FEED.store(on, Ordering::Relaxed);
+}
+
+pub fn feature_feed() -> bool {
+    FEATURE_FEED.load(Ordering::Relaxed)
+}
+
 pub fn set_replay_mode(on: bool) {
     REPLAY_MODE.store(on, Ordering::Relaxed);
 }
 
 pub fn replay_mode() -> bool {
     REPLAY_MODE.load(Ordering::Relaxed)
+}
+
+/// 串行化所有**碰 `REPLAY_MODE` 的测试**。
+///
+/// 它是进程级全局，而 `cargo test` 默认并行跑。本模块自己的测试早就靠「合成一个
+/// 测试」绕开了互相踩，但那挡不住**别的模块**：`timeandsales` 的保留窗口也按
+/// 这个标志分实时/回放，它的测试与这里的测试并行时会互相把标志翻掉——
+/// 现象是随机失败，而两边的代码都是对的（W2 的全局分配器计数踩过同一个坑）。
+///
+/// 凡是要 `set_replay_mode` 的测试，先取这把锁。
+#[cfg(test)]
+pub(crate) fn replay_mode_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // 锁中毒（前一个持有者 panic）不影响正确性：标志本身是原子量，
+    // 这把锁只用来排队。
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -359,6 +409,7 @@ mod replay_mode_tests {
     /// 合在一个测试里：`REPLAY_MODE` 是进程级全局，拆开会并行互相踩。
     #[test]
     fn 回放模式开关() {
+        let _g = replay_mode_test_lock();
         // 默认关：普通看盘工作区要能正常补拉历史。
         set_replay_mode(false);
         assert!(!replay_mode());
