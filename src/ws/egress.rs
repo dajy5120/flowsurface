@@ -160,14 +160,14 @@ pub static ALL: &[Source] = &[
     Source {
         key: "l2-feed",
         label: "L2 增量 feed",
-        what: "Binance USDS-M @depth WS（喂通道② → ws-signals）；需 VPN",
+        what: "Binance USDS-M @depth WS（喂通道② → ws-signals → 分流给特征引擎）；需 VPN",
         kind: Kind::Service,
         unit: "ws-l2-feed",
     },
     Source {
         key: "trades-feed",
         label: "成交 feed",
-        what: "Binance USDS-M @aggTrade WS（喂通道② → ws-signals）；需 VPN",
+        what: "Binance USDS-M @trade WS（喂通道② → ws-signals → 分流给特征引擎）；需 VPN",
         kind: Kind::Service,
         unit: "ws-trades-feed",
     },

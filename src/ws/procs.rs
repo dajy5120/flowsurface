@@ -72,7 +72,7 @@ pub static ALL: &[Proc] = &[
         what: "通道② ring → 微结构信号 + Factory combo → Redis ws:signals",
         unit: "ws-signals",
         kind: Kind::Daemon,
-        if_stopped: "Cockpit「实盘」读数的「引擎」行不再更新",
+        if_stopped: "Cockpit「实盘」读数的「引擎」行不再更新；特征引擎也收不到数据（它的输入是 signals 分流过去的）",
     },
     Proc {
         key: "l2-feed",
@@ -80,12 +80,12 @@ pub static ALL: &[Proc] = &[
         what: "Binance @depth → 通道② ring（有外连，需 VPN）",
         unit: "ws-l2-feed",
         kind: Kind::Daemon,
-        if_stopped: "signals 收不到盘口增量，信号全线停更",
+        if_stopped: "signals 收不到盘口增量，信号全线停更；特征引擎的簿停在最后一刻",
     },
     Proc {
         key: "trades-feed",
         label: "成交 feed",
-        what: "Binance @aggTrade → 通道② ring（有外连，需 VPN）",
+        what: "Binance @trade → 通道② ring（有外连，需 VPN）",
         unit: "ws-trades-feed",
         kind: Kind::Daemon,
         if_stopped: "**静默降级**：撤补退化成「总移除量」近似，combo 缺成交类特征",
