@@ -127,6 +127,7 @@ pub enum Event {
     PredictionInteraction(crate::ws::prediction::PredictionMsg),
     /// 全市场雷达交互（docs/22 P0b）：守护启停 + 窗口/排序口径切换。
     RadarInteraction(crate::ws::radar::RadarMsg),
+    FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg),
 }
 
 pub struct State {
@@ -437,6 +438,7 @@ impl State {
                 ContentKind::PredictionBoard => (Content::PredictionBoard, vec![]),
                 ContentKind::PmBinance => (Content::PmBinance, vec![]),
                 ContentKind::FeatureLab => (Content::FeatureLab, vec![]),
+                ContentKind::FeatureMatrix => (Content::FeatureMatrix, vec![]),
                 ContentKind::PmReplay => {
                     (Content::PmReplay(crate::ws::pm_replay::PmReplayState::load()), vec![])
                 }
@@ -638,6 +640,7 @@ impl State {
                 | Content::PmBinance
                 | Content::PmReplay(_)
                 | Content::FeatureLab
+                | Content::FeatureMatrix
                 | Content::MarketMap
                 | Content::Recorder(_)
                 | Content::TardisReplay(_)
@@ -857,6 +860,22 @@ impl State {
                 // **零交易所流**——数据由 factory.prediction.feature_lab 批量算好落盘。
                 self.compose_stack_view(
                     crate::ws::feature_lab_view::pane_body(),
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::FeatureMatrix => {
+                // 特征矩阵（docs/31 §8.1）：只读 ~/ws-data/cockpit/feature_matrix.json，
+                // 由 wealthspring-features 的引擎周期性写出。**零交易所流、零计算**。
+                // 筛选/视图切换发 FeatureMatrixMsg → 包成 pane 事件。
+                let base = crate::ws::feature_matrix_view::pane_body()
+                    .map(move |m| Message::PaneEvent(id, Event::FeatureMatrixInteraction(m)));
+                self.compose_stack_view(
+                    base,
                     id,
                     None,
                     compact_controls,
@@ -1484,6 +1503,7 @@ impl State {
                         | ContentKind::PmBinance
                         | ContentKind::PmReplay
                         | ContentKind::FeatureLab
+                        | ContentKind::FeatureMatrix
                         | ContentKind::MarketMap
                         | ContentKind::Recorder
                         | ContentKind::TardisReplay
@@ -1545,6 +1565,12 @@ impl State {
             Event::PredictionInteraction(m) => {
                 // 预测市场：夜跑启停 + 定时开关（副作用为 systemctl，无面板状态）。
                 crate::ws::prediction::handle(m);
+            }
+            Event::FeatureMatrixInteraction(m) => {
+                // 特征矩阵（docs/31 §8.1）：只改筛选/折叠，**没有任何副作用**——
+                // 面板只读旁路 JSON，不启停守护也不触发计算。状态在
+                // ws::feature_matrix 的进程级静态里，同一份筛选对所有矩阵 pane 生效。
+                crate::ws::feature_matrix::handle(m);
             }
             Event::RadarInteraction(m) => {
                 // 全市场雷达（docs/22 P0b）：守护启停 + 窗口/排序切换（状态在 ws::radar 的
@@ -2140,7 +2166,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => None,
         }
     }
@@ -2177,6 +2203,7 @@ impl State {
             | Content::PmBinance
             | Content::PmReplay(_)
             | Content::FeatureLab
+            | Content::FeatureMatrix
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2299,6 +2326,10 @@ pub enum Content {
     PmReplay(crate::ws::pm_replay::PmReplayState),
     /// 特征库（docs/30）：只读 feature_lab.json 旁路快照，零交易所流。
     FeatureLab,
+    /// 订单流特征矩阵（docs/31 §8.1）：只读 feature_matrix.json 旁路快照，
+    /// 零交易所流、**零计算**。筛选/折叠状态在 `ws::feature_matrix` 的进程级静态里，
+    /// 所以这里不带载荷——同一份口径对所有矩阵 pane 生效。
+    FeatureMatrix,
     /// 全市场雷达（docs/22 P0）：无行情流，渲染走 `ws::radar_readout` 旁路快照。
     /// ⚠ 与 `Content::Heatmap`（订单簿深度热图）无关，别混（docs/22 §10 坑 1）。
     MarketMap,
@@ -2534,6 +2565,7 @@ impl Content {
             ContentKind::PredictionBoard => Content::PredictionBoard,
             ContentKind::PmBinance => Content::PmBinance,
             ContentKind::FeatureLab => Content::FeatureLab,
+            ContentKind::FeatureMatrix => Content::FeatureMatrix,
             ContentKind::PmReplay => {
                 Content::PmReplay(crate::ws::pm_replay::PmReplayState::load())
             }
@@ -2573,6 +2605,7 @@ impl Content {
             | Content::PmBinance
             | Content::PmReplay(_)
             | Content::FeatureLab
+            | Content::FeatureMatrix
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2666,6 +2699,7 @@ impl Content {
             | Content::PmBinance
             | Content::PmReplay(_)
             | Content::FeatureLab
+            | Content::FeatureMatrix
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2730,6 +2764,7 @@ impl Content {
             | Content::PmBinance
             | Content::PmReplay(_)
             | Content::FeatureLab
+            | Content::FeatureMatrix
             | Content::MarketMap
             | Content::Recorder(_)
             | Content::TardisReplay(_)
@@ -2813,6 +2848,7 @@ impl Content {
             Content::PmBinance => ContentKind::PmBinance,
             Content::PmReplay(_) => ContentKind::PmReplay,
             Content::FeatureLab => ContentKind::FeatureLab,
+            Content::FeatureMatrix => ContentKind::FeatureMatrix,
             Content::MarketMap => ContentKind::MarketMap,
             Content::Recorder(_) => ContentKind::Recorder,
             Content::TardisReplay(_) => ContentKind::TardisReplay,
@@ -2837,7 +2873,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => true,
         }
     }

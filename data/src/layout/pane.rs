@@ -125,6 +125,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    FeatureMatrix {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     MarketMap {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -351,6 +357,15 @@ pub enum ContentKind {
     /// **它是研究仪器，不是行情图。** 面板上最重要的不是特征值，而是
     /// 「做了多少次检验、朴素命中几个、FDR 之后还剩几个、样本还差多少」。
     FeatureLab,
+    /// 订单流特征矩阵（docs/31 §8.1）：七阶段 × 63 条特征 × 窗口的逐 slot 状态。
+    /// 只读 feature_matrix.json 旁路快照（由 wealthspring-features 的引擎写出），
+    /// **零交易所流、零计算**——面板不重算任何特征值。
+    ///
+    /// 与 [`ContentKind::FeatureLab`] 分工：这一页回答「引擎此刻算出了什么、
+    /// 每个 slot 什么质量」，那一页回答「这些值里有没有一个真的预测得动」
+    /// （样本量/多重比较/FDR）。合成一页会让人把「93 个 slot 质量良好」
+    /// 读成「93 个有效信号」。
+    FeatureMatrix,
     /// 全市场雷达（docs/22 P0）：加密全市场树图 + 涨跌速度/量异常排行。
     /// 只读 radar_board.json 旁路，**零交易所流**（数据来自独立的 ws-radar 守护）。
     MarketMap,
@@ -396,7 +411,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 27] = [
+    pub const ALL: [ContentKind; 28] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -414,6 +429,7 @@ impl ContentKind {
         ContentKind::PmBinance,
         ContentKind::PmReplay,
         ContentKind::FeatureLab,
+        ContentKind::FeatureMatrix,
         ContentKind::MarketMap,
         ContentKind::Observatory,
         ContentKind::NetEgress,
@@ -447,6 +463,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::PmBinance => "币安预测(BTC 5m)",
             ContentKind::PmReplay => "预测市场回放",
             ContentKind::FeatureLab => "特征库",
+            ContentKind::FeatureMatrix => "特征矩阵",
             ContentKind::MarketMap => "全市场雷达",
             ContentKind::Observatory => "接口观察终端",
             ContentKind::NetEgress => "网络出口",
@@ -535,6 +552,7 @@ impl PaneSetup {
                 | ContentKind::PmBinance
                 | ContentKind::PmReplay
                 | ContentKind::FeatureLab
+                | ContentKind::FeatureMatrix
                 | ContentKind::MarketMap
                 | ContentKind::Observatory
                 | ContentKind::NetEgress
@@ -575,6 +593,7 @@ impl PaneSetup {
             | ContentKind::PmBinance
             | ContentKind::PmReplay
             | ContentKind::FeatureLab
+            | ContentKind::FeatureMatrix
             | ContentKind::MarketMap
             | ContentKind::Observatory
             | ContentKind::NetEgress
