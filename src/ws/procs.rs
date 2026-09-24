@@ -91,6 +91,14 @@ pub static ALL: &[Proc] = &[
         if_stopped: "**静默降级**：撤补退化成「总移除量」近似，combo 缺成交类特征",
     },
     Proc {
+        key: "features",
+        label: "特征引擎",
+        what: "通道② ring（由 signals 分流）→ 订单流特征 → 两份 cockpit 旁路文件",
+        unit: "ws-features",
+        kind: Kind::Daemon,
+        if_stopped: "「订单流特征」工作区的矩阵与四张图停在最后一次快照；**无数据缺口**，录制器仍在落盘，事后可回放重算",
+    },
+    Proc {
         key: "factory-bridge",
         label: "Factory 池桥",
         what: "本地 Factory 现役池 → Redis ws:factory:pool（每 5s）",

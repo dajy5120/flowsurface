@@ -19,9 +19,13 @@
 //!
 //! ## 源无关
 //!
-//! [`ChartSource`] 是回放与常驻引擎的共同接口。本波实现 [`JsonlSource`]（读文件，
-//! 文件增长就继续读，所以同一个实现也能 tail 一个常驻引擎正在写的文件）；
-//! 常驻引擎源留到后续波次。
+//! [`ChartSource`] 是回放与常驻引擎的共同接口，而 [`JsonlSource`] **两种都覆盖**：
+//! 回放路径由 `examples/replay_events_csv.rs` 写完整一份，常驻路径由
+//! `ws_features` 守护持续追加——面板侧读的是同一个文件、同一个格式，
+//! 一行都不用分情况。文件增长就继续读，被轮转（换了一份新的、更短）就从头再读。
+//!
+//! 也就是说「换数据源」这件事在面板这一侧是**不存在的**：
+//! 起不起那个守护，决定的是文件由谁在写，不是面板怎么读。
 
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -268,6 +272,15 @@ impl KlineAgg {
     }
 }
 
+/// 图上最多画多少个检出标记。
+///
+/// `orders::chart_fills_snapshot` 每帧 clone 一次，其文档写明「≤500 条」。
+/// 常驻场景下检出会一直来（30 分钟录制里就有 2840 个），不设上限的话
+/// 这个 Vec 会一直长，而且每帧 clone 的成本也一直涨。
+///
+/// 超出时**留最新的**——人看的是图的右边。
+pub const MAX_MARKS: usize = 500;
+
 /// 把检出转成图上的 ▲▼ 标记。
 ///
 /// 复用 docs/08 F3b 的 `CHART_FILLS` 通道——它本来画的是回测成交，
@@ -411,6 +424,11 @@ pub fn subscription(path: String, kinds: Vec<StreamKind>) -> Subscription<Event>
                             }
                             Row::Det { ts_ns, kind, px, qty, sell } => {
                                 dets.push((ts_ns, kind, px, qty, sell));
+                                // 常驻会一直收到检出：不设上限的话这个 Vec 会无界增长，
+                                // 且每帧 clone 的成本跟着涨。留最新的 MAX_MARKS 个。
+                                if dets.len() > MAX_MARKS * 2 {
+                                    dets.drain(..dets.len() - MAX_MARKS);
+                                }
                             }
                         }
                     }
@@ -439,7 +457,8 @@ pub fn subscription(path: String, kinds: Vec<StreamKind>) -> Subscription<Event>
                         }
                     }
                     if !dets.is_empty() {
-                        orders::publish_chart_fills(&detections_to_fills(&dets));
+                        let from = dets.len().saturating_sub(MAX_MARKS);
+                        orders::publish_chart_fills(&detections_to_fills(&dets[from..]));
                     }
                 }
             },
@@ -568,6 +587,21 @@ mod tests {
         let rows = src.poll().unwrap();
         assert!(!rows.is_empty(), "文件被重写后一行都没读到");
         assert!(matches!(&rows[0], Row::Meta(_)), "没有从头读");
+    }
+
+    #[test]
+    fn 检出标记有上限且留最新的() {
+        // 常驻会一直收到检出。`chart_fills_snapshot` 每帧 clone，其文档写明 ≤500，
+        // 不封顶的话这个 Vec 会无界增长、每帧成本也一直涨。
+        let dets: Vec<(u64, String, f64, f64, bool)> = (0..1_500u64)
+            .map(|i| (i * 1_000_000, "sweep".to_string(), 100.0 + i as f64, 1.0, false))
+            .collect();
+        let from = dets.len().saturating_sub(MAX_MARKS);
+        let fills = detections_to_fills(&dets[from..]);
+        assert_eq!(fills.len(), MAX_MARKS);
+        // 留的是最新的那一段——人看的是图的右边。
+        assert_eq!(fills[fills.len() - 1].ts, 1_499);
+        assert_eq!(fills[0].ts, 1_000);
     }
 
     #[test]

@@ -119,6 +119,9 @@ pub struct Source {
 pub static NO_EGRESS: &[(&str, &str)] = &[
     ("ws-control", "只绑本地 UDS 收 Studio 命令；往外发包的是它拉起的子进程"),
     ("ws-signals", "数据从通道② ring 来，结果写本地 Redis"),
+    // 与 ws-signals 同一形状：数据由 signals 从环里分流过来，结果写本地文件。
+    // 它不自己连交易所——那正是走分流而不是再开两条 WS 的理由（docs/31 §8.2）。
+    ("ws-features", "数据由 ws-signals 从通道② 分流过来，结果写本地旁路文件"),
     ("ws-factory-bridge", "读本地 Factory 池文件 → 本地 Redis"),
     // 它确实连外网，但那些连接已经由上面的「Cockpit 行情图」一行代表了
     // （`Kind::InProcess`）。在这里再列一行会把同一批连接数两遍。
