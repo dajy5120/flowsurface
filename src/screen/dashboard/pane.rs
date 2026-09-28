@@ -132,6 +132,8 @@ pub enum Event {
     /// 全市场雷达交互（docs/22 P0b）：守护启停 + 窗口/排序口径切换。
     RadarInteraction(crate::ws::radar::RadarMsg),
     FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg),
+    /// 回测结果面板顶上的「发起回测」（共用数据选择组件 + 起 runner）。
+    BacktestLaunchInteraction(crate::ws::backtest_launch::LaunchMsg),
 }
 
 pub struct State {
@@ -993,7 +995,10 @@ impl State {
             }
             Content::BacktestResult => {
                 // 回测结果（docs/08 F6-P7）：渲染走 ws::backtest_readout 旁路快照。
-                let base = crate::ws::backtest_view::pane_body();
+                // 顶上是「发起回测」（选策略 + 共用数据选择组件 → 起 runner）。
+                let launch = crate::ws::backtest_launch_view::view()
+                    .map(move |m| Message::PaneEvent(id, Event::BacktestLaunchInteraction(m)));
+                let base = column![launch, crate::ws::backtest_view::pane_body()].into();
                 self.compose_stack_view(
                     base,
                     id,
@@ -1570,6 +1575,7 @@ impl State {
                 // 预测市场：夜跑启停 + 定时开关（副作用为 systemctl，无面板状态）。
                 crate::ws::prediction::handle(m);
             }
+            Event::BacktestLaunchInteraction(m) => crate::ws::backtest_launch::handle(m),
             Event::FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg::Source(m)) => {
                 // 特征数据源：选择 / 开始 / 停止回放。换了图表流就请上层清图。
                 if crate::ws::feature_source::handle(m) {

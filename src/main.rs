@@ -332,6 +332,25 @@ impl Flowsurface {
                 let main_window_id = self.main_window.id;
                 let handles = self.handles.clone();
 
+                // 特征数据源换了标的（回放写出了图表流的 meta 行 / 切回实时）：
+                // 按它重建「订单流特征」工作区的图（外壳 = 标的 + 最小刻度 + 最小量）
+                if let Some(s) = ws::feature_source::take_shell() {
+                    let ti = exchange::TickerInfo::new(
+                        exchange::Ticker::new(&s.symbol, exchange::adapter::Exchange::BinanceLinear),
+                        s.tick,
+                        s.min_qty,
+                        None,
+                    );
+                    if let Some(l) = self
+                        .layout_manager
+                        .layouts
+                        .iter_mut()
+                        .find(|l| l.id.name == ws::workspace::WS_FEATURES)
+                    {
+                        let _ = l.dashboard.reset_chart_panes_to(main_window_id, Some(ti));
+                    }
+                }
+
                 return self
                     .active_dashboard_mut()
                     .tick(&handles, now, main_window_id)
@@ -364,6 +383,7 @@ impl Flowsurface {
                 self.save_state_to_disk(&windows);
                 // 特征面板发起的回放是 Cockpit 的子进程：关窗一起停
                 ws::feature_source::shutdown();
+                ws::backtest_launch::shutdown();
                 // 关界面 = 关掉全部后台守护（docs/26 S4b）。**先存盘再停**：
                 // 反过来的话，停服务那几十毫秒里用户已经看不到窗口了，
                 // 而布局还没落盘——崩在这中间就丢布局。
@@ -1621,7 +1641,7 @@ impl Flowsurface {
             proxy_cfg_persisted,
         );
 
-        match serde_json::to_string(&state) {
+        match serde_json::to_string(&state).map(ws::feature_source::scrub_saved) {
             Ok(layout_str) => {
                 let file_name = data::SAVED_STATE_PATH;
                 if let Err(e) = data::write_json_to_file(&layout_str, file_name) {

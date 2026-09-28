@@ -228,6 +228,101 @@ fn fmt_s(s: u64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+// ── 图的外壳（标的 / 刻度）跟着数据走 ─────────────────────────────────────────
+//
+// 四张图是 flowsurface 的行情图，外壳是一个 `TickerInfo`（交易所:标的 + 最小刻度 + 最小量），
+// 价格轴与聚合粒度都按它来。回放美股 / 期货时沿用 BinanceLinear:BTCUSDT 的外壳，
+// 价格照画但聚合粒度不对（ESU6 的 0.25 被按 0.1 × 倍数聚），标题也写着 BTCUSDT。
+//
+// 所以回放写出图表流的第一行（`meta`：标的、刻度、最小量）后，把外壳换成它：
+// 后台线程等到这一行 → 记为「待换外壳」→ 主循环下一帧（`Message::Tick`）按它重建特征工作区的图。
+// 交易所一栏仍写 BinanceLinear——flowsurface 的交易所枚举里没有 Databento，
+// 而这些图的数据只来自图表流、从不连交易所（回放类工作区禁止补拉，`workspace::replay_mode()`）。
+
+/// 图的外壳。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shell {
+    pub symbol: String,
+    pub tick: f32,
+    pub min_qty: f32,
+}
+
+impl Shell {
+    /// 常驻引擎那一个（Binance U 本位永续 BTCUSDT）。
+    #[must_use]
+    pub fn live() -> Self {
+        Self { symbol: "BTCUSDT".into(), tick: 0.1, min_qty: 0.001 }
+    }
+}
+
+/// `(待换的外壳, 现在的外壳)`。
+static SHELL: OnceLock<Mutex<(Option<Shell>, Shell)>> = OnceLock::new();
+
+fn shell_cell() -> &'static Mutex<(Option<Shell>, Shell)> {
+    SHELL.get_or_init(|| Mutex::new((None, Shell::live())))
+}
+
+fn set_pending_shell(s: Shell) {
+    if let Ok(mut g) = shell_cell().lock() {
+        g.0 = Some(s);
+    }
+}
+
+/// 主循环每帧取一次：有待换的外壳就返回它（并记为当前）。
+pub fn take_shell() -> Option<Shell> {
+    let mut g = shell_cell().lock().ok()?;
+    let s = g.0.take()?;
+    g.1 = s.clone();
+    Some(s)
+}
+
+/// 外壳标的的写法约束（flowsurface `Ticker`：≤ 28 字节、ASCII、不含 `|`）。
+fn shell_symbol(s: &str) -> Option<String> {
+    let t: String = s.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
+    (!t.is_empty() && t.len() <= 28).then_some(t)
+}
+
+/// 等回放写出图表流的 `meta` 行（最多 2 分钟：Databento 逐单窗口起点要先建簿）。
+fn watch_meta(chart: PathBuf) {
+    std::thread::spawn(move || {
+        for _ in 0..600 {
+            // 期间又换了一次回放 / 切回实时：这一份作废
+            if chart_override().as_ref() != Some(&chart) {
+                return;
+            }
+            if let Ok(t) = std::fs::read_to_string(&chart)
+                && let Some(line) = t.lines().next()
+                && let Some(super::feature_feed::Row::Meta(m)) = super::feature_feed::parse_row(line)
+                && let Some(symbol) = shell_symbol(&m.symbol)
+                && m.tick_size > 0.0
+            {
+                set_pending_shell(Shell {
+                    symbol,
+                    tick: m.tick_size as f32,
+                    min_qty: if m.min_qty > 0.0 { m.min_qty as f32 } else { 1.0 },
+                });
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+}
+
+/// 存盘前把布局里的回放外壳换回 BTCUSDT。
+///
+/// 布局按「交易所:标的」存图的流；下次启动时 flowsurface 按交易所的标的表去解析——
+/// `BinanceLinear:ESU6` 解析不到，那几张图会一直停在「等待就绪」，连重置都做不了
+/// （重置要先拿到就绪的流）。币安本来就有的标的（从 Tardis 回放 ETHUSDT）照存。
+#[must_use]
+pub fn scrub_saved(json: String) -> String {
+    let cur = shell_cell().lock().map(|g| g.1.clone()).unwrap_or_else(|_| Shell::live());
+    let native = super::data_picker::native_symbols("Binance", "linear", "");
+    if cur.symbol == "BTCUSDT" || native.contains(&cur.symbol) {
+        return json;
+    }
+    json.replace(&format!("\"BinanceLinear:{}\"", cur.symbol), "\"BinanceLinear:BTCUSDT\"")
+}
+
 /// 处理一条消息。返回 `true` = 图表流换了，请上层把四张图清空重画。
 pub fn handle(m: SourceMsg) -> bool {
     let Ok(mut g) = cell().lock() else { return false };
@@ -241,6 +336,8 @@ pub fn handle(m: SourceMsg) -> bool {
             if g.pick.source == Some(BSource::Live) && g.reading.is_some() {
                 stop(&mut g);
                 g.reading = None;
+                // 图的外壳换回常驻引擎的那一个
+                set_pending_shell(Shell::live());
                 return true;
             }
         }
@@ -346,7 +443,8 @@ fn start(g: &mut St) -> bool {
                 pace: g.pace,
                 done: None,
             });
-            g.reading = Some((matrix, chart, desc));
+            g.reading = Some((matrix, chart.clone(), desc));
+            watch_meta(chart);
             true
         }
         Err(e) => {
@@ -382,6 +480,20 @@ mod tests {
         assert!(!valid_hhmm("24:00"));
         assert!(!valid_hhmm("9:5"));
         assert!(!valid_hhmm("abc"));
+    }
+
+    #[test]
+    fn 外壳标的清洗与存盘换回() {
+        assert_eq!(shell_symbol("ESU6").as_deref(), Some("ESU6"));
+        assert_eq!(shell_symbol("BRK.B").as_deref(), Some("BRK.B"));
+        assert_eq!(shell_symbol("a|b c").as_deref(), Some("abc"));
+        assert!(shell_symbol("").is_none());
+        set_pending_shell(Shell { symbol: "ESU6".into(), tick: 0.25, min_qty: 1.0 });
+        assert!(take_shell().is_some_and(|s| s.symbol == "ESU6"));
+        let saved = scrub_saved(r#"{"t":"BinanceLinear:ESU6","u":"BinanceLinear:ETHUSDT"}"#.into());
+        assert_eq!(saved, r#"{"t":"BinanceLinear:BTCUSDT","u":"BinanceLinear:ETHUSDT"}"#);
+        set_pending_shell(Shell::live());
+        let _ = take_shell();
     }
 
     #[test]

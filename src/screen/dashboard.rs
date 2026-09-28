@@ -1437,6 +1437,18 @@ impl Dashboard {
     /// 不清的话新旧两段数据会画进同一张图。**不发拉取请求**——这些图的数据只来自图表流，
     /// 不找交易所要历史。
     fn reset_chart_panes(&mut self, main_window: window::Id) -> Task<Message> {
+        self.reset_chart_panes_to(main_window, None)
+    }
+
+    /// 同上，并把外壳换成 `shell`（`None` = 各图保留原来的标的）。
+    ///
+    /// 特征数据源换了标的（回放 ESU6 / AAPL …）时用：价格轴与聚合粒度都跟着新的最小刻度走，
+    /// 标题也显示新标的。
+    pub fn reset_chart_panes_to(
+        &mut self,
+        main_window: window::Id,
+        shell: Option<TickerInfo>,
+    ) -> Task<Message> {
         for (_, _, state) in self.iter_all_panes_mut(main_window) {
             let kind = state.content.kind();
             let is_chart = matches!(
@@ -1448,7 +1460,7 @@ impl Dashboard {
                     | ContentKind::TimeAndSales
                     | ContentKind::Ladder
             );
-            if is_chart && let Some(tk) = state.stream_pair() {
+            if is_chart && let Some(tk) = shell.or_else(|| state.stream_pair()) {
                 state.set_content_and_streams(vec![tk], kind);
             }
         }
