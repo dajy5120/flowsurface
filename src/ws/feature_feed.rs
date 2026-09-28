@@ -105,10 +105,12 @@ pub fn parse_row(line: &str) -> Option<Row> {
             tick_size: v["tick_size"].as_f64().unwrap_or(0.0),
             min_qty: v["min_qty"].as_f64().unwrap_or(0.0),
         })),
+        // 价或量 ≤ 0 的不是成交（币安 @trade 流的占位消息 `{"p":"0","q":"0"}`，录制器忠实录下了）：
+        // 画进图里是一根砸到 0 的尖刺，价格轴被拉到 0 ~ 8 万。写入端已经滤掉，这里再挡一道。
         "trade" => Some(Row::Trade {
             ts_ns: ts(&v),
-            px: v["px"].as_f64()?,
-            qty: v["qty"].as_f64()?,
+            px: v["px"].as_f64().filter(|x| *x > 0.0)?,
+            qty: v["qty"].as_f64().filter(|x| *x > 0.0)?,
             // `as_bool()` 对 JSON `null` 返回 None——正是要的语义。
             sell: v["sell"].as_bool(),
         }),
@@ -316,8 +318,18 @@ pub fn subscription(path: String, kinds: Vec<StreamKind>) -> Subscription<Event>
 
                 // 阻塞读盘在独立线程（与 replay.rs 同形状）。
                 std::thread::spawn(move || {
-                    let Ok(mut src) = JsonlSource::open(PathBuf::from(&path)) else {
-                        return;
+                    // 文件可能**还不存在**：回放进程要先把数据读进来、推断完刻度才建文件
+                    // （本地录制数据要读整段 parquet，要好几秒）。原来打不开就直接退出，而订阅的身份
+                    // （路径 + 流）没变、iced 不会再建一次 → 四张图永远 Waiting for data，不报任何错。
+                    // 所以等它出现；订阅被丢弃（换了路径 / 关了工作区）就不等了。
+                    let mut src = loop {
+                        if tx.is_closed() {
+                            return;
+                        }
+                        match JsonlSource::open(PathBuf::from(&path)) {
+                            Ok(s) => break s,
+                            Err(_) => std::thread::sleep(Duration::from_millis(200)),
+                        }
                     };
                     loop {
                         // 对端存活探测每轮无条件做一次：文件读完后这个线程会长期
@@ -499,6 +511,14 @@ mod tests {
     use super::*;
     use exchange::Timeframe;
     use std::hash::{Hash, Hasher};
+
+    /// 录制数据里的币安占位消息（价 / 量为 0）不是成交，不进图。
+    #[test]
+    fn 零价零量的占位成交不进图() {
+        assert!(parse_row(r#"{"t":"trade","ts":1,"px":0,"qty":0,"sell":null}"#).is_none());
+        assert!(parse_row(r#"{"t":"trade","ts":1,"px":83000.5,"qty":0,"sell":true}"#).is_none());
+        assert!(parse_row(r#"{"t":"trade","ts":1,"px":83000.5,"qty":0.01,"sell":true}"#).is_some());
+    }
     use std::io::Write;
 
     fn tmp(tag: &str) -> PathBuf {
