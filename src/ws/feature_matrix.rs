@@ -220,40 +220,73 @@ pub struct ViewState {
     pub drag: Option<(Col, f32, f32)>,
     /// 鼠标在表头里的最近 x（拖拽起点用）。
     pub mouse_x: f32,
-    /// 涨跌箭头：与多久之前比（毫秒）、单箭头 / 双箭头的 |Δz| 阈值。持久化在 [`ui_path`]。
+    /// 涨跌箭头：与多久之前比（毫秒）、各档的 |Δz| 阈值（1~5 档，逐档递增；第 N 档画 N 个箭头）。
+    /// 持久化在 [`ui_path`]。
     pub trend_ms: u32,
-    pub th1: f64,
-    pub th2: f64,
-    /// 三个输入框的文本（输入到一半时不合法，合法了才生效）。
+    pub ths: Vec<f64>,
+    /// 输入框的文本（输入到一半时不合法，合法了才生效）：比较时长 + 五档阈值（空 = 这一档不用）。
     pub trend_text: String,
-    pub th1_text: String,
-    pub th2_text: String,
+    pub th_text: [String; TREND_LEVELS],
     /// 上一次输入不合法的原因。
     pub trend_err: String,
 }
 
-/// 涨跌箭头的默认值：与 5 秒前比，|Δz| ≥ 0.5 单箭头、≥ 1.5 双箭头。
+/// 涨跌箭头的默认值：与 5 秒前比，|Δz| ≥ 0.5 一个箭头、≥ 1.5 两个箭头（第 3~5 档默认不用）。
 pub const TREND_MS: u32 = 5_000;
-pub const TH1: f64 = 0.5;
-pub const TH2: f64 = 1.5;
+pub const THS: [f64; 2] = [0.5, 1.5];
+/// 最多几档（第 N 档画 N 个箭头）。
+pub const TREND_LEVELS: usize = 5;
 /// 比较时长的范围（上限 = 面板保留的快照历史长度）。
 pub const TREND_MIN_MS: u32 = 1_000;
 pub const TREND_MAX_MS: u32 = 600_000;
 
-/// 某格与 N 秒前相比的 z 变化 → 箭头级别：+2 / +1 / 0 / −1 / −2。
+/// 某格与 N 秒前相比的 z 变化 → 箭头级别：±(|Δz| 达到了几档阈值)，0 = 不画。
 #[must_use]
-pub fn trend_level(dz: f64, th1: f64, th2: f64) -> i8 {
-    if dz >= th2 {
-        2
-    } else if dz >= th1 {
-        1
-    } else if dz <= -th2 {
-        -2
-    } else if dz <= -th1 {
-        -1
-    } else {
-        0
+pub fn trend_level(dz: f64, ths: &[f64]) -> i8 {
+    let n = ths.iter().take_while(|t| dz.abs() >= **t).count() as i8;
+    if dz < 0.0 { -n } else { n }
+}
+
+/// 校验五个阈值输入框：按顺序填（中间不能空）、都大于 0、逐档递增；至少填一档。
+pub fn parse_ths(texts: &[String]) -> Result<Vec<f64>, String> {
+    let mut out: Vec<f64> = Vec::new();
+    let mut ended = false;
+    for (i, t) in texts.iter().enumerate() {
+        let t = t.trim();
+        if t.is_empty() {
+            ended = true;
+            continue;
+        }
+        if ended {
+            return Err(format!("第 {} 档前面有空着的档——阈值要从第 1 档起按顺序填", i + 1));
+        }
+        let x: f64 = t.parse().map_err(|_| format!("第 {} 档「{t}」不是数", i + 1))?;
+        if x <= 0.0 {
+            return Err(format!("第 {} 档要大于 0", i + 1));
+        }
+        if let Some(prev) = out.last()
+            && x <= *prev
+        {
+            return Err(format!("第 {} 档（{x}）要大于第 {} 档（{prev}）", i + 1, i));
+        }
+        out.push(x);
     }
+    if out.is_empty() {
+        return Err("至少填第 1 档".into());
+    }
+    Ok(out)
+}
+
+/// 阈值的说法，如 `0.5 / 1.5`。
+#[must_use]
+pub fn fmt_ths(ths: &[f64]) -> String {
+    ths.iter().map(|x| format!("{x}")).collect::<Vec<_>>().join(" / ")
+}
+
+/// 阈值 → 五个输入框的文本（没用的档是空串）。
+#[must_use]
+pub fn ths_text(ths: &[f64]) -> [String; TREND_LEVELS] {
+    std::array::from_fn(|i| ths.get(i).map_or_else(String::new, |x| format!("{x}")))
 }
 
 /// 全局时间窗口的编辑草稿。点「应用并重启」才写配置。
@@ -507,8 +540,8 @@ pub enum FeatureMatrixMsg {
     ResetWidths,
     /// 涨跌箭头：比较时长 / 两档阈值的输入框。
     TrendLookback(String),
-    TrendTh1(String),
-    TrendTh2(String),
+    /// `(第几档，0 起, 文本)`。
+    TrendTh(usize, String),
     /// 某一列回到自适应宽度（双击表头分隔线）。
     AutoCol(Col),
 }
@@ -520,12 +553,10 @@ fn cell() -> &'static Mutex<ViewState> {
         let p = load_ui();
         Mutex::new(ViewState {
             trend_text: super::feature_matrix_readout::format_window(p.trend_ms),
-            th1_text: format!("{}", p.th1),
-            th2_text: format!("{}", p.th2),
+            th_text: ths_text(&p.ths),
             col_w: p.col_w,
             trend_ms: p.trend_ms,
-            th1: p.th1,
-            th2: p.th2,
+            ths: p.ths,
             ..ViewState::default()
         })
     })
@@ -542,13 +573,12 @@ pub fn ui_path() -> std::path::PathBuf {
 pub struct UiPrefs {
     pub col_w: std::collections::BTreeMap<Col, f32>,
     pub trend_ms: u32,
-    pub th1: f64,
-    pub th2: f64,
+    pub ths: Vec<f64>,
 }
 
 impl UiPrefs {
     fn of(st: &ViewState) -> Self {
-        Self { col_w: st.col_w.clone(), trend_ms: st.trend_ms, th1: st.th1, th2: st.th2 }
+        Self { col_w: st.col_w.clone(), trend_ms: st.trend_ms, ths: st.ths.clone() }
     }
 }
 
@@ -566,14 +596,18 @@ fn load_ui() -> UiPrefs {
         })
         .collect();
     let t = &v["trend"];
-    let th1 = t["th1"].as_f64().filter(|x| *x > 0.0).unwrap_or(TH1);
+    // 新格式 `ths`；旧格式 `th1` / `th2` 照读
+    let saved: Vec<String> = match t["ths"].as_array() {
+        Some(a) => a.iter().filter_map(serde_json::Value::as_f64).map(|x| format!("{x}")).collect(),
+        None => [t["th1"].as_f64(), t["th2"].as_f64()].into_iter().flatten().map(|x| format!("{x}")).collect(),
+    };
+    let ths = parse_ths(&saved).unwrap_or_else(|_| THS.to_vec());
     UiPrefs {
         col_w,
         trend_ms: t["ms"]
             .as_u64()
             .map_or(TREND_MS, |x| (x as u32).clamp(TREND_MIN_MS, TREND_MAX_MS)),
-        th1,
-        th2: t["th2"].as_f64().filter(|x| *x > th1).unwrap_or(TH2.max(th1)),
+        ths: ths.into_iter().take(TREND_LEVELS).collect(),
     }
 }
 
@@ -607,7 +641,7 @@ fn save_ui(p: &UiPrefs) {
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
     let v = serde_json::json!({
         "col_w": o,
-        "trend": { "ms": p.trend_ms, "th1": p.th1, "th2": p.th2 },
+        "trend": { "ms": p.trend_ms, "ths": p.ths },
     });
     let _ = std::fs::write(path, v.to_string());
 }
@@ -634,7 +668,7 @@ pub fn handle(m: FeatureMatrixMsg) -> Option<f32> {
                 save_ui(&w);
             }
         }
-        FeatureMatrixMsg::TrendLookback(_) | FeatureMatrixMsg::TrendTh1(_) | FeatureMatrixMsg::TrendTh2(_) => {
+        FeatureMatrixMsg::TrendLookback(_) | FeatureMatrixMsg::TrendTh(..) => {
             let (p, changed) = {
                 let Ok(mut g) = cell().lock() else { return None };
                 let before = UiPrefs::of(&g);
@@ -1140,27 +1174,17 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
             }
             st.trend_text = t;
         }
-        FeatureMatrixMsg::TrendTh1(t) => {
-            match t.trim().parse::<f64>() {
-                Ok(x) if x > 0.0 && x < st.th2 => {
-                    st.th1 = x;
+        FeatureMatrixMsg::TrendTh(i, t) => {
+            if let Some(slot) = st.th_text.get_mut(i) {
+                *slot = t;
+            }
+            match parse_ths(&st.th_text) {
+                Ok(v) => {
+                    st.ths = v;
                     st.trend_err.clear();
                 }
-                Ok(_) => st.trend_err = format!("单箭头阈值要大于 0、小于双箭头阈值 {}", st.th2),
-                Err(_) => st.trend_err = format!("「{}」不是数", t.trim()),
+                Err(e) => st.trend_err = format!("{e}（没有生效，仍按 {} 显示）", fmt_ths(&st.ths)),
             }
-            st.th1_text = t;
-        }
-        FeatureMatrixMsg::TrendTh2(t) => {
-            match t.trim().parse::<f64>() {
-                Ok(x) if x > st.th1 => {
-                    st.th2 = x;
-                    st.trend_err.clear();
-                }
-                Ok(_) => st.trend_err = format!("双箭头阈值要大于单箭头阈值 {}", st.th1),
-                Err(_) => st.trend_err = format!("「{}」不是数", t.trim()),
-            }
-            st.th2_text = t;
         }
         FeatureMatrixMsg::WinInput(t) => {
             if let Some(w) = st.win_edit.as_mut() {
@@ -1407,23 +1431,28 @@ mod tests {
 
     #[test]
     fn 涨跌箭头分级与设置校验() {
-        assert_eq!(trend_level(0.49, 0.5, 1.5), 0);
-        assert_eq!(trend_level(0.5, 0.5, 1.5), 1);
-        assert_eq!(trend_level(1.6, 0.5, 1.5), 2);
-        assert_eq!(trend_level(-0.7, 0.5, 1.5), -1);
-        assert_eq!(trend_level(-3.0, 0.5, 1.5), -2);
-        let mut st = ViewState { trend_ms: TREND_MS, th1: TH1, th2: TH2, ..ViewState::default() };
+        let ths = [0.5, 1.0, 1.5, 2.0, 3.0];
+        assert_eq!(trend_level(0.49, &ths), 0);
+        assert_eq!(trend_level(0.5, &ths), 1);
+        assert_eq!(trend_level(1.6, &ths), 3);
+        assert_eq!(trend_level(9.0, &ths), 5, "封顶 5 档");
+        assert_eq!(trend_level(-2.2, &ths), -4);
+        assert_eq!(trend_level(2.2, &THS), 2, "只设两档时封顶两个箭头");
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_ths(&s(&["0.5", "1.5", "", "", ""])).unwrap(), vec![0.5, 1.5]);
+        assert!(parse_ths(&s(&["0.5", "", "2", "", ""])).is_err(), "中间不能空");
+        assert!(parse_ths(&s(&["1", "0.8", "", "", ""])).is_err(), "要逐档递增");
+        assert!(parse_ths(&s(&["", "", "", "", ""])).is_err(), "至少一档");
+        let mut st = ViewState { trend_ms: TREND_MS, ths: THS.to_vec(), th_text: ths_text(&THS), ..ViewState::default() };
         apply(&mut st, FeatureMatrixMsg::TrendLookback("30s".into()));
         assert_eq!(st.trend_ms, 30_000);
-        // 超出历史长度、不合法的不生效，并说原因
         apply(&mut st, FeatureMatrixMsg::TrendLookback("20m".into()));
-        assert_eq!(st.trend_ms, 30_000);
+        assert_eq!(st.trend_ms, 30_000, "超出历史长度的不生效");
         assert!(!st.trend_err.is_empty());
-        apply(&mut st, FeatureMatrixMsg::TrendTh1("2".into()));
-        assert_eq!(st.th1, TH1, "单箭头阈值不能大于双箭头阈值");
-        apply(&mut st, FeatureMatrixMsg::TrendTh2("2.5".into()));
-        apply(&mut st, FeatureMatrixMsg::TrendTh1("2".into()));
-        assert_eq!((st.th1, st.th2), (2.0, 2.5));
+        apply(&mut st, FeatureMatrixMsg::TrendTh(3, "3".into()));
+        assert_eq!(st.ths, THS.to_vec(), "跳过第 3 档填第 4 档不生效");
+        apply(&mut st, FeatureMatrixMsg::TrendTh(2, "2".into()));
+        assert_eq!(st.ths, vec![0.5, 1.5, 2.0, 3.0]);
         assert!(st.trend_err.is_empty());
     }
 

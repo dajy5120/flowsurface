@@ -309,14 +309,16 @@ fn quality_word(s: &Slot) -> String {
 /// 涨（绿）/ 跌（红）。与质量色条的绿红是两件事：箭头只说「这个数比 N 秒前变大 / 变小」，不说好坏。
 const C_UP: Color = Color::from_rgb(0.30, 0.82, 0.45);
 const C_DOWN: Color = Color::from_rgb(0.93, 0.36, 0.34);
-/// 完整模式里箭头那一小列的宽度。
-const ARROW: f32 = 24.0;
+/// 完整模式里箭头那一小列的宽度：够画「启用的档数」个箭头。
+fn arrow_width(levels: usize) -> f32 {
+    10.0 + 7.0 * levels.max(1) as f32
+}
 
 /// 涨跌比较的上下文：N 秒前那份快照（每格 z、值）与阈值。
 struct Trend {
     past: Option<Box<[(f32, f32)]>>,
-    th1: f64,
-    th2: f64,
+    /// 各档阈值（第 N 档画 N 个箭头）。
+    ths: Vec<f64>,
     /// 「近 5s」这样的说法。
     label: String,
 }
@@ -325,8 +327,7 @@ impl Trend {
     fn new(m: &Matrix, v: &ViewState) -> Self {
         Self {
             past: ro::past(m.as_of, u64::from(v.trend_ms)),
-            th1: v.th1,
-            th2: v.th2,
+            ths: v.ths.clone(),
             label: format!("近 {}", ro::format_window(v.trend_ms)),
         }
     }
@@ -340,18 +341,17 @@ impl Trend {
 
     fn level(&self, s: &Slot) -> i8 {
         self.dz(s)
-            .map_or(0, |d| super::feature_matrix::trend_level(d, self.th1, self.th2))
+            .map_or(0, |d| super::feature_matrix::trend_level(d, &self.ths))
     }
 }
 
-/// 箭头与颜色：+2 ▲▲ / +1 ▲（绿），−1 ▼ / −2 ▼▼（红），0 不画。
-fn arrow(level: i8) -> (&'static str, Color) {
-    match level {
-        2 => ("▲▲", C_UP),
-        1 => ("▲", C_UP),
-        -1 => ("▼", C_DOWN),
-        -2 => ("▼▼", C_DOWN),
-        _ => ("", C_DIM),
+/// 箭头与颜色：第 N 档画 N 个，▲ 绿（变大）/ ▼ 红（变小），0 不画。
+fn arrow(level: i8) -> (String, Color) {
+    let n = usize::from(level.unsigned_abs());
+    match level.signum() {
+        1 => ("▲".repeat(n), C_UP),
+        -1 => ("▼".repeat(n), C_DOWN),
+        _ => (String::new(), C_DIM),
     }
 }
 
@@ -465,6 +465,8 @@ struct Widths {
     unit: f32,
     layer: f32,
     status: f32,
+    /// 箭头小列（随启用的档数定，不可拖）。
+    arrow: f32,
 }
 
 impl Widths {
@@ -485,7 +487,7 @@ impl Widths {
     /// 一个窗口组的宽度（不含组后的分隔带）。
     fn group(&self, mode: TableMode) -> f32 {
         match mode {
-            TableMode::Full => BAR + self.val + ARROW + SEP + self.z + SEP + self.pct,
+            TableMode::Full => BAR + self.val + self.arrow + SEP + self.z + SEP + self.pct,
             TableMode::Pivot => self.cell,
         }
     }
@@ -518,7 +520,8 @@ fn widths(rows: &[FeatureRow<'_>], wins: &[u32], v: &ViewState) -> Widths {
     let pct = est("100%", 11.0) + pad;
     // 窗口组要装得下它的标题
     let label = wins.iter().map(|w| est(&format!("窗口 {}", window_label(*w)), 10.0) + pad).fold(0.0, f32::max);
-    let full = BAR + val + ARROW + SEP + z + SEP + pct;
+    let arrow = arrow_width(v.ths.len());
+    let full = BAR + val + arrow + SEP + z + SEP + pct;
     if full < label {
         val += label - full;
     }
@@ -527,7 +530,7 @@ fn widths(rows: &[FeatureRow<'_>], wins: &[u32], v: &ViewState) -> Widths {
         Metric::Pct => est("100%", 11.0) + pad,
         Metric::Value => val,
         Metric::Quality => mx(&mut slots().map(|s| est(&quality_word(s), 11.0) + pad), 40.0, 140.0),
-        Metric::Change => est("▼▼ +12.34", 11.0) + pad,
+        Metric::Change => est(&format!("{} +12.34", "▼".repeat(v.ths.len())), 11.0) + pad,
     }
     .max(wins.iter().map(|w| est(&format!("{} · {}", window_label(*w), v.metric.label()), 10.0) + pad).fold(0.0, f32::max));
     let unit = mx(&mut rows.iter().map(|r| est(&r.head().unit, 10.0) + pad), 36.0, 130.0);
@@ -537,7 +540,7 @@ fn widths(rows: &[FeatureRow<'_>], wins: &[u32], v: &ViewState) -> Widths {
         220.0,
     );
     let status = mx(&mut rows.iter().map(|r| est(&row_status(r).0, 10.0) + pad), 60.0, 340.0);
-    let mut w = Widths { name, key, val, z, pct, cell, unit, layer, status };
+    let mut w = Widths { name, key, val, z, pct, cell, unit, layer, status, arrow };
     // 自适应只算一次：还没有宽度的列（第一次打开 / 双击恢复之后）把这次算出的宽度固定下来，
     // 已有的一概不动——之后数据刷新不会让列宽跟着跳。空表（还没数据）不固定。
     if !rows.is_empty() {
@@ -585,7 +588,7 @@ fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, w: &Width
             fcell(nowrap(num(s.value), 11.0, value_color(s)), w.val, true),
             {
                 let (a, c) = arrow(level);
-                fcell(nowrap(a.to_string(), 10.0, c), ARROW, false)
+                fcell(nowrap(a, 10.0, c), w.arrow, false)
             },
             sep(false),
             fcell(nowrap(num(s.z), 11.0, C_DIM), w.z, true),
@@ -606,11 +609,11 @@ fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, w: &Width
                 Metric::Quality => (quality_word(s), Some(bar_color(s).scale_alpha(0.28)), C_TXT),
                 Metric::Change => {
                     let (a, c) = arrow(level);
-                    let bg = match level {
-                        2 => Some(C_UP.scale_alpha(0.32)),
-                        1 => Some(C_UP.scale_alpha(0.14)),
-                        -1 => Some(C_DOWN.scale_alpha(0.14)),
-                        -2 => Some(C_DOWN.scale_alpha(0.32)),
+                    // 档位越高底色越深
+                    let depth = f32::from(level.unsigned_abs()) / tr.ths.len().max(1) as f32;
+                    let bg = match level.signum() {
+                        1 => Some(C_UP.scale_alpha(0.08 + 0.32 * depth)),
+                        -1 => Some(C_DOWN.scale_alpha(0.08 + 0.32 * depth)),
                         _ => None,
                     };
                     (
@@ -683,7 +686,7 @@ fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric, w: &Widths) -
                 r = r
                     .push(container(text("")).width(Length::Fixed(BAR)))
                     .push(fcell(h("值"), w.val, true))
-                    .push(fcell(h(" Δ"), ARROW, false))
+                    .push(fcell(h(" Δ"), w.arrow, false))
                     .push(grip(false, Col::Val, w.val))
                     .push(fcell(h("z"), w.z, true))
                     .push(grip(false, Col::Z, w.z))
@@ -838,7 +841,7 @@ fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
         (TableMode::Pivot, Metric::Z) => dim("蓝 = 低于常态，红 = 高于常态，颜色越深偏离越大（|z| ≥ 3 封顶）".into()),
         (TableMode::Pivot, Metric::Pct) => dim("蓝 = 处在历史低位，红 = 处在历史高位，50% 附近不着色".into()),
         (TableMode::Pivot, Metric::Quality) => dim("格子按质量着色，写的是原因；悬停看原文".into()),
-        (TableMode::Pivot, Metric::Change) => dim("与 N 秒前相比 z 的变化：绿 ▲ 变大，红 ▼ 变小，双箭头 = 变化超过双箭头阈值".into()),
+        (TableMode::Pivot, Metric::Change) => dim("与 N 秒前相比 z 的变化：绿 ▲ 变大，红 ▼ 变小；箭头个数 = 达到的档位，底色越深档位越高".into()),
     };
     r = r.push(legend);
     r = r.push(text("　列宽：拖表头分隔线调整，双击某条分隔线 = 这一列按当前内容重新自适应").size(10).color(C_DIM));
@@ -850,22 +853,28 @@ fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
             .on_input(Msg::TrendLookback)
             .size(11)
             .width(Length::Fixed(56.0)),
-        text("前相比 z 的变化，|Δz| ≥").size(10).color(C_DIM),
-        iced::widget::text_input("0.5", &v.th1_text)
-            .on_input(Msg::TrendTh1)
-            .size(11)
-            .width(Length::Fixed(48.0)),
-        nowrap("▲ / ▼".into(), 10.0, C_UP),
-        text("，≥").size(10).color(C_DIM),
-        iced::widget::text_input("1.5", &v.th2_text)
-            .on_input(Msg::TrendTh2)
-            .size(11)
-            .width(Length::Fixed(48.0)),
-        nowrap("▲▲ / ▼▼".into(), 10.0, C_UP),
-        text("（绿涨红跌；只说变大变小，不说好坏；没有 z 的特征不画）").size(10).color(C_DIM),
+        text("前相比 z 的变化，|Δz| 达到").size(10).color(C_DIM),
     ]
     .spacing(4)
     .align_y(iced::Alignment::Center);
+    // 五档阈值：第 N 档达到就画 N 个箭头；空着 = 不用这一档（要从第 1 档起按顺序填）
+    let mut levels = row![].spacing(4).align_y(iced::Alignment::Center);
+    for i in 0..super::feature_matrix::TREND_LEVELS {
+        let on = i < v.ths.len();
+        levels = levels
+            .push(nowrap("▲".repeat(i + 1), 10.0, if on { C_UP } else { C_PEND }))
+            .push(
+                iced::widget::text_input("不用", &v.th_text[i])
+                    .on_input(move |t| Msg::TrendTh(i, t))
+                    .size(11)
+                    .width(Length::Fixed(46.0)),
+            );
+    }
+    let trend = trend.push(levels).push(
+        text("（第 N 档达到画 N 个箭头，空着的档不用；绿涨红跌，只说变大变小、不说好坏；没有 z 的特征不画）")
+            .size(10)
+            .color(C_DIM),
+    );
     let mut col = column![r.wrap(), trend.wrap()].spacing(4);
     if !v.trend_err.is_empty() {
         col = col.push(text(v.trend_err.clone()).size(10).color(C_BAD));
