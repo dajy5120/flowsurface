@@ -112,6 +112,40 @@ pub struct Picker {
     pub selected: std::collections::BTreeSet<String>,
     /// 按键名 / 中文名子串筛（四百多条，不给搜索等于没法选）。
     pub search: String,
+    /// 正在编辑的已存选择集（`None` = 还没存过的新草稿）。
+    pub editing: Option<String>,
+    /// 名称输入框（新建时是新名字；编辑时改它 + 「更新」= 改名）。
+    pub name: String,
+    pub note: String,
+    /// 点过一次「删除」、等第二次确认的选择集。
+    pub confirm_delete: Option<String>,
+}
+
+impl Picker {
+    /// 草稿与正在编辑的选择集不一致（有未保存的修改）。
+    #[must_use]
+    pub fn dirty(&self) -> bool {
+        let Some(n) = &self.editing else {
+            return false;
+        };
+        match super::feature_presets::get(n) {
+            Some(p) => {
+                let saved: std::collections::BTreeSet<String> = p.keys.into_iter().collect();
+                saved != self.selected || p.note != self.note.trim() || n != self.name.trim()
+            }
+            None => true,
+        }
+    }
+
+    /// 把一个选择集载入草稿。当前字典里没有的键跳过，返回跳过了几条。
+    pub fn load(&mut self, p: &super::feature_presets::Preset, known: &std::collections::BTreeSet<String>) -> usize {
+        self.selected = p.keys.iter().filter(|k| known.is_empty() || known.contains(*k)).cloned().collect();
+        self.editing = Some(p.name.clone());
+        self.name = p.name.clone();
+        self.note = p.note.clone();
+        self.confirm_delete = None;
+        p.keys.len() - self.selected.len()
+    }
 }
 
 impl Picker {
@@ -223,6 +257,24 @@ pub enum FeatureMatrixMsg {
     PickSearch(String),
     /// 写自定义配置并重启引擎。
     ApplyPicker,
+    /// 把已存选择集载入选择页（编辑它）。
+    PresetLoad(String),
+    /// 从当前勾选开始一个新的（未保存）选择集。
+    PresetNew,
+    PresetName(String),
+    PresetNote(String),
+    /// 以名称框里的名字另存为新选择集。
+    PresetSaveNew,
+    /// 覆盖正在编辑的选择集（名称框改过 = 顺带改名）。
+    PresetUpdate,
+    /// 删除（第一次点只是要求确认）。
+    PresetDelete(String),
+    /// 导出到文件（系统「另存为」对话框）。
+    PresetExport(String),
+    /// 从文件导入（系统「打开」对话框），导入后直接载入编辑。
+    PresetImport,
+    /// 直接应用一个已存选择集并重启引擎（模式栏的下拉框）。
+    PresetApply(String),
 }
 
 static STATE: OnceLock<Mutex<ViewState>> = OnceLock::new();
@@ -240,20 +292,61 @@ pub fn state() -> ViewState {
 pub fn handle(m: FeatureMatrixMsg) {
     match m {
         FeatureMatrixMsg::Engine(act) => engine_action(act),
-        FeatureMatrixMsg::SetMode(mode) => apply_mode(mode, Vec::new()),
+        FeatureMatrixMsg::SetMode(mode) => apply_mode(mode, Vec::new(), None),
         FeatureMatrixMsg::ApplyPicker => {
-            let keys: Vec<String> = state()
-                .picker
-                .map(|p| p.selected.into_iter().collect())
-                .unwrap_or_default();
-            if keys.is_empty() {
+            let Some(p) = state().picker else { return };
+            if p.selected.is_empty() {
                 set_engine_note("✗ 一条特征都没选——引擎会退回默认集，没有应用".into());
                 return;
             }
-            apply_mode("custom", keys);
+            // 草稿与所编辑的选择集一致时，配置里记下它的名字（模式栏据此显示）
+            let preset = p.editing.clone().filter(|_| !p.dirty());
+            apply_mode("custom", p.selected.into_iter().collect(), preset);
             if let Ok(mut g) = cell().lock() {
                 g.picker = None;
             }
+        }
+        FeatureMatrixMsg::PresetApply(name) => match super::feature_presets::get(&name) {
+            Some(p) => apply_mode("custom", p.keys, Some(name)),
+            None => set_engine_note(format!("✗ 没有选择集「{name}」")),
+        },
+        FeatureMatrixMsg::PresetExport(name) => {
+            set_preset_note(String::new());
+            std::thread::spawn(move || {
+                let Some(path) = super::feature_presets::ask_save_path(&name) else {
+                    return;
+                };
+                set_preset_note(match super::feature_presets::export_to(&name, &path) {
+                    Ok(()) => format!("✔ 已导出「{name}」→ {}", path.display()),
+                    Err(e) => format!("✗ {e}"),
+                });
+            });
+        }
+        FeatureMatrixMsg::PresetImport => {
+            set_preset_note(String::new());
+            std::thread::spawn(|| {
+                let Some(path) = super::feature_presets::ask_open_path() else {
+                    return;
+                };
+                match super::feature_presets::import_from(&path) {
+                    Ok(pr) => {
+                        let known = known_keys(&super::feature_matrix_readout::snapshot());
+                        let mut skipped = 0;
+                        if let Ok(mut g) = cell().lock()
+                            && let Some(p) = g.picker.as_mut()
+                        {
+                            skipped = p.load(&pr, &known);
+                        }
+                        set_preset_note(format!(
+                            "✔ 已导入「{}」（{} 条特征）{}",
+                            pr.name,
+                            pr.keys.len(),
+                            if skipped > 0 { format!("，其中 {skipped} 条当前字典里没有，已跳过") } else { String::new() }
+                        ));
+                    }
+                    Err(e) => set_preset_note(format!("✗ 导入 {} 失败：{e}", path.display())),
+                }
+            });
         }
         m => {
             // 选择页的批量「恢复默认」与初始勾选要读快照（默认集、当前启用集）
@@ -287,26 +380,57 @@ pub fn read_config() -> (String, Vec<String>) {
     (mode, keys)
 }
 
-/// 配置 JSON（纯函数，测试用）。
+/// 配置 JSON（纯函数，测试用）。`preset` 只给面板看（引擎忽略它）。
 #[must_use]
-pub fn config_json(mode: &str, keys: &[String]) -> String {
-    serde_json::json!({ "mode": mode, "keys": keys }).to_string()
+pub fn config_json(mode: &str, keys: &[String], preset: Option<&str>) -> String {
+    match preset {
+        Some(p) => serde_json::json!({ "mode": mode, "keys": keys, "preset": p }),
+        None => serde_json::json!({ "mode": mode, "keys": keys }),
+    }
+    .to_string()
+}
+
+/// 当前配置记着的选择集名（应用的是某个已存选择集时才有）。
+#[must_use]
+pub fn config_preset() -> Option<String> {
+    let t = std::fs::read_to_string(config_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&t).ok()?;
+    v["preset"].as_str().map(str::to_string)
+}
+
+static PRESET_NOTE: OnceLock<Mutex<String>> = OnceLock::new();
+
+/// 选择集操作的回执（显示在选择页的选择集栏里）。
+#[must_use]
+pub fn preset_note() -> String {
+    PRESET_NOTE.get_or_init(|| Mutex::new(String::new())).lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+fn set_preset_note(t: String) {
+    if let Ok(mut g) = PRESET_NOTE.get_or_init(|| Mutex::new(String::new())).lock() {
+        *g = t;
+    }
+}
+
+fn known_keys(m: &super::feature_matrix_readout::Matrix) -> std::collections::BTreeSet<String> {
+    m.slots.iter().map(|s| s.key.clone()).collect()
 }
 
 /// 写配置（临时文件 + rename：引擎恰好在读时不会读到半个文件）并重启引擎。
-fn apply_mode(mode: &'static str, keys: Vec<String>) {
+fn apply_mode(mode: &'static str, keys: Vec<String>, preset: Option<String>) {
     let p = config_path();
     let tmp = p.with_extension("json.tmp");
     let r = std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new(".")))
-        .and_then(|()| std::fs::write(&tmp, config_json(mode, &keys)))
+        .and_then(|()| std::fs::write(&tmp, config_json(mode, &keys, preset.as_deref())))
         .and_then(|()| std::fs::rename(&tmp, &p));
     if let Err(e) = r {
         set_engine_note(format!("✗ 写 {} 失败：{e}", p.display()));
         return;
     }
-    let label = match mode {
-        "all" => "全开".to_string(),
-        "custom" => format!("自定义（{} 条）", keys.len()),
+    let label = match (mode, &preset) {
+        ("all", _) => "全开".to_string(),
+        ("custom", Some(n)) => format!("选择集「{n}」（{} 条）", keys.len()),
+        ("custom", None) => format!("自定义（{} 条）", keys.len()),
         _ => "默认".to_string(),
     };
     set_engine_note(format!("启用集 → {label}，正在重启引擎…"));
@@ -357,13 +481,89 @@ pub fn engine_state() -> Option<super::svcctl::UnitState> {
 pub fn apply_with(st: &mut ViewState, m: FeatureMatrixMsg, snap: &super::feature_matrix_readout::Matrix) {
     match m {
         FeatureMatrixMsg::OpenPicker => {
+            super::feature_presets::invalidate();
+            set_preset_note(String::new());
             let (mode, keys) = read_config();
-            let selected = if mode == "custom" && !keys.is_empty() {
-                keys.into_iter().collect()
-            } else {
-                snap.enabled_keys().into_iter().collect()
+            let mut p = Picker::default();
+            // 当前生效的是某个已存选择集 → 直接进入编辑它
+            match config_preset().and_then(|n| super::feature_presets::get(&n)).filter(|_| mode == "custom") {
+                Some(pr) => {
+                    p.load(&pr, &known_keys(snap));
+                }
+                None => {
+                    p.selected = if mode == "custom" && !keys.is_empty() {
+                        keys.into_iter().collect()
+                    } else {
+                        snap.enabled_keys().into_iter().collect()
+                    };
+                }
+            }
+            st.picker = Some(p);
+        }
+        FeatureMatrixMsg::PresetLoad(name) => {
+            let Some(p) = st.picker.as_mut() else { return };
+            match super::feature_presets::get(&name) {
+                Some(pr) => {
+                    let skipped = p.load(&pr, &known_keys(snap));
+                    set_preset_note(if skipped > 0 {
+                        format!("已载入「{name}」；其中 {skipped} 条当前字典里没有，已跳过（点「更新」会把它们从选择集里去掉）")
+                    } else {
+                        format!("已载入「{name}」，改完点「更新」保存")
+                    });
+                }
+                None => set_preset_note(format!("✗ 没有选择集「{name}」")),
+            }
+        }
+        FeatureMatrixMsg::PresetSaveNew => {
+            let Some(p) = st.picker.as_mut() else { return };
+            let keys: Vec<String> = p.selected.iter().cloned().collect();
+            match super::feature_presets::save(&p.name, &p.note, &keys, false) {
+                Ok(pr) => {
+                    p.editing = Some(pr.name.clone());
+                    p.name = pr.name.clone();
+                    set_preset_note(format!("✔ 已保存选择集「{}」（{} 条）", pr.name, pr.keys.len()));
+                }
+                Err(e) => set_preset_note(format!("✗ {e}")),
+            }
+        }
+        FeatureMatrixMsg::PresetUpdate => {
+            let Some(p) = st.picker.as_mut() else { return };
+            let Some(old) = p.editing.clone() else {
+                set_preset_note("✗ 还没保存过——先「另存为新选择集」".into());
+                return;
             };
-            st.picker = Some(Picker { selected, search: String::new() });
+            let keys: Vec<String> = p.selected.iter().cloned().collect();
+            match super::feature_presets::rename_and_update(&old, &p.name, &p.note, &keys) {
+                Ok(pr) => {
+                    let renamed = pr.name != old;
+                    p.editing = Some(pr.name.clone());
+                    p.name = pr.name.clone();
+                    set_preset_note(if renamed {
+                        format!("✔ 已更新并改名「{old}」→「{}」（{} 条）", pr.name, pr.keys.len())
+                    } else {
+                        format!("✔ 已更新「{}」（{} 条）", pr.name, pr.keys.len())
+                    });
+                }
+                Err(e) => set_preset_note(format!("✗ {e}")),
+            }
+        }
+        FeatureMatrixMsg::PresetDelete(name) => {
+            let Some(p) = st.picker.as_mut() else { return };
+            if p.confirm_delete.as_deref() != Some(name.as_str()) {
+                p.confirm_delete = Some(name.clone());
+                set_preset_note(format!("再点一次「确认删除」删掉「{name}」（不可恢复；导出过的文件不受影响）"));
+                return;
+            }
+            p.confirm_delete = None;
+            match super::feature_presets::delete(&name) {
+                Ok(()) => {
+                    if p.editing.as_deref() == Some(name.as_str()) {
+                        p.editing = None;
+                    }
+                    set_preset_note(format!("✔ 已删除「{name}」"));
+                }
+                Err(e) => set_preset_note(format!("✗ {e}")),
+            }
         }
         FeatureMatrixMsg::PickBulk(stage, bulk) => {
             let Some(p) = st.picker.as_mut() else { return };
@@ -420,12 +620,37 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
                 p.search = q;
             }
         }
+        FeatureMatrixMsg::PresetName(n) => {
+            if let Some(p) = st.picker.as_mut() {
+                p.name = n;
+            }
+        }
+        FeatureMatrixMsg::PresetNote(n) => {
+            if let Some(p) = st.picker.as_mut() {
+                p.note = n;
+            }
+        }
+        FeatureMatrixMsg::PresetNew => {
+            if let Some(p) = st.picker.as_mut() {
+                p.editing = None;
+                p.name.clear();
+                p.note.clear();
+                p.confirm_delete = None;
+            }
+        }
         // 有副作用或要读快照的，不在这里（见 `handle` / `apply_with`）
         FeatureMatrixMsg::Engine(_)
         | FeatureMatrixMsg::SetMode(_)
         | FeatureMatrixMsg::ApplyPicker
         | FeatureMatrixMsg::OpenPicker
-        | FeatureMatrixMsg::PickBulk(..) => {}
+        | FeatureMatrixMsg::PickBulk(..)
+        | FeatureMatrixMsg::PresetLoad(_)
+        | FeatureMatrixMsg::PresetSaveNew
+        | FeatureMatrixMsg::PresetUpdate
+        | FeatureMatrixMsg::PresetDelete(_)
+        | FeatureMatrixMsg::PresetExport(_)
+        | FeatureMatrixMsg::PresetImport
+        | FeatureMatrixMsg::PresetApply(_) => {}
         // 折叠状态**不清**：它是「我在看哪一段」，不是筛选。
         FeatureMatrixMsg::ClearFilters => {
             st.quality = QualityFilter::All;
@@ -570,12 +795,37 @@ mod tests {
     }
 
     #[test]
+    fn 载入选择集跳过字典里没有的键并进入编辑() {
+        let pr = super::super::feature_presets::Preset {
+            name: "盘口".into(),
+            note: "n".into(),
+            keys: vec!["mid_price".into(), "改名前的旧键".into()],
+            updated: String::new(),
+        };
+        let known = known_keys(&snap());
+        let mut p = Picker::default();
+        assert_eq!(p.load(&pr, &known), 1);
+        assert_eq!(p.selected.len(), 1);
+        assert_eq!(p.editing.as_deref(), Some("盘口"));
+        assert_eq!(p.name, "盘口");
+        assert_eq!(p.note, "n");
+        // 新建 = 保留勾选、脱离已存选择集
+        let mut st = ViewState { picker: Some(p), ..ViewState::default() };
+        apply(&mut st, FeatureMatrixMsg::PresetNew);
+        let p = st.picker.unwrap();
+        assert!(p.editing.is_none() && p.name.is_empty());
+        assert_eq!(p.selected.len(), 1, "新建不清勾选：从当前勾选开始");
+    }
+
+    #[test]
     fn 配置json与引擎约定一致() {
         // 引擎侧 `feature_config::FeatureConfig` 读的就是这两个字段
-        let t = config_json("custom", &["mid_price".into(), "obi_l2".into()]);
+        let t = config_json("custom", &["mid_price".into(), "obi_l2".into()], Some("盘口"));
         let v: serde_json::Value = serde_json::from_str(&t).unwrap();
         assert_eq!(v["mode"], "custom");
         assert_eq!(v["keys"].as_array().unwrap().len(), 2);
+        assert_eq!(v["preset"], "盘口");
+        assert!(serde_json::from_str::<serde_json::Value>(&config_json("all", &[], None)).unwrap()["preset"].is_null());
         assert!(config_path().ends_with("cockpit/feature_config.json") || std::env::var("WS_FEATURE_CONFIG").is_ok());
     }
 

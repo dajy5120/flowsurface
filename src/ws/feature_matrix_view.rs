@@ -613,11 +613,27 @@ fn mode_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
         .align_y(iced::Alignment::Center);
     r = r.push(chip("默认".into(), mode == "default", Msg::SetMode("default")));
     r = r.push(chip("全开".into(), mode == "all", Msg::SetMode("all")));
+    let active_preset = super::feature_matrix::config_preset().filter(|_| mode == "custom");
     r = r.push(chip(
-        if mode == "custom" { format!("自定义（{}）…", keys.len()) } else { "自定义…".into() },
+        match (&active_preset, mode.as_str()) {
+            (Some(n), _) => format!("自定义：{n}（{}）…", keys.len()),
+            (None, "custom") => format!("自定义（{}）…", keys.len()),
+            _ => "自定义…".into(),
+        },
         mode == "custom",
         Msg::OpenPicker,
     ));
+    // 已存的选择集：选中即应用并重启引擎
+    let names: Vec<String> = super::feature_presets::list().into_iter().map(|p| p.name).collect();
+    if !names.is_empty() {
+        r = r.push(text("　选择集").size(11).color(C_DIM));
+        r = r.push(
+            iced::widget::pick_list(names, active_preset.clone(), Msg::PresetApply)
+                .placeholder("选一个直接应用…")
+                .text_size(11)
+                .padding([2, 6]),
+        );
+    }
     if m.present {
         let f = m.features();
         let on = f.iter().filter(|r| r.enabled()).count();
@@ -636,6 +652,73 @@ fn prior_tag(p: &str) -> (&'static str, Color) {
         "untested" => ("未检验", C_DIM),
         _ => ("", C_DIM),
     }
+}
+
+/// 选择集栏：已存的选择集（点名字载入编辑）+ 名称 / 备注 + 保存 / 更新 / 删除 / 导出 / 导入。
+fn preset_bar<'a>(p: &super::feature_matrix::Picker) -> Element<'a, Msg> {
+    let presets = super::feature_presets::list();
+    let mut b = column![].spacing(5);
+
+    let mut lr = row![text("选择集 ").size(12).color(C_HEAD)]
+        .spacing(5)
+        .align_y(iced::Alignment::Center);
+    if presets.is_empty() {
+        lr = lr.push(text("还没有保存过选择集——勾选好后在下面起个名字「另存为新选择集」").size(10).color(C_DIM));
+    }
+    for pr in &presets {
+        let editing = p.editing.as_deref() == Some(pr.name.as_str());
+        let label = format!("{}（{}）", pr.name, pr.keys.len());
+        lr = lr.push(chip(label, editing, Msg::PresetLoad(pr.name.clone())));
+    }
+    lr = lr.push(text("　").size(11));
+    lr = lr.push(chip("＋ 新建".into(), p.editing.is_none(), Msg::PresetNew));
+    lr = lr.push(chip("导入…".into(), false, Msg::PresetImport));
+    // 选择集多了会超出一行：换行排，不横向溢出
+    b = b.push(lr.wrap());
+
+    let status = match &p.editing {
+        Some(n) if p.dirty() => (format!("正在编辑「{n}」· 有未保存的修改"), C_WARN),
+        Some(n) => (format!("正在编辑「{n}」· 已保存"), C_OK),
+        None => ("新选择集（未保存）".to_string(), C_DIM),
+    };
+    let mut er = row![
+        text(status.0).size(11).color(status.1),
+        iced::widget::text_input("名称", &p.name)
+            .on_input(Msg::PresetName)
+            .size(11)
+            .width(Length::Fixed(180.0)),
+        iced::widget::text_input("备注（可选）", &p.note)
+            .on_input(Msg::PresetNote)
+            .size(11)
+            .width(Length::Fixed(260.0)),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center);
+    if let Some(n) = &p.editing {
+        let renaming = p.name.trim() != n;
+        er = er.push(chip(
+            if renaming { format!("更新并改名为「{}」", p.name.trim()) } else { "更新".into() },
+            p.dirty(),
+            Msg::PresetUpdate,
+        ));
+    }
+    er = er.push(chip("另存为新选择集".into(), false, Msg::PresetSaveNew));
+    if let Some(n) = &p.editing {
+        er = er.push(chip("导出…".into(), false, Msg::PresetExport(n.clone())));
+        let confirming = p.confirm_delete.as_deref() == Some(n.as_str());
+        er = er.push(chip(
+            if confirming { "确认删除".into() } else { "删除".into() },
+            confirming,
+            Msg::PresetDelete(n.clone()),
+        ));
+    }
+    b = b.push(er);
+    let note = super::feature_matrix::preset_note();
+    if !note.is_empty() {
+        let c = if note.starts_with('✗') { C_BAD } else { C_DIM };
+        b = b.push(text(note).size(10).color(c));
+    }
+    b.into()
 }
 
 /// 自定义启用集的选择页：七阶段、一行一个特征、勾选框。
@@ -657,6 +740,7 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
         .spacing(6)
         .align_y(iced::Alignment::Center),
     );
+    b = b.push(preset_bar(p));
     b = b.push(
         row![
             iced::widget::text_input("搜索键名或中文名…", &p.search)

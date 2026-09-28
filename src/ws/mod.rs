@@ -50,6 +50,7 @@ pub mod feature_lab_readout;
 pub mod feature_matrix;
 pub mod feature_matrix_readout;
 pub mod feature_matrix_view;
+pub mod feature_presets;
 pub mod feature_lab_view;
 pub mod flow;
 pub mod orders;
