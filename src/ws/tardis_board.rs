@@ -6,11 +6,48 @@
 //!
 //! 三个数据接口（主仓 `factory/replay/sources.py`，产出同一套规范化列）：
 //!   ① Tardis · DuckDB 仓   ② Tardis · 直读 Parquet   ③ 自录数据 · Recorder
-//! 类型清单/符号/日期不在 Rust 侧重复实现扫描——读 Python 生成的 catalog JSON。
+//!
+//! 选数据用共用数据选择组件（[`super::data_picker`]，docs/28）：管线 B → B2 购买数据（Tardis）/
+//! B3 本地录制 → 根目录扫描 → 市场 → 标的 → 日期 + 起始时刻 + 时长。选定的根目录经
+//! `WS_TARDIS_ROOT` / `WS_DATA_DIR` 传给脚本。数据类型仍由本面板单选（它有自己的规范类型名与中文名）：
+//! 可选的类型 = 扫描到的当天类型（录制器的目录名换成规范名，见 [`canonical_type`]）。
 
 use std::process::{Command, Stdio};
 
+use super::data_picker::{BSource, DataPick, DataPickMsg, Load, PickOpts, Pipeline, Purpose, TimeMode};
 use super::tardis_board_readout as ro;
+
+/// 本面板对共用组件的要求：只读本地（B2 Tardis / B3 录制），时间选一段，类型自己选。
+#[must_use]
+pub fn pick_opts() -> PickOpts {
+    PickOpts {
+        purpose: Purpose::Chart,
+        sources: Some(vec![BSource::Purchased, BSource::Recorded]),
+        vendors: Some(vec!["tardis"]),
+        time: TimeMode::Window,
+        local_only: true,
+        hide_types: true,
+    }
+}
+
+/// 扫描给的类型名 → 本面板（`sources.py`）的规范类型名。Tardis 本来就是规范名；
+/// 录制器目录名按 `RecorderSource.MAP` 反查，没有对应物的（如 `snap100ms`）返回 `None`。
+#[must_use]
+pub fn canonical_type(source: &str, t: &str) -> Option<String> {
+    if source != "recorder" {
+        return Some(t.to_string());
+    }
+    match t {
+        "trades" => Some("trades".into()),
+        "l2" => Some("incremental_book_L2".into()),
+        "mark" => Some("derivative_ticker".into()),
+        _ => None,
+    }
+}
+
+/// Tardis 的两种读法（同一份数据）：直读 Parquet（跟随所选根目录）/ DuckDB 仓（固定仓库文件）。
+pub const TARDIS_ACCESS: [(&str, &str); 2] =
+    [("tardis_parquet", "直读 Parquet"), ("tardis_duckdb", "DuckDB 仓")];
 
 fn repo() -> std::path::PathBuf {
     std::env::var("WS_REPO")
@@ -66,6 +103,11 @@ impl std::fmt::Display for Speed {
 
 #[derive(Clone)]
 pub struct TardisBoardState {
+    /// 共用数据选择组件的选择（下面的 source / symbol / date / start_hm / minutes 由它同步而来）。
+    pub pick: DataPick,
+    /// B2 Tardis 的读法（[`TARDIS_ACCESS`] 的键）。
+    pub access: String,
+    /// `sources.py` 的源键：`tardis_parquet` / `tardis_duckdb` / `recorder`（空 = 还没选到本地来源）。
     pub source: String,
     pub symbol: String,
     pub date: String,
@@ -93,83 +135,117 @@ impl Default for TardisBoardState {
 }
 
 impl TardisBoardState {
-    /// 默认落在 catalog 里**真实存在**的第一组组合，开箱即可出图。
+    /// 缺省：管线 B · B2 购买数据 · Tardis · 加密 · BTCUSDT，09:00 起 10 分钟（日期取扫描到的最新一天）。
     pub fn load() -> Self {
-        let cat = ro::catalog();
-        let src = cat
-            .sources
-            .iter()
-            .find(|s| s.available)
-            .cloned()
-            .unwrap_or_default();
-        let symbol = src
-            .symbols
-            .iter()
-            .find(|s| *s == "BTCUSDT")
-            .cloned()
-            .or_else(|| src.symbols.first().cloned())
-            .unwrap_or_default();
-        let date = src
-            .dates
-            .get(&symbol)
-            .and_then(|d| d.first().cloned())
-            .unwrap_or_default();
-        let dtype = src.types.first().cloned().unwrap_or_default();
-        Self {
-            source: src.key.clone(),
-            symbol,
-            date,
+        let mut pick = DataPick::default();
+        for m in [
+            DataPickMsg::Pipeline(Pipeline::B),
+            DataPickMsg::Source(BSource::Purchased),
+            DataPickMsg::Vendor("tardis".into()),
+            DataPickMsg::Market("crypto".into()),
+            DataPickMsg::Symbol("BTCUSDT".into()),
+            DataPickMsg::Start("09:00".into()),
+            DataPickMsg::Minutes(10),
+        ] {
+            pick.update(m);
+        }
+        let mut st = Self {
+            pick,
+            access: "tardis_parquet".into(),
+            source: String::new(),
+            symbol: String::new(),
+            date: String::new(),
             start_hm: "09:00".into(),
             minutes: 10,
-            dtype,
-            hint: "选 数据源 → 数据类型 → 时段，点「加载」出图；再点「▶ 回放」按时间步进播放".into(),
+            dtype: "trades".into(),
+            hint: "选 管线 → 来源 → 市场 → 标的 → 时间，再选数据类型，点「加载」出图；再点「▶ 回放」按时间步进播放".into(),
             busy: false,
             speed: Speed::X60,
             seek_pct: None,
             compare: false,
             auto_load: true,
             band_ticks: 200,
+        };
+        st.sync();
+        st
+    }
+
+    /// 本地来源的扫描结果（还没选到本地来源 / 还在扫 = `None`）。
+    fn scan(&self) -> Option<super::data_picker::Scan> {
+        match self.pick.local_scan()? {
+            Load::Ready(s) => Some(s),
+            _ => None,
         }
     }
 
-    /// 当前源在 catalog 里的条目（自取 catalog；view 里请用 [`Self::src_entry_in`]）。
-    pub fn src_entry(&self) -> ro::SourceEntry {
-        self.src_entry_in(&ro::catalog())
+    /// 当前 标的 × 日 可选的数据类型（规范名，按扫描顺序去重）。
+    #[must_use]
+    pub fn avail_types(&self) -> Vec<String> {
+        let (Some(sc), Some(key)) = (self.scan(), self.pick.local_key()) else {
+            return Vec::new();
+        };
+        if self.symbol.is_empty() || self.date.is_empty() {
+            return Vec::new();
+        }
+        let mut v: Vec<String> = Vec::new();
+        for t in sc.types(&self.symbol, &self.date) {
+            if let Some(c) = canonical_type(key, &t)
+                && !v.contains(&c)
+            {
+                v.push(c);
+            }
+        }
+        v
     }
 
-    /// 用**已取到的** catalog 查条目。view 每帧渲染，若每处都自取会反复 stat + 深拷贝
-    /// 整份清单（实测 pane_body 一帧要 10 次）；统一取一次再传引用。
-    pub fn src_entry_in(&self, cat: &ro::Catalog) -> ro::SourceEntry {
-        cat.sources
-            .iter()
-            .find(|s| s.key == self.source)
-            .cloned()
-            .unwrap_or_default()
+    /// 同市场的标的数（跨符号对比要 ≥ 2）。
+    #[must_use]
+    pub fn n_symbols(&self) -> usize {
+        match (self.scan(), self.pick.market.as_deref()) {
+            (Some(sc), Some(mk)) => sc.symbols(mk, "").len(),
+            _ => 0,
+        }
     }
 
-    /// 切源/切符号后把不合法的选择拉回该源真实有的值（避免出现空面板）。
-    fn reconcile(&mut self) {
-        let e = self.src_entry();
-        if !e.symbols.contains(&self.symbol) {
-            self.symbol = e.symbols.first().cloned().unwrap_or_default();
+    /// 所选根目录要经哪个环境变量传给脚本：`(变量名, 目录)`。
+    #[must_use]
+    pub fn root_env(&self) -> Option<(&'static str, String)> {
+        match self.pick.local_key()? {
+            "tardis" => Some(("WS_TARDIS_ROOT", self.pick.root_or_default())),
+            "recorder" => Some(("WS_DATA_DIR", self.pick.root_or_default())),
+            _ => None,
         }
-        let dates = e.dates.get(&self.symbol).cloned().unwrap_or_default();
-        if !dates.contains(&self.date) {
-            self.date = dates.first().cloned().unwrap_or_default();
-        }
-        if !e.types.contains(&self.dtype) {
-            self.dtype = e.types.first().cloned().unwrap_or_default();
+    }
+
+    /// 从组件的选择同步出脚本要的参数；日期没选时取扫描到的最新一天；类型不在当天可选范围内就拉回第一个。
+    fn sync(&mut self) {
+        self.pick.poll();
+        self.source = match self.pick.local_key() {
+            Some("tardis") => self.access.clone(),
+            Some("recorder") => "recorder".into(),
+            _ => String::new(),
+        };
+        self.symbol = self.pick.symbol.clone().unwrap_or_default();
+        self.date = match (&self.pick.date, self.scan()) {
+            (Some(d), _) => d.clone(),
+            (None, Some(sc)) if !self.symbol.is_empty() => sc.dates(&self.symbol).last().cloned().unwrap_or_default(),
+            _ => String::new(),
+        };
+        self.start_hm = self.pick.start.clone();
+        self.minutes = self.pick.minutes;
+        let types = self.avail_types();
+        if !types.is_empty() && !types.contains(&self.dtype) {
+            self.dtype = types[0].clone();
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum TardisBoardMsg {
-    SourcePick(String),
-    SymbolPick(String),
-    DatePick(String),
-    StartPick(String),
-    MinutesPick(u32),
+    /// 共用数据选择组件的消息。
+    Data(DataPickMsg),
+    /// B2 Tardis 的读法（[`TARDIS_ACCESS`]）。
+    Access(String),
     TypePick(String),
     Load,
     RefreshCatalog,
@@ -198,11 +274,9 @@ pub fn hours() -> Vec<String> {
 fn changes_selection(m: &TardisBoardMsg) -> bool {
     matches!(
         m,
-        TardisBoardMsg::SourcePick(_)
-            | TardisBoardMsg::SymbolPick(_)
-            | TardisBoardMsg::DatePick(_)
-            | TardisBoardMsg::StartPick(_)
-            | TardisBoardMsg::MinutesPick(_)
+        TardisBoardMsg::Data(
+            DataPickMsg::Symbol(_) | DataPickMsg::Date(_) | DataPickMsg::Minutes(_)
+        ) | TardisBoardMsg::Access(_)
             | TardisBoardMsg::TypePick(_)
             | TardisBoardMsg::ToggleCompare
             | TardisBoardMsg::BandPick(_)
@@ -213,20 +287,23 @@ pub fn handle(st: &mut TardisBoardState, msg: TardisBoardMsg) {
     if !matches!(msg, TardisBoardMsg::Load) {
         clear_load_message(); // 其它交互后让各自的 hint 显示，不被上次加载结果盖住
     }
+    // 每条消息前先把目录选择框的结果 / 刚扫完的目录收进来（日期缺省取最新一天要等扫描）
+    st.sync();
     let auto = st.auto_load && changes_selection(&msg);
     match msg {
-        TardisBoardMsg::SourcePick(s) => {
-            st.source = s;
-            st.reconcile();
-            st.hint = format!("已切到「{}」，点「加载」刷新", st.src_entry().label);
+        TardisBoardMsg::Data(m) => {
+            st.pick.update(m);
+            st.sync();
         }
-        TardisBoardMsg::SymbolPick(s) => {
-            st.symbol = s;
-            st.reconcile();
+        TardisBoardMsg::Access(a) => {
+            st.access = a;
+            st.sync();
+            st.hint = if st.access == "tardis_duckdb" {
+                "DuckDB 仓读的是固定的仓库文件（WS_DUCKDB_PATH），不跟随上面选的根目录".into()
+            } else {
+                "直读 Parquet：读上面选的根目录".into()
+            };
         }
-        TardisBoardMsg::DatePick(s) => st.date = s,
-        TardisBoardMsg::StartPick(s) => st.start_hm = s,
-        TardisBoardMsg::MinutesPick(m) => st.minutes = m,
         TardisBoardMsg::TypePick(t) => {
             st.dtype = t;
             st.hint = "类型已切换，点「加载」出该类型的主图与衍生图".into();
@@ -266,7 +343,8 @@ pub fn handle(st: &mut TardisBoardState, msg: TardisBoardMsg) {
             }
         }
     }
-    if auto {
+    // 还没选完（没到标的 / 日期）就不自动加载——否则选的过程中一直冒「没有可用的…」
+    if auto && !st.source.is_empty() && !st.symbol.is_empty() && !st.date.is_empty() {
         // 选择变了就直接重载。加载是异步的，界面不会卡；正忙时 load() 自己会拒并提示。
         let m = load(st);
         if !m.is_empty() {
@@ -332,10 +410,26 @@ fn clear_load_message() {
     }
 }
 
+/// `HH:MM`（UTC）。
+fn valid_hm(s: &str) -> bool {
+    let p: Vec<&str> = s.split(':').collect();
+    p.len() == 2
+        && p[0].parse::<u32>().is_ok_and(|h| h < 24)
+        && p[1].len() == 2
+        && p[1].parse::<u32>().is_ok_and(|m| m < 60)
+}
+
 /// 异步起 panels.py 生成面板 JSON：只 spawn 不等待，结果由 [`poll_load`] 收。
 fn load(st: &TardisBoardState) -> String {
-    if st.symbol.is_empty() || st.date.is_empty() || st.dtype.is_empty() {
-        return "✗ 该数据源没有可用的符号/日期/类型".into();
+    if st.source.is_empty() || st.symbol.is_empty() || st.date.is_empty() {
+        return "✗ 还没选完：管线 B → 购买数据（Tardis）或本地录制 → 标的 → 日期".into();
+    }
+    let types = st.avail_types();
+    if !types.is_empty() && !types.contains(&st.dtype) {
+        return format!("✗ {} {} 没有「{}」这类数据", st.symbol, st.date, ro::type_label(&st.dtype));
+    }
+    if !valid_hm(&st.start_hm) {
+        return format!("✗ 起始时刻要写成 HH:MM（UTC）——现在是「{}」", st.start_hm);
     }
     if poll_load().is_some() {
         return "（上一次加载还在跑，稍候）".into();
@@ -343,6 +437,9 @@ fn load(st: &TardisBoardState) -> String {
     clear_load_message();
     let out = ro::panel_path();
     let mut cmd = Command::new(venv_py());
+    if let Some((k, v)) = st.root_env() {
+        cmd.env(k, v);
+    }
     cmd.current_dir(repo())
         .args([
             "-m",

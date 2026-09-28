@@ -381,6 +381,10 @@ pub struct PickOpts {
     /// 只允许 B2 的这些数据商（`None` = 全部）。
     pub vendors: Option<Vec<&'static str>>,
     pub time: TimeMode,
+    /// 宿主只读本地历史文件（管线 A / B1 / B4 都没有意义）：管线 A 置灰。
+    pub local_only: bool,
+    /// 宿主自己选数据类型（单选、有自己的类型名）：组件不列类型勾选。
+    pub hide_types: bool,
 }
 
 /// 一个面板的选择。

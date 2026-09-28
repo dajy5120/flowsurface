@@ -83,6 +83,8 @@ pub fn pick_opts() -> super::data_picker::PickOpts {
         sources: Some(vec![BSource::Purchased]),
         vendors: Some(vec!["tardis"]),
         time: TimeMode::Date,
+        local_only: true,
+        ..PickOpts::default()
     }
 }
 

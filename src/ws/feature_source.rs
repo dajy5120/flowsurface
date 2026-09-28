@@ -31,6 +31,7 @@ pub fn pick_opts() -> PickOpts {
         sources: Some(vec![BSource::Live, BSource::Purchased, BSource::Recorded]),
         vendors: None,
         time: TimeMode::Window,
+        ..PickOpts::default()
     }
 }
 

@@ -109,10 +109,17 @@ pub fn view<'a>(p: &DataPick, opts: &PickOpts) -> El<'a> {
     // ① 管线
     let mut v = vec![label("管线")];
     for pl in Pipeline::ALL {
-        let blocked = pl == Pipeline::A && opts.purpose == Purpose::Compute;
+        let blocked = pl == Pipeline::A && (opts.purpose == Purpose::Compute || opts.local_only);
         let c = chip(pl.label().into(), p.pipeline == Some(pl), (!blocked).then_some(DataPickMsg::Pipeline(pl)));
         v.push(if blocked {
-            with_tip(c, "管线 A 只喂图表：它的数据不得进入特征、策略、回测与结果（docs/28 §1.2）".into())
+            with_tip(
+                c,
+                if opts.local_only {
+                    "本面板只读本地历史文件：选管线 B 的购买数据 / 本地录制".into()
+                } else {
+                    "管线 A 只喂图表：它的数据不得进入特征、策略、回测与结果（docs/28 §1.2）".into()
+                },
+            )
         } else {
             c
         });
@@ -360,7 +367,7 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
                 .into(),
         );
         v.push(dim("时长".into()));
-        let mins: Vec<Choice> = [5u32, 10, 15, 30, 60, 120, 240, 390, 1440]
+        let mins: Vec<Choice> = [1u32, 5, 10, 15, 30, 60, 120, 240, 390, 1440]
             .iter()
             .map(|m| Choice {
                 key: m.to_string(),
@@ -374,6 +381,9 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
     b = b.push(line(v));
 
     // 数据类型：当天有的全部列出，可勾选；没选日期时列出该标的出现过的类型（各几天）
+    if opts.hide_types {
+        return b.into();
+    }
     match p.date.as_deref() {
         Some(d) => {
             let types = sc.types(sym, d);

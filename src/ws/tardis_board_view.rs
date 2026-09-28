@@ -11,7 +11,8 @@ use iced::widget::{
 use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 use super::tardis_board::{
-    MINUTES, Speed, TardisBoardMsg, TardisBoardState, hours, is_playing, load_message, poll_load,
+    Speed, TARDIS_ACCESS, TardisBoardMsg, TardisBoardState, is_playing, load_message, pick_opts,
+    poll_load,
 };
 use super::tardis_board_readout as ro;
 
@@ -653,10 +654,8 @@ fn label<'a>(s: &str) -> Element<'a, TardisBoardMsg> {
 pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     // 每帧轮询后台加载（顺带收割已结束的子进程并刷新面板缓存）。
     let loading = poll_load();
-    // catalog 每帧只取一次：每次调用都要 stat + 深拷贝整份清单，
-    // 原来 pane_body 一帧要取 10 次（src_entry 1 + 8 个类型 chip 的 type_label + 本处）。
+    // catalog 每帧只取一次（只用它的类型中文名）：每次调用都要 stat + 深拷贝整份清单。
     let cat = ro::catalog();
-    let entry = app.src_entry_in(&cat);
     let p = ro::panel();
     let ph = ro::playhead();
     // 播放头只在与**当前已加载面板**的时间范围吻合时生效，避免用上一次回放的游标
@@ -690,34 +689,33 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     ]
     .spacing(3);
 
-    // ① 数据源
-    let mut src_row = row![label("① 数据源")].spacing(6).align_y(Alignment::Center);
-    for s in &cat.sources {
-        src_row = src_row.push(chip(
-            format!("{}{}", s.label, if s.available { "" } else { "（无）" }),
-            s.key == app.source,
-            s.available,
-            TardisBoardMsg::SourcePick(s.key.clone()),
-        ));
+    // ① 数据：共用数据选择组件（管线 → 来源 → 根目录扫描 → 市场 → 标的 → 时间）
+    let mut src_col = column![
+        label("① 数据"),
+        super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisBoardMsg::Data),
+    ]
+    .spacing(4);
+    if app.pick.local_key() == Some("tardis") {
+        let mut r = row![label("读法")].spacing(6).align_y(Alignment::Center);
+        for (k, name) in TARDIS_ACCESS {
+            r = r.push(chip(name.into(), app.access == k, true, TardisBoardMsg::Access(k.into())));
+        }
+        src_col = src_col.push(r);
     }
-    src_row = src_row.push({
-        // 与「加载」一致：后台任务跑着时禁用，避免叠起多个子进程
-        let b = button(text("刷新清单").size(11)).padding([3, 8]);
-        if loading.is_none() { b.on_press(TardisBoardMsg::RefreshCatalog) } else { b }
-    });
 
-    // ② 数据类型（本源没有的类型置灰，不可点——不画空面板）
+    // ② 数据类型（当天没有的类型置灰，不可点——不画空面板）
+    let have = app.avail_types();
     let all: Vec<String> = if cat.type_labels.is_empty() {
-        entry.types.clone()
+        have.clone()
     } else {
         let mut v: Vec<String> = cat.type_labels.keys().cloned().collect();
-        v.sort_by_key(|t| entry.types.iter().position(|x| x == t).unwrap_or(usize::MAX));
+        v.sort_by_key(|t| have.iter().position(|x| x == t).unwrap_or(usize::MAX));
         v
     };
     let mut ty_row1 = row![label("② 数据类型")].spacing(6).align_y(Alignment::Center);
     let mut ty_row2 = row![label("                ")].spacing(6).align_y(Alignment::Center);
     for (i, t) in all.iter().enumerate() {
-        let has = entry.types.contains(t);
+        let has = have.contains(t);
         let c = chip(
             cat.type_labels.get(t).cloned().unwrap_or_else(|| t.clone()),
             *t == app.dtype,
@@ -731,25 +729,18 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
         }
     }
 
-    // ③ 窗口
-    let dates = entry.dates.get(&app.symbol).cloned().unwrap_or_default();
+    // ③ 出图（标的 / 日期 / 时段在 ① 里选）
     let picks = row![
-        label("③ 窗口"),
+        label("③ 出图"),
         // 固定宽度：文字在「单符号」「跨符号对比」间切换时长度不同，不定宽会把整行右推，
         // 「加载」按钮位置随状态漂移（实测点错过多次）。
         container(chip(
             if app.compare { "跨符号对比".into() } else { "单符号".into() },
             app.compare,
-            entry.symbols.len() > 1,
+            app.n_symbols() > 1,
             TardisBoardMsg::ToggleCompare,
         ))
         .width(Length::Fixed(104.0)),
-        pick_list(entry.symbols.clone(), Some(app.symbol.clone()), TardisBoardMsg::SymbolPick)
-            .text_size(12),
-        pick_list(dates, Some(app.date.clone()), TardisBoardMsg::DatePick).text_size(12),
-        pick_list(hours(), Some(app.start_hm.clone()), TardisBoardMsg::StartPick).text_size(12),
-        pick_list(MINUTES.to_vec(), Some(app.minutes), TardisBoardMsg::MinutesPick).text_size(12),
-        label("分钟"),
         {
             let b = button(text(if loading.is_some() { "加载中…" } else { "加载" }).size(12))
                 .padding([3, 12]);
@@ -914,7 +905,7 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     container(
         column![
             header,
-            src_row,
+            src_col,
             ty_row1,
             ty_row2,
             picks,
