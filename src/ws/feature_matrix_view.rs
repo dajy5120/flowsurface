@@ -138,8 +138,9 @@ fn layer_badges<'a>(s: &Slot) -> Element<'a, Msg> {
 //
 // 一行一个特征、各时间窗口横向成组；组与组之间一条竖线。
 //
-// **列宽是固定像素**（横向滚动的前提）：默认按内容自适应（估算每列最长的内容），
-// 用户在表头拖分隔线调整、双击分隔线恢复自适应；拖过的宽度存在 `feature_matrix_ui.json`。
+// **列宽是固定像素**（横向滚动的前提）。第一次按内容自适应一次（估算每列最长的内容）后就**固定**，
+// 数据怎么变都不跟着跳；之后只由用户在表头拖分隔线调整。双击分隔线 = 这一列按当前内容重新自适应一次；
+// 宽度存在 `feature_matrix_ui.json`。
 // 文字一律不换行、超出裁掉——换行会撑高固定行高，压到下一行上。
 //
 // 表头在滚动区之外固定在顶上；表体双向滚动，横向滚动时把表头滚到同一位置（`Effect::ScrollX`），
@@ -200,16 +201,35 @@ fn sep<'a>(line: bool) -> Element<'a, Msg> {
     c.into()
 }
 
-/// 表头里的分隔带：可拖拽调 `col` 的宽度，双击恢复自适应。
+/// 表头分隔线的样式：比表体的线明显；`strong` = 窗口组边界（更亮）。
+fn head_rule(t: &iced::Theme, strong: bool) -> iced::widget::rule::Style {
+    let mut s = crate::style::split_ruler(t);
+    let p = t.extended_palette();
+    s.color = p.background.strong.color.scale_alpha(if strong { 0.95 } else { 0.6 });
+    s
+}
+
+/// 表头里的竖线（不可拖，用在上层的窗口标题行）。
+fn head_sep<'a>(strong: bool) -> Element<'a, Msg> {
+    container(iced::widget::rule::vertical(if strong { 2.0 } else { 1.0 }).style(move |t: &iced::Theme| head_rule(t, strong)))
+        .width(Length::Fixed(SEP))
+        .height(Length::Fill)
+        .align_x(iced::Alignment::Center)
+        .into()
+}
+
+/// 表头里的横线。
+fn head_hline<'a>(total: f32) -> Element<'a, Msg> {
+    container(iced::widget::rule::horizontal(1.0).style(|t: &iced::Theme| head_rule(t, false)))
+        .width(Length::Fixed(total))
+        .into()
+}
+
+/// 表头里的分隔带：画出分隔线，可拖拽调 `col` 的宽度，双击按当前内容重新自适应这一列。
+/// `line` = 窗口组边界（线更粗更亮）。
 fn grip<'a>(line: bool, col: Col, w: f32) -> Element<'a, Msg> {
     iced::widget::mouse_area(
-        container(iced::widget::rule::vertical(1.0).style(move |t: &iced::Theme| {
-            let mut s = crate::style::split_ruler(t);
-            if !line {
-                s.color = s.color.scale_alpha(0.45);
-            }
-            s
-        }))
+        container(iced::widget::rule::vertical(if line { 2.0 } else { 1.0 }).style(move |t: &iced::Theme| head_rule(t, line)))
         .width(Length::Fixed(SEP))
         .height(Length::Fill)
         .align_x(iced::Alignment::Center),
@@ -457,6 +477,11 @@ fn widths(rows: &[FeatureRow<'_>], wins: &[u32], v: &ViewState) -> Widths {
     );
     let status = mx(&mut rows.iter().map(|r| est(&row_status(r).0, 10.0) + pad), 60.0, 340.0);
     let mut w = Widths { name, key, val, z, pct, cell, unit, layer, status };
+    // 自适应只算一次：还没有宽度的列（第一次打开 / 双击恢复之后）把这次算出的宽度固定下来，
+    // 已有的一概不动——之后数据刷新不会让列宽跟着跳。空表（还没数据）不固定。
+    if !rows.is_empty() {
+        super::feature_matrix::freeze_missing(&Col::ALL.map(|c| (c, w.get(c))));
+    }
     for (c, x) in &v.col_w {
         let x = *x;
         match c {
@@ -534,7 +559,13 @@ fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric, w: &Widths) -
     let gw = w.group(mode);
     let mut b = column![];
     if mode == TableMode::Full {
-        let mut top = row![fcell(text(""), w.name + SEP + w.key, false), sep(true)].height(Length::Fixed(18.0));
+        let mut top = row![
+            fcell(text(""), w.name, false),
+            head_sep(false),
+            fcell(text(""), w.key, false),
+            head_sep(true),
+        ]
+        .height(Length::Fixed(18.0));
         for win in wins {
             top = top
                 .push(
@@ -545,9 +576,9 @@ fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric, w: &Widths) -
                         .align_y(iced::Alignment::Center)
                         .clip(true),
                 )
-                .push(sep(true));
+                .push(head_sep(true));
         }
-        b = b.push(top);
+        b = b.push(top).push(head_hline(w.total(mode, wins.len())));
     }
     let mut r = row![
         fcell(h("特征"), w.name, false),
@@ -590,8 +621,8 @@ fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric, w: &Widths) -
         .push(grip(false, Col::Layer, w.layer))
         .push(fcell(h("状态"), w.status, false))
         .push(grip(false, Col::Status, w.status));
-    b = b.push(r);
     let total = w.total(mode, wins.len());
+    b = b.push(r).push(head_hline(total));
     iced::widget::mouse_area(
         tinted(b, Some(Color::from_rgba(0.55, 0.65, 0.85, 0.10))).width(Length::Fixed(total)),
     )
@@ -702,10 +733,8 @@ fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
         (TableMode::Pivot, Metric::Quality) => dim("格子按质量着色，写的是原因；悬停看原文".into()),
     };
     r = r.push(legend);
-    r = r.push(text("　列宽：拖表头分隔线调整，双击恢复自适应").size(10).color(C_DIM));
-    if !v.col_w.is_empty() {
-        r = r.push(chip("全部自适应".into(), false, Msg::ResetWidths));
-    }
+    r = r.push(text("　列宽：拖表头分隔线调整，双击某条分隔线 = 这一列按当前内容重新自适应").size(10).color(C_DIM));
+    r = r.push(chip("全部重新自适应".into(), false, Msg::ResetWidths));
     r.wrap().into()
 }
 

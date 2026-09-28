@@ -504,6 +504,26 @@ fn load_widths() -> std::collections::BTreeMap<Col, f32> {
         .collect()
 }
 
+/// 把自适应算出的宽度**固定下来**：只补还没有宽度的列（第一次打开、双击恢复、全部重新自适应之后），
+/// 已有的一概不动——之后数据怎么变列宽都不跟着跳，只由用户拖。补过才写盘。
+pub fn freeze_missing(auto: &[(Col, f32)]) {
+    let w = {
+        let Ok(mut g) = cell().lock() else { return };
+        let mut added = false;
+        for (c, x) in auto {
+            if !g.col_w.contains_key(c) {
+                g.col_w.insert(*c, x.clamp(COL_MIN, COL_MAX));
+                added = true;
+            }
+        }
+        if !added {
+            return;
+        }
+        g.col_w.clone()
+    };
+    save_widths(&w);
+}
+
 fn save_widths(w: &std::collections::BTreeMap<Col, f32>) {
     let o: serde_json::Map<String, serde_json::Value> = w
         .iter()
