@@ -75,6 +75,8 @@ pub enum SourceMsg {
     /// 展开 / 收起选择器。
     Toggle,
     Start,
+    /// 暂停 / 继续（切换）。
+    Pause,
     Stop,
 }
 
@@ -89,6 +91,29 @@ struct Run {
     pace: Pace,
     /// 结束后的一行结论（`None` = 还在跑）。
     done: Option<String>,
+    /// 暂停的时刻（`Some` = 正暂停着：进程收了 SIGSTOP）。
+    paused_at: Option<Instant>,
+    /// 累计暂停时长（算「已回放多久」时扣掉）。
+    paused_total: std::time::Duration,
+}
+
+impl Run {
+    /// 实际在跑的墙钟时长（扣掉暂停）。
+    fn active_secs(&self) -> u64 {
+        let paused = self.paused_total + self.paused_at.map_or_else(Default::default, |t| t.elapsed());
+        self.started.elapsed().saturating_sub(paused).as_secs()
+    }
+}
+
+/// 给回放进程发信号（`STOP` 暂停 / `CONT` 继续）。
+fn signal(child: &Child, sig: &str) -> bool {
+    Command::new("kill")
+        .args([format!("-{sig}"), child.id().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 struct St {
@@ -159,6 +184,8 @@ pub struct View {
     /// 回放状态一行（没有回放 = 空）。
     pub status: String,
     pub running: bool,
+    /// 回放正暂停着。
+    pub paused: bool,
     pub note: String,
 }
 
@@ -174,6 +201,7 @@ pub fn view() -> View {
             is_replay: false,
             status: String::new(),
             running: false,
+            paused: false,
             note: String::new(),
         };
     };
@@ -190,6 +218,7 @@ pub fn view() -> View {
         is_replay: g.reading.is_some(),
         status,
         running: g.run.as_ref().is_some_and(|r| r.done.is_none()),
+        paused: g.run.as_ref().is_some_and(|r| r.done.is_none() && r.paused_at.is_some()),
         note: g.note.clone(),
     }
 }
@@ -202,7 +231,7 @@ fn poll_run(r: &mut Run) -> String {
         let log = std::fs::read_to_string(&r.log).unwrap_or_default();
         r.done = Some(if st.success() {
             let n = log.lines().find_map(|l| l.strip_prefix("重放 ")).unwrap_or("").trim();
-            format!("✔ 回放完成：{n}（用时 {}）", fmt_s(r.started.elapsed().as_secs()))
+            format!("✔ 回放完成：{n}（用时 {}）", fmt_s(r.active_secs()))
         } else {
             let last = log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("（无输出）");
             format!("✗ 回放失败：{last}")
@@ -211,7 +240,10 @@ fn poll_run(r: &mut Run) -> String {
     if let Some(d) = &r.done {
         return format!("{d} · {}", r.desc);
     }
-    let el = r.started.elapsed().as_secs();
+    let el = r.active_secs();
+    if r.paused_at.is_some() {
+        return format!("⏸ 已暂停（已回放 {}）· {}", fmt_s(el), r.desc);
+    }
     match r.pace.arg() {
         Some(x) => format!(
             "▶ 回放中 {} / 约 {}（{}）· {}",
@@ -346,6 +378,29 @@ pub fn handle(m: SourceMsg) -> bool {
             g.note = "已停止；表与图停在停止那一刻".into();
         }
         SourceMsg::Start => return start(&mut g),
+        SourceMsg::Pause => {
+            let Some(r) = g.run.as_mut().filter(|r| r.done.is_none()) else {
+                g.note = "没有正在跑的回放".into();
+                return false;
+            };
+            match r.paused_at {
+                None => {
+                    if signal(&r.child, "STOP") {
+                        r.paused_at = Some(Instant::now());
+                    } else {
+                        g.note = "暂停失败（发 SIGSTOP 没成功）".into();
+                    }
+                }
+                Some(t) => {
+                    if signal(&r.child, "CONT") {
+                        r.paused_total += t.elapsed();
+                        r.paused_at = None;
+                    } else {
+                        g.note = "继续失败（发 SIGCONT 没成功）".into();
+                    }
+                }
+            }
+        }
     }
     false
 }
@@ -442,6 +497,8 @@ fn start(g: &mut St) -> bool {
                 span_s: u64::from(minutes) * 60,
                 pace: g.pace,
                 done: None,
+                paused_at: None,
+                paused_total: std::time::Duration::ZERO,
             });
             g.reading = Some((matrix, chart.clone(), desc));
             watch_meta(chart);

@@ -393,6 +393,18 @@ pub fn subscription(path: String, kinds: Vec<StreamKind>) -> Subscription<Event>
                                 // 先把攒着的成交发出去，**再发深度**：
                                 // 顺序反了的话足迹里这一格的成交会落在下一个簿状态上。
                                 if !trades.is_empty() {
+                                    // 先发进行中的 K 线桶，再发成交：按时间聚合的 Footprint 只把成交记进
+                                    // **已经存在**的桶（`insert_trades_existing_buckets`），桶的 K 线后到的话
+                                    // 这批成交在足迹里直接丢掉（最快回放时几乎每一格都丢）。
+                                    if let Some(a) = agg.as_ref() {
+                                        for k in &kinds {
+                                            if let StreamKind::Kline { .. } = k
+                                                && output.send(Event::KlineReceived(*k, a.to_kline())).await.is_err()
+                                            {
+                                                return;
+                                            }
+                                        }
+                                    }
                                     let batch: Box<[Trade]> = std::mem::take(&mut trades).into();
                                     let at = batch.last().map_or(ts_ns, |t| t.time.as_u64() * 1_000_000);
                                     for k in &kinds {
@@ -439,6 +451,16 @@ pub fn subscription(path: String, kinds: Vec<StreamKind>) -> Subscription<Event>
                         }
                     }
                     if !trades.is_empty() {
+                        // 同上：桶先于成交
+                        if let Some(a) = agg.as_ref() {
+                            for k in &kinds {
+                                if let StreamKind::Kline { .. } = k
+                                    && output.send(Event::KlineReceived(*k, a.to_kline())).await.is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
                         let batch: Box<[Trade]> = trades.into();
                         let at = batch.last().map_or(0, |t| t.time.as_u64());
                         for k in &kinds {

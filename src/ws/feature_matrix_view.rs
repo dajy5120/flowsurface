@@ -1541,11 +1541,23 @@ fn source_bar<'a>(s: &super::feature_source::View) -> Element<'a, Msg> {
     .spacing(8)
     .align_y(iced::Alignment::Center);
     if s.running {
-        head = head.push(chip("■ 停止回放".into(), false, Msg::Source(SourceMsg::Stop)));
+        head = head
+            .push(chip(
+                if s.paused { "▶ 继续".into() } else { "⏸ 暂停".into() },
+                s.paused,
+                Msg::Source(SourceMsg::Pause),
+            ))
+            .push(chip("■ 停止回放".into(), false, Msg::Source(SourceMsg::Stop)));
     }
     let mut b = column![head].spacing(5);
     if !s.status.is_empty() {
-        b = b.push(text(s.status.clone()).size(10).color(if s.running { C_OK } else { C_DIM }));
+        b = b.push(text(s.status.clone()).size(10).color(if s.paused {
+            C_WARN
+        } else if s.running {
+            C_OK
+        } else {
+            C_DIM
+        }));
     }
     if s.open {
         let opts = super::feature_source::pick_opts();
@@ -1562,6 +1574,16 @@ fn source_bar<'a>(s: &super::feature_source::View) -> Element<'a, Msg> {
                 false,
                 Msg::Source(SourceMsg::Start),
             ));
+            // 暂停 / 继续：只在有回放在跑时可点
+            pr = pr.push(if s.running {
+                chip(
+                    if s.paused { "▶ 继续回放".into() } else { "⏸ 暂停回放".into() },
+                    s.paused,
+                    Msg::Source(SourceMsg::Pause),
+                )
+            } else {
+                text("⏸ 暂停回放").size(11).color(C_PEND).into()
+            });
             b = b.push(pr).push(
                 text(
                     "回放由特征引擎直接读数据商接口（不转格式），启用集与时间窗口用本面板的配置；\
