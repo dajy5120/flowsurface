@@ -74,12 +74,15 @@ impl std::fmt::Display for Speed {
 /// 时长档（分钟）。
 pub const MINUTES: [u32; 5] = [5, 15, 30, 60, 240];
 
-/// 本面板用的数据源（共用数据选择组件只列 Tardis）。
+/// 本面板的选择范围：管线 B · B2 购买数据 · Tardis（回放脚本读 Tardis 原始文件）；时间只选日期
+/// （起始时刻 / 时长用本面板自己的整点与时长档）。
 pub fn pick_opts() -> super::data_picker::PickOpts {
-    super::data_picker::PickOpts {
-        sources: Some(vec!["tardis"]),
-        live: false,
-        date: true,
+    use super::data_picker::{BSource, PickOpts, Purpose, TimeMode};
+    PickOpts {
+        purpose: Purpose::Chart,
+        sources: Some(vec![BSource::Purchased]),
+        vendors: Some(vec!["tardis"]),
+        time: TimeMode::Date,
     }
 }
 
@@ -104,11 +107,15 @@ impl TardisReplayState {
     /// 默认选 Tardis · 加密 · BTCUSDT；日期不选时开始回放用该标的最新有数据的一天。
     pub fn load() -> Self {
         Self {
-            pick: super::data_picker::DataPick {
-                source: Some("tardis".into()),
-                market: Some("crypto".into()),
-                symbol: Some("BTCUSDT".into()),
-                ..Default::default()
+            pick: {
+                use super::data_picker::{BSource, DataPick, DataPickMsg as M, Pipeline};
+                let mut p = DataPick::default();
+                p.update(M::Pipeline(Pipeline::B));
+                p.update(M::Source(BSource::Purchased));
+                p.update(M::Vendor("tardis".into()));
+                p.update(M::Market("crypto".into()));
+                p.update(M::Symbol("BTCUSDT".into()));
+                p
             },
             start_hm: "09:00".into(),
             minutes: 30,
@@ -168,24 +175,27 @@ pub fn handle(st: &mut TardisReplayState, msg: TardisReplayMsg) {
 }
 
 fn start(st: &TardisReplayState) -> String {
-    use super::data_picker::{self as dp, Load};
+    use super::data_picker::Load;
     let Some(symbol) = st.pick.symbol.clone() else {
         return "✗ 先选标的".into();
     };
     // 没选日期：用该标的最新有数据的一天
     let date = match &st.pick.date {
         Some(d) => d.clone(),
-        None => match dp::dates("tardis", &symbol) {
-            Load::Ready(ds) => match ds.last() {
+        None => match st.pick.local_scan() {
+            Some(Load::Ready(sc)) => match sc.dates(&symbol).last() {
                 Some(d) => d.clone(),
-                None => return format!("✗ {symbol} 没有可用日期（检查 Tardis 数据根）"),
+                None => return format!("✗ {symbol} 没有可用日期（检查 Tardis 根目录）"),
             },
-            Load::Loading => return "日期还在查，稍后再点".into(),
-            Load::Failed(e) => return format!("✗ 查日期失败：{e}"),
+            Some(Load::Loading) => return "还在扫描目录，稍后再点".into(),
+            Some(Load::Failed(e)) => return format!("✗ 扫描失败：{e}"),
+            None => return "✗ 先选数据来源".into(),
         },
     };
     let (symbol, date) = (&symbol, &date);
-    let src = tardis_root()
+    // 组件里选的根目录（缺省即 Tardis 默认根）；回放脚本经 WS_TARDIS_ROOT 读同一个
+    let root = PathBuf::from(st.pick.root_or_default());
+    let src = root
         .join("trades")
         .join(date.replace('-', "/"))
         .join(format!("{symbol}.parquet"));
@@ -194,6 +204,7 @@ fn start(st: &TardisReplayState) -> String {
     }
     stop(); // 同一时刻只跑一个回放
     let mut cmd = Command::new(venv_py());
+    cmd.env("WS_TARDIS_ROOT", &root);
     cmd.current_dir(repo())
         .args([
             "-m",

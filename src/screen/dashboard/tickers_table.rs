@@ -304,8 +304,20 @@ impl TickersTable {
                 self.metadata_fetch_state.mark_fetched(venue);
                 self.unavailable_exchanges.remove(&venue);
 
+                // 共享给共用数据选择组件（管线 A / B1 的标的列表），它不另外联网
+                let mut by_market: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
                 for (ticker, ticker_info) in info.into_iter() {
+                    let (sym, kind) = ticker.to_full_symbol_and_type();
+                    let mk = match kind {
+                        exchange::adapter::MarketKind::Spot => "spot",
+                        exchange::adapter::MarketKind::LinearPerps => "linear",
+                        exchange::adapter::MarketKind::InversePerps => "inverse",
+                    };
+                    by_market.entry(mk).or_default().push(sym);
                     self.tickers_info.insert(ticker, ticker_info);
+                }
+                for (mk, syms) in by_market {
+                    crate::ws::data_picker::publish_native_tickers(&venue.to_string(), mk, syms);
                 }
 
                 if self.selected_exchanges.contains(&venue) {
