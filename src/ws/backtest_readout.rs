@@ -97,6 +97,7 @@ impl Provenance {
     pub fn summary(&self) -> String {
         let src = match self.source.as_str() {
             "tardis" => "自有数据(Tardis)",
+            "databento" => "自有数据(Databento)",
             "recorder" => "录制数据(自录)",
             "" => "来源未标注",
             other => other,
