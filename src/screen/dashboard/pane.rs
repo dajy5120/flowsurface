@@ -134,6 +134,8 @@ pub enum Event {
     FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg),
     /// 回测结果面板顶上的「发起回测」（共用数据选择组件 + 起 runner）。
     BacktestLaunchInteraction(crate::ws::backtest_launch::LaunchMsg),
+    /// 点了链路徽标：跳到对应面板的数据源选择。
+    LinkBadgeClicked,
 }
 
 pub struct State {
@@ -631,6 +633,12 @@ impl State {
             // 本分支的条件就是 `stream_pair_kind()` 非空——恰好是那 7 个面板；
             // 其余 17 个是零交易所流的读数面板，给它们加徽标是纯噪音。
             top_left_buttons = top_left_buttons.push(provenance_badge());
+            // 数据链路徽标：数据从哪来、流到哪、通不通（与上面的「性质」各说一件事）。
+            top_left_buttons = top_left_buttons.push(link_badge(
+                id,
+                &base_ti.ticker.exchange.venue().to_string(),
+                &base_ti.ticker.display_symbol_and_type().0,
+            ));
         } else if !matches!(
             self.content,
             Content::Starter
@@ -1576,6 +1584,7 @@ impl State {
                 crate::ws::prediction::handle(m);
             }
             Event::BacktestLaunchInteraction(m) => crate::ws::backtest_launch::handle(m),
+            Event::LinkBadgeClicked => crate::ws::provenance::on_link_click(),
             Event::FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg::Source(m)) => {
                 // 特征数据源：选择 / 开始 / 停止回放。换了图表流就请上层清图。
                 if crate::ws::feature_source::handle(m) {
@@ -2948,6 +2957,48 @@ fn provenance_badge<'a>() -> Element<'a, Message> {
     iced::widget::tooltip(
         chip,
         container(text(b.detail).size(style::text_size::BODY)).style(style::tooltip).padding(8),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+/// 渲染数据链路徽标：描边 + `⇢`，与左边实心的「性质」徽标一眼分开。
+///
+/// 能跳转时是按钮：点它展开对应面板的数据源选择。
+fn link_badge<'a>(pane_id: pane_grid::Pane, venue: &str, symbol: &str) -> Element<'a, Message> {
+    use crate::ws::provenance::{self, LinkTone};
+
+    let l = provenance::link(crate::ws::workspace::replay_mode(), venue, symbol);
+    let color = match l.tone {
+        LinkTone::Ok => iced::Color::from_rgb(0.45, 0.78, 0.55),
+        LinkTone::Running => iced::Color::from_rgb(0.55, 0.70, 1.0),
+        LinkTone::Warn => iced::Color::from_rgb(0.92, 0.74, 0.35),
+        LinkTone::Bad => iced::Color::from_rgb(0.92, 0.42, 0.40),
+        LinkTone::Idle => iced::Color::from_rgb(0.60, 0.63, 0.68),
+    };
+    // 始终显示完整标签（约 180px）。不用 `responsive` 按宽度收起：它恒占满剩余宽度，
+    // 描边会被拉成一整条、把标题栏右侧的按钮挤走。
+    let body = text(format!("⇢ {}", l.label)).size(style::text_size::BODY).color(color);
+    let chip = container(body)
+        .padding(padding::left(6).right(6))
+        .height(widget::PANE_CONTROL_BTN_HEIGHT)
+        .align_y(Alignment::Center)
+        .style(move |_theme| container::Style {
+            border: iced::Border { color: iced::Color { a: 0.55, ..color }, width: 1.0, radius: 3.0.into() },
+            ..Default::default()
+        });
+    let el: Element<'a, Message> = if l.clickable {
+        button(chip)
+            .padding(0)
+            .style(|_theme, _status| button::Style::default())
+            .on_press(Message::PaneEvent(pane_id, Event::LinkBadgeClicked))
+            .into()
+    } else {
+        chip.into()
+    };
+    iced::widget::tooltip(
+        el,
+        container(text(l.detail).size(style::text_size::BODY)).style(style::tooltip).padding(8),
         tooltip::Position::Bottom,
     )
     .into()

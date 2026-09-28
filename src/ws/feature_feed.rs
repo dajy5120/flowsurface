@@ -55,9 +55,31 @@ pub fn feed_path() -> PathBuf {
     if let Some(p) = super::feature_source::chart_override() {
         return p;
     }
+    default_feed_path()
+}
+
+/// 常驻引擎写的那一份（不管数据源选了什么）。
+pub fn default_feed_path() -> PathBuf {
     std::env::var("WS_FEATURE_CHART")
         .map(PathBuf::from)
         .unwrap_or_else(|_| super::paths::data_dir().join("cockpit").join("feature_chart.jsonl"))
+}
+
+/// 订阅最近一次把数据交给图的时刻：`(图表流路径, 那批数据里最新的事件时间 ns, 墙钟)`。
+/// 链路徽标据此判断「图表流在长、图却没收到」（上一次 Waiting for data 的那类问题）。
+static LAST_RX: std::sync::Mutex<Option<(PathBuf, u64, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+fn mark_received(path: &str, ts_ns: u64) {
+    if let Ok(mut g) = LAST_RX.lock() {
+        *g = Some((PathBuf::from(path), ts_ns, std::time::Instant::now()));
+    }
+}
+
+/// `path` 这份图表流最近一次交给图的 `(事件时间 ns, 墙钟)`；换过文件 / 还没收到 = `None`。
+#[must_use]
+pub fn last_received(path: &std::path::Path) -> Option<(u64, std::time::Instant)> {
+    let g = LAST_RX.lock().ok()?;
+    g.as_ref().filter(|(p, _, _)| p == path).map(|(_, ts, at)| (*ts, *at))
 }
 
 /// 文件头。图表靠 `tick_size` / `min_qty` 定价格轴刻度与聚合桶。
@@ -315,6 +337,7 @@ pub fn subscription(path: String, kinds: Vec<StreamKind>) -> Subscription<Event>
             256,
             move |mut output: iced::futures::channel::mpsc::Sender<Event>| async move {
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<Row>>(8);
+                let rx_path = path.clone();
 
                 // 阻塞读盘在独立线程（与 replay.rs 同形状）。
                 std::thread::spawn(move || {
@@ -356,6 +379,14 @@ pub fn subscription(path: String, kinds: Vec<StreamKind>) -> Subscription<Event>
                 let mut agg: Option<KlineAgg> = None;
                 let mut dets: Vec<(u64, String, f64, f64, bool)> = Vec::new();
                 while let Some(rows) = rx.recv().await {
+                    // 这批里最新的事件时间：交完之后记下（链路徽标的「图表」一跳）
+                    let newest = rows
+                        .iter()
+                        .filter_map(|r| match r {
+                            Row::Trade { ts_ns, .. } | Row::Depth { ts_ns, .. } => Some(*ts_ns),
+                            _ => None,
+                        })
+                        .max();
                     let mut trades: Vec<Trade> = Vec::new();
                     for row in rows {
                         match row {
@@ -495,6 +526,9 @@ pub fn subscription(path: String, kinds: Vec<StreamKind>) -> Subscription<Event>
                                 return;
                             }
                         }
+                    }
+                    if let Some(ts) = newest {
+                        mark_received(&rx_path, ts);
                     }
                     if !dets.is_empty() {
                         let from = dets.len().saturating_sub(MAX_MARKS);

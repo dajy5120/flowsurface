@@ -95,6 +95,10 @@ struct Run {
     paused_at: Option<Instant>,
     /// 累计暂停时长（算「已回放多久」时扣掉）。
     paused_total: std::time::Duration,
+    /// 这次回放选的数据（链路徽标逐跳显示用）。
+    sel: Selection,
+    /// 日志首行（引擎配置：启用集 / 窗口），读到一次就缓存。
+    engine_line: Option<String>,
 }
 
 impl Run {
@@ -499,6 +503,8 @@ fn start(g: &mut St) -> bool {
                 done: None,
                 paused_at: None,
                 paused_total: std::time::Duration::ZERO,
+                sel: sel.clone(),
+                engine_line: None,
             });
             g.reading = Some((matrix, chart.clone(), desc));
             watch_meta(chart);
@@ -559,5 +565,178 @@ mod tests {
         assert_eq!(v.pick.source, Some(BSource::Live));
         assert!(!v.is_replay);
         assert!(matrix_override().is_none() && chart_override().is_none());
+    }
+}
+
+// ── 数据链路（链路徽标用，见 `super::provenance::link`）──────────────────────────
+
+/// 链路状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkState {
+    /// B1：常驻引擎在跑。
+    Live,
+    /// B1：常驻引擎停了（图停在最后一刻）。
+    EngineStopped,
+    /// 回放中（速度标签）。
+    Running(&'static str),
+    Paused,
+    Done,
+    Failed,
+    /// 回放已起，但图表流文件还没建出来（数据还在加载）。
+    WaitingFile,
+}
+
+/// 链路逐跳：`(这一跳是否正常, 名称, 内容)`。
+pub type Hop = (bool, &'static str, String);
+
+/// 特征工作区当前的数据链路。
+#[derive(Debug, Clone)]
+pub struct LinkInfo {
+    /// `B1` / `B2` / `B3`。
+    pub code: &'static str,
+    /// 数据商 / 交易所的名字。
+    pub vendor: String,
+    pub symbol: String,
+    pub state: LinkState,
+    pub hops: Vec<Hop>,
+    /// 自动检查发现的问题（有就把徽标转成警示 / 错误色）。
+    pub problem: Option<(bool, String)>,
+}
+
+fn vendor_label(key: &str) -> &'static str {
+    match key {
+        "tardis" => "Tardis",
+        "databento" => "Databento",
+        "recorder" => "录制",
+        _ => "?",
+    }
+}
+
+fn file_size(p: &std::path::Path) -> Option<u64> {
+    std::fs::metadata(p).ok().map(|m| m.len())
+}
+
+fn fmt_bytes(n: u64) -> String {
+    if n >= 1 << 20 {
+        format!("{:.1} MB", n as f64 / f64::from(1 << 20))
+    } else {
+        format!("{:.0} KB", n as f64 / 1024.0)
+    }
+}
+
+fn fmt_ns(ns: u64) -> String {
+    chrono::DateTime::from_timestamp_nanos(ns as i64).format("%H:%M:%S").to_string()
+}
+
+/// 图这一跳：外壳 + 最近收到的数据；并判「图表流在长、图却没收到」。
+fn chart_hop(chart: &std::path::Path, flowing: bool) -> (Hop, Option<(bool, String)>) {
+    let shell = shell_cell().lock().map(|g| g.1.clone()).unwrap_or_else(|_| Shell::live());
+    let rx = super::feature_feed::last_received(chart);
+    let recv = match &rx {
+        Some((ts, at)) => format!("最近收到 {}（{} 秒前）", fmt_ns(*ts), at.elapsed().as_secs()),
+        None => "还没收到数据".into(),
+    };
+    let stale = flowing && file_size(chart).is_some_and(|n| n > 4096)
+        && rx.as_ref().is_none_or(|(_, at)| at.elapsed().as_secs() > 5);
+    let hop = (!stale, "图表", format!("外壳 {} · tick {} · {recv}", shell.symbol, shell.tick));
+    (hop, stale.then(|| (true, "图未收到数据：图表流在增长，但图 5 秒以上没收到新数据".to_string())))
+}
+
+/// 特征工作区的数据链路。
+#[must_use]
+pub fn link_info() -> LinkInfo {
+    let matrix = super::feature_matrix_readout::snapshot();
+    let engine_t = if matrix.as_of > 0 { format!(" · 事件时间 {}", fmt_ns(matrix.as_of)) } else { String::new() };
+    let Ok(mut g) = cell().lock() else {
+        return LinkInfo { code: "B?", vendor: String::new(), symbol: String::new(), state: LinkState::Failed, hops: vec![], problem: None };
+    };
+    // ── B1：常驻引擎 ──
+    if g.reading.is_none() {
+        drop(g);
+        let active = super::feature_matrix::engine_state().is_none_or(|s| s.active);
+        let chart = super::feature_feed::default_feed_path();
+        let (chop, problem) = chart_hop(&chart, active);
+        let mut hops = vec![
+            (true, "选择", "管线 B · B1 交易所实时 · Binance U 本位永续 · BTCUSDT".to_string()),
+            (true, "接入", "ws-l2-feed / ws-trades-feed → ws-signals → 通道② 共享内存环".to_string()),
+            (active, "计算", format!("常驻特征引擎 ws-features（{}）{engine_t}", if active { "运行中" } else { "已停止" })),
+            (file_size(&chart).is_some(), "输出", format!("{} · {}", chart.display(), file_size(&chart).map_or("不存在".into(), fmt_bytes))),
+        ];
+        hops.push(chop);
+        return LinkInfo {
+            code: "B1",
+            vendor: "Binance".into(),
+            symbol: "BTCUSDT".into(),
+            state: if active { LinkState::Live } else { LinkState::EngineStopped },
+            hops,
+            problem: if active { problem } else { Some((false, "常驻引擎已停止：图停在停止前的最后一刻".into())) },
+        };
+    }
+    // ── B2 / B3：回放 ──
+    let (_, chart, _) = g.reading.clone().unwrap_or_default();
+    let pace_label = g.run.as_ref().map_or("", |r| r.pace.label());
+    let Some(r) = g.run.as_mut() else {
+        return LinkInfo { code: "B?", vendor: String::new(), symbol: String::new(), state: LinkState::Done, hops: vec![], problem: None };
+    };
+    let status = poll_run(r);
+    if r.engine_line.is_none() {
+        r.engine_line = std::fs::read_to_string(&r.log).ok().and_then(|t| t.lines().next().map(str::to_string));
+    }
+    let Selection::Local { source, root, symbol, date, window, types, .. } = r.sel.clone() else {
+        return LinkInfo { code: "B?", vendor: String::new(), symbol: String::new(), state: LinkState::Failed, hops: vec![], problem: None };
+    };
+    let failed = r.done.as_deref().is_some_and(|d| d.starts_with('✗'));
+    let exists = file_size(&chart).is_some();
+    let state = if failed {
+        LinkState::Failed
+    } else if r.done.is_some() {
+        LinkState::Done
+    } else if r.paused_at.is_some() {
+        LinkState::Paused
+    } else if !exists {
+        LinkState::WaitingFile
+    } else {
+        LinkState::Running(pace_label)
+    };
+    let flowing = matches!(state, LinkState::Running(_));
+    let (w_hm, w_min) = window.unwrap_or_else(|| ("00:00".into(), 0));
+    let code = if source == "recorder" { "B3" } else { "B2" };
+    let adapter = match source.as_str() {
+        "tardis" => "wealthspring-vendors::tardis（原始 parquet，不转格式）",
+        "databento" => {
+            if types.iter().any(|t| t == "mbo") {
+                "wealthspring-vendors::databento（MBO 逐单重建，含 L3）"
+            } else {
+                "wealthspring-vendors::databento（不喂逐单）"
+            }
+        }
+        _ => "wealthspring-vendors::recorder（自录 parquet）",
+    };
+    let engine = r.engine_line.clone().unwrap_or_default();
+    let (chop, mut problem) = chart_hop(&chart, flowing);
+    // 外壳与数据标的对不上（meta 行到了以后才会换）
+    let shell = shell_cell().lock().map(|g| g.1.symbol.clone()).unwrap_or_default();
+    if problem.is_none() && exists && shell != symbol && shell_symbol(&symbol).as_deref() != Some(shell.as_str()) {
+        problem = Some((false, format!("图的外壳还是 {shell}，数据是 {symbol}（等回放写出 meta 行后会自动换）")));
+    }
+    if failed {
+        problem = Some((true, r.done.clone().unwrap_or_default()));
+    }
+    let hops = vec![
+        (true, "选择", format!("管线 B · {code} · {} · {symbol} · {date} {w_hm} 起 {w_min} 分钟", vendor_label(&source))),
+        (true, "数据", format!("{root}（{} 类：{}）", types.len(), types.join(" · "))),
+        (true, "接入", adapter.to_string()),
+        (!failed, "计算", format!("特征引擎 replay_source · {engine} · {pace_label}{engine_t}")),
+        (exists, "输出", format!("{} · {}", chart.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()), file_size(&chart).map_or("还没建出来".into(), fmt_bytes))),
+        chop,
+        (!failed, "状态", status),
+    ];
+    LinkInfo { code, vendor: vendor_label(&source).into(), symbol, state, hops, problem }
+}
+
+/// 点链路徽标：展开数据源选择栏。
+pub fn open_picker() {
+    if let Ok(mut g) = cell().lock() {
+        g.open = true;
     }
 }

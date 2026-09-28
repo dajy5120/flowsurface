@@ -293,3 +293,10 @@ fn run(g: &mut St) {
 pub fn shutdown() {
     handle(LaunchMsg::Stop);
 }
+
+/// 点链路徽标：展开「发起回测」。
+pub fn open_picker() {
+    if let Ok(mut g) = cell().lock() {
+        g.open = true;
+    }
+}
