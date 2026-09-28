@@ -120,10 +120,12 @@ pub enum Metric {
     Pct,
     Value,
     Quality,
+    /// 与 N 秒前相比 z 的变化（涨跌箭头 + Δz）。
+    Change,
 }
 
 impl Metric {
-    pub const ALL: [Self; 4] = [Self::Z, Self::Pct, Self::Value, Self::Quality];
+    pub const ALL: [Self; 5] = [Self::Z, Self::Pct, Self::Value, Self::Quality, Self::Change];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -132,6 +134,7 @@ impl Metric {
             Self::Pct => "分位",
             Self::Value => "值",
             Self::Quality => "质量",
+            Self::Change => "变化",
         }
     }
 }
@@ -217,6 +220,40 @@ pub struct ViewState {
     pub drag: Option<(Col, f32, f32)>,
     /// 鼠标在表头里的最近 x（拖拽起点用）。
     pub mouse_x: f32,
+    /// 涨跌箭头：与多久之前比（毫秒）、单箭头 / 双箭头的 |Δz| 阈值。持久化在 [`ui_path`]。
+    pub trend_ms: u32,
+    pub th1: f64,
+    pub th2: f64,
+    /// 三个输入框的文本（输入到一半时不合法，合法了才生效）。
+    pub trend_text: String,
+    pub th1_text: String,
+    pub th2_text: String,
+    /// 上一次输入不合法的原因。
+    pub trend_err: String,
+}
+
+/// 涨跌箭头的默认值：与 5 秒前比，|Δz| ≥ 0.5 单箭头、≥ 1.5 双箭头。
+pub const TREND_MS: u32 = 5_000;
+pub const TH1: f64 = 0.5;
+pub const TH2: f64 = 1.5;
+/// 比较时长的范围（上限 = 面板保留的快照历史长度）。
+pub const TREND_MIN_MS: u32 = 1_000;
+pub const TREND_MAX_MS: u32 = 600_000;
+
+/// 某格与 N 秒前相比的 z 变化 → 箭头级别：+2 / +1 / 0 / −1 / −2。
+#[must_use]
+pub fn trend_level(dz: f64, th1: f64, th2: f64) -> i8 {
+    if dz >= th2 {
+        2
+    } else if dz >= th1 {
+        1
+    } else if dz <= -th2 {
+        -2
+    } else if dz <= -th1 {
+        -1
+    } else {
+        0
+    }
 }
 
 /// 全局时间窗口的编辑草稿。点「应用并重启」才写配置。
@@ -468,6 +505,10 @@ pub enum FeatureMatrixMsg {
     DragEnd,
     /// 全部列回到自适应宽度。
     ResetWidths,
+    /// 涨跌箭头：比较时长 / 两档阈值的输入框。
+    TrendLookback(String),
+    TrendTh1(String),
+    TrendTh2(String),
     /// 某一列回到自适应宽度（双击表头分隔线）。
     AutoCol(Col),
 }
@@ -476,8 +517,15 @@ static STATE: OnceLock<Mutex<ViewState>> = OnceLock::new();
 
 fn cell() -> &'static Mutex<ViewState> {
     STATE.get_or_init(|| {
+        let p = load_ui();
         Mutex::new(ViewState {
-            col_w: load_widths(),
+            trend_text: super::feature_matrix_readout::format_window(p.trend_ms),
+            th1_text: format!("{}", p.th1),
+            th2_text: format!("{}", p.th2),
+            col_w: p.col_w,
+            trend_ms: p.trend_ms,
+            th1: p.th1,
+            th2: p.th2,
             ..ViewState::default()
         })
     })
@@ -489,19 +537,44 @@ pub fn ui_path() -> std::path::PathBuf {
     super::paths::data_dir().join("cockpit").join("feature_matrix_ui.json")
 }
 
-fn load_widths() -> std::collections::BTreeMap<Col, f32> {
+/// 界面偏好（列宽 + 涨跌箭头设置）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiPrefs {
+    pub col_w: std::collections::BTreeMap<Col, f32>,
+    pub trend_ms: u32,
+    pub th1: f64,
+    pub th2: f64,
+}
+
+impl UiPrefs {
+    fn of(st: &ViewState) -> Self {
+        Self { col_w: st.col_w.clone(), trend_ms: st.trend_ms, th1: st.th1, th2: st.th2 }
+    }
+}
+
+fn load_ui() -> UiPrefs {
     let v: serde_json::Value = std::fs::read_to_string(ui_path())
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
-    Col::ALL
+    let col_w = Col::ALL
         .iter()
         .filter_map(|c| {
             v["col_w"][c.key()]
                 .as_f64()
                 .map(|w| (*c, (w as f32).clamp(COL_MIN, COL_MAX)))
         })
-        .collect()
+        .collect();
+    let t = &v["trend"];
+    let th1 = t["th1"].as_f64().filter(|x| *x > 0.0).unwrap_or(TH1);
+    UiPrefs {
+        col_w,
+        trend_ms: t["ms"]
+            .as_u64()
+            .map_or(TREND_MS, |x| (x as u32).clamp(TREND_MIN_MS, TREND_MAX_MS)),
+        th1,
+        th2: t["th2"].as_f64().filter(|x| *x > th1).unwrap_or(TH2.max(th1)),
+    }
 }
 
 /// 把自适应算出的宽度**固定下来**：只补还没有宽度的列（第一次打开、双击恢复、全部重新自适应之后），
@@ -519,19 +592,24 @@ pub fn freeze_missing(auto: &[(Col, f32)]) {
         if !added {
             return;
         }
-        g.col_w.clone()
+        UiPrefs::of(&g)
     };
-    save_widths(&w);
+    save_ui(&w);
 }
 
-fn save_widths(w: &std::collections::BTreeMap<Col, f32>) {
-    let o: serde_json::Map<String, serde_json::Value> = w
+fn save_ui(p: &UiPrefs) {
+    let o: serde_json::Map<String, serde_json::Value> = p
+        .col_w
         .iter()
         .map(|(c, x)| (c.key().to_string(), serde_json::json!(x.round())))
         .collect();
-    let p = ui_path();
-    let _ = std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new(".")));
-    let _ = std::fs::write(p, serde_json::json!({ "col_w": o }).to_string());
+    let path = ui_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+    let v = serde_json::json!({
+        "col_w": o,
+        "trend": { "ms": p.trend_ms, "th1": p.th1, "th2": p.th2 },
+    });
+    let _ = std::fs::write(path, v.to_string());
 }
 
 /// 当前视图状态的副本。
@@ -550,10 +628,23 @@ pub fn handle(m: FeatureMatrixMsg) -> Option<f32> {
                 // 鼠标每次离开表头都会发 DragEnd：没在拖就什么都不做，别每次都写文件
                 let changed = !matches!(m, FeatureMatrixMsg::DragEnd) || g.drag.is_some();
                 apply(&mut g, m);
-                (g.col_w.clone(), changed)
+                (UiPrefs::of(&g), changed)
             };
             if changed {
-                save_widths(&w);
+                save_ui(&w);
+            }
+        }
+        FeatureMatrixMsg::TrendLookback(_) | FeatureMatrixMsg::TrendTh1(_) | FeatureMatrixMsg::TrendTh2(_) => {
+            let (p, changed) = {
+                let Ok(mut g) = cell().lock() else { return None };
+                let before = UiPrefs::of(&g);
+                apply(&mut g, m);
+                let now = UiPrefs::of(&g);
+                let changed = now != before;
+                (now, changed)
+            };
+            if changed {
+                save_ui(&p);
             }
         }
         FeatureMatrixMsg::Engine(act) => engine_action(act),
@@ -1038,6 +1129,39 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
             st.col_w.remove(&c);
             st.drag = None;
         }
+        FeatureMatrixMsg::TrendLookback(t) => {
+            match super::feature_matrix_readout::parse_window(&t) {
+                Ok(ms) if (TREND_MIN_MS..=TREND_MAX_MS).contains(&ms) => {
+                    st.trend_ms = ms;
+                    st.trend_err.clear();
+                }
+                Ok(_) => st.trend_err = "比较时长要在 1s ~ 10m 之间".into(),
+                Err(e) => st.trend_err = e,
+            }
+            st.trend_text = t;
+        }
+        FeatureMatrixMsg::TrendTh1(t) => {
+            match t.trim().parse::<f64>() {
+                Ok(x) if x > 0.0 && x < st.th2 => {
+                    st.th1 = x;
+                    st.trend_err.clear();
+                }
+                Ok(_) => st.trend_err = format!("单箭头阈值要大于 0、小于双箭头阈值 {}", st.th2),
+                Err(_) => st.trend_err = format!("「{}」不是数", t.trim()),
+            }
+            st.th1_text = t;
+        }
+        FeatureMatrixMsg::TrendTh2(t) => {
+            match t.trim().parse::<f64>() {
+                Ok(x) if x > st.th1 => {
+                    st.th2 = x;
+                    st.trend_err.clear();
+                }
+                Ok(_) => st.trend_err = format!("双箭头阈值要大于单箭头阈值 {}", st.th1),
+                Err(_) => st.trend_err = format!("「{}」不是数", t.trim()),
+            }
+            st.th2_text = t;
+        }
         FeatureMatrixMsg::WinInput(t) => {
             if let Some(w) = st.win_edit.as_mut() {
                 w.input = t;
@@ -1279,6 +1403,28 @@ mod tests {
         let p = st.picker.unwrap();
         assert!(p.editing.is_none() && p.name.is_empty());
         assert_eq!(p.selected.len(), 1, "新建不清勾选：从当前勾选开始");
+    }
+
+    #[test]
+    fn 涨跌箭头分级与设置校验() {
+        assert_eq!(trend_level(0.49, 0.5, 1.5), 0);
+        assert_eq!(trend_level(0.5, 0.5, 1.5), 1);
+        assert_eq!(trend_level(1.6, 0.5, 1.5), 2);
+        assert_eq!(trend_level(-0.7, 0.5, 1.5), -1);
+        assert_eq!(trend_level(-3.0, 0.5, 1.5), -2);
+        let mut st = ViewState { trend_ms: TREND_MS, th1: TH1, th2: TH2, ..ViewState::default() };
+        apply(&mut st, FeatureMatrixMsg::TrendLookback("30s".into()));
+        assert_eq!(st.trend_ms, 30_000);
+        // 超出历史长度、不合法的不生效，并说原因
+        apply(&mut st, FeatureMatrixMsg::TrendLookback("20m".into()));
+        assert_eq!(st.trend_ms, 30_000);
+        assert!(!st.trend_err.is_empty());
+        apply(&mut st, FeatureMatrixMsg::TrendTh1("2".into()));
+        assert_eq!(st.th1, TH1, "单箭头阈值不能大于双箭头阈值");
+        apply(&mut st, FeatureMatrixMsg::TrendTh2("2.5".into()));
+        apply(&mut st, FeatureMatrixMsg::TrendTh1("2".into()));
+        assert_eq!((st.th1, st.th2), (2.0, 2.5));
+        assert!(st.trend_err.is_empty());
     }
 
     #[test]

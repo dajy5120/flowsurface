@@ -306,6 +306,55 @@ fn quality_word(s: &Slot) -> String {
     }
 }
 
+/// 涨（绿）/ 跌（红）。与质量色条的绿红是两件事：箭头只说「这个数比 N 秒前变大 / 变小」，不说好坏。
+const C_UP: Color = Color::from_rgb(0.30, 0.82, 0.45);
+const C_DOWN: Color = Color::from_rgb(0.93, 0.36, 0.34);
+/// 完整模式里箭头那一小列的宽度。
+const ARROW: f32 = 24.0;
+
+/// 涨跌比较的上下文：N 秒前那份快照（每格 z、值）与阈值。
+struct Trend {
+    past: Option<Box<[(f32, f32)]>>,
+    th1: f64,
+    th2: f64,
+    /// 「近 5s」这样的说法。
+    label: String,
+}
+
+impl Trend {
+    fn new(m: &Matrix, v: &ViewState) -> Self {
+        Self {
+            past: ro::past(m.as_of, u64::from(v.trend_ms)),
+            th1: v.th1,
+            th2: v.th2,
+            label: format!("近 {}", ro::format_window(v.trend_ms)),
+        }
+    }
+
+    /// 这一格与 N 秒前相比 z 的变化。没有 z（归一化为 none 的特征）或历史还不够长时 `None`。
+    fn dz(&self, s: &Slot) -> Option<f64> {
+        let (z0, _) = *self.past.as_ref()?.get(s.idx)?;
+        let z = s.z?;
+        (!z0.is_nan()).then(|| z - f64::from(z0))
+    }
+
+    fn level(&self, s: &Slot) -> i8 {
+        self.dz(s)
+            .map_or(0, |d| super::feature_matrix::trend_level(d, self.th1, self.th2))
+    }
+}
+
+/// 箭头与颜色：+2 ▲▲ / +1 ▲（绿），−1 ▼ / −2 ▼▼（红），0 不画。
+fn arrow(level: i8) -> (&'static str, Color) {
+    match level {
+        2 => ("▲▲", C_UP),
+        1 => ("▲", C_UP),
+        -1 => ("▼", C_DOWN),
+        -2 => ("▼▼", C_DOWN),
+        _ => ("", C_DIM),
+    }
+}
+
 /// 一个 slot 的完整说明（悬停提示）。
 fn slot_tip(s: &Slot) -> String {
     format!(
@@ -436,7 +485,7 @@ impl Widths {
     /// 一个窗口组的宽度（不含组后的分隔带）。
     fn group(&self, mode: TableMode) -> f32 {
         match mode {
-            TableMode::Full => BAR + self.val + SEP + self.z + SEP + self.pct,
+            TableMode::Full => BAR + self.val + ARROW + SEP + self.z + SEP + self.pct,
             TableMode::Pivot => self.cell,
         }
     }
@@ -469,7 +518,7 @@ fn widths(rows: &[FeatureRow<'_>], wins: &[u32], v: &ViewState) -> Widths {
     let pct = est("100%", 11.0) + pad;
     // 窗口组要装得下它的标题
     let label = wins.iter().map(|w| est(&format!("窗口 {}", window_label(*w)), 10.0) + pad).fold(0.0, f32::max);
-    let full = BAR + val + SEP + z + SEP + pct;
+    let full = BAR + val + ARROW + SEP + z + SEP + pct;
     if full < label {
         val += label - full;
     }
@@ -478,6 +527,7 @@ fn widths(rows: &[FeatureRow<'_>], wins: &[u32], v: &ViewState) -> Widths {
         Metric::Pct => est("100%", 11.0) + pad,
         Metric::Value => val,
         Metric::Quality => mx(&mut slots().map(|s| est(&quality_word(s), 11.0) + pad), 40.0, 140.0),
+        Metric::Change => est("▼▼ +12.34", 11.0) + pad,
     }
     .max(wins.iter().map(|w| est(&format!("{} · {}", window_label(*w), v.metric.label()), 10.0) + pad).fold(0.0, f32::max));
     let unit = mx(&mut rows.iter().map(|r| est(&r.head().unit, 10.0) + pad), 36.0, 130.0);
@@ -511,18 +561,32 @@ fn widths(rows: &[FeatureRow<'_>], wins: &[u32], v: &ViewState) -> Widths {
 }
 
 /// 一个窗口组（这个特征没有该窗口时留空；「—」表示有这个窗口但没有值）。
-fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, w: &Widths) -> Element<'a, Msg> {
+fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, w: &Widths, tr: &Trend) -> Element<'a, Msg> {
     let gw = w.group(mode);
     let Some(s) = s else {
         return fcell(text(""), gw, false);
     };
-    let tip = slot_tip(s);
+    let dz = tr.dz(s);
+    let level = tr.level(s);
+    let tip = format!(
+        "{}\n{} Δz {}",
+        slot_tip(s),
+        tr.label,
+        dz.map_or_else(
+            || if tr.past.is_none() { "—（历史还不够长）".to_string() } else { "—（这条特征没有 z）".to_string() },
+            |d| format!("{d:+.2}")
+        )
+    );
     let body: Element<'a, Msg> = match mode {
         TableMode::Full => row![
             tinted(text(""), Some(bar_color(s)))
                 .width(Length::Fixed(BAR))
                 .height(Length::Fill),
             fcell(nowrap(num(s.value), 11.0, value_color(s)), w.val, true),
+            {
+                let (a, c) = arrow(level);
+                fcell(nowrap(a.to_string(), 10.0, c), ARROW, false)
+            },
             sep(false),
             fcell(nowrap(num(s.z), 11.0, C_DIM), w.z, true),
             sep(false),
@@ -540,6 +604,21 @@ fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, w: &Width
                 ),
                 Metric::Value => (num(s.value), None, value_color(s)),
                 Metric::Quality => (quality_word(s), Some(bar_color(s).scale_alpha(0.28)), C_TXT),
+                Metric::Change => {
+                    let (a, c) = arrow(level);
+                    let bg = match level {
+                        2 => Some(C_UP.scale_alpha(0.32)),
+                        1 => Some(C_UP.scale_alpha(0.14)),
+                        -1 => Some(C_DOWN.scale_alpha(0.14)),
+                        -2 => Some(C_DOWN.scale_alpha(0.32)),
+                        _ => None,
+                    };
+                    (
+                        dz.map_or_else(|| "—".into(), |d| format!("{a} {d:+.2}").trim().to_string()),
+                        bg,
+                        if level == 0 { C_DIM } else { c },
+                    )
+                }
             };
             let muted = s.not_implemented() || s.disabled();
             tinted(
@@ -604,6 +683,7 @@ fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric, w: &Widths) -
                 r = r
                     .push(container(text("")).width(Length::Fixed(BAR)))
                     .push(fcell(h("值"), w.val, true))
+                    .push(fcell(h(" Δ"), ARROW, false))
                     .push(grip(false, Col::Val, w.val))
                     .push(fcell(h("z"), w.z, true))
                     .push(grip(false, Col::Z, w.z))
@@ -650,6 +730,7 @@ fn feature_line<'a>(
     mode: TableMode,
     metric: Metric,
     w: &Widths,
+    tr: &Trend,
     idx: usize,
     hovered: bool,
 ) -> Element<'a, Msg> {
@@ -663,7 +744,7 @@ fn feature_line<'a>(
     ]
     .height(Length::Fixed(ROW_H));
     for win in wins {
-        line = line.push(window_group(r.window(*win), mode, metric, w)).push(sep(true));
+        line = line.push(window_group(r.window(*win), mode, metric, w, tr)).push(sep(true));
     }
     let (st, sc) = row_status(r);
     line = line
@@ -687,9 +768,24 @@ fn feature_line<'a>(
         .into()
 }
 
-/// 阶段分节条（横贯整表）。
-fn stage_band<'a>(t: String, c: Color, width: f32) -> container::Container<'a, Msg> {
-    tinted(nowrap(t, 12.0, c), Some(Color::from_rgba(0.55, 0.65, 0.85, 0.16)))
+/// 阶段分节条（横贯整表）：标题 + 本阶段「变大 / 变小」的格子数（一眼看这一段整体往哪边走）。
+fn stage_band<'a>(t: String, c: Color, width: f32, rows: &[FeatureRow<'_>], tr: &Trend) -> container::Container<'a, Msg> {
+    let mut r = row![nowrap(t, 12.0, c)].spacing(10).align_y(iced::Alignment::Center);
+    if tr.past.is_some() {
+        let (mut up, mut down) = (0usize, 0usize);
+        for s in rows.iter().flat_map(|r| r.slots.iter()) {
+            match tr.level(s) {
+                l if l > 0 => up += 1,
+                l if l < 0 => down += 1,
+                _ => {}
+            }
+        }
+        r = r
+            .push(nowrap(format!("{}：", tr.label), 10.0, C_DIM))
+            .push(nowrap(format!("▲ {up}"), 11.0, C_UP))
+            .push(nowrap(format!("▼ {down}"), 11.0, C_DOWN));
+    }
+    tinted(r, Some(Color::from_rgba(0.55, 0.65, 0.85, 0.16)))
         .width(Length::Fixed(width))
         .padding([3, 6])
 }
@@ -742,11 +838,39 @@ fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
         (TableMode::Pivot, Metric::Z) => dim("蓝 = 低于常态，红 = 高于常态，颜色越深偏离越大（|z| ≥ 3 封顶）".into()),
         (TableMode::Pivot, Metric::Pct) => dim("蓝 = 处在历史低位，红 = 处在历史高位，50% 附近不着色".into()),
         (TableMode::Pivot, Metric::Quality) => dim("格子按质量着色，写的是原因；悬停看原文".into()),
+        (TableMode::Pivot, Metric::Change) => dim("与 N 秒前相比 z 的变化：绿 ▲ 变大，红 ▼ 变小，双箭头 = 变化超过双箭头阈值".into()),
     };
     r = r.push(legend);
     r = r.push(text("　列宽：拖表头分隔线调整，双击某条分隔线 = 这一列按当前内容重新自适应").size(10).color(C_DIM));
     r = r.push(chip("全部重新自适应".into(), false, Msg::ResetWidths));
-    r.wrap().into()
+    let trend = row![
+        text("涨跌 ").size(11).color(C_DIM),
+        text("与").size(10).color(C_DIM),
+        iced::widget::text_input("5s", &v.trend_text)
+            .on_input(Msg::TrendLookback)
+            .size(11)
+            .width(Length::Fixed(56.0)),
+        text("前相比 z 的变化，|Δz| ≥").size(10).color(C_DIM),
+        iced::widget::text_input("0.5", &v.th1_text)
+            .on_input(Msg::TrendTh1)
+            .size(11)
+            .width(Length::Fixed(48.0)),
+        nowrap("▲ / ▼".into(), 10.0, C_UP),
+        text("，≥").size(10).color(C_DIM),
+        iced::widget::text_input("1.5", &v.th2_text)
+            .on_input(Msg::TrendTh2)
+            .size(11)
+            .width(Length::Fixed(48.0)),
+        nowrap("▲▲ / ▼▼".into(), 10.0, C_UP),
+        text("（绿涨红跌；只说变大变小，不说好坏；没有 z 的特征不画）").size(10).color(C_DIM),
+    ]
+    .spacing(4)
+    .align_y(iced::Alignment::Center);
+    let mut col = column![r.wrap(), trend.wrap()].spacing(4);
+    if !v.trend_err.is_empty() {
+        col = col.push(text(v.trend_err.clone()).size(10).color(C_BAD));
+    }
+    col.into()
 }
 
 /// 筛选条。四个维度 + 清除（docs/31 §8.1：可按阶段/类别/状态/市场筛）。
@@ -876,7 +1000,7 @@ fn top_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
 }
 
 /// ① 特征矩阵（表体）：七阶段纵向分节，一行一个特征，窗口横向成组。表头在滚动区外。
-fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths) -> Element<'a, Msg> {
+fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths, tr: &Trend) -> Element<'a, Msg> {
     let total = w.total(v.table, wins.len());
     let mut b = column![].spacing(0).width(Length::Fixed(total));
     let mut shown = 0usize;
@@ -893,11 +1017,13 @@ fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths) -> Eleme
             format!("{label} · {} 条特征（全部窗口良好 {good}）", rows.len()),
             C_HEAD,
             total,
+            &rows,
+            tr,
         ));
         for (i, r) in rows.iter().enumerate() {
             shown += 1;
             let hov = v.hover.as_deref() == Some(r.head().key.as_str());
-            b = b.push(feature_line(r, wins, v.table, v.metric, w, i, hov));
+            b = b.push(feature_line(r, wins, v.table, v.metric, w, tr, i, hov));
         }
     }
     let n = m.features().len();
@@ -928,7 +1054,7 @@ fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths) -> Eleme
 ///
 /// 与 ① 的区别不是排版而是**用途**：① 是「这个引擎有哪些特征、各自什么状态」，
 /// ② 是「此刻这个向量长什么样」。列与 ① 相同（参数一个不少），阶段可折叠。
-fn vector_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths) -> Element<'a, Msg> {
+fn vector_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths, tr: &Trend) -> Element<'a, Msg> {
     let total = w.total(v.table, wins.len());
     let mut b = column![].spacing(0).width(Length::Fixed(total));
     for (key, label) in Matrix::STAGES {
@@ -948,7 +1074,7 @@ fn vector_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths) -> Eleme
             if bad > 0 { format!("　有异常窗口 {bad}") } else { String::new() },
         );
         b = b.push(
-            button(stage_band(head, if bad > 0 { C_WARN } else { C_HEAD }, total))
+            button(stage_band(head, if bad > 0 { C_WARN } else { C_HEAD }, total, &rows, tr))
                 .padding(0)
                 .style(|t, st| crate::style::button::modifier(t, st, false))
                 .on_press(Msg::ToggleStage(key.to_string())),
@@ -958,7 +1084,7 @@ fn vector_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths) -> Eleme
         }
         for (i, r) in rows.iter().enumerate() {
             let hov = v.hover.as_deref() == Some(r.head().key.as_str());
-            b = b.push(feature_line(r, wins, v.table, v.metric, w, i, hov));
+            b = b.push(feature_line(r, wins, v.table, v.metric, w, tr, i, hov));
         }
     }
     b.into()
@@ -1508,9 +1634,10 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
     let all_rows: Vec<FeatureRow<'_>> = Matrix::STAGES.iter().flat_map(|(k, _)| visible(&m, &v, k)).collect();
     let wins = table_windows(&all_rows);
     let w = widths(&all_rows, &wins, &v);
+    let tr = Trend::new(&m, &v);
     let body = match v.view {
-        View::Vector => vector_view(&m, &v, &wins, &w),
-        _ => matrix_view(&m, &v, &wins, &w),
+        View::Vector => vector_view(&m, &v, &wins, &w, &tr),
+        _ => matrix_view(&m, &v, &wins, &w, &tr),
     };
     let head = scrollable(table_header(&wins, v.table, v.metric, &w))
         .direction(scrollable::Direction::Horizontal(

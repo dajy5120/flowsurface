@@ -51,6 +51,8 @@ pub struct Slot {
     pub win_custom: bool,
     /// 字典默认窗口（毫秒）。
     pub win_default: Vec<u32>,
+    /// 在快照 `slots` 里的下标（涨跌箭头按它去历史快照里找同一格）。
+    pub idx: usize,
 }
 
 impl Slot {
@@ -263,8 +265,82 @@ pub fn snapshot() -> Matrix {
         Err(_) => Matrix::default(),
     };
     v.refreshed = chrono::Local::now().format("%H:%M:%S").to_string();
+    record(&v);
     *g = (mt, v.clone());
     v
+}
+
+// ── 快照历史（涨跌箭头用）──────────────────────────────────────────────────
+//
+// 面板不算特征值；箭头只是把引擎给的 z 与 N 秒前的 z 相减——同一个数前后比，不是第二条计算路径。
+// 每份快照只留每格的 (z, 值)，按事件时钟排；布局变了（引擎换了启用集 / 窗口重启）就清空重来。
+
+/// 历史最多留多久（比较时长的上限）。
+pub const HISTORY_MS: u64 = 600_000;
+/// 至多几份（500ms 一份 × 10 分钟 = 1200，留点余量）。
+const HISTORY_CAP: usize = 1_400;
+
+/// 一份快照的每格 `(z, 值)`（缺值为 NaN）。
+type Row = Box<[(f32, f32)]>;
+
+struct History {
+    sig: u64,
+    entries: std::collections::VecDeque<(u64, Row)>,
+}
+
+static HISTORY: OnceLock<Mutex<History>> = OnceLock::new();
+
+fn history() -> &'static Mutex<History> {
+    HISTORY.get_or_init(|| Mutex::new(History { sig: 0, entries: std::collections::VecDeque::new() }))
+}
+
+/// 布局签名：slot 的键与窗口依次哈希。
+fn layout_sig(m: &Matrix) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for s in &m.slots {
+        s.key.hash(&mut h);
+        s.window_ms.hash(&mut h);
+    }
+    h.finish()
+}
+
+fn record(m: &Matrix) {
+    if !m.present || m.as_of == 0 {
+        return;
+    }
+    let Ok(mut g) = history().lock() else { return };
+    let sig = layout_sig(m);
+    if sig != g.sig {
+        g.sig = sig;
+        g.entries.clear();
+    }
+    // 事件时钟回退（引擎重启、回放换了一份数据）= 另一段历史
+    if g.entries.back().is_some_and(|(t, _)| *t > m.as_of) {
+        g.entries.clear();
+    }
+    if g.entries.back().is_some_and(|(t, _)| *t == m.as_of) {
+        return;
+    }
+    let f = |x: Option<f64>| x.map_or(f32::NAN, |v| v as f32);
+    let row: Row = m.slots.iter().map(|s| (f(s.z), f(s.value))).collect();
+    g.entries.push_back((m.as_of, row));
+    let cut = m.as_of.saturating_sub(HISTORY_MS * 1_000_000 + 5_000_000_000);
+    while g.entries.len() > HISTORY_CAP || g.entries.front().is_some_and(|(t, _)| *t < cut) {
+        g.entries.pop_front();
+    }
+}
+
+/// `lookback_ms` 之前（按事件时钟）的那份快照：每格 `(z, 值)`，没有则 NaN。历史还不够长时 `None`。
+#[must_use]
+pub fn past(now_ns: u64, lookback_ms: u64) -> Option<Row> {
+    let g = history().lock().ok()?;
+    let target = now_ns.checked_sub(lookback_ms * 1_000_000)?;
+    g.entries
+        .iter()
+        .rev()
+        .find(|(t, _)| *t <= target)
+        .map(|(_, r)| r.clone())
 }
 
 fn strings(v: &serde_json::Value) -> Vec<String> {
@@ -314,8 +390,9 @@ pub fn parse(text: &str) -> Matrix {
         saturated_windows: v["saturated_windows"].as_u64().unwrap_or(0) as usize,
         ..Default::default()
     };
-    for s in v["slots"].as_array().into_iter().flatten() {
+    for (idx, s) in v["slots"].as_array().into_iter().flatten().enumerate() {
         out.slots.push(Slot {
+            idx,
             key: s["key"].as_str().unwrap_or_default().to_string(),
             name_cn: s["name_cn"].as_str().unwrap_or_default().to_string(),
             stage: s["stage"].as_str().unwrap_or_default().to_string(),
@@ -657,5 +734,26 @@ mod tests {
         assert_eq!(parse_windows(" ").unwrap(), Vec::<u32>::new());
         assert!(parse_windows("1s,xyz").is_err());
         assert_eq!(format_window(0), "瞬时");
+    }
+
+    #[test]
+    fn 快照历史按事件时钟找n秒前且布局变了就清空() {
+        let mk = |as_of: u64, z: f64, key: &str| {
+            parse(&format!(
+                r#"{{"as_of":{as_of},"slots":[{{"key":"{key}","stage":"S1_price","window_ms":0,"z":{z},"quality":"GOOD"}}]}}"#
+            ))
+        };
+        // 用一个本测试独有的键，避免与别的测试共享全局历史时串味
+        let s = 1_000_000_000u64;
+        for (i, z) in [0.0, 0.5, 1.0, 1.5].iter().enumerate() {
+            record(&mk(s * (100 + i as u64), *z, "历史测试键"));
+        }
+        let now = s * 103;
+        let p = past(now, 2_000).expect("2 秒前那份");
+        assert!((p[0].0 - 0.5).abs() < 1e-6, "应当取到 t=101s 的那份，实为 {}", p[0].0);
+        assert!(past(now, 60_000).is_none(), "历史不够 60 秒");
+        // 布局变了（换了一个键）→ 清空
+        record(&mk(s * 104, 2.0, "另一个键"));
+        assert!(past(s * 104, 1_000).is_none());
     }
 }
