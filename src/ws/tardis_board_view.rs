@@ -680,7 +680,7 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     };
 
     let header = column![
-        text("Tardis 历史面板 — 数据源 → 数据类型 → 图表")
+        text("历史数据面板（Tardis / Databento / 本地录制）— 数据 → 数据类型 → 图表")
             .size(19)
             .color(Color::from_rgb(0.55, 0.8, 1.0)),
         text("零交易所流：全部数据来自本地历史文件，不建立任何实时连接")

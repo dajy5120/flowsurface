@@ -4,45 +4,67 @@
 //! **全程零交易所流**：不声明任何 ticker、不订阅任何实时连接；数据由主仓
 //! `factory/replay/panels.py` 落成 JSON，本面板只读渲染（见 [`super::tardis_board_readout`]）。
 //!
-//! 三个数据接口（主仓 `factory/replay/sources.py`，产出同一套规范化列）：
-//!   ① Tardis · DuckDB 仓   ② Tardis · 直读 Parquet   ③ 自录数据 · Recorder
+//! 四个数据接口（主仓 `factory/replay/sources.py`，产出同一套规范化列）：
+//!   ① Tardis · DuckDB 仓   ② Tardis · 直读 Parquet   ③ Databento（经 wealthspring_py 统一数据源接口）   ④ 自录数据
 //!
-//! 选数据用共用数据选择组件（[`super::data_picker`]，docs/28）：管线 B → B2 购买数据（Tardis）/
+//! 选数据用共用数据选择组件（[`super::data_picker`]，docs/28）：管线 B → B2 购买数据（Tardis / Databento）/
 //! B3 本地录制 → 根目录扫描 → 市场 → 标的 → 日期 + 起始时刻 + 时长。选定的根目录经
-//! `WS_TARDIS_ROOT` / `WS_DATA_DIR` 传给脚本。数据类型仍由本面板单选（它有自己的规范类型名与中文名）：
-//! 可选的类型 = 扫描到的当天类型（录制器的目录名换成规范名，见 [`canonical_type`]）。
+//! `WS_TARDIS_ROOT` / `WS_DATABENTO_ROOT` / `WS_DATA_DIR` 传给脚本。数据类型仍由本面板单选（它有自己的规范类型名与中文名）：
+//! 可选的类型 = 扫描到的当天类型（数据商原名换成规范名，见 [`canonical_types`]）。
 
 use std::process::{Command, Stdio};
 
 use super::data_picker::{BSource, DataPick, DataPickMsg, Load, PickOpts, Pipeline, Purpose, TimeMode};
 use super::tardis_board_readout as ro;
 
-/// 本面板对共用组件的要求：只读本地（B2 Tardis / B3 录制），时间选一段，类型自己选。
+/// 本面板对共用组件的要求：只读本地（B2 Tardis / Databento、B3 录制），时间选一段，类型自己选。
 #[must_use]
 pub fn pick_opts() -> PickOpts {
     PickOpts {
         purpose: Purpose::Chart,
         sources: Some(vec![BSource::Purchased, BSource::Recorded]),
-        vendors: Some(vec!["tardis"]),
+        vendors: None,
         time: TimeMode::Window,
         local_only: true,
         hide_types: true,
     }
 }
 
-/// 扫描给的类型名 → 本面板（`sources.py`）的规范类型名。Tardis 本来就是规范名；
-/// 录制器目录名按 `RecorderSource.MAP` 反查，没有对应物的（如 `snap100ms`）返回 `None`。
+/// 扫描给的类型名（数据商原名）→ 本面板（`sources.py`）能画的规范类型。
+///
+/// - Tardis：本来就是规范名。
+/// - 录制器：按 `RecorderSource.MAP` 反查。
+/// - Databento（`DatabentoSource`）：`mbo` 经 Rust 逐单重建出增量盘口与逐笔成交；`trades` 即逐笔成交；
+///   `mbp-10` 是交易所发布的前 10 档，给 BBO 顶档与深簿 5 档。
+///
+/// 没有对应物的（录制器 `snap100ms`、Databento `definition` / `statistics` / `status`）给空。
 #[must_use]
-pub fn canonical_type(source: &str, t: &str) -> Option<String> {
-    if source != "recorder" {
-        return Some(t.to_string());
+pub fn canonical_types(source: &str, t: &str) -> Vec<&'static str> {
+    match (source, t) {
+        ("tardis", _) => ro_type(t).into_iter().collect(),
+        ("recorder", "trades") | ("databento", "trades") => vec!["trades"],
+        ("recorder", "l2") => vec!["incremental_book_L2"],
+        ("recorder", "mark") => vec!["derivative_ticker"],
+        ("databento", "mbo") => vec!["incremental_book_L2", "trades"],
+        ("databento", "mbp-10") => vec!["book_ticker", "book_snapshot_5"],
+        _ => Vec::new(),
     }
-    match t {
-        "trades" => Some("trades".into()),
-        "l2" => Some("incremental_book_L2".into()),
-        "mark" => Some("derivative_ticker".into()),
-        _ => None,
-    }
+}
+
+/// 八种规范类型里的哪一个（Tardis 扫描名原样对上）。
+fn ro_type(t: &str) -> Option<&'static str> {
+    [
+        "incremental_book_L2",
+        "book_ticker",
+        "quotes",
+        "book_snapshot_25",
+        "book_snapshot_5",
+        "trades",
+        "derivative_ticker",
+        "liquidations",
+    ]
+    .into_iter()
+    .find(|x| *x == t)
 }
 
 /// Tardis 的两种读法（同一份数据）：直读 Parquet（跟随所选根目录）/ DuckDB 仓（固定仓库文件）。
@@ -107,7 +129,7 @@ pub struct TardisBoardState {
     pub pick: DataPick,
     /// B2 Tardis 的读法（[`TARDIS_ACCESS`] 的键）。
     pub access: String,
-    /// `sources.py` 的源键：`tardis_parquet` / `tardis_duckdb` / `recorder`（空 = 还没选到本地来源）。
+    /// `sources.py` 的源键：`tardis_parquet` / `tardis_duckdb` / `databento` / `recorder`（空 = 还没选到本地来源）。
     pub source: String,
     pub symbol: String,
     pub date: String,
@@ -189,10 +211,10 @@ impl TardisBoardState {
         }
         let mut v: Vec<String> = Vec::new();
         for t in sc.types(&self.symbol, &self.date) {
-            if let Some(c) = canonical_type(key, &t)
-                && !v.contains(&c)
-            {
-                v.push(c);
+            for c in canonical_types(key, &t) {
+                if !v.iter().any(|x| x == c) {
+                    v.push(c.to_string());
+                }
             }
         }
         v
@@ -212,6 +234,7 @@ impl TardisBoardState {
     pub fn root_env(&self) -> Option<(&'static str, String)> {
         match self.pick.local_key()? {
             "tardis" => Some(("WS_TARDIS_ROOT", self.pick.root_or_default())),
+            "databento" => Some(("WS_DATABENTO_ROOT", self.pick.root_or_default())),
             "recorder" => Some(("WS_DATA_DIR", self.pick.root_or_default())),
             _ => None,
         }
@@ -222,6 +245,7 @@ impl TardisBoardState {
         self.pick.poll();
         self.source = match self.pick.local_key() {
             Some("tardis") => self.access.clone(),
+            Some("databento") => "databento".into(),
             Some("recorder") => "recorder".into(),
             _ => String::new(),
         };
@@ -422,7 +446,7 @@ fn valid_hm(s: &str) -> bool {
 /// 异步起 panels.py 生成面板 JSON：只 spawn 不等待，结果由 [`poll_load`] 收。
 fn load(st: &TardisBoardState) -> String {
     if st.source.is_empty() || st.symbol.is_empty() || st.date.is_empty() {
-        return "✗ 还没选完：管线 B → 购买数据（Tardis）或本地录制 → 标的 → 日期".into();
+        return "✗ 还没选完：管线 B → 购买数据（Tardis / Databento）或本地录制 → 标的 → 日期".into();
     }
     let types = st.avail_types();
     if !types.is_empty() && !types.contains(&st.dtype) {
