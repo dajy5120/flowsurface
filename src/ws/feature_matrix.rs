@@ -179,6 +179,9 @@ pub enum FeatureMatrixMsg {
     SetMarket(Option<String>),
     ToggleStage(String),
     ClearFilters,
+    /// 特征引擎总开关：`"start"` / `"stop"`（systemctl，作用于 `ws-features`）。
+    /// **这是本面板唯一有副作用的消息**——其余都只改筛选。
+    Engine(&'static str),
 }
 
 static STATE: OnceLock<Mutex<ViewState>> = OnceLock::new();
@@ -194,8 +197,49 @@ pub fn state() -> ViewState {
 }
 
 pub fn handle(m: FeatureMatrixMsg) {
+    if let FeatureMatrixMsg::Engine(act) = m {
+        engine_action(act);
+        return;
+    }
     let Ok(mut g) = cell().lock() else { return };
     apply(&mut g, m);
+}
+
+static ENGINE_NOTE: OnceLock<Mutex<String>> = OnceLock::new();
+
+/// 总开关上一次动作的回执（给人看的一行字）。
+#[must_use]
+pub fn engine_note() -> String {
+    ENGINE_NOTE
+        .get_or_init(|| Mutex::new(String::new()))
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+fn set_engine_note(t: String) {
+    if let Ok(mut g) = ENGINE_NOTE.get_or_init(|| Mutex::new(String::new())).lock() {
+        *g = t;
+    }
+}
+
+/// 启停特征引擎。与进程页同一个动作（[`super::procs::action`]）、同一个单元，
+/// 丢后台线程——`systemctl stop` 要等进程退出，放在更新循环里会卡帧。
+fn engine_action(act: &'static str) {
+    set_engine_note(format!("正在{}…", if act == "start" { "启动" } else { "停止" }));
+    std::thread::spawn(move || set_engine_note(super::procs::action(ENGINE_KEY, act)));
+}
+
+/// 特征引擎在进程清单（[`super::procs::ALL`]）里的 key。
+pub const ENGINE_KEY: &str = "features";
+
+/// 特征引擎此刻的状态（进程页的 5 秒轮询；轮询还没出第一轮时是 `None`）。
+#[must_use]
+pub fn engine_state() -> Option<super::svcctl::UnitState> {
+    super::procs::rows()
+        .into_iter()
+        .find(|r| r.key == ENGINE_KEY)
+        .map(|r| r.st)
 }
 
 /// 纯函数形式的状态转移。测试直接测它——不需要碰全局锁。
@@ -214,6 +258,8 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
                 st.collapsed.push(s);
             }
         }
+        // 有副作用，不走纯函数（见 `handle`）
+        FeatureMatrixMsg::Engine(_) => {}
         // 折叠状态**不清**：它是「我在看哪一段」，不是筛选。
         FeatureMatrixMsg::ClearFilters => {
             st.quality = QualityFilter::All;
@@ -323,5 +369,19 @@ mod tests {
         apply(&mut st, FeatureMatrixMsg::SetView(View::Vector));
         assert_eq!(st.view, View::Vector);
         assert_eq!(st.stage, Some("S7_execution"), "换视图把筛选也丢了");
+    }
+
+    #[test]
+    fn 总开关不动筛选且指向特征引擎() {
+        // 启停是副作用，不该顺手改掉人正在看的筛选
+        let mut st = ViewState::default();
+        apply(&mut st, FeatureMatrixMsg::SetStage(Some("S3_book")));
+        let before = st.clone();
+        apply(&mut st, FeatureMatrixMsg::Engine("stop"));
+        assert_eq!(st.stage, before.stage);
+        assert_eq!(st.view, before.view);
+        // key 改名而这里没跟 = 按钮启停的是别的服务（或回「未知条目」）
+        let p = super::super::procs::ALL.iter().find(|p| p.key == ENGINE_KEY).expect("进程清单里有特征引擎");
+        assert_eq!(p.unit, "ws-features");
     }
 }

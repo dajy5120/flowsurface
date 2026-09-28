@@ -1567,9 +1567,10 @@ impl State {
                 crate::ws::prediction::handle(m);
             }
             Event::FeatureMatrixInteraction(m) => {
-                // 特征矩阵（docs/31 §8.1）：只改筛选/折叠，**没有任何副作用**——
-                // 面板只读旁路 JSON，不启停守护也不触发计算。状态在
-                // ws::feature_matrix 的进程级静态里，同一份筛选对所有矩阵 pane 生效。
+                // 特征矩阵（docs/31 §8.1）：筛选/折叠只改视图状态；唯一的副作用是
+                // 总开关 `Engine(start|stop)`——systemctl 启停 ws-features（后台线程，回执写进
+                // ws::feature_matrix 的进程级静态）。面板本身只读旁路 JSON，不触发计算。
+                // 同一份筛选对所有矩阵 pane 生效。
                 crate::ws::feature_matrix::handle(m);
             }
             Event::RadarInteraction(m) => {

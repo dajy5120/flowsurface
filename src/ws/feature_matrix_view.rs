@@ -496,6 +496,41 @@ fn engine_view<'a>(m: &Matrix) -> Element<'a, Msg> {
     b.into()
 }
 
+/// 特征引擎总开关：状态 + 启动 / 停止。
+///
+/// 与进程页「特征引擎」那一行是同一个单元、同一个动作——放在这里是因为
+/// 看特征的人要在看特征的地方启停，而不是切到进程页去找。
+/// 停掉**没有数据缺口**（录制器照常落盘，事后可回放重算），所以不需要二次确认。
+fn engine_bar<'a>() -> Element<'a, Msg> {
+    let note = super::feature_matrix::engine_note();
+    let mut r = row![text("特征引擎 ").size(12).color(C_HEAD)]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+    match super::feature_matrix::engine_state() {
+        // 轮询还没出第一轮：别猜状态，也别给按钮——猜错了按钮就是反的
+        None => r = r.push(text("查询中…").size(11).color(C_DIM)),
+        Some(st) if st.active => {
+            r = r
+                .push(text("● 运行中").size(11).color(C_OK))
+                .push(
+                    text(format!("已运行 {}", super::svcctl::fmt_dur(st.uptime_secs)))
+                        .size(10)
+                        .color(C_DIM),
+                )
+                .push(chip("■ 停止".into(), false, Msg::Engine("stop")));
+        }
+        Some(_) => {
+            r = r
+                .push(text("○ 已停止").size(11).color(C_WARN))
+                .push(chip("▶ 启动".into(), false, Msg::Engine("start")));
+        }
+    }
+    if !note.is_empty() {
+        r = r.push(text(note).size(10).color(C_DIM));
+    }
+    r.into()
+}
+
 pub fn pane_body<'a>() -> Element<'a, Msg> {
     let m: Matrix = ro::snapshot();
     let v = super::feature_matrix::state();
@@ -511,6 +546,7 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
         vr = vr.push(chip(view.label().into(), v.view == view, Msg::SetView(view)));
     }
     b = b.push(vr.align_y(iced::Alignment::Center));
+    b = b.push(engine_bar());
 
     if !m.present {
         return b
@@ -527,6 +563,14 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
             .into();
     }
 
+    if super::feature_matrix::engine_state().is_some_and(|st| !st.active) {
+        // 停了之后旁路文件还在：不说一声，人会把最后一张快照当成现在
+        b = b.push(
+            text("引擎已停止：下面是停止前的最后一次快照，不再更新")
+                .size(11)
+                .color(C_WARN),
+        );
+    }
     b = b.push(top_bar(&m));
     if v.view != View::Engine {
         b = b.push(filter_bar(&m, &v));
