@@ -8,8 +8,7 @@ use iced::widget::{button, column, container, pick_list, progress_bar, row, text
 use iced::{Alignment, Color, Element, Length};
 
 use super::tardis_replay::{
-    MINUTES, Speed, TardisReplayMsg, TardisReplayState, available_dates, available_symbols, hours,
-    is_running,
+    MINUTES, Speed, TardisReplayMsg, TardisReplayState, hours, is_running, pick_opts,
 };
 
 fn group(n: u64) -> String {
@@ -33,34 +32,19 @@ pub fn pane_body(app: &TardisReplayState) -> Element<'_, TardisReplayMsg> {
     let st = super::tardis_replay_readout::snapshot();
     let running = is_running();
 
-    let syms = available_symbols();
-    let dates = available_dates(&app.symbol);
-    let n_days = dates.len();
-
     let header = column![
         text("Tardis 历史回放 — 已购 30 天逐笔进 Cockpit")
             .size(20)
             .color(Color::from_rgb(0.55, 0.8, 1.0)),
-        text(format!(
-            "数据源：{}｜{} 个符号 × {n_days} 天",
-            super::tardis_replay::tardis_root().display(),
-            syms.len()
-        ))
-        .size(11)
-        .color(Color::from_rgb(0.55, 0.6, 0.65)),
+        text(format!("数据源：{}", super::tardis_replay::tardis_root().display()))
+            .size(11)
+            .color(Color::from_rgb(0.55, 0.6, 0.65)),
     ]
     .spacing(4);
 
-    // 拆两行：5 个选择器挤一行会在窄 pane（右侧栏典型宽度）里溢出被裁。
+    // 数据管线 / 市场 / 标的 / 日期：共用数据选择组件（只列 Tardis）；时段 / 时长 / 倍速另起一行。
     let picks = column![
-        row![
-            label("符号"),
-            pick_list(syms, Some(app.symbol.clone()), TardisReplayMsg::SymbolPick).text_size(13),
-            label("日期"),
-            pick_list(dates, Some(app.date.clone()), TardisReplayMsg::DatePick).text_size(13),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
+        super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisReplayMsg::Data),
         row![
             label("起始(UTC)"),
             pick_list(hours(), Some(app.start_hm.clone()), TardisReplayMsg::StartPick)

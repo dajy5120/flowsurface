@@ -9,7 +9,6 @@
 //! `WS_REPO` / `WS_VENV_PY` 覆盖。只读状态见 [`super::tardis_replay_readout`]，渲染见
 //! `tardis_replay_view`。
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -75,11 +74,20 @@ impl std::fmt::Display for Speed {
 /// 时长档（分钟）。
 pub const MINUTES: [u32; 5] = [5, 15, 30, 60, 240];
 
+/// 本面板用的数据源（共用数据选择组件只列 Tardis）。
+pub fn pick_opts() -> super::data_picker::PickOpts {
+    super::data_picker::PickOpts {
+        sources: Some(vec!["tardis"]),
+        live: false,
+        date: true,
+    }
+}
+
 /// pane 携带的可编辑状态。
 #[derive(Clone)]
 pub struct TardisReplayState {
-    pub symbol: String,
-    pub date: String,
+    /// 数据管线 / 市场 / 标的 / 日期（共用组件 [`super::data_picker`]；目录只有主仓一份实现）。
+    pub pick: super::data_picker::DataPick,
     pub start_hm: String,
     pub minutes: u32,
     pub speed: Speed,
@@ -93,83 +101,21 @@ impl Default for TardisReplayState {
 }
 
 impl TardisReplayState {
-    /// 默认落在数据集里**实际存在**的首个符号/日期，避免开箱即错。
+    /// 默认选 Tardis · 加密 · BTCUSDT；日期不选时开始回放用该标的最新有数据的一天。
     pub fn load() -> Self {
-        let syms = available_symbols();
-        let symbol = syms
-            .iter()
-            .find(|s| *s == "BTCUSDT")
-            .or_else(|| syms.first())
-            .cloned()
-            .unwrap_or_else(|| "BTCUSDT".into());
-        let date = available_dates(&symbol).first().cloned().unwrap_or_default();
         Self {
-            symbol,
-            date,
+            pick: super::data_picker::DataPick {
+                source: Some("tardis".into()),
+                market: Some("crypto".into()),
+                symbol: Some("BTCUSDT".into()),
+                ..Default::default()
+            },
             start_hm: "09:00".into(),
             minutes: 30,
             speed: Speed::X60,
-            hint: "选符号/日期/时段 → 开始回放；行情进左侧图表（K 线/足迹/CVD）".into(),
+            hint: "选标的 / 日期 / 时段 → 开始回放；行情进左侧图表（K 线/足迹/CVD）".into(),
         }
     }
-}
-
-/// 扫 `trades/{年}/{月}/{日}/{符号}.parquet` 得可用符号（取首个存在的日目录）。
-pub fn available_symbols() -> Vec<String> {
-    let root = tardis_root().join("trades");
-    let mut out = BTreeSet::new();
-    // trades/YYYY/MM/DD/SYM.parquet —— 逐层取第一个，够列出符号集。
-    for y in read_dir_sorted(&root) {
-        for m in read_dir_sorted(&y) {
-            for d in read_dir_sorted(&m) {
-                if let Ok(rd) = std::fs::read_dir(&d) {
-                    for f in rd.flatten() {
-                        let p = f.path();
-                        if p.extension().is_some_and(|e| e == "parquet")
-                            && let Some(stem) = p.file_stem().and_then(|s| s.to_str())
-                        {
-                            out.insert(stem.to_string());
-                        }
-                    }
-                }
-                if !out.is_empty() {
-                    return out.into_iter().collect();
-                }
-            }
-        }
-    }
-    out.into_iter().collect()
-}
-
-/// 某符号可用日期（`YYYY-MM-DD`，升序）。
-pub fn available_dates(symbol: &str) -> Vec<String> {
-    let root = tardis_root().join("trades");
-    let mut out = Vec::new();
-    for y in read_dir_sorted(&root) {
-        for m in read_dir_sorted(&y) {
-            for d in read_dir_sorted(&m) {
-                if d.join(format!("{symbol}.parquet")).exists() {
-                    let seg = |p: &PathBuf| {
-                        p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string()
-                    };
-                    out.push(format!("{}-{}-{}", seg(&y), seg(&m), seg(&d)));
-                }
-            }
-        }
-    }
-    out
-}
-
-fn read_dir_sorted(p: &PathBuf) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(p)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    v.sort();
-    v
 }
 
 /// 整点选项（00:00..23:00）。
@@ -180,8 +126,8 @@ pub fn hours() -> Vec<String> {
 /// pane 的交互消息（view 发出 → pane.update 路由到 [`handle`]）。
 #[derive(Debug, Clone)]
 pub enum TardisReplayMsg {
-    SymbolPick(String),
-    DatePick(String),
+    /// 共用数据选择组件的消息。
+    Data(super::data_picker::DataPickMsg),
     StartPick(String),
     MinutesPick(u32),
     SpeedPick(Speed),
@@ -212,15 +158,7 @@ pub fn is_running() -> bool {
 
 pub fn handle(st: &mut TardisReplayState, msg: TardisReplayMsg) {
     match msg {
-        TardisReplayMsg::SymbolPick(s) => {
-            st.symbol = s;
-            // 换符号后日期可能不再有效 → 落到该符号的首个可用日。
-            let dates = available_dates(&st.symbol);
-            if !dates.contains(&st.date) {
-                st.date = dates.first().cloned().unwrap_or_default();
-            }
-        }
-        TardisReplayMsg::DatePick(s) => st.date = s,
+        TardisReplayMsg::Data(m) => st.pick.update(m),
         TardisReplayMsg::StartPick(s) => st.start_hm = s,
         TardisReplayMsg::MinutesPick(m) => st.minutes = m,
         TardisReplayMsg::SpeedPick(s) => st.speed = s,
@@ -230,13 +168,27 @@ pub fn handle(st: &mut TardisReplayState, msg: TardisReplayMsg) {
 }
 
 fn start(st: &TardisReplayState) -> String {
-    if st.date.is_empty() {
-        return "✗ 没有可用日期（检查 Tardis 数据根）".into();
-    }
+    use super::data_picker::{self as dp, Load};
+    let Some(symbol) = st.pick.symbol.clone() else {
+        return "✗ 先选标的".into();
+    };
+    // 没选日期：用该标的最新有数据的一天
+    let date = match &st.pick.date {
+        Some(d) => d.clone(),
+        None => match dp::dates("tardis", &symbol) {
+            Load::Ready(ds) => match ds.last() {
+                Some(d) => d.clone(),
+                None => return format!("✗ {symbol} 没有可用日期（检查 Tardis 数据根）"),
+            },
+            Load::Loading => return "日期还在查，稍后再点".into(),
+            Load::Failed(e) => return format!("✗ 查日期失败：{e}"),
+        },
+    };
+    let (symbol, date) = (&symbol, &date);
     let src = tardis_root()
         .join("trades")
-        .join(st.date.replace('-', "/"))
-        .join(format!("{}.parquet", st.symbol));
+        .join(date.replace('-', "/"))
+        .join(format!("{symbol}.parquet"));
     if !src.exists() {
         return format!("✗ 无此数据: {}", src.display());
     }
@@ -246,8 +198,8 @@ fn start(st: &TardisReplayState) -> String {
         .args([
             "-m",
             "factory.replay.tardis_cockpit_feed",
-            &st.symbol,
-            &st.date,
+            symbol,
+            date,
             "--from",
             &st.start_hm,
             "--minutes",
@@ -267,7 +219,7 @@ fn start(st: &TardisReplayState) -> String {
             }
             format!(
                 "▶ 回放中 {} {} {} +{}min（{}）",
-                st.symbol, st.date, st.start_hm, st.minutes, st.speed
+                symbol, date, st.start_hm, st.minutes, st.speed
             )
         }
         Err(e) => format!("✗ 启动失败: {e}（检查 {} 与主仓路径）", venv_py()),
