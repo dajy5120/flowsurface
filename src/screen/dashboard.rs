@@ -424,6 +424,15 @@ impl Dashboard {
                             pane::Effect::FocusWidget(id) => {
                                 return (iced::widget::operation::focus(id), None);
                             }
+                            pane::Effect::ScrollX(id, x) => {
+                                return (
+                                    iced::widget::operation::scroll_to(
+                                        id,
+                                        iced::widget::scrollable::AbsoluteOffset { x, y: 0.0 },
+                                    ),
+                                    None,
+                                );
+                            }
                         };
                         return (task, None);
                     }

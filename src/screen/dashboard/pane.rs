@@ -53,6 +53,8 @@ pub enum Effect {
     RequestFetch(Vec<FetchSpec>),
     SwitchTickersInGroup(TickerInfo),
     FocusWidget(iced::widget::Id),
+    /// 把某个 scrollable 横向滚到 `x`（特征矩阵：表头跟着表体横向滚动）。
+    ScrollX(iced::widget::Id, f32),
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -1571,7 +1573,13 @@ impl State {
                 // 总开关 `Engine(start|stop)`——systemctl 启停 ws-features（后台线程，回执写进
                 // ws::feature_matrix 的进程级静态）。面板本身只读旁路 JSON，不触发计算。
                 // 同一份筛选对所有矩阵 pane 生效。
-                crate::ws::feature_matrix::handle(m);
+                // 表体横向滚动时回一个「把表头滚到同一位置」的操作，表头才能既固定又跟着横滚。
+                if let Some(x) = crate::ws::feature_matrix::handle(m) {
+                    return Some(Effect::ScrollX(
+                        iced::widget::Id::new(crate::ws::feature_matrix::HEAD_ID),
+                        x,
+                    ));
+                }
             }
             Event::RadarInteraction(m) => {
                 // 全市场雷达（docs/22 P0b）：守护启停 + 窗口/排序切换（状态在 ws::radar 的

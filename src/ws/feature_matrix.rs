@@ -38,6 +38,58 @@ impl View {
     }
 }
 
+/// 表头 / 表体两个 scrollable 的控件 ID（表体横滚时把表头滚到同一位置）。
+pub const HEAD_ID: &str = "feature-matrix-table-head";
+pub const BODY_ID: &str = "feature-matrix-table-body";
+
+/// 表格的一类列。同一类列在各个窗口组里宽度相同（拖一处，所有窗口组一起变）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Col {
+    Name,
+    Key,
+    Val,
+    Z,
+    Pct,
+    /// 透视模式每个窗口的那一格。
+    Cell,
+    Unit,
+    Layer,
+    Status,
+}
+
+impl Col {
+    pub const ALL: [Self; 9] = [
+        Self::Name,
+        Self::Key,
+        Self::Val,
+        Self::Z,
+        Self::Pct,
+        Self::Cell,
+        Self::Unit,
+        Self::Layer,
+        Self::Status,
+    ];
+
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Key => "key",
+            Self::Val => "val",
+            Self::Z => "z",
+            Self::Pct => "pct",
+            Self::Cell => "cell",
+            Self::Unit => "unit",
+            Self::Layer => "layer",
+            Self::Status => "status",
+        }
+    }
+}
+
+/// 列宽下限 / 上限（像素）。
+pub const COL_MIN: f32 = 28.0;
+pub const COL_MAX: f32 = 600.0;
+
 /// 表格的展示方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TableMode {
@@ -159,6 +211,12 @@ pub struct ViewState {
     pub hover: Option<String>,
     /// 收起表格上方的控件（引擎 / 启用集 / 窗口 / 筛选），把高度让给表格。
     pub fold_controls: bool,
+    /// 用户拖过的列宽（像素）；没拖过的列按内容自适应。持久化在 [`ui_path`]。
+    pub col_w: std::collections::BTreeMap<Col, f32>,
+    /// 正在拖的列：`(列, 起点鼠标 x, 起点宽度)`。
+    pub drag: Option<(Col, f32, f32)>,
+    /// 鼠标在表头里的最近 x（拖拽起点用）。
+    pub mouse_x: f32,
 }
 
 /// 全局时间窗口的编辑草稿。点「应用并重启」才写配置。
@@ -401,12 +459,59 @@ pub enum FeatureMatrixMsg {
     /// 鼠标离开某一行（只清掉自己——进出事件的先后不保证）。
     HoverOut(String),
     ToggleFoldControls,
+    /// 表体滚动（横向偏移）：返回给上层去同步表头。
+    TableScrolled(f32),
+    /// 鼠标在表头里移动（相对表头的 x）。
+    HeaderMove(f32),
+    /// 在某列右侧的分隔线上按下：`(列, 当前宽度)`。
+    DragStart(Col, f32),
+    DragEnd,
+    /// 全部列回到自适应宽度。
+    ResetWidths,
+    /// 某一列回到自适应宽度（双击表头分隔线）。
+    AutoCol(Col),
 }
 
 static STATE: OnceLock<Mutex<ViewState>> = OnceLock::new();
 
 fn cell() -> &'static Mutex<ViewState> {
-    STATE.get_or_init(|| Mutex::new(ViewState::default()))
+    STATE.get_or_init(|| {
+        Mutex::new(ViewState {
+            col_w: load_widths(),
+            ..ViewState::default()
+        })
+    })
+}
+
+/// 面板自己的界面偏好（列宽）。与引擎配置分开：它不影响计算，也不该随选择集走。
+#[must_use]
+pub fn ui_path() -> std::path::PathBuf {
+    super::paths::data_dir().join("cockpit").join("feature_matrix_ui.json")
+}
+
+fn load_widths() -> std::collections::BTreeMap<Col, f32> {
+    let v: serde_json::Value = std::fs::read_to_string(ui_path())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    Col::ALL
+        .iter()
+        .filter_map(|c| {
+            v["col_w"][c.key()]
+                .as_f64()
+                .map(|w| (*c, (w as f32).clamp(COL_MIN, COL_MAX)))
+        })
+        .collect()
+}
+
+fn save_widths(w: &std::collections::BTreeMap<Col, f32>) {
+    let o: serde_json::Map<String, serde_json::Value> = w
+        .iter()
+        .map(|(c, x)| (c.key().to_string(), serde_json::json!(x.round())))
+        .collect();
+    let p = ui_path();
+    let _ = std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new(".")));
+    let _ = std::fs::write(p, serde_json::json!({ "col_w": o }).to_string());
 }
 
 /// 当前视图状态的副本。
@@ -415,13 +520,27 @@ pub fn state() -> ViewState {
     cell().lock().map(|g| g.clone()).unwrap_or_default()
 }
 
-pub fn handle(m: FeatureMatrixMsg) {
+/// 处理一条面板消息。返回 `Some(x)` = 请上层把表头横向滚到 `x`（与表体同步）。
+pub fn handle(m: FeatureMatrixMsg) -> Option<f32> {
     match m {
+        FeatureMatrixMsg::TableScrolled(x) => return Some(x),
+        FeatureMatrixMsg::DragEnd | FeatureMatrixMsg::ResetWidths | FeatureMatrixMsg::AutoCol(_) => {
+            let (w, changed) = {
+                let Ok(mut g) = cell().lock() else { return None };
+                // 鼠标每次离开表头都会发 DragEnd：没在拖就什么都不做，别每次都写文件
+                let changed = !matches!(m, FeatureMatrixMsg::DragEnd) || g.drag.is_some();
+                apply(&mut g, m);
+                (g.col_w.clone(), changed)
+            };
+            if changed {
+                save_widths(&w);
+            }
+        }
         FeatureMatrixMsg::Engine(act) => engine_action(act),
         // 切到默认 / 全开不动窗口，也不丢上一次的自定义键表（再切回自定义时还在）
         FeatureMatrixMsg::SetMode(mode) => apply_mode(mode, None, None, None),
         FeatureMatrixMsg::WinApply => {
-            let Some(w) = state().win_edit else { return };
+            let w = state().win_edit?;
             let mut pw = config_windows();
             pw.global = (!w.list.is_empty()).then_some(w.list.clone());
             let label = pw.global.as_deref().map_or_else(
@@ -434,16 +553,16 @@ pub fn handle(m: FeatureMatrixMsg) {
             }
         }
         FeatureMatrixMsg::ApplyPicker => {
-            let Some(p) = state().picker else { return };
+            let p = state().picker?;
             if p.selected.is_empty() {
                 set_engine_note("✗ 一条特征都没选——引擎会退回默认集，没有应用".into());
-                return;
+                return None;
             }
             let windows = match p.windows() {
                 Ok(w) => w,
                 Err(e) => {
                     set_preset_note(format!("✗ {e}——没有应用"));
-                    return;
+                    return None;
                 }
             };
             // 草稿与所编辑的选择集一致时，配置里记下它的名字（模式栏据此显示）
@@ -498,10 +617,11 @@ pub fn handle(m: FeatureMatrixMsg) {
         m => {
             // 选择页的批量「恢复默认」与初始勾选要读快照（默认集、当前启用集）
             let snap = super::feature_matrix_readout::snapshot();
-            let Ok(mut g) = cell().lock() else { return };
+            let Ok(mut g) = cell().lock() else { return None };
             apply_with(&mut g, m, &snap);
         }
     }
+    None
 }
 
 /// 启用集配置文件。**必须与主仓 `feature_config::config_path()` 算出同一个路径**。
@@ -882,6 +1002,22 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
             }
         }
         FeatureMatrixMsg::ToggleFoldControls => st.fold_controls = !st.fold_controls,
+        FeatureMatrixMsg::HeaderMove(x) => {
+            st.mouse_x = x;
+            if let Some((c, x0, w0)) = st.drag {
+                st.col_w.insert(c, (w0 + x - x0).clamp(COL_MIN, COL_MAX));
+            }
+        }
+        FeatureMatrixMsg::DragStart(c, w) => st.drag = Some((c, st.mouse_x, w)),
+        FeatureMatrixMsg::DragEnd => st.drag = None,
+        FeatureMatrixMsg::ResetWidths => {
+            st.col_w.clear();
+            st.drag = None;
+        }
+        FeatureMatrixMsg::AutoCol(c) => {
+            st.col_w.remove(&c);
+            st.drag = None;
+        }
         FeatureMatrixMsg::WinInput(t) => {
             if let Some(w) = st.win_edit.as_mut() {
                 w.input = t;
@@ -944,7 +1080,8 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
         | FeatureMatrixMsg::PresetImport
         | FeatureMatrixMsg::PresetApply(_)
         | FeatureMatrixMsg::WinOpen
-        | FeatureMatrixMsg::WinApply => {}
+        | FeatureMatrixMsg::WinApply
+        | FeatureMatrixMsg::TableScrolled(_) => {}
         // 折叠状态**不清**：它是「我在看哪一段」，不是筛选。
         FeatureMatrixMsg::ClearFilters => {
             st.quality = QualityFilter::All;

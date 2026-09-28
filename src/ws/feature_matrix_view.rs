@@ -23,7 +23,7 @@ use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Color, Element, Length};
 
 use super::feature_matrix::{
-    FeatureMatrixMsg as Msg, Metric, QualityFilter, StatusFilter, TableMode, View, ViewState,
+    Col, FeatureMatrixMsg as Msg, Metric, QualityFilter, StatusFilter, TableMode, View, ViewState,
 };
 use super::feature_matrix_readout::{self as ro, FeatureRow, Matrix, Slot};
 
@@ -136,40 +136,31 @@ fn layer_badges<'a>(s: &Slot) -> Element<'a, Msg> {
 
 // ── 表格 ─────────────────────────────────────────────────────────────────
 //
-// 一行一个特征、各时间窗口横向成组。让它可读的三件事：
-// 1. 窗口组交替底色 + 组间竖线：一眼分清「这几列是 1s 的、那几列是 5m 的」；
-// 2. 行斑马纹 + 悬停整行高亮：长行不看串；
-// 3. 表头在滚动区之外（固定在顶上）。为此所有阶段共用同一套窗口列（可见行的窗口并集）——
-//    各阶段各自出列的话，固定的表头就对不上下面的行。
+// 一行一个特征、各时间窗口横向成组；组与组之间一条竖线。
 //
-// 质量不占文字列：每个窗口组左边一条色条（绿良好 / 黄降级 / 橙过期 / 红无效 / 灰不可用），原因在悬停提示里。
-// 「透视」模式每个窗口只一列、只显示一个指标，z 与分位按偏离着色成热力图。
+// **列宽是固定像素**（横向滚动的前提）：默认按内容自适应（估算每列最长的内容），
+// 用户在表头拖分隔线调整、双击分隔线恢复自适应；拖过的宽度存在 `feature_matrix_ui.json`。
+// 文字一律不换行、超出裁掉——换行会撑高固定行高，压到下一行上。
+//
+// 表头在滚动区之外固定在顶上；表体双向滚动，横向滚动时把表头滚到同一位置（`Effect::ScrollX`），
+// 所以横向滚动条在表格区域底部，表头始终与下面的列对齐。所有阶段共用同一套窗口列（可见行的窗口并集）。
+//
+// 质量不占文字列：每个窗口组左边一条色条，原因在悬停提示里。「透视」模式每个窗口一列、只显示一个指标，
+// z 与分位按偏离蓝—红着色成热力图。
 
-const P_NAME: u16 = 5;
-const P_KEY: u16 = 4;
-const P_VAL: u16 = 3;
-const P_Z: u16 = 2;
-const P_PCT: u16 = 2;
-/// 透视模式每个窗口一格。
-const P_CELL: u16 = 3;
-const P_UNIT: u16 = 2;
-const P_LAYER: u16 = 3;
-const P_STAT: u16 = 4;
+/// 每列右侧的分隔带宽度（表头里是拖拽把手）。
+const SEP: f32 = 7.0;
 /// 质量色条宽度。
 const BAR: f32 = 3.0;
-/// 行高（固定：各格子的底色要铺满整行）。
+/// 行高（固定：色条与热力底色要铺满整行）。
 const ROW_H: f32 = 22.0;
+
+/// 比例列（选择页等非表格处仍在用）。
+const P_NAME: u16 = 5;
+const P_LAYER: u16 = 3;
 
 fn pc<'a>(e: impl Into<Element<'a, Msg>>, portion: u16) -> Element<'a, Msg> {
     container(e).width(Length::FillPortion(portion)).into()
-}
-
-/// 右对齐的比例列（数值列：小数点纵向成列）。
-fn pr<'a>(e: impl Into<Element<'a, Msg>>, portion: u16) -> Element<'a, Msg> {
-    container(e)
-        .width(Length::FillPortion(portion))
-        .align_x(iced::Alignment::End)
-        .into()
 }
 
 /// 带底色的容器（`None` = 透明）。
@@ -180,18 +171,60 @@ fn tinted<'a>(e: impl Into<Element<'a, Msg>>, c: Option<Color>) -> container::Co
     })
 }
 
-/// 窗口组之间的竖线。
-fn vline<'a>() -> Element<'a, Msg> {
-    iced::widget::rule::vertical(1.0).style(crate::style::split_ruler).into()
+/// 不换行、超出裁掉的文字。
+fn nowrap<'a>(t: String, size: f32, c: Color) -> iced::widget::Text<'a> {
+    text(t).size(size).color(c).wrapping(iced::widget::text::Wrapping::None)
 }
 
-/// 窗口组的交替底色。
-fn group_bg(i: usize) -> Color {
-    if i.is_multiple_of(2) {
-        Color::from_rgba(0.55, 0.65, 0.85, 0.05)
+/// 定宽格子：垂直居中、裁掉溢出。`right` = 右对齐（数值列，小数点纵向成列）。
+fn fcell<'a>(e: impl Into<Element<'a, Msg>>, w: f32, right: bool) -> Element<'a, Msg> {
+    container(e)
+        .width(Length::Fixed(w))
+        .height(Length::Fill)
+        .align_y(iced::Alignment::Center)
+        .align_x(if right { iced::Alignment::End } else { iced::Alignment::Start })
+        .clip(true)
+        .into()
+}
+
+/// 表体里的分隔带：`line` = 画一条竖线（窗口组边界）。
+fn sep<'a>(line: bool) -> Element<'a, Msg> {
+    let c = container(if line {
+        Element::from(iced::widget::rule::vertical(1.0).style(crate::style::split_ruler))
     } else {
-        Color::from_rgba(0.55, 0.65, 0.85, 0.12)
-    }
+        Element::from(text(""))
+    })
+    .width(Length::Fixed(SEP))
+    .height(Length::Fill)
+    .align_x(iced::Alignment::Center);
+    c.into()
+}
+
+/// 表头里的分隔带：可拖拽调 `col` 的宽度，双击恢复自适应。
+fn grip<'a>(line: bool, col: Col, w: f32) -> Element<'a, Msg> {
+    iced::widget::mouse_area(
+        container(iced::widget::rule::vertical(1.0).style(move |t: &iced::Theme| {
+            let mut s = crate::style::split_ruler(t);
+            if !line {
+                s.color = s.color.scale_alpha(0.45);
+            }
+            s
+        }))
+        .width(Length::Fixed(SEP))
+        .height(Length::Fill)
+        .align_x(iced::Alignment::Center),
+    )
+    .on_press(Msg::DragStart(col, w))
+    .on_double_click(Msg::AutoCol(col))
+    .interaction(iced::mouse::Interaction::ResizingHorizontally)
+    .into()
+}
+
+/// 估算文字宽度（像素）：中日韩字符按一个字号，其余按 0.62 个字号。
+fn est(t: &str, size: f32) -> f32 {
+    t.chars()
+        .map(|c| if (c as u32) >= 0x2E80 { size } else { size * 0.62 })
+        .sum()
 }
 
 /// 窗口的列标题。`0` 是瞬时量，不是「零秒窗口」。
@@ -225,6 +258,21 @@ fn reason_cn(r: &str) -> &str {
 
 fn pct_text(p: Option<f64>) -> String {
     p.map_or_else(|| "—".into(), |p| format!("{:.0}%", p * 100.0))
+}
+
+fn z_text(z: Option<f64>) -> String {
+    z.map_or_else(|| "—".into(), |z| format!("{z:+.2}"))
+}
+
+/// 透视「质量」格里的字。
+fn quality_word(s: &Slot) -> String {
+    if s.not_implemented() {
+        "待实现".into()
+    } else if s.reason.is_empty() {
+        "良好".into()
+    } else {
+        reason_cn(&s.reason).to_string()
+    }
 }
 
 /// 一个 slot 的完整说明（悬停提示）。
@@ -288,91 +336,6 @@ fn value_color(s: &Slot) -> Color {
     }
 }
 
-const fn group_portion(mode: TableMode) -> u16 {
-    match mode {
-        TableMode::Full => P_VAL + P_Z + P_PCT,
-        TableMode::Pivot => P_CELL,
-    }
-}
-
-/// 一个窗口组。这个特征没有该窗口时留空（「—」表示有这个窗口但没有值）。
-fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, gi: usize) -> Element<'a, Msg> {
-    let portion = group_portion(mode);
-    let Some(s) = s else {
-        return tinted(text(""), Some(group_bg(gi)))
-            .width(Length::FillPortion(portion))
-            .height(Length::Fill)
-            .into();
-    };
-    let tip = slot_tip(s);
-    let body: Element<'a, Msg> = match mode {
-        TableMode::Full => {
-            let bar = tinted(text(""), Some(bar_color(s)))
-                .width(Length::Fixed(BAR))
-                .height(Length::Fill);
-            tinted(
-                row![
-                    bar,
-                    pr(text(num(s.value)).size(11).color(value_color(s)), P_VAL),
-                    pr(text(num(s.z)).size(11).color(C_DIM), P_Z),
-                    pr(text(pct_text(s.percentile)).size(11).color(C_DIM), P_PCT),
-                ]
-                .spacing(4)
-                .padding([0, 4])
-                .align_y(iced::Alignment::Center)
-                .height(Length::Fill),
-                Some(group_bg(gi)),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
-        }
-        TableMode::Pivot => {
-            let (t, bg, c) = match metric {
-                Metric::Z => (
-                    s.z.map_or_else(|| "—".into(), |z| format!("{z:+.2}")),
-                    s.z.and_then(|z| heat(z / 3.0)),
-                    C_TXT,
-                ),
-                Metric::Pct => (
-                    pct_text(s.percentile),
-                    s.percentile.and_then(|p| heat((p - 0.5) * 2.0)),
-                    C_TXT,
-                ),
-                Metric::Value => (num(s.value), None, value_color(s)),
-                Metric::Quality => (
-                    if s.not_implemented() {
-                        "待实现".to_string()
-                    } else if s.reason.is_empty() {
-                        "良好".to_string()
-                    } else {
-                        reason_cn(&s.reason).to_string()
-                    },
-                    Some(bar_color(s).scale_alpha(0.28)),
-                    C_TXT,
-                ),
-            };
-            let muted = s.not_implemented() || s.disabled();
-            tinted(
-                container(text(t).size(11).color(if muted { C_PEND } else { c }))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(iced::Alignment::End)
-                    .align_y(iced::Alignment::Center)
-                    .padding([0, 6]),
-                Some(bg.unwrap_or_else(|| group_bg(gi))),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
-        }
-    };
-    container(with_tip(body, tip))
-        .width(Length::FillPortion(portion))
-        .height(Length::Fill)
-        .into()
-}
-
 /// 一条特征各窗口的质量汇总（状态列）：全部良好只写 GOOD，否则写最要紧的那个问题。
 fn row_status(r: &FeatureRow<'_>) -> (String, Color) {
     let h = r.head();
@@ -410,66 +373,232 @@ fn row_status(r: &FeatureRow<'_>) -> (String, Color) {
     (t, qcolor(&worst.quality))
 }
 
-/// 固定表头。完整模式两层（上层窗口标签横跨一组，下层 值 / z / 分位）；透视模式一层。
-fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric) -> Element<'a, Msg> {
-    let h = |t: &str| text(t.to_string()).size(10).color(C_DIM);
-    let portion = group_portion(mode);
-    let mut top = row![pc(h("特征"), P_NAME), pc(h("键"), P_KEY)]
-        .spacing(0)
-        .height(Length::Fixed(18.0));
-    for (gi, w) in wins.iter().enumerate() {
-        let label = match mode {
-            TableMode::Full => format!("窗口 {}", window_label(*w)),
-            TableMode::Pivot => format!("{} · {}", window_label(*w), metric.label()),
-        };
-        top = top.push(vline()).push(
-            tinted(
-                container(text(label).size(10).color(C_HEAD))
-                    .width(Length::Fill)
-                    .align_x(iced::Alignment::Center),
-                Some(group_bg(gi)),
-            )
-            .width(Length::FillPortion(portion))
-            .height(Length::Fill),
-        );
-    }
-    top = top
-        .push(vline())
-        .push(pc(h("单位"), P_UNIT))
-        .push(pc(h("数据层"), P_LAYER))
-        .push(pc(h("状态"), P_STAT));
-    let mut b = column![top];
-    if mode == TableMode::Full {
-        let mut bottom = row![pc(text(""), P_NAME), pc(text(""), P_KEY)]
-            .spacing(0)
-            .height(Length::Fixed(16.0));
-        for (gi, _) in wins.iter().enumerate() {
-            bottom = bottom.push(vline()).push(
-                tinted(
-                    row![
-                        container(text("")).width(Length::Fixed(BAR)),
-                        pr(h("值"), P_VAL),
-                        pr(h("z"), P_Z),
-                        pr(h("分位"), P_PCT),
-                    ]
-                    .spacing(4)
-                    .padding([0, 4]),
-                    Some(group_bg(gi)),
-                )
-                .width(Length::FillPortion(portion))
-                .height(Length::Fill),
-            );
+/// 各类列的实际宽度（像素）：自适应，再叠用户拖过的。
+#[derive(Debug, Clone, Copy)]
+struct Widths {
+    name: f32,
+    key: f32,
+    val: f32,
+    z: f32,
+    pct: f32,
+    cell: f32,
+    unit: f32,
+    layer: f32,
+    status: f32,
+}
+
+impl Widths {
+    fn get(&self, c: Col) -> f32 {
+        match c {
+            Col::Name => self.name,
+            Col::Key => self.key,
+            Col::Val => self.val,
+            Col::Z => self.z,
+            Col::Pct => self.pct,
+            Col::Cell => self.cell,
+            Col::Unit => self.unit,
+            Col::Layer => self.layer,
+            Col::Status => self.status,
         }
-        bottom = bottom
-            .push(vline())
-            .push(pc(text(""), P_UNIT))
-            .push(pc(text(""), P_LAYER))
-            .push(pc(text(""), P_STAT));
-        b = b.push(bottom);
     }
-    tinted(b.padding([2, 6]), Some(Color::from_rgba(0.55, 0.65, 0.85, 0.10)))
-        .width(Length::Fill)
+
+    /// 一个窗口组的宽度（不含组后的分隔带）。
+    fn group(&self, mode: TableMode) -> f32 {
+        match mode {
+            TableMode::Full => BAR + self.val + SEP + self.z + SEP + self.pct,
+            TableMode::Pivot => self.cell,
+        }
+    }
+
+    /// 整表宽度。
+    fn total(&self, mode: TableMode, nwin: usize) -> f32 {
+        self.name
+            + SEP
+            + self.key
+            + SEP
+            + nwin as f32 * (self.group(mode) + SEP)
+            + self.unit
+            + SEP
+            + self.layer
+            + SEP
+            + self.status
+            + SEP
+    }
+}
+
+/// 自适应列宽：按可见内容估算每类列最长的那一格，再叠用户拖过的宽度。
+fn widths(rows: &[FeatureRow<'_>], wins: &[u32], v: &ViewState) -> Widths {
+    let pad = 12.0;
+    let mx = |it: &mut dyn Iterator<Item = f32>, lo: f32, hi: f32| it.fold(lo, f32::max).min(hi);
+    let slots = || rows.iter().flat_map(|r| r.slots.iter().copied());
+    let name = mx(&mut rows.iter().map(|r| est(&r.head().name_cn, 11.0) + pad), 60.0, 280.0);
+    let key = mx(&mut rows.iter().map(|r| est(&r.head().key, 10.0) + pad), 60.0, 300.0);
+    let mut val = mx(&mut slots().map(|s| est(&num(s.value), 11.0) + pad), 36.0, 170.0);
+    let z = mx(&mut slots().map(|s| est(&num(s.z), 11.0) + pad), 34.0, 110.0);
+    let pct = est("100%", 11.0) + pad;
+    // 窗口组要装得下它的标题
+    let label = wins.iter().map(|w| est(&format!("窗口 {}", window_label(*w)), 10.0) + pad).fold(0.0, f32::max);
+    let full = BAR + val + SEP + z + SEP + pct;
+    if full < label {
+        val += label - full;
+    }
+    let cell = match v.metric {
+        Metric::Z => est("+12.34", 11.0) + pad,
+        Metric::Pct => est("100%", 11.0) + pad,
+        Metric::Value => val,
+        Metric::Quality => mx(&mut slots().map(|s| est(&quality_word(s), 11.0) + pad), 40.0, 140.0),
+    }
+    .max(wins.iter().map(|w| est(&format!("{} · {}", window_label(*w), v.metric.label()), 10.0) + pad).fold(0.0, f32::max));
+    let unit = mx(&mut rows.iter().map(|r| est(&r.head().unit, 10.0) + pad), 36.0, 130.0);
+    let layer = mx(
+        &mut rows.iter().map(|r| r.head().inputs.iter().map(|l| est(l, 9.0) + 3.0).sum::<f32>() + pad),
+        44.0,
+        220.0,
+    );
+    let status = mx(&mut rows.iter().map(|r| est(&row_status(r).0, 10.0) + pad), 60.0, 340.0);
+    let mut w = Widths { name, key, val, z, pct, cell, unit, layer, status };
+    for (c, x) in &v.col_w {
+        let x = *x;
+        match c {
+            Col::Name => w.name = x,
+            Col::Key => w.key = x,
+            Col::Val => w.val = x,
+            Col::Z => w.z = x,
+            Col::Pct => w.pct = x,
+            Col::Cell => w.cell = x,
+            Col::Unit => w.unit = x,
+            Col::Layer => w.layer = x,
+            Col::Status => w.status = x,
+        }
+    }
+    w
+}
+
+/// 一个窗口组（这个特征没有该窗口时留空；「—」表示有这个窗口但没有值）。
+fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, w: &Widths) -> Element<'a, Msg> {
+    let gw = w.group(mode);
+    let Some(s) = s else {
+        return fcell(text(""), gw, false);
+    };
+    let tip = slot_tip(s);
+    let body: Element<'a, Msg> = match mode {
+        TableMode::Full => row![
+            tinted(text(""), Some(bar_color(s)))
+                .width(Length::Fixed(BAR))
+                .height(Length::Fill),
+            fcell(nowrap(num(s.value), 11.0, value_color(s)), w.val, true),
+            sep(false),
+            fcell(nowrap(num(s.z), 11.0, C_DIM), w.z, true),
+            sep(false),
+            fcell(nowrap(pct_text(s.percentile), 11.0, C_DIM), w.pct, true),
+        ]
+        .height(Length::Fill)
+        .into(),
+        TableMode::Pivot => {
+            let (t, bg, c) = match metric {
+                Metric::Z => (z_text(s.z), s.z.and_then(|z| heat(z / 3.0)), C_TXT),
+                Metric::Pct => (
+                    pct_text(s.percentile),
+                    s.percentile.and_then(|p| heat((p - 0.5) * 2.0)),
+                    C_TXT,
+                ),
+                Metric::Value => (num(s.value), None, value_color(s)),
+                Metric::Quality => (quality_word(s), Some(bar_color(s).scale_alpha(0.28)), C_TXT),
+            };
+            let muted = s.not_implemented() || s.disabled();
+            tinted(
+                container(nowrap(t, 11.0, if muted { C_PEND } else { c }))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(iced::Alignment::End)
+                    .align_y(iced::Alignment::Center)
+                    .padding([0, 6])
+                    .clip(true),
+                bg,
+            )
+            .width(Length::Fixed(gw))
+            .height(Length::Fill)
+            .into()
+        }
+    };
+    container(with_tip(body, tip))
+        .width(Length::Fixed(gw))
+        .height(Length::Fill)
+        .clip(true)
         .into()
+}
+
+/// 固定表头（可拖分隔线调列宽）。完整模式两层：上层窗口标签横跨一组，下层 值 / z / 分位。
+fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric, w: &Widths) -> Element<'a, Msg> {
+    let h = |t: &str| nowrap(t.to_string(), 10.0, C_DIM);
+    let gw = w.group(mode);
+    let mut b = column![];
+    if mode == TableMode::Full {
+        let mut top = row![fcell(text(""), w.name + SEP + w.key, false), sep(true)].height(Length::Fixed(18.0));
+        for win in wins {
+            top = top
+                .push(
+                    container(nowrap(format!("窗口 {}", window_label(*win)), 10.0, C_HEAD))
+                        .width(Length::Fixed(gw))
+                        .height(Length::Fill)
+                        .align_x(iced::Alignment::Center)
+                        .align_y(iced::Alignment::Center)
+                        .clip(true),
+                )
+                .push(sep(true));
+        }
+        b = b.push(top);
+    }
+    let mut r = row![
+        fcell(h("特征"), w.name, false),
+        grip(false, Col::Name, w.name),
+        fcell(h("键"), w.key, false),
+        grip(true, Col::Key, w.key),
+    ]
+    .height(Length::Fixed(18.0));
+    for win in wins {
+        match mode {
+            TableMode::Full => {
+                r = r
+                    .push(container(text("")).width(Length::Fixed(BAR)))
+                    .push(fcell(h("值"), w.val, true))
+                    .push(grip(false, Col::Val, w.val))
+                    .push(fcell(h("z"), w.z, true))
+                    .push(grip(false, Col::Z, w.z))
+                    .push(fcell(h("分位"), w.pct, true))
+                    .push(grip(true, Col::Pct, w.pct));
+            }
+            TableMode::Pivot => {
+                r = r
+                    .push(
+                        container(nowrap(format!("{} · {}", window_label(*win), metric.label()), 10.0, C_HEAD))
+                            .width(Length::Fixed(gw))
+                            .height(Length::Fill)
+                            .align_x(iced::Alignment::End)
+                            .align_y(iced::Alignment::Center)
+                            .padding([0, 6])
+                            .clip(true),
+                    )
+                    .push(grip(true, Col::Cell, w.cell));
+            }
+        }
+    }
+    r = r
+        .push(fcell(h("单位"), w.unit, false))
+        .push(grip(false, Col::Unit, w.unit))
+        .push(fcell(h("数据层"), w.layer, false))
+        .push(grip(false, Col::Layer, w.layer))
+        .push(fcell(h("状态"), w.status, false))
+        .push(grip(false, Col::Status, w.status));
+    b = b.push(r);
+    let total = w.total(mode, wins.len());
+    iced::widget::mouse_area(
+        tinted(b, Some(Color::from_rgba(0.55, 0.65, 0.85, 0.10))).width(Length::Fixed(total)),
+    )
+    .on_move(|p| Msg::HeaderMove(p.x))
+    .on_release(Msg::DragEnd)
+    .on_exit(Msg::DragEnd)
+    .into()
 }
 
 /// 一行。斑马纹 + 悬停整行高亮；鼠标进出发消息（面板据此记下高亮的是哪一行）。
@@ -478,48 +607,30 @@ fn feature_line<'a>(
     wins: &[u32],
     mode: TableMode,
     metric: Metric,
+    w: &Widths,
     idx: usize,
     hovered: bool,
 ) -> Element<'a, Msg> {
     let h = r.head();
     let muted = h.not_implemented() || !r.enabled();
     let mut line = row![
-        container(text(h.name_cn.clone()).size(11).color(if muted { C_PEND } else { C_TXT }))
-            .width(Length::FillPortion(P_NAME))
-            .align_y(iced::Alignment::Center)
-            .height(Length::Fill),
-        container(text(h.key.clone()).size(10).color(C_DIM))
-            .width(Length::FillPortion(P_KEY))
-            .align_y(iced::Alignment::Center)
-            .height(Length::Fill),
+        fcell(nowrap(h.name_cn.clone(), 11.0, if muted { C_PEND } else { C_TXT }), w.name, false),
+        sep(false),
+        fcell(nowrap(h.key.clone(), 10.0, C_DIM), w.key, false),
+        sep(true),
     ]
-    .spacing(0)
     .height(Length::Fixed(ROW_H));
-    for (gi, w) in wins.iter().enumerate() {
-        line = line.push(vline()).push(window_group(r.window(*w), mode, metric, gi));
+    for win in wins {
+        line = line.push(window_group(r.window(*win), mode, metric, w)).push(sep(true));
     }
     let (st, sc) = row_status(r);
     line = line
-        .push(vline())
-        .push(
-            container(text(h.unit.clone()).size(10).color(C_DIM))
-                .width(Length::FillPortion(P_UNIT))
-                .padding([0, 4])
-                .align_y(iced::Alignment::Center)
-                .height(Length::Fill),
-        )
-        .push(
-            container(layer_badges(h))
-                .width(Length::FillPortion(P_LAYER))
-                .align_y(iced::Alignment::Center)
-                .height(Length::Fill),
-        )
-        .push(
-            container(text(st).size(10).color(sc))
-                .width(Length::FillPortion(P_STAT))
-                .align_y(iced::Alignment::Center)
-                .height(Length::Fill),
-        );
+        .push(fcell(nowrap(h.unit.clone(), 10.0, C_DIM), w.unit, false))
+        .push(sep(false))
+        .push(fcell(layer_badges(h), w.layer, false))
+        .push(sep(false))
+        .push(fcell(nowrap(st, 10.0, sc), w.status, false))
+        .push(sep(false));
     let bg = if hovered {
         Some(Color::from_rgba(0.55, 0.75, 1.0, 0.16))
     } else if !idx.is_multiple_of(2) {
@@ -528,29 +639,17 @@ fn feature_line<'a>(
         None
     };
     let key = h.key.clone();
-    iced::widget::mouse_area(tinted(line.padding([0, 6]), bg).width(Length::Fill))
+    iced::widget::mouse_area(tinted(line, bg).width(Length::Fixed(w.total(mode, wins.len()))))
         .on_enter(Msg::HoverIn(key.clone()))
         .on_exit(Msg::HoverOut(key))
         .into()
 }
 
-/// 阶段分节条（横贯整行）。
-fn stage_band<'a>(t: String, c: Color) -> container::Container<'a, Msg> {
-    tinted(text(t).size(12).color(c), Some(Color::from_rgba(0.55, 0.65, 0.85, 0.16)))
-        .width(Length::Fill)
+/// 阶段分节条（横贯整表）。
+fn stage_band<'a>(t: String, c: Color, width: f32) -> container::Container<'a, Msg> {
+    tinted(nowrap(t, 12.0, c), Some(Color::from_rgba(0.55, 0.65, 0.85, 0.16)))
+        .width(Length::Fixed(width))
         .padding([3, 6])
-}
-
-/// 表格的窗口列：可见行（全部阶段）的窗口并集，升序。固定表头与所有行共用这一套。
-fn table_windows(m: &Matrix, v: &ViewState) -> Vec<u32> {
-    let mut w: Vec<u32> = Matrix::STAGES
-        .iter()
-        .flat_map(|(k, _)| visible(m, v, k))
-        .flat_map(|r| r.slots.iter().map(|s| s.window_ms).collect::<Vec<_>>())
-        .collect();
-    w.sort_unstable();
-    w.dedup();
-    w
 }
 
 /// 通过当前筛选的特征：任一窗口通过筛选即显示整行；未启用的按开关藏起来。
@@ -561,7 +660,15 @@ fn visible<'m>(m: &'m Matrix, v: &ViewState, stage: &str) -> Vec<FeatureRow<'m>>
         .collect()
 }
 
-/// 表格上方一行：完整 / 透视、透视的指标、图例。
+/// 表格的窗口列：可见行（全部阶段）的窗口并集，升序。固定表头与所有行共用这一套。
+fn table_windows(rows: &[FeatureRow<'_>]) -> Vec<u32> {
+    let mut w: Vec<u32> = rows.iter().flat_map(|r| r.slots.iter().map(|s| s.window_ms)).collect();
+    w.sort_unstable();
+    w.dedup();
+    w
+}
+
+/// 表格上方一行：完整 / 透视、透视的指标、图例、列宽。
 fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
     let mut r = row![text("展示 ").size(11).color(C_DIM)]
         .spacing(4)
@@ -594,7 +701,12 @@ fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
         (TableMode::Pivot, Metric::Pct) => dim("蓝 = 处在历史低位，红 = 处在历史高位，50% 附近不着色".into()),
         (TableMode::Pivot, Metric::Quality) => dim("格子按质量着色，写的是原因；悬停看原文".into()),
     };
-    r.push(legend).into()
+    r = r.push(legend);
+    r = r.push(text("　列宽：拖表头分隔线调整，双击恢复自适应").size(10).color(C_DIM));
+    if !v.col_w.is_empty() {
+        r = r.push(chip("全部自适应".into(), false, Msg::ResetWidths));
+    }
+    r.wrap().into()
 }
 
 /// 筛选条。四个维度 + 清除（docs/31 §8.1：可按阶段/类别/状态/市场筛）。
@@ -724,8 +836,9 @@ fn top_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
 }
 
 /// ① 特征矩阵（表体）：七阶段纵向分节，一行一个特征，窗口横向成组。表头在滚动区外。
-fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32]) -> Element<'a, Msg> {
-    let mut b = column![].spacing(0).width(Length::Fill);
+fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths) -> Element<'a, Msg> {
+    let total = w.total(v.table, wins.len());
+    let mut b = column![].spacing(0).width(Length::Fixed(total));
     let mut shown = 0usize;
     for (key, label) in Matrix::STAGES {
         let rows = visible(m, v, key);
@@ -739,25 +852,34 @@ fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32]) -> Element<'a, Msg> 
         b = b.push(stage_band(
             format!("{label} · {} 条特征（全部窗口良好 {good}）", rows.len()),
             C_HEAD,
+            total,
         ));
         for (i, r) in rows.iter().enumerate() {
             shown += 1;
             let hov = v.hover.as_deref() == Some(r.head().key.as_str());
-            b = b.push(feature_line(r, wins, v.table, v.metric, i, hov));
+            b = b.push(feature_line(r, wins, v.table, v.metric, w, i, hov));
         }
     }
-    let total = m.features().len();
+    let n = m.features().len();
     if shown == 0 {
         b = b.push(
-            text("当前筛选下没有任何特征——点「✕ 清筛选」或「显示未启用」")
-                .size(11)
-                .color(C_WARN),
+            container(nowrap(
+                "当前筛选下没有任何特征——点「✕ 清筛选」或「显示未启用」".into(),
+                11.0,
+                C_WARN,
+            ))
+            .padding([6, 6]),
         );
-    } else if shown < total {
+    } else if shown < n {
         // 筛过之后忘了筛，会把「矩阵里只有 3 条」当成引擎的问题。
-        b = b.push(container(dim(format!(
-            "当前显示 {shown} 条特征，共 {total} 条（其余被筛选或未启用）"
-        ))).padding([6, 6]));
+        b = b.push(
+            container(nowrap(
+                format!("当前显示 {shown} 条特征，共 {n} 条（其余被筛选或未启用）"),
+                10.0,
+                C_DIM,
+            ))
+            .padding([6, 6]),
+        );
     }
     b.into()
 }
@@ -766,8 +888,9 @@ fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32]) -> Element<'a, Msg> 
 ///
 /// 与 ① 的区别不是排版而是**用途**：① 是「这个引擎有哪些特征、各自什么状态」，
 /// ② 是「此刻这个向量长什么样」。列与 ① 相同（参数一个不少），阶段可折叠。
-fn vector_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32]) -> Element<'a, Msg> {
-    let mut b = column![].spacing(0).width(Length::Fill);
+fn vector_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths) -> Element<'a, Msg> {
+    let total = w.total(v.table, wins.len());
+    let mut b = column![].spacing(0).width(Length::Fixed(total));
     for (key, label) in Matrix::STAGES {
         let rows = visible(m, v, key);
         if rows.is_empty() {
@@ -785,9 +908,8 @@ fn vector_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32]) -> Element<'a, Msg> 
             if bad > 0 { format!("　有异常窗口 {bad}") } else { String::new() },
         );
         b = b.push(
-            button(stage_band(head, if bad > 0 { C_WARN } else { C_HEAD }))
+            button(stage_band(head, if bad > 0 { C_WARN } else { C_HEAD }, total))
                 .padding(0)
-                .width(Length::Fill)
                 .style(|t, st| crate::style::button::modifier(t, st, false))
                 .on_press(Msg::ToggleStage(key.to_string())),
         );
@@ -796,7 +918,7 @@ fn vector_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32]) -> Element<'a, Msg> 
         }
         for (i, r) in rows.iter().enumerate() {
             let hov = v.hover.as_deref() == Some(r.head().key.as_str());
-            b = b.push(feature_line(r, wins, v.table, v.metric, i, hov));
+            b = b.push(feature_line(r, wins, v.table, v.metric, w, i, hov));
         }
     }
     b.into()
@@ -1341,17 +1463,34 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
     }
     b = b.push(table_controls(&v));
 
-    // 表头固定在滚动区之外；表体单独滚动。两者用同一套窗口列，所以上下对齐。
-    let wins = table_windows(&m, &v);
+    // 表头固定在滚动区之外（横向跟着表体滚：表体滚动时回传偏移，上层把表头滚到同一位置）；
+    // 表体双向滚动，横向滚动条在表格区域底部。表头与所有行共用同一套窗口列与列宽。
+    let all_rows: Vec<FeatureRow<'_>> = Matrix::STAGES.iter().flat_map(|(k, _)| visible(&m, &v, k)).collect();
+    let wins = table_windows(&all_rows);
+    let w = widths(&all_rows, &wins, &v);
     let body = match v.view {
-        View::Vector => vector_view(&m, &v, &wins),
-        _ => matrix_view(&m, &v, &wins),
+        View::Vector => vector_view(&m, &v, &wins, &w),
+        _ => matrix_view(&m, &v, &wins, &w),
     };
+    let head = scrollable(table_header(&wins, v.table, v.metric, &w))
+        .direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::new().width(0).scroller_width(0),
+        ))
+        .id(super::feature_matrix::HEAD_ID);
+    let body = scrollable(body)
+        .direction(scrollable::Direction::Both {
+            vertical: scrollable::Scrollbar::new(),
+            horizontal: scrollable::Scrollbar::new(),
+        })
+        .id(super::feature_matrix::BODY_ID)
+        .on_scroll(|vp| Msg::TableScrolled(vp.absolute_offset().x))
+        .width(Length::Fill)
+        .height(Length::Fill);
     column![
         b,
-        container(table_header(&wins, v.table, v.metric)).padding([0, 10]),
-        container(scrollable(body).height(Length::Fill))
-            .padding(iced::Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 10.0 })
+        container(head).padding([0, 10]),
+        container(body)
+            .padding(iced::Padding { top: 0.0, right: 10.0, bottom: 4.0, left: 10.0 })
             .height(Length::Fill),
     ]
     .width(Length::Fill)
