@@ -23,7 +23,7 @@ use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Color, Element, Length};
 
 use super::feature_matrix::{
-    FeatureMatrixMsg as Msg, QualityFilter, StatusFilter, View, ViewState,
+    FeatureMatrixMsg as Msg, Metric, QualityFilter, StatusFilter, TableMode, View, ViewState,
 };
 use super::feature_matrix_readout::{self as ro, FeatureRow, Matrix, Slot};
 
@@ -134,22 +134,31 @@ fn layer_badges<'a>(s: &Slot) -> Element<'a, Msg> {
     r.into()
 }
 
-// ── 表格布局 ─────────────────────────────────────────────────────────────
+// ── 表格 ─────────────────────────────────────────────────────────────────
 //
-// 一行一个特征、各时间窗口横向成列；列宽按比例分（`FillPortion`），表格随窗口铺满。
-// 固定像素宽度的旧版在大屏上只占左边一半，而且同一特征的五个窗口占五行、名称重复五遍。
+// 一行一个特征、各时间窗口横向成组。让它可读的三件事：
+// 1. 窗口组交替底色 + 组间竖线：一眼分清「这几列是 1s 的、那几列是 5m 的」；
+// 2. 行斑马纹 + 悬停整行高亮：长行不看串；
+// 3. 表头在滚动区之外（固定在顶上）。为此所有阶段共用同一套窗口列（可见行的窗口并集）——
+//    各阶段各自出列的话，固定的表头就对不上下面的行。
+//
+// 质量不占文字列：每个窗口组左边一条色条（绿良好 / 黄降级 / 橙过期 / 红无效 / 灰不可用），原因在悬停提示里。
+// 「透视」模式每个窗口只一列、只显示一个指标，z 与分位按偏离着色成热力图。
 
-const P_NAME: u16 = 4;
+const P_NAME: u16 = 5;
 const P_KEY: u16 = 4;
-/// 每个窗口一组四列：值 | z | 分位 | 质量·原因。
 const P_VAL: u16 = 3;
 const P_Z: u16 = 2;
 const P_PCT: u16 = 2;
-const P_Q: u16 = 3;
-const P_WIN: u16 = P_VAL + P_Z + P_PCT + P_Q;
+/// 透视模式每个窗口一格。
+const P_CELL: u16 = 3;
 const P_UNIT: u16 = 2;
 const P_LAYER: u16 = 3;
 const P_STAT: u16 = 4;
+/// 质量色条宽度。
+const BAR: f32 = 3.0;
+/// 行高（固定：各格子的底色要铺满整行）。
+const ROW_H: f32 = 22.0;
 
 fn pc<'a>(e: impl Into<Element<'a, Msg>>, portion: u16) -> Element<'a, Msg> {
     container(e).width(Length::FillPortion(portion)).into()
@@ -163,12 +172,34 @@ fn pr<'a>(e: impl Into<Element<'a, Msg>>, portion: u16) -> Element<'a, Msg> {
         .into()
 }
 
-/// 窗口的列标题。`0` 是瞬时量，不是「零秒窗口」。
-fn window_label(w: u32) -> String {
-    Slot { window_ms: w, ..Slot::default() }.window_label()
+/// 带底色的容器（`None` = 透明）。
+fn tinted<'a>(e: impl Into<Element<'a, Msg>>, c: Option<Color>) -> container::Container<'a, Msg> {
+    container(e).style(move |_t: &iced::Theme| container::Style {
+        background: c.map(iced::Background::Color),
+        ..Default::default()
+    })
 }
 
-/// 原因的简短中文（质量列里写它，悬停看原文）。
+/// 窗口组之间的竖线。
+fn vline<'a>() -> Element<'a, Msg> {
+    iced::widget::rule::vertical(1.0).style(crate::style::split_ruler).into()
+}
+
+/// 窗口组的交替底色。
+fn group_bg(i: usize) -> Color {
+    if i.is_multiple_of(2) {
+        Color::from_rgba(0.55, 0.65, 0.85, 0.05)
+    } else {
+        Color::from_rgba(0.55, 0.65, 0.85, 0.12)
+    }
+}
+
+/// 窗口的列标题。`0` 是瞬时量，不是「零秒窗口」。
+fn window_label(w: u32) -> String {
+    ro::format_window(w)
+}
+
+/// 原因的简短中文（悬停提示与透视「质量」格里用，原文附在提示里）。
 fn reason_cn(r: &str) -> &str {
     match r {
         "disabled" => "未启用",
@@ -192,54 +223,154 @@ fn reason_cn(r: &str) -> &str {
     }
 }
 
-/// 一个窗口的四列：值 | z | 分位 | 质量·原因。这个特征没有该窗口时四列留空（不是「—」：
-/// 「—」表示有这个窗口但没有值，空白表示根本没有这个窗口）。
-fn win_block<'a>(line: iced::widget::Row<'a, Msg>, s: Option<&Slot>) -> iced::widget::Row<'a, Msg> {
-    let Some(s) = s else {
-        return line
-            .push(pc(text(""), P_VAL))
-            .push(pc(text(""), P_Z))
-            .push(pc(text(""), P_PCT))
-            .push(pc(text(""), P_Q));
-    };
-    let muted = s.not_implemented() || s.disabled();
-    let vc = if muted {
+fn pct_text(p: Option<f64>) -> String {
+    p.map_or_else(|| "—".into(), |p| format!("{:.0}%", p * 100.0))
+}
+
+/// 一个 slot 的完整说明（悬停提示）。
+fn slot_tip(s: &Slot) -> String {
+    format!(
+        "{} · {}\n质量 {}{}\n值 {}　z {}　分位 {}",
+        s.key,
+        s.window_label(),
+        s.quality,
+        if s.reason.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}（{}）", reason_cn(&s.reason), s.reason)
+        },
+        num(s.value),
+        num(s.z),
+        pct_text(s.percentile),
+    )
+}
+
+fn with_tip<'a>(e: impl Into<Element<'a, Msg>>, tip: String) -> Element<'a, Msg> {
+    iced::widget::tooltip(
+        e,
+        container(text(tip).size(11)).style(crate::style::tooltip).padding(6),
+        iced::widget::tooltip::Position::Top,
+    )
+    .into()
+}
+
+/// 偏离着色：`x` ∈ [−1, 1]，负蓝正红，越深偏离越大；接近 0 不着色。
+fn heat(x: f64) -> Option<Color> {
+    let x = x.clamp(-1.0, 1.0);
+    if x.abs() < 0.05 {
+        return None;
+    }
+    let a = (0.10 + 0.50 * x.abs()) as f32;
+    Some(if x > 0.0 {
+        Color::from_rgba(0.92, 0.32, 0.30, a)
+    } else {
+        Color::from_rgba(0.30, 0.55, 0.95, a)
+    })
+}
+
+/// 质量色条的颜色（没启用 / 待实现的用最暗的灰）。
+fn bar_color(s: &Slot) -> Color {
+    if s.not_implemented() || s.disabled() {
+        C_PEND.scale_alpha(0.5)
+    } else {
+        qcolor(&s.quality)
+    }
+}
+
+/// 值的颜色：良好用正文色，其余按质量；没启用 / 待实现的压暗。
+fn value_color(s: &Slot) -> Color {
+    if s.not_implemented() || s.disabled() {
         C_PEND
     } else if s.quality == "GOOD" {
         C_TXT
     } else {
         qcolor(&s.quality)
+    }
+}
+
+const fn group_portion(mode: TableMode) -> u16 {
+    match mode {
+        TableMode::Full => P_VAL + P_Z + P_PCT,
+        TableMode::Pivot => P_CELL,
+    }
+}
+
+/// 一个窗口组。这个特征没有该窗口时留空（「—」表示有这个窗口但没有值）。
+fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, gi: usize) -> Element<'a, Msg> {
+    let portion = group_portion(mode);
+    let Some(s) = s else {
+        return tinted(text(""), Some(group_bg(gi)))
+            .width(Length::FillPortion(portion))
+            .height(Length::Fill)
+            .into();
     };
-    let q = if s.not_implemented() {
-        "待实现".to_string()
-    } else if s.reason.is_empty() {
-        s.quality.clone()
-    } else {
-        format!("{}·{}", s.quality, reason_cn(&s.reason))
+    let tip = slot_tip(s);
+    let body: Element<'a, Msg> = match mode {
+        TableMode::Full => {
+            let bar = tinted(text(""), Some(bar_color(s)))
+                .width(Length::Fixed(BAR))
+                .height(Length::Fill);
+            tinted(
+                row![
+                    bar,
+                    pr(text(num(s.value)).size(11).color(value_color(s)), P_VAL),
+                    pr(text(num(s.z)).size(11).color(C_DIM), P_Z),
+                    pr(text(pct_text(s.percentile)).size(11).color(C_DIM), P_PCT),
+                ]
+                .spacing(4)
+                .padding([0, 4])
+                .align_y(iced::Alignment::Center)
+                .height(Length::Fill),
+                Some(group_bg(gi)),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        }
+        TableMode::Pivot => {
+            let (t, bg, c) = match metric {
+                Metric::Z => (
+                    s.z.map_or_else(|| "—".into(), |z| format!("{z:+.2}")),
+                    s.z.and_then(|z| heat(z / 3.0)),
+                    C_TXT,
+                ),
+                Metric::Pct => (
+                    pct_text(s.percentile),
+                    s.percentile.and_then(|p| heat((p - 0.5) * 2.0)),
+                    C_TXT,
+                ),
+                Metric::Value => (num(s.value), None, value_color(s)),
+                Metric::Quality => (
+                    if s.not_implemented() {
+                        "待实现".to_string()
+                    } else if s.reason.is_empty() {
+                        "良好".to_string()
+                    } else {
+                        reason_cn(&s.reason).to_string()
+                    },
+                    Some(bar_color(s).scale_alpha(0.28)),
+                    C_TXT,
+                ),
+            };
+            let muted = s.not_implemented() || s.disabled();
+            tinted(
+                container(text(t).size(11).color(if muted { C_PEND } else { c }))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(iced::Alignment::End)
+                    .align_y(iced::Alignment::Center)
+                    .padding([0, 6]),
+                Some(bg.unwrap_or_else(|| group_bg(gi))),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        }
     };
-    // 悬停看原始原因串（面板上写的是简短中文）
-    let tip = format!(
-        "{} · {}\n质量 {}{}",
-        s.key,
-        s.window_label(),
-        s.quality,
-        if s.reason.is_empty() { String::new() } else { format!("　原因 {}（{}）", reason_cn(&s.reason), s.reason) },
-    );
-    let qcell: Element<'a, Msg> = iced::widget::tooltip(
-        text(q).size(10).color(if muted { C_PEND } else { qcolor(&s.quality) }),
-        container(text(tip).size(11)).style(crate::style::tooltip).padding(6),
-        iced::widget::tooltip::Position::Top,
-    )
-    .into();
-    line.push(pr(text(num(s.value)).size(11).color(vc), P_VAL))
-        .push(pr(text(num(s.z)).size(11).color(C_DIM), P_Z))
-        .push(pr(
-            text(s.percentile.map_or_else(|| "—".into(), |p| format!("{:.0}%", p * 100.0)))
-                .size(11)
-                .color(C_DIM),
-            P_PCT,
-        ))
-        .push(container(qcell).width(Length::FillPortion(P_Q)).padding([0, 4]))
+    container(with_tip(body, tip))
+        .width(Length::FillPortion(portion))
+        .height(Length::Fill)
+        .into()
 }
 
 /// 一条特征各窗口的质量汇总（状态列）：全部良好只写 GOOD，否则写最要紧的那个问题。
@@ -270,65 +401,153 @@ fn row_status(r: &FeatureRow<'_>) -> (String, Color) {
         .filter(|s| s.quality != "GOOD")
         .min_by_key(|s| rank(&s.quality))
         .expect("good < n");
-    let what = if worst.reason.is_empty() { worst.quality.clone() } else { format!("{} · {}", worst.quality, reason_cn(&worst.reason)) };
+    let what = if worst.reason.is_empty() {
+        worst.quality.clone()
+    } else {
+        format!("{} · {}", worst.quality, reason_cn(&worst.reason))
+    };
     let t = if good > 0 { format!("{good}/{n} 窗口良好　{what}") } else { what };
     (t, qcolor(&worst.quality))
 }
 
-/// 两层表头。上层：窗口标签横跨它那一组；下层：特征 | 键 | (值 z 分位 质量)×窗口 | 单位 | 数据层 | 状态。
-fn table_header<'a>(wins: &[u32]) -> Element<'a, Msg> {
+/// 固定表头。完整模式两层（上层窗口标签横跨一组，下层 值 / z / 分位）；透视模式一层。
+fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric) -> Element<'a, Msg> {
     let h = |t: &str| text(t.to_string()).size(10).color(C_DIM);
-    let mut top = row![pc(text(""), P_NAME), pc(text(""), P_KEY)].spacing(6);
-    for w in wins {
-        top = top.push(pc(
-            container(text(format!("窗口 {}", window_label(*w))).size(10).color(C_HEAD))
-                .width(Length::Fill)
-                .align_x(iced::Alignment::Center),
-            P_WIN,
-        ));
+    let portion = group_portion(mode);
+    let mut top = row![pc(h("特征"), P_NAME), pc(h("键"), P_KEY)]
+        .spacing(0)
+        .height(Length::Fixed(18.0));
+    for (gi, w) in wins.iter().enumerate() {
+        let label = match mode {
+            TableMode::Full => format!("窗口 {}", window_label(*w)),
+            TableMode::Pivot => format!("{} · {}", window_label(*w), metric.label()),
+        };
+        top = top.push(vline()).push(
+            tinted(
+                container(text(label).size(10).color(C_HEAD))
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::Center),
+                Some(group_bg(gi)),
+            )
+            .width(Length::FillPortion(portion))
+            .height(Length::Fill),
+        );
     }
     top = top
-        .push(pc(text(""), P_UNIT))
-        .push(pc(text(""), P_LAYER))
-        .push(pc(text(""), P_STAT));
-
-    let mut bottom = row![pc(h("特征"), P_NAME), pc(h("键"), P_KEY)].spacing(6);
-    for _ in wins {
-        bottom = bottom
-            .push(pr(h("值"), P_VAL))
-            .push(pr(h("z"), P_Z))
-            .push(pr(h("分位"), P_PCT))
-            .push(container(h("质量")).width(Length::FillPortion(P_Q)).padding([0, 4]));
-    }
-    bottom = bottom
+        .push(vline())
         .push(pc(h("单位"), P_UNIT))
         .push(pc(h("数据层"), P_LAYER))
         .push(pc(h("状态"), P_STAT));
-    column![top, bottom].spacing(1).into()
-}
-
-fn feature_line<'a>(r: &FeatureRow<'_>, wins: &[u32]) -> Element<'a, Msg> {
-    let h = r.head();
-    let muted = h.not_implemented() || !r.enabled();
-    let mut line = row![
-        pc(text(h.name_cn.clone()).size(11).color(if muted { C_PEND } else { C_TXT }), P_NAME),
-        pc(text(h.key.clone()).size(10).color(C_DIM), P_KEY),
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center);
-    for w in wins {
-        line = win_block(line, r.window(*w));
+    let mut b = column![top];
+    if mode == TableMode::Full {
+        let mut bottom = row![pc(text(""), P_NAME), pc(text(""), P_KEY)]
+            .spacing(0)
+            .height(Length::Fixed(16.0));
+        for (gi, _) in wins.iter().enumerate() {
+            bottom = bottom.push(vline()).push(
+                tinted(
+                    row![
+                        container(text("")).width(Length::Fixed(BAR)),
+                        pr(h("值"), P_VAL),
+                        pr(h("z"), P_Z),
+                        pr(h("分位"), P_PCT),
+                    ]
+                    .spacing(4)
+                    .padding([0, 4]),
+                    Some(group_bg(gi)),
+                )
+                .width(Length::FillPortion(portion))
+                .height(Length::Fill),
+            );
+        }
+        bottom = bottom
+            .push(vline())
+            .push(pc(text(""), P_UNIT))
+            .push(pc(text(""), P_LAYER))
+            .push(pc(text(""), P_STAT));
+        b = b.push(bottom);
     }
-    let (st, sc) = row_status(r);
-    line.push(pc(text(h.unit.clone()).size(10).color(C_DIM), P_UNIT))
-        .push(pc(layer_badges(h), P_LAYER))
-        .push(pc(text(st).size(10).color(sc), P_STAT))
+    tinted(b.padding([2, 6]), Some(Color::from_rgba(0.55, 0.65, 0.85, 0.10)))
+        .width(Length::Fill)
         .into()
 }
 
-/// 一组特征用到的窗口（升序去重）——每个阶段按自己的窗口出列，不给空列。
-fn windows_of(rows: &[FeatureRow<'_>]) -> Vec<u32> {
-    let mut w: Vec<u32> = rows.iter().flat_map(|r| r.slots.iter().map(|s| s.window_ms)).collect();
+/// 一行。斑马纹 + 悬停整行高亮；鼠标进出发消息（面板据此记下高亮的是哪一行）。
+fn feature_line<'a>(
+    r: &FeatureRow<'_>,
+    wins: &[u32],
+    mode: TableMode,
+    metric: Metric,
+    idx: usize,
+    hovered: bool,
+) -> Element<'a, Msg> {
+    let h = r.head();
+    let muted = h.not_implemented() || !r.enabled();
+    let mut line = row![
+        container(text(h.name_cn.clone()).size(11).color(if muted { C_PEND } else { C_TXT }))
+            .width(Length::FillPortion(P_NAME))
+            .align_y(iced::Alignment::Center)
+            .height(Length::Fill),
+        container(text(h.key.clone()).size(10).color(C_DIM))
+            .width(Length::FillPortion(P_KEY))
+            .align_y(iced::Alignment::Center)
+            .height(Length::Fill),
+    ]
+    .spacing(0)
+    .height(Length::Fixed(ROW_H));
+    for (gi, w) in wins.iter().enumerate() {
+        line = line.push(vline()).push(window_group(r.window(*w), mode, metric, gi));
+    }
+    let (st, sc) = row_status(r);
+    line = line
+        .push(vline())
+        .push(
+            container(text(h.unit.clone()).size(10).color(C_DIM))
+                .width(Length::FillPortion(P_UNIT))
+                .padding([0, 4])
+                .align_y(iced::Alignment::Center)
+                .height(Length::Fill),
+        )
+        .push(
+            container(layer_badges(h))
+                .width(Length::FillPortion(P_LAYER))
+                .align_y(iced::Alignment::Center)
+                .height(Length::Fill),
+        )
+        .push(
+            container(text(st).size(10).color(sc))
+                .width(Length::FillPortion(P_STAT))
+                .align_y(iced::Alignment::Center)
+                .height(Length::Fill),
+        );
+    let bg = if hovered {
+        Some(Color::from_rgba(0.55, 0.75, 1.0, 0.16))
+    } else if !idx.is_multiple_of(2) {
+        Some(Color::from_rgba(1.0, 1.0, 1.0, 0.035))
+    } else {
+        None
+    };
+    let key = h.key.clone();
+    iced::widget::mouse_area(tinted(line.padding([0, 6]), bg).width(Length::Fill))
+        .on_enter(Msg::HoverIn(key.clone()))
+        .on_exit(Msg::HoverOut(key))
+        .into()
+}
+
+/// 阶段分节条（横贯整行）。
+fn stage_band<'a>(t: String, c: Color) -> container::Container<'a, Msg> {
+    tinted(text(t).size(12).color(c), Some(Color::from_rgba(0.55, 0.65, 0.85, 0.16)))
+        .width(Length::Fill)
+        .padding([3, 6])
+}
+
+/// 表格的窗口列：可见行（全部阶段）的窗口并集，升序。固定表头与所有行共用这一套。
+fn table_windows(m: &Matrix, v: &ViewState) -> Vec<u32> {
+    let mut w: Vec<u32> = Matrix::STAGES
+        .iter()
+        .flat_map(|(k, _)| visible(m, v, k))
+        .flat_map(|r| r.slots.iter().map(|s| s.window_ms).collect::<Vec<_>>())
+        .collect();
     w.sort_unstable();
     w.dedup();
     w
@@ -340,6 +559,42 @@ fn visible<'m>(m: &'m Matrix, v: &ViewState, stage: &str) -> Vec<FeatureRow<'m>>
         .into_iter()
         .filter(|r| (v.show_disabled || r.enabled()) && r.slots.iter().any(|s| v.passes(s)))
         .collect()
+}
+
+/// 表格上方一行：完整 / 透视、透视的指标、图例。
+fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
+    let mut r = row![text("展示 ").size(11).color(C_DIM)]
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+    for t in TableMode::ALL {
+        r = r.push(chip(t.label().into(), v.table == t, Msg::SetTable(t)));
+    }
+    if v.table == TableMode::Pivot {
+        r = r.push(text("　指标 ").size(11).color(C_DIM));
+        for mt in Metric::ALL {
+            r = r.push(chip(mt.label().into(), v.metric == mt, Msg::SetMetric(mt)));
+        }
+    }
+    r = r.push(text("　").size(11));
+    let legend: Element<'a, Msg> = match (v.table, v.metric) {
+        (TableMode::Full, _) | (TableMode::Pivot, Metric::Value) => {
+            let mut l = row![text("色条 = 质量：").size(10).color(C_DIM)].spacing(4);
+            for (q, name) in [
+                ("GOOD", "良好"),
+                ("DEGRADED", "降级"),
+                ("STALE", "过期"),
+                ("INVALID", "无效"),
+                ("UNAVAILABLE", "不可用"),
+            ] {
+                l = l.push(text(format!("■{name}")).size(10).color(qcolor(q)));
+            }
+            l.push(text("　悬停看原因").size(10).color(C_DIM)).into()
+        }
+        (TableMode::Pivot, Metric::Z) => dim("蓝 = 低于常态，红 = 高于常态，颜色越深偏离越大（|z| ≥ 3 封顶）".into()),
+        (TableMode::Pivot, Metric::Pct) => dim("蓝 = 处在历史低位，红 = 处在历史高位，50% 附近不着色".into()),
+        (TableMode::Pivot, Metric::Quality) => dim("格子按质量着色，写的是原因；悬停看原文".into()),
+    };
+    r.push(legend).into()
 }
 
 /// 筛选条。四个维度 + 清除（docs/31 §8.1：可按阶段/类别/状态/市场筛）。
@@ -468,44 +723,51 @@ fn top_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
     b.into()
 }
 
-/// ① 特征矩阵：七阶段纵向分节，一行一个特征，窗口横向成列。
-fn matrix_view<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
-    let mut b = column![].spacing(4).width(Length::Fill);
+/// ① 特征矩阵（表体）：七阶段纵向分节，一行一个特征，窗口横向成组。表头在滚动区外。
+fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32]) -> Element<'a, Msg> {
+    let mut b = column![].spacing(0).width(Length::Fill);
     let mut shown = 0usize;
     for (key, label) in Matrix::STAGES {
         let rows = visible(m, v, key);
         if rows.is_empty() {
             continue;
         }
-        let good = rows.iter().filter(|r| r.slots.iter().all(|s| s.quality == "GOOD")).count();
-        b = b.push(sec(format!("{label} · {} 条特征（全部窗口良好 {good}）", rows.len())));
-        let wins = windows_of(&rows);
-        b = b.push(table_header(&wins));
-        for r in &rows {
+        let good = rows
+            .iter()
+            .filter(|r| r.slots.iter().all(|s| s.quality == "GOOD"))
+            .count();
+        b = b.push(stage_band(
+            format!("{label} · {} 条特征（全部窗口良好 {good}）", rows.len()),
+            C_HEAD,
+        ));
+        for (i, r) in rows.iter().enumerate() {
             shown += 1;
-            b = b.push(feature_line(r, &wins));
+            let hov = v.hover.as_deref() == Some(r.head().key.as_str());
+            b = b.push(feature_line(r, wins, v.table, v.metric, i, hov));
         }
     }
     let total = m.features().len();
     if shown == 0 {
-        b = b.push(text("当前筛选下没有任何特征——点「✕ 清筛选」或「显示未启用」").size(11).color(C_WARN));
+        b = b.push(
+            text("当前筛选下没有任何特征——点「✕ 清筛选」或「显示未启用」")
+                .size(11)
+                .color(C_WARN),
+        );
     } else if shown < total {
         // 筛过之后忘了筛，会把「矩阵里只有 3 条」当成引擎的问题。
-        b = b.push(dim(format!("当前显示 {shown} 条特征，共 {total} 条（其余被筛选或未启用）")));
+        b = b.push(container(dim(format!(
+            "当前显示 {shown} 条特征，共 {total} 条（其余被筛选或未启用）"
+        ))).padding([6, 6]));
     }
     b.into()
 }
 
-/// ② 实时向量：按阶段折叠，异常高亮。
+/// ② 实时向量（表体）：按阶段折叠，异常高亮。
 ///
 /// 与 ① 的区别不是排版而是**用途**：① 是「这个引擎有哪些特征、各自什么状态」，
 /// ② 是「此刻这个向量长什么样」。列与 ① 相同（参数一个不少），阶段可折叠。
-fn vector_view<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
-    let mut b = column![].spacing(4).width(Length::Fill);
-    b = b.push(dim(format!(
-        "FeatureVector @ {}（事件时钟）——点阶段名折叠/展开，悬停质量列看原始原因串。",
-        m.as_of
-    )));
+fn vector_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32]) -> Element<'a, Msg> {
+    let mut b = column![].spacing(0).width(Length::Fill);
     for (key, label) in Matrix::STAGES {
         let rows = visible(m, v, key);
         if rows.is_empty() {
@@ -523,18 +785,18 @@ fn vector_view<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
             if bad > 0 { format!("　有异常窗口 {bad}") } else { String::new() },
         );
         b = b.push(
-            button(text(head).size(12).color(if bad > 0 { C_WARN } else { C_HEAD }))
-                .padding([1, 4])
+            button(stage_band(head, if bad > 0 { C_WARN } else { C_HEAD }))
+                .padding(0)
+                .width(Length::Fill)
                 .style(|t, st| crate::style::button::modifier(t, st, false))
                 .on_press(Msg::ToggleStage(key.to_string())),
         );
         if collapsed {
             continue;
         }
-        let wins = windows_of(&rows);
-        b = b.push(table_header(&wins));
-        for r in &rows {
-            b = b.push(feature_line(r, &wins));
+        for (i, r) in rows.iter().enumerate() {
+            let hov = v.hover.as_deref() == Some(r.head().key.as_str());
+            b = b.push(feature_line(r, wins, v.table, v.metric, i, hov));
         }
     }
     b.into()
@@ -1010,15 +1272,25 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
     .spacing(6)
     .padding(10);
 
-    // 视图切换。
+    // 视图切换 + 收起控件
     let mut vr = row![].spacing(4);
     for view in View::ALL {
         vr = vr.push(chip(view.label().into(), v.view == view, Msg::SetView(view)));
     }
+    if v.view != View::Engine && v.picker.is_none() {
+        vr = vr.push(text("　").size(11)).push(chip(
+            if v.fold_controls { "▾ 展开控件".into() } else { "▴ 收起控件".into() },
+            v.fold_controls,
+            Msg::ToggleFoldControls,
+        ));
+    }
     b = b.push(vr.align_y(iced::Alignment::Center));
-    b = b.push(engine_bar());
-    b = b.push(mode_bar(&m));
-    b = b.push(window_bar(&m, &v));
+    let fold = v.fold_controls && v.view != View::Engine && v.picker.is_none();
+    if !fold {
+        b = b.push(engine_bar());
+        b = b.push(mode_bar(&m));
+        b = b.push(window_bar(&m, &v));
+    }
 
     if let Some(p) = &v.picker {
         if !m.present {
@@ -1056,20 +1328,35 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
                 .color(C_WARN),
         );
     }
-    b = b.push(top_bar(&m));
-    if v.view != View::Engine {
+    if v.view == View::Engine {
+        b = b.push(top_bar(&m)).push(engine_view(&m));
+        return container(scrollable(b.width(Length::Fill)))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    }
+    if !fold {
+        b = b.push(top_bar(&m));
         b = b.push(filter_bar(&m, &v));
     }
-    b = b.push(match v.view {
-        View::Matrix => matrix_view(&m, &v),
-        View::Vector => vector_view(&m, &v),
-        View::Engine => engine_view(&m),
-    });
+    b = b.push(table_controls(&v));
 
-    container(scrollable(b.width(Length::Fill)))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    // 表头固定在滚动区之外；表体单独滚动。两者用同一套窗口列，所以上下对齐。
+    let wins = table_windows(&m, &v);
+    let body = match v.view {
+        View::Vector => vector_view(&m, &v, &wins),
+        _ => matrix_view(&m, &v, &wins),
+    };
+    column![
+        b,
+        container(table_header(&wins, v.table, v.metric)).padding([0, 10]),
+        container(scrollable(body).height(Length::Fill))
+            .padding(iced::Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 10.0 })
+            .height(Length::Fill),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 #[cfg(test)]

@@ -38,6 +38,52 @@ impl View {
     }
 }
 
+/// 表格的展示方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableMode {
+    /// 每个窗口一组：质量色条 + 值 | z | 分位。
+    #[default]
+    Full,
+    /// 每个窗口一列，只显示选中的一个指标（z / 分位按偏离着色，成热力图）。
+    Pivot,
+}
+
+impl TableMode {
+    pub const ALL: [Self; 2] = [Self::Full, Self::Pivot];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Full => "完整",
+            Self::Pivot => "透视",
+        }
+    }
+}
+
+/// 透视视图显示的指标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Metric {
+    #[default]
+    Z,
+    Pct,
+    Value,
+    Quality,
+}
+
+impl Metric {
+    pub const ALL: [Self; 4] = [Self::Z, Self::Pct, Self::Value, Self::Quality];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Z => "z",
+            Self::Pct => "分位",
+            Self::Value => "值",
+            Self::Quality => "质量",
+        }
+    }
+}
+
 /// 质量筛选。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QualityFilter {
@@ -106,6 +152,13 @@ pub struct ViewState {
     pub picker: Option<Picker>,
     /// 全局时间窗口的编辑草稿（模式栏下的「时间窗口」一行；`None` = 没在编辑）。
     pub win_edit: Option<WinEdit>,
+    /// 表格展示方式（完整 / 透视）与透视的指标。
+    pub table: TableMode,
+    pub metric: Metric,
+    /// 鼠标所在的特征行（整行高亮）。
+    pub hover: Option<String>,
+    /// 收起表格上方的控件（引擎 / 启用集 / 窗口 / 筛选），把高度让给表格。
+    pub fold_controls: bool,
 }
 
 /// 全局时间窗口的编辑草稿。点「应用并重启」才写配置。
@@ -341,6 +394,13 @@ pub enum FeatureMatrixMsg {
     WinDefault,
     /// 写配置并重启引擎。
     WinApply,
+    SetTable(TableMode),
+    SetMetric(Metric),
+    /// 鼠标进入某一行。
+    HoverIn(String),
+    /// 鼠标离开某一行（只清掉自己——进出事件的先后不保证）。
+    HoverOut(String),
+    ToggleFoldControls,
 }
 
 static STATE: OnceLock<Mutex<ViewState>> = OnceLock::new();
@@ -813,6 +873,15 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
             }
         }
         FeatureMatrixMsg::WinClose => st.win_edit = None,
+        FeatureMatrixMsg::SetTable(t) => st.table = t,
+        FeatureMatrixMsg::SetMetric(m) => st.metric = m,
+        FeatureMatrixMsg::HoverIn(k) => st.hover = Some(k),
+        FeatureMatrixMsg::HoverOut(k) => {
+            if st.hover.as_deref() == Some(k.as_str()) {
+                st.hover = None;
+            }
+        }
+        FeatureMatrixMsg::ToggleFoldControls => st.fold_controls = !st.fold_controls,
         FeatureMatrixMsg::WinInput(t) => {
             if let Some(w) = st.win_edit.as_mut() {
                 w.input = t;
