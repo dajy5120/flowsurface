@@ -139,14 +139,28 @@ fn layer_badges<'a>(s: &Slot) -> Element<'a, Msg> {
 // 一行一个特征、各时间窗口横向成列；列宽按比例分（`FillPortion`），表格随窗口铺满。
 // 固定像素宽度的旧版在大屏上只占左边一半，而且同一特征的五个窗口占五行、名称重复五遍。
 
-const P_NAME: u16 = 5;
+const P_NAME: u16 = 4;
+const P_KEY: u16 = 4;
+/// 每个窗口一组四列：值 | z | 分位 | 质量·原因。
+const P_VAL: u16 = 3;
+const P_Z: u16 = 2;
+const P_PCT: u16 = 2;
+const P_Q: u16 = 3;
+const P_WIN: u16 = P_VAL + P_Z + P_PCT + P_Q;
 const P_UNIT: u16 = 2;
 const P_LAYER: u16 = 3;
-const P_WIN: u16 = 3;
 const P_STAT: u16 = 4;
 
 fn pc<'a>(e: impl Into<Element<'a, Msg>>, portion: u16) -> Element<'a, Msg> {
     container(e).width(Length::FillPortion(portion)).into()
+}
+
+/// 右对齐的比例列（数值列：小数点纵向成列）。
+fn pr<'a>(e: impl Into<Element<'a, Msg>>, portion: u16) -> Element<'a, Msg> {
+    container(e)
+        .width(Length::FillPortion(portion))
+        .align_x(iced::Alignment::End)
+        .into()
 }
 
 /// 窗口的列标题。`0` 是瞬时量，不是「零秒窗口」。
@@ -154,7 +168,7 @@ fn window_label(w: u32) -> String {
     Slot { window_ms: w, ..Slot::default() }.window_label()
 }
 
-/// 原因的简短中文（窗口格子里值为「—」时写在值下面，悬停看原文）。
+/// 原因的简短中文（质量列里写它，悬停看原文）。
 fn reason_cn(r: &str) -> &str {
     match r {
         "disabled" => "未启用",
@@ -178,10 +192,15 @@ fn reason_cn(r: &str) -> &str {
     }
 }
 
-/// 一个窗口格子：值（按质量着色）+ 下面一行小字（z · 分位，没有值时写原因）；悬停看全部。
-fn win_cell<'a>(s: Option<&Slot>) -> Element<'a, Msg> {
+/// 一个窗口的四列：值 | z | 分位 | 质量·原因。这个特征没有该窗口时四列留空（不是「—」：
+/// 「—」表示有这个窗口但没有值，空白表示根本没有这个窗口）。
+fn win_block<'a>(line: iced::widget::Row<'a, Msg>, s: Option<&Slot>) -> iced::widget::Row<'a, Msg> {
     let Some(s) = s else {
-        return pc(text(""), P_WIN);
+        return line
+            .push(pc(text(""), P_VAL))
+            .push(pc(text(""), P_Z))
+            .push(pc(text(""), P_PCT))
+            .push(pc(text(""), P_Q));
     };
     let muted = s.not_implemented() || s.disabled();
     let vc = if muted {
@@ -191,38 +210,36 @@ fn win_cell<'a>(s: Option<&Slot>) -> Element<'a, Msg> {
     } else {
         qcolor(&s.quality)
     };
-    let sub = if s.value.is_none() {
-        if s.not_implemented() { "待实现".to_string() } else { reason_cn(&s.reason).to_string() }
+    let q = if s.not_implemented() {
+        "待实现".to_string()
+    } else if s.reason.is_empty() {
+        s.quality.clone()
     } else {
-        match (s.z, s.percentile) {
-            (Some(z), Some(p)) => format!("z {z:.2} · {:.0}%", p * 100.0),
-            (Some(z), None) => format!("z {z:.2}"),
-            (None, Some(p)) => format!("{:.0}%", p * 100.0),
-            (None, None) if s.quality != "GOOD" => reason_cn(&s.reason).to_string(),
-            (None, None) => String::new(),
-        }
+        format!("{}·{}", s.quality, reason_cn(&s.reason))
     };
-    let body = column![
-        text(num(s.value)).size(11).color(vc),
-        text(sub).size(9).color(if s.quality == "GOOD" || muted { C_DIM } else { vc }),
-    ]
-    .align_x(iced::Alignment::End);
+    // 悬停看原始原因串（面板上写的是简短中文）
     let tip = format!(
-        "{} · {}\n质量 {}{}\n值 {}　z {}　分位 {}",
+        "{} · {}\n质量 {}{}",
         s.key,
         s.window_label(),
         s.quality,
-        if s.reason.is_empty() { String::new() } else { format!(" · {}（{}）", reason_cn(&s.reason), s.reason) },
-        num(s.value),
-        num(s.z),
-        s.percentile.map_or_else(|| "—".into(), |p| format!("{:.0}%", p * 100.0)),
+        if s.reason.is_empty() { String::new() } else { format!("　原因 {}（{}）", reason_cn(&s.reason), s.reason) },
     );
-    let t = iced::widget::tooltip(
-        container(body).width(Length::Fill).align_x(iced::Alignment::End),
+    let qcell: Element<'a, Msg> = iced::widget::tooltip(
+        text(q).size(10).color(if muted { C_PEND } else { qcolor(&s.quality) }),
         container(text(tip).size(11)).style(crate::style::tooltip).padding(6),
         iced::widget::tooltip::Position::Top,
-    );
-    pc(t, P_WIN)
+    )
+    .into();
+    line.push(pr(text(num(s.value)).size(11).color(vc), P_VAL))
+        .push(pr(text(num(s.z)).size(11).color(C_DIM), P_Z))
+        .push(pr(
+            text(s.percentile.map_or_else(|| "—".into(), |p| format!("{:.0}%", p * 100.0)))
+                .size(11)
+                .color(C_DIM),
+            P_PCT,
+        ))
+        .push(container(qcell).width(Length::FillPortion(P_Q)).padding([0, 4]))
 }
 
 /// 一条特征各窗口的质量汇总（状态列）：全部良好只写 GOOD，否则写最要紧的那个问题。
@@ -254,43 +271,59 @@ fn row_status(r: &FeatureRow<'_>) -> (String, Color) {
         .min_by_key(|s| rank(&s.quality))
         .expect("good < n");
     let what = if worst.reason.is_empty() { worst.quality.clone() } else { format!("{} · {}", worst.quality, reason_cn(&worst.reason)) };
-    let t = if good > 0 { format!("{good}/{n} 良好　{what}") } else { what };
+    let t = if good > 0 { format!("{good}/{n} 窗口良好　{what}") } else { what };
     (t, qcolor(&worst.quality))
 }
 
-/// 表头：特征 | 单位 | 数据层 | 各窗口 | 状态。`compact` 省掉单位与数据层（实时向量视图）。
-fn table_header<'a>(wins: &[u32], compact: bool) -> Element<'a, Msg> {
-    let mut r = row![pc(text("特征").size(10).color(C_DIM), P_NAME)].spacing(6);
-    if !compact {
-        r = r.push(pc(text("单位").size(10).color(C_DIM), P_UNIT));
-        r = r.push(pc(text("数据层").size(10).color(C_DIM), P_LAYER));
-    }
+/// 两层表头。上层：窗口标签横跨它那一组；下层：特征 | 键 | (值 z 分位 质量)×窗口 | 单位 | 数据层 | 状态。
+fn table_header<'a>(wins: &[u32]) -> Element<'a, Msg> {
+    let h = |t: &str| text(t.to_string()).size(10).color(C_DIM);
+    let mut top = row![pc(text(""), P_NAME), pc(text(""), P_KEY)].spacing(6);
     for w in wins {
-        r = r.push(pc(
-            container(text(window_label(*w)).size(10).color(C_DIM)).width(Length::Fill).align_x(iced::Alignment::End),
+        top = top.push(pc(
+            container(text(format!("窗口 {}", window_label(*w))).size(10).color(C_HEAD))
+                .width(Length::Fill)
+                .align_x(iced::Alignment::Center),
             P_WIN,
         ));
     }
-    r.push(pc(text("状态").size(10).color(C_DIM), P_STAT)).into()
+    top = top
+        .push(pc(text(""), P_UNIT))
+        .push(pc(text(""), P_LAYER))
+        .push(pc(text(""), P_STAT));
+
+    let mut bottom = row![pc(h("特征"), P_NAME), pc(h("键"), P_KEY)].spacing(6);
+    for _ in wins {
+        bottom = bottom
+            .push(pr(h("值"), P_VAL))
+            .push(pr(h("z"), P_Z))
+            .push(pr(h("分位"), P_PCT))
+            .push(container(h("质量")).width(Length::FillPortion(P_Q)).padding([0, 4]));
+    }
+    bottom = bottom
+        .push(pc(h("单位"), P_UNIT))
+        .push(pc(h("数据层"), P_LAYER))
+        .push(pc(h("状态"), P_STAT));
+    column![top, bottom].spacing(1).into()
 }
 
-fn feature_line<'a>(r: &FeatureRow<'_>, wins: &[u32], compact: bool) -> Element<'a, Msg> {
+fn feature_line<'a>(r: &FeatureRow<'_>, wins: &[u32]) -> Element<'a, Msg> {
     let h = r.head();
     let muted = h.not_implemented() || !r.enabled();
-    let name = column![
-        text(h.name_cn.clone()).size(11).color(if muted { C_PEND } else { C_TXT }),
-        text(h.key.clone()).size(9).color(C_DIM),
-    ];
-    let mut line = row![pc(name, P_NAME)].spacing(6).align_y(iced::Alignment::Center);
-    if !compact {
-        line = line.push(pc(text(h.unit.clone()).size(10).color(C_DIM), P_UNIT));
-        line = line.push(pc(layer_badges(h), P_LAYER));
-    }
+    let mut line = row![
+        pc(text(h.name_cn.clone()).size(11).color(if muted { C_PEND } else { C_TXT }), P_NAME),
+        pc(text(h.key.clone()).size(10).color(C_DIM), P_KEY),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center);
     for w in wins {
-        line = line.push(win_cell(r.window(*w)));
+        line = win_block(line, r.window(*w));
     }
     let (st, sc) = row_status(r);
-    line.push(pc(text(st).size(10).color(sc), P_STAT)).into()
+    line.push(pc(text(h.unit.clone()).size(10).color(C_DIM), P_UNIT))
+        .push(pc(layer_badges(h), P_LAYER))
+        .push(pc(text(st).size(10).color(sc), P_STAT))
+        .into()
 }
 
 /// 一组特征用到的窗口（升序去重）——每个阶段按自己的窗口出列，不给空列。
@@ -447,10 +480,10 @@ fn matrix_view<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
         let good = rows.iter().filter(|r| r.slots.iter().all(|s| s.quality == "GOOD")).count();
         b = b.push(sec(format!("{label} · {} 条特征（全部窗口良好 {good}）", rows.len())));
         let wins = windows_of(&rows);
-        b = b.push(table_header(&wins, false));
+        b = b.push(table_header(&wins));
         for r in &rows {
             shown += 1;
-            b = b.push(feature_line(r, &wins, false));
+            b = b.push(feature_line(r, &wins));
         }
     }
     let total = m.features().len();
@@ -466,11 +499,11 @@ fn matrix_view<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
 /// ② 实时向量：按阶段折叠，异常高亮。
 ///
 /// 与 ① 的区别不是排版而是**用途**：① 是「这个引擎有哪些特征、各自什么状态」，
-/// ② 是「此刻这个向量长什么样」。所以 ② 更紧凑（没有单位 / 数据层列），阶段可折叠。
+/// ② 是「此刻这个向量长什么样」。列与 ① 相同（参数一个不少），阶段可折叠。
 fn vector_view<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
     let mut b = column![].spacing(4).width(Length::Fill);
     b = b.push(dim(format!(
-        "FeatureVector @ {}（事件时钟）——点阶段名折叠/展开，悬停格子看质量原因。",
+        "FeatureVector @ {}（事件时钟）——点阶段名折叠/展开，悬停质量列看原始原因串。",
         m.as_of
     )));
     for (key, label) in Matrix::STAGES {
@@ -499,9 +532,9 @@ fn vector_view<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
             continue;
         }
         let wins = windows_of(&rows);
-        b = b.push(table_header(&wins, true));
+        b = b.push(table_header(&wins));
         for r in &rows {
-            b = b.push(feature_line(r, &wins, true));
+            b = b.push(feature_line(r, &wins));
         }
     }
     b.into()
