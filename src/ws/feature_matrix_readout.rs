@@ -41,6 +41,12 @@ pub struct Slot {
     /// `spec` = 已登记·待实现，`impl` / `verified` = 已实现。
     pub status: String,
     pub wave: u8,
+    /// 先验：`gross` / `falsified` / `untested`（docs/31a）。旧快照没有这个字段时为空串。
+    pub prior: String,
+    /// `hot` / `warm` / `offline_only`。
+    pub latency: String,
+    /// 是否在引擎的默认启用集里（自定义选择页「恢复默认」按它勾）。
+    pub default_on: bool,
 }
 
 impl Slot {
@@ -66,6 +72,37 @@ impl Slot {
     #[must_use]
     pub fn abnormal(&self) -> bool {
         !self.quality.is_empty() && self.quality != "GOOD"
+    }
+
+    /// 本部署没开这条特征（引擎标 `disabled`）。
+    #[must_use]
+    pub fn disabled(&self) -> bool {
+        self.reason == "disabled"
+    }
+}
+
+/// 一条特征 = 它的全部窗口（面板一行一个特征，窗口横向成列）。
+#[derive(Clone, Debug)]
+pub struct FeatureRow<'a> {
+    /// 按窗口升序；至少一个。元数据（键、名称、阶段……）取第一个 slot 的。
+    pub slots: Vec<&'a Slot>,
+}
+
+impl<'a> FeatureRow<'a> {
+    #[must_use]
+    pub fn head(&self) -> &'a Slot {
+        self.slots[0]
+    }
+
+    /// 本部署启用了它（任一窗口不是 `disabled`）。
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.slots.iter().any(|s| !s.disabled())
+    }
+
+    #[must_use]
+    pub fn window(&self, w: u32) -> Option<&'a Slot> {
+        self.slots.iter().copied().find(|s| s.window_ms == w)
     }
 }
 
@@ -130,6 +167,39 @@ impl Matrix {
     #[must_use]
     pub fn by_stage(&self, stage: &str) -> Vec<&Slot> {
         self.slots.iter().filter(|s| s.stage == stage).collect()
+    }
+
+    /// 全部特征（按快照里的先后次序，同一特征的各窗口归到一行）。
+    #[must_use]
+    pub fn features(&self) -> Vec<FeatureRow<'_>> {
+        let mut out: Vec<FeatureRow<'_>> = Vec::new();
+        for s in &self.slots {
+            // 引擎按特征连续写各窗口：只看上一行就能归组
+            match out.last_mut() {
+                Some(r) if r.head().key == s.key => r.slots.push(s),
+                _ => out.push(FeatureRow { slots: vec![s] }),
+            }
+        }
+        for r in &mut out {
+            r.slots.sort_by_key(|s| s.window_ms);
+        }
+        out
+    }
+
+    /// 某阶段的特征。
+    #[must_use]
+    pub fn features_in(&self, stage: &str) -> Vec<FeatureRow<'_>> {
+        self.features().into_iter().filter(|r| r.head().stage == stage).collect()
+    }
+
+    /// 本部署启用的特征键（自定义选择页的初始勾选）。
+    #[must_use]
+    pub fn enabled_keys(&self) -> Vec<String> {
+        self.features()
+            .into_iter()
+            .filter(FeatureRow::enabled)
+            .map(|r| r.head().key.clone())
+            .collect()
     }
 
     /// 按质量计数。
@@ -263,6 +333,9 @@ pub fn parse(text: &str) -> Matrix {
             reason: s["reason"].as_str().unwrap_or_default().to_string(),
             status: s["status"].as_str().unwrap_or_default().to_string(),
             wave: s["wave"].as_u64().unwrap_or(0) as u8,
+            prior: s["prior"].as_str().unwrap_or_default().to_string(),
+            latency: s["latency"].as_str().unwrap_or_default().to_string(),
+            default_on: s["default_on"].as_bool().unwrap_or(false),
         });
     }
     for w in v["pool_detail"].as_array().into_iter().flatten() {
@@ -478,6 +551,21 @@ mod tests {
         for s in &m.slots {
             assert!(known.contains(&s.stage.as_str()), "阶段 {} 没有对应分节", s.stage);
         }
+    }
+
+    #[test]
+    fn 同一特征的各窗口归成一行且窗口升序() {
+        let t = r#"{"slots":[
+          {"key":"a","stage":"S1_price","window_ms":5000,"quality":"GOOD","reason":null},
+          {"key":"a","stage":"S1_price","window_ms":1000,"quality":"UNAVAILABLE","reason":"disabled"},
+          {"key":"b","stage":"S1_price","window_ms":0,"quality":"UNAVAILABLE","reason":"disabled"}]}"#;
+        let m = parse(t);
+        let f = m.features();
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].slots.iter().map(|s| s.window_ms).collect::<Vec<_>>(), vec![1000, 5000]);
+        assert!(f[0].enabled(), "任一窗口没被禁用就算启用");
+        assert!(!f[1].enabled());
+        assert_eq!(m.enabled_keys(), vec!["a".to_string()]);
     }
 
     #[test]
