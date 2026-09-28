@@ -638,6 +638,84 @@ fn engine_view<'a>(m: &Matrix) -> Element<'a, Msg> {
     b.into()
 }
 
+/// 时间窗口：全局一组（替换每条可自定义特征的默认窗口）+ 选择页里的单条覆盖。
+fn window_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
+    use super::feature_matrix_readout::format_window;
+    let cw = super::feature_matrix::config_windows();
+    let fixed = if m.present {
+        m.features().iter().filter(|r| !r.head().win_custom).count()
+    } else {
+        0
+    };
+    let mut b = column![].spacing(4);
+    let mut r = row![text("时间窗口 ").size(12).color(C_HEAD)]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+    match &v.win_edit {
+        None => {
+            let g = cw.global.as_deref().map_or_else(
+                || "默认（各特征用字典窗口）".to_string(),
+                super::feature_matrix_readout::format_windows,
+            );
+            r = r.push(text(format!("全局：{g}")).size(11).color(C_TXT));
+            if !cw.overrides.is_empty() {
+                r = r.push(text(format!("单条覆盖 {} 条", cw.overrides.len())).size(10).color(C_DIM));
+            }
+            r = r.push(chip("修改…".into(), false, Msg::WinOpen));
+            if fixed > 0 {
+                r = r.push(
+                    text(format!("瞬时量与窗口固定的 {fixed} 条不受影响；单条覆盖在「自定义…」里逐条设"))
+                        .size(10)
+                        .color(C_DIM),
+                );
+            }
+            b = b.push(r);
+        }
+        Some(w) => {
+            r = r.push(text("全局：").size(11).color(C_DIM));
+            if w.list.is_empty() {
+                r = r.push(text("默认（各特征用字典窗口）").size(11).color(C_TXT));
+            }
+            for x in &w.list {
+                r = r.push(chip(format!("{} ✕", format_window(*x)), true, Msg::WinRemove(*x)));
+            }
+            r = r
+                .push(
+                    iced::widget::text_input("加窗口，如 10s 或 1m, 15m", &w.input)
+                        .on_input(Msg::WinInput)
+                        .on_submit(Msg::WinAdd)
+                        .size(11)
+                        .width(Length::Fixed(200.0)),
+                )
+                .push(chip("添加".into(), false, Msg::WinAdd));
+            b = b.push(r.wrap());
+            let mut r2 = row![text("常用 ").size(10).color(C_DIM)]
+                .spacing(6)
+                .align_y(iced::Alignment::Center);
+            for (i, (name, ws)) in super::feature_matrix::WINDOW_PRESETS.iter().enumerate() {
+                r2 = r2.push(chip(
+                    format!("{name}（{}）", super::feature_matrix_readout::format_windows(ws)),
+                    false,
+                    Msg::WinQuick(i),
+                ));
+            }
+            r2 = r2
+                .push(chip("恢复默认".into(), false, Msg::WinDefault))
+                .push(text("　").size(10))
+                .push(chip("✔ 应用并重启引擎".into(), true, Msg::WinApply))
+                .push(chip("取消".into(), false, Msg::WinClose));
+            b = b.push(r2.wrap());
+            if !w.err.is_empty() {
+                b = b.push(text(w.err.clone()).size(10).color(C_BAD));
+            }
+            b = b.push(dim(format!(
+                "范围 100ms ~ 1d，至多 8 个。替换每条可自定义特征的默认窗口（字典窗口里带「瞬时」的保留瞬时）；                 瞬时量与窗口固定的 {fixed} 条不受影响。窗口越多、越长，延迟与内存越高；                 2 秒这类很短的窗口里，多数统计量会因样本不足而没有值。"
+            )));
+        }
+    }
+    b.into()
+}
+
 /// 启用集：默认 / 全开 / 自定义。点下去写配置并重启引擎（窗口从头累计）。
 fn mode_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
     let (mode, keys) = super::feature_matrix::read_config();
@@ -776,6 +854,22 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
     b = b.push(preset_bar(p));
     b = b.push(
         row![
+            text("时间窗口").size(12).color(C_HEAD),
+            text("全局").size(11).color(C_DIM),
+            iced::widget::text_input("空 = 字典默认；如 1m 5m 15m", &p.global_text)
+                .on_input(Msg::PickGlobalWindows)
+                .size(11)
+                .width(Length::Fixed(220.0)),
+            text("每条特征的「窗口」列可单独覆盖；两者都随选择集保存，应用时一起写入").size(10).color(C_DIM),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+    );
+    if let Err(e) = p.windows() {
+        b = b.push(text(format!("✗ {e}")).size(10).color(C_BAD));
+    }
+    b = b.push(
+        row![
             iced::widget::text_input("搜索键名或中文名…", &p.search)
                 .on_input(Msg::PickSearch)
                 .size(11)
@@ -803,7 +897,8 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
             pc(text("先验").size(10).color(C_DIM), 2),
             pc(text("级别").size(10).color(C_DIM), 2),
             pc(text("数据层").size(10).color(C_DIM), P_LAYER),
-            pc(text("窗口").size(10).color(C_DIM), 5),
+            pc(text("默认窗口").size(10).color(C_DIM), 4),
+            pc(text("窗口覆盖").size(10).color(C_DIM), 4),
             pc(text("默认集").size(10).color(C_DIM), 2),
         ]
         .spacing(6),
@@ -830,7 +925,16 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
             let on = p.selected.contains(&h.key);
             let k = h.key.clone();
             let (pt, pcol) = prior_tag(&h.prior);
-            let wins = r.slots.iter().map(|s| s.window_label()).collect::<Vec<_>>().join(" · ");
+            let wins = super::feature_matrix_readout::format_windows(&h.win_default);
+            let over: Element<'a, Msg> = if h.win_custom {
+                let k2 = h.key.clone();
+                iced::widget::text_input("—", p.win_text.get(&h.key).map_or("", String::as_str))
+                    .on_input(move |t| Msg::PickWindows(k2.clone(), t))
+                    .size(10)
+                    .into()
+            } else {
+                text("固定").size(10).color(C_PEND).into()
+            };
             let lat = match h.latency.as_str() {
                 "hot" => "逐事件".to_string(),
                 "warm" => "250ms 节拍".to_string(),
@@ -850,7 +954,8 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
                     pc(text(pt).size(10).color(pcol), 2),
                     pc(text(lat).size(10).color(C_DIM), 2),
                     pc(layer_badges(h), P_LAYER),
-                    pc(text(wins).size(10).color(C_DIM), 5),
+                    pc(text(wins).size(10).color(C_DIM), 4),
+                    pc(over, 4),
                     pc(text(if h.default_on { "✓" } else { "" }).size(10).color(C_OK), 2),
                 ]
                 .spacing(6)
@@ -913,6 +1018,7 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
     b = b.push(vr.align_y(iced::Alignment::Center));
     b = b.push(engine_bar());
     b = b.push(mode_bar(&m));
+    b = b.push(window_bar(&m, &v));
 
     if let Some(p) = &v.picker {
         if !m.present {

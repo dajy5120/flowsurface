@@ -104,7 +104,27 @@ pub struct ViewState {
     pub show_disabled: bool,
     /// 自定义启用集的选择页（打开时整块替换视图）。
     pub picker: Option<Picker>,
+    /// 全局时间窗口的编辑草稿（模式栏下的「时间窗口」一行；`None` = 没在编辑）。
+    pub win_edit: Option<WinEdit>,
 }
+
+/// 全局时间窗口的编辑草稿。点「应用并重启」才写配置。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WinEdit {
+    /// 草稿里的窗口（毫秒，升序）。空 = 恢复字典默认。
+    pub list: Vec<u32>,
+    /// 「添加窗口」输入框。
+    pub input: String,
+    /// 上一次添加失败的原因。
+    pub err: String,
+}
+
+/// 常用的几组全局窗口（一键填进草稿）。
+pub const WINDOW_PRESETS: [(&str, &[u32]); 3] = [
+    ("高频", &[1_000, 5_000, 30_000]),
+    ("日内", &[60_000, 300_000, 900_000, 3_600_000]),
+    ("波段", &[3_600_000, 14_400_000, 86_400_000]),
+];
 
 /// 自定义启用集的草稿。点「应用并重启」才写配置；「取消」直接丢弃。
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -119,6 +139,10 @@ pub struct Picker {
     pub note: String,
     /// 点过一次「删除」、等第二次确认的选择集。
     pub confirm_delete: Option<String>,
+    /// 全局时间窗口（文本，如 `1m 5m 15m`；空 = 字典默认）。随选择集保存。
+    pub global_text: String,
+    /// 单条特征的窗口覆盖（特征键 → 文本；空串 = 不覆盖）。随选择集保存。
+    pub win_text: std::collections::BTreeMap<String, String>,
 }
 
 impl Picker {
@@ -130,8 +154,11 @@ impl Picker {
         };
         match super::feature_presets::get(n) {
             Some(p) => {
-                let saved: std::collections::BTreeSet<String> = p.keys.into_iter().collect();
-                saved != self.selected || p.note != self.note.trim() || n != self.name.trim()
+                let saved: std::collections::BTreeSet<String> = p.keys.iter().cloned().collect();
+                saved != self.selected
+                    || p.note != self.note.trim()
+                    || n != self.name.trim()
+                    || self.windows().ok().as_ref() != Some(&p.windows)
             }
             None => true,
         }
@@ -144,7 +171,29 @@ impl Picker {
         self.name = p.name.clone();
         self.note = p.note.clone();
         self.confirm_delete = None;
+        self.set_windows(&p.windows);
         p.keys.len() - self.selected.len()
+    }
+
+    /// 把窗口设置填进文本框。
+    pub fn set_windows(&mut self, w: &super::feature_presets::PresetWindows) {
+        use super::feature_matrix_readout::format_windows;
+        self.global_text = w.global.as_deref().map(format_windows).unwrap_or_default();
+        self.win_text = w.overrides.iter().map(|(k, v)| (k.clone(), format_windows(v))).collect();
+    }
+
+    /// 解析草稿里的窗口设置；写错的给出是哪一条。
+    pub fn windows(&self) -> Result<super::feature_presets::PresetWindows, String> {
+        use super::feature_matrix_readout::parse_windows;
+        let g = parse_windows(&self.global_text).map_err(|e| format!("全局窗口：{e}"))?;
+        let mut o = std::collections::BTreeMap::new();
+        for (k, t) in &self.win_text {
+            let v = parse_windows(t).map_err(|e| format!("{k} 的窗口：{e}"))?;
+            if !v.is_empty() {
+                o.insert(k.clone(), v);
+            }
+        }
+        Ok(super::feature_presets::PresetWindows { global: (!g.is_empty()).then_some(g), overrides: o })
     }
 }
 
@@ -275,6 +324,23 @@ pub enum FeatureMatrixMsg {
     PresetImport,
     /// 直接应用一个已存选择集并重启引擎（模式栏的下拉框）。
     PresetApply(String),
+    /// 选择页：全局窗口文本。
+    PickGlobalWindows(String),
+    /// 选择页：`(特征键, 窗口文本)`。
+    PickWindows(String, String),
+    /// 模式栏「时间窗口」：打开 / 关闭编辑。
+    WinOpen,
+    WinClose,
+    WinInput(String),
+    /// 把输入框里的窗口加进草稿。
+    WinAdd,
+    WinRemove(u32),
+    /// 用一组常用窗口替换草稿。
+    WinQuick(usize),
+    /// 清空草稿（= 字典默认窗口）。
+    WinDefault,
+    /// 写配置并重启引擎。
+    WinApply,
 }
 
 static STATE: OnceLock<Mutex<ViewState>> = OnceLock::new();
@@ -292,22 +358,43 @@ pub fn state() -> ViewState {
 pub fn handle(m: FeatureMatrixMsg) {
     match m {
         FeatureMatrixMsg::Engine(act) => engine_action(act),
-        FeatureMatrixMsg::SetMode(mode) => apply_mode(mode, Vec::new(), None),
+        // 切到默认 / 全开不动窗口，也不丢上一次的自定义键表（再切回自定义时还在）
+        FeatureMatrixMsg::SetMode(mode) => apply_mode(mode, None, None, None),
+        FeatureMatrixMsg::WinApply => {
+            let Some(w) = state().win_edit else { return };
+            let mut pw = config_windows();
+            pw.global = (!w.list.is_empty()).then_some(w.list.clone());
+            let label = pw.global.as_deref().map_or_else(
+                || "默认".to_string(),
+                super::feature_matrix_readout::format_windows,
+            );
+            write_and_restart(format!("全局时间窗口 → {label}"), |v| set_windows(v, &pw));
+            if let Ok(mut g) = cell().lock() {
+                g.win_edit = None;
+            }
+        }
         FeatureMatrixMsg::ApplyPicker => {
             let Some(p) = state().picker else { return };
             if p.selected.is_empty() {
                 set_engine_note("✗ 一条特征都没选——引擎会退回默认集，没有应用".into());
                 return;
             }
+            let windows = match p.windows() {
+                Ok(w) => w,
+                Err(e) => {
+                    set_preset_note(format!("✗ {e}——没有应用"));
+                    return;
+                }
+            };
             // 草稿与所编辑的选择集一致时，配置里记下它的名字（模式栏据此显示）
             let preset = p.editing.clone().filter(|_| !p.dirty());
-            apply_mode("custom", p.selected.into_iter().collect(), preset);
+            apply_mode("custom", Some(p.selected.into_iter().collect()), preset, Some(windows));
             if let Ok(mut g) = cell().lock() {
                 g.picker = None;
             }
         }
         FeatureMatrixMsg::PresetApply(name) => match super::feature_presets::get(&name) {
-            Some(p) => apply_mode("custom", p.keys, Some(name)),
+            Some(p) => apply_mode("custom", Some(p.keys), Some(name), Some(p.windows)),
             None => set_engine_note(format!("✗ 没有选择集「{name}」")),
         },
         FeatureMatrixMsg::PresetExport(name) => {
@@ -365,13 +452,20 @@ pub fn config_path() -> std::path::PathBuf {
         .unwrap_or_else(|_| super::paths::data_dir().join("cockpit").join("feature_config.json"))
 }
 
-/// 配置文件里的 `(模式, 自定义键表)`。没有文件 = 默认集（与引擎同一约定）。
+/// 整份配置（没有文件 / 写坏了 = 空对象，与引擎「退回默认」同一约定）。
+#[must_use]
+pub fn config_value() -> serde_json::Value {
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// 配置文件里的 `(模式, 自定义键表)`。
 #[must_use]
 pub fn read_config() -> (String, Vec<String>) {
-    let Ok(t) = std::fs::read_to_string(config_path()) else {
-        return ("default".into(), Vec::new());
-    };
-    let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+    let v = config_value();
     let mode = v["mode"].as_str().unwrap_or("default").to_string();
     let keys = v["keys"]
         .as_array()
@@ -380,22 +474,80 @@ pub fn read_config() -> (String, Vec<String>) {
     (mode, keys)
 }
 
-/// 配置 JSON（纯函数，测试用）。`preset` 只给面板看（引擎忽略它）。
-#[must_use]
-pub fn config_json(mode: &str, keys: &[String], preset: Option<&str>) -> String {
-    match preset {
-        Some(p) => serde_json::json!({ "mode": mode, "keys": keys, "preset": p }),
-        None => serde_json::json!({ "mode": mode, "keys": keys }),
-    }
-    .to_string()
-}
-
 /// 当前配置记着的选择集名（应用的是某个已存选择集时才有）。
 #[must_use]
 pub fn config_preset() -> Option<String> {
-    let t = std::fs::read_to_string(config_path()).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&t).ok()?;
-    v["preset"].as_str().map(str::to_string)
+    config_value()["preset"].as_str().map(str::to_string)
+}
+
+/// 当前配置的时间窗口（全局一组 + 单条覆盖）。
+#[must_use]
+pub fn config_windows() -> super::feature_presets::PresetWindows {
+    super::feature_presets::PresetWindows::from_value(&config_value()["windows"])
+}
+
+/// 在配置对象上改启用集（纯函数，测试用）。`keys` / `preset` / `windows` 为 `None` 的保持原样。
+pub fn edit_config(
+    v: &mut serde_json::Value,
+    mode: &str,
+    keys: Option<&[String]>,
+    preset: Option<Option<&str>>,
+    windows: Option<&super::feature_presets::PresetWindows>,
+) {
+    if !v.is_object() {
+        *v = serde_json::json!({});
+    }
+    v["mode"] = serde_json::json!(mode);
+    if let Some(k) = keys {
+        v["keys"] = serde_json::json!(k);
+    }
+    match preset {
+        Some(Some(p)) => v["preset"] = serde_json::json!(p),
+        Some(None) => {
+            if let Some(o) = v.as_object_mut() {
+                o.remove("preset");
+            }
+        }
+        None => {}
+    }
+    if let Some(w) = windows {
+        set_windows(v, w);
+    }
+}
+
+/// 在配置对象上写窗口段（默认窗口 = 删掉这一段）。
+pub fn set_windows(v: &mut serde_json::Value, w: &super::feature_presets::PresetWindows) {
+    if !v.is_object() {
+        *v = serde_json::json!({});
+    }
+    if w.is_default() {
+        if let Some(o) = v.as_object_mut() {
+            o.remove("windows");
+        }
+    } else {
+        v["windows"] = w.to_value();
+    }
+}
+
+/// 读整份配置、按 `edit` 改、原子写回（临时文件 + rename：引擎恰好在读时不会读到半个文件），再重启引擎。
+fn write_and_restart(label: String, edit: impl FnOnce(&mut serde_json::Value)) {
+    let p = config_path();
+    let mut v = config_value();
+    edit(&mut v);
+    let tmp = p.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(&v).unwrap_or_default();
+    let r = std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new(".")))
+        .and_then(|()| std::fs::write(&tmp, text))
+        .and_then(|()| std::fs::rename(&tmp, &p));
+    if let Err(e) = r {
+        set_engine_note(format!("✗ 写 {} 失败：{e}", p.display()));
+        return;
+    }
+    set_engine_note(format!("{label}，正在重启引擎…"));
+    std::thread::spawn(move || {
+        let r = super::procs::action(ENGINE_KEY, "restart");
+        set_engine_note(format!("{label}：{r}（窗口从头累计，几分钟后才有长窗口的值）"));
+    });
 }
 
 static PRESET_NOTE: OnceLock<Mutex<String>> = OnceLock::new();
@@ -416,27 +568,22 @@ fn known_keys(m: &super::feature_matrix_readout::Matrix) -> std::collections::BT
     m.slots.iter().map(|s| s.key.clone()).collect()
 }
 
-/// 写配置（临时文件 + rename：引擎恰好在读时不会读到半个文件）并重启引擎。
-fn apply_mode(mode: &'static str, keys: Vec<String>, preset: Option<String>) {
-    let p = config_path();
-    let tmp = p.with_extension("json.tmp");
-    let r = std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new(".")))
-        .and_then(|()| std::fs::write(&tmp, config_json(mode, &keys, preset.as_deref())))
-        .and_then(|()| std::fs::rename(&tmp, &p));
-    if let Err(e) = r {
-        set_engine_note(format!("✗ 写 {} 失败：{e}", p.display()));
-        return;
-    }
+/// 切启用集并重启引擎。`keys` / `windows` 为 `None` 时保留配置里原有的。
+fn apply_mode(
+    mode: &'static str,
+    keys: Option<Vec<String>>,
+    preset: Option<String>,
+    windows: Option<super::feature_presets::PresetWindows>,
+) {
+    let n = keys.as_ref().map_or_else(|| read_config().1.len(), Vec::len);
     let label = match (mode, &preset) {
         ("all", _) => "全开".to_string(),
-        ("custom", Some(n)) => format!("选择集「{n}」（{} 条）", keys.len()),
-        ("custom", None) => format!("自定义（{} 条）", keys.len()),
+        ("custom", Some(p)) => format!("选择集「{p}」（{n} 条）"),
+        ("custom", None) => format!("自定义（{n} 条）"),
         _ => "默认".to_string(),
     };
-    set_engine_note(format!("启用集 → {label}，正在重启引擎…"));
-    std::thread::spawn(move || {
-        let r = super::procs::action(ENGINE_KEY, "restart");
-        set_engine_note(format!("启用集 → {label}：{r}（窗口从头累计，几分钟后才有长窗口的值）"));
+    write_and_restart(format!("启用集 → {label}"), |v| {
+        edit_config(v, mode, keys.as_deref(), Some(preset.as_deref()), windows.as_ref());
     });
 }
 
@@ -496,9 +643,16 @@ pub fn apply_with(st: &mut ViewState, m: FeatureMatrixMsg, snap: &super::feature
                     } else {
                         snap.enabled_keys().into_iter().collect()
                     };
+                    p.set_windows(&config_windows());
                 }
             }
             st.picker = Some(p);
+        }
+        FeatureMatrixMsg::WinOpen => {
+            st.win_edit = Some(WinEdit {
+                list: config_windows().global.unwrap_or_default(),
+                ..WinEdit::default()
+            });
         }
         FeatureMatrixMsg::PresetLoad(name) => {
             let Some(p) = st.picker.as_mut() else { return };
@@ -517,7 +671,14 @@ pub fn apply_with(st: &mut ViewState, m: FeatureMatrixMsg, snap: &super::feature
         FeatureMatrixMsg::PresetSaveNew => {
             let Some(p) = st.picker.as_mut() else { return };
             let keys: Vec<String> = p.selected.iter().cloned().collect();
-            match super::feature_presets::save(&p.name, &p.note, &keys, false) {
+            let windows = match p.windows() {
+                Ok(w) => w,
+                Err(e) => {
+                    set_preset_note(format!("✗ {e}"));
+                    return;
+                }
+            };
+            match super::feature_presets::save(&p.name, &p.note, &keys, &windows, false) {
                 Ok(pr) => {
                     p.editing = Some(pr.name.clone());
                     p.name = pr.name.clone();
@@ -533,7 +694,14 @@ pub fn apply_with(st: &mut ViewState, m: FeatureMatrixMsg, snap: &super::feature
                 return;
             };
             let keys: Vec<String> = p.selected.iter().cloned().collect();
-            match super::feature_presets::rename_and_update(&old, &p.name, &p.note, &keys) {
+            let windows = match p.windows() {
+                Ok(w) => w,
+                Err(e) => {
+                    set_preset_note(format!("✗ {e}"));
+                    return;
+                }
+            };
+            match super::feature_presets::rename_and_update(&old, &p.name, &p.note, &keys, &windows) {
                 Ok(pr) => {
                     let renamed = pr.name != old;
                     p.editing = Some(pr.name.clone());
@@ -630,6 +798,61 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
                 p.note = n;
             }
         }
+        FeatureMatrixMsg::PickGlobalWindows(t) => {
+            if let Some(p) = st.picker.as_mut() {
+                p.global_text = t;
+            }
+        }
+        FeatureMatrixMsg::PickWindows(k, t) => {
+            if let Some(p) = st.picker.as_mut() {
+                if t.trim().is_empty() {
+                    p.win_text.remove(&k);
+                } else {
+                    p.win_text.insert(k, t);
+                }
+            }
+        }
+        FeatureMatrixMsg::WinClose => st.win_edit = None,
+        FeatureMatrixMsg::WinInput(t) => {
+            if let Some(w) = st.win_edit.as_mut() {
+                w.input = t;
+                w.err.clear();
+            }
+        }
+        FeatureMatrixMsg::WinAdd => {
+            if let Some(w) = st.win_edit.as_mut() {
+                match super::feature_matrix_readout::parse_windows(&w.input) {
+                    Ok(v) => {
+                        w.list.extend(v);
+                        w.list.sort_unstable();
+                        w.list.dedup();
+                        if w.list.len() > super::feature_matrix_readout::MAX_WINDOWS {
+                            w.list.truncate(super::feature_matrix_readout::MAX_WINDOWS);
+                            w.err = format!("至多 {} 个窗口，多出的已丢掉", super::feature_matrix_readout::MAX_WINDOWS);
+                        }
+                        w.input.clear();
+                    }
+                    Err(e) => w.err = e,
+                }
+            }
+        }
+        FeatureMatrixMsg::WinRemove(x) => {
+            if let Some(w) = st.win_edit.as_mut() {
+                w.list.retain(|y| *y != x);
+            }
+        }
+        FeatureMatrixMsg::WinQuick(i) => {
+            if let (Some(w), Some((_, ws))) = (st.win_edit.as_mut(), WINDOW_PRESETS.get(i)) {
+                w.list = ws.to_vec();
+                w.err.clear();
+            }
+        }
+        FeatureMatrixMsg::WinDefault => {
+            if let Some(w) = st.win_edit.as_mut() {
+                w.list.clear();
+                w.err.clear();
+            }
+        }
         FeatureMatrixMsg::PresetNew => {
             if let Some(p) = st.picker.as_mut() {
                 p.editing = None;
@@ -650,7 +873,9 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
         | FeatureMatrixMsg::PresetDelete(_)
         | FeatureMatrixMsg::PresetExport(_)
         | FeatureMatrixMsg::PresetImport
-        | FeatureMatrixMsg::PresetApply(_) => {}
+        | FeatureMatrixMsg::PresetApply(_)
+        | FeatureMatrixMsg::WinOpen
+        | FeatureMatrixMsg::WinApply => {}
         // 折叠状态**不清**：它是「我在看哪一段」，不是筛选。
         FeatureMatrixMsg::ClearFilters => {
             st.quality = QualityFilter::All;
@@ -801,10 +1026,23 @@ mod tests {
             note: "n".into(),
             keys: vec!["mid_price".into(), "改名前的旧键".into()],
             updated: String::new(),
+            windows: {
+                let mut w = super::super::feature_presets::PresetWindows {
+                    global: Some(vec![60_000, 900_000]),
+                    ..Default::default()
+                };
+                w.overrides.insert("mid_price".into(), vec![10_000]);
+                w
+            },
         };
         let known = known_keys(&snap());
         let mut p = Picker::default();
         assert_eq!(p.load(&pr, &known), 1);
+        // 窗口随选择集载入，文本能原样解析回去
+        assert_eq!(p.global_text, "1m · 15m");
+        assert_eq!(p.windows().unwrap(), pr.windows);
+        p.win_text.insert("obi_l2".into(), "abc".into());
+        assert!(p.windows().is_err(), "写错的窗口要报出来，不能悄悄丢掉");
         assert_eq!(p.selected.len(), 1);
         assert_eq!(p.editing.as_deref(), Some("盘口"));
         assert_eq!(p.name, "盘口");
@@ -820,12 +1058,19 @@ mod tests {
     #[test]
     fn 配置json与引擎约定一致() {
         // 引擎侧 `feature_config::FeatureConfig` 读的就是这两个字段
-        let t = config_json("custom", &["mid_price".into(), "obi_l2".into()], Some("盘口"));
-        let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+        // 改启用集不丢窗口段，改窗口不丢启用集
+        let mut v = serde_json::json!({"mode": "all", "windows": {"global": [60000], "overrides": {}}});
+        edit_config(&mut v, "custom", Some(&["mid_price".into(), "obi_l2".into()]), Some(Some("盘口")), None);
         assert_eq!(v["mode"], "custom");
         assert_eq!(v["keys"].as_array().unwrap().len(), 2);
         assert_eq!(v["preset"], "盘口");
-        assert!(serde_json::from_str::<serde_json::Value>(&config_json("all", &[], None)).unwrap()["preset"].is_null());
+        assert_eq!(v["windows"]["global"][0], 60000, "改启用集把窗口段丢了");
+        edit_config(&mut v, "all", None, Some(None), None);
+        assert!(v["preset"].is_null());
+        assert_eq!(v["keys"].as_array().unwrap().len(), 2, "切到全开不该丢自定义键表");
+        set_windows(&mut v, &super::super::feature_presets::PresetWindows::default());
+        assert!(v["windows"].is_null(), "默认窗口 = 删掉窗口段");
+        assert_eq!(v["mode"], "all");
         assert!(config_path().ends_with("cockpit/feature_config.json") || std::env::var("WS_FEATURE_CONFIG").is_ok());
     }
 

@@ -47,18 +47,17 @@ pub struct Slot {
     pub latency: String,
     /// 是否在引擎的默认启用集里（自定义选择页「恢复默认」按它勾）。
     pub default_on: bool,
+    /// 窗口能否自定义（瞬时量 / 窗口是定义本身 / 仅离线的不能）。
+    pub win_custom: bool,
+    /// 字典默认窗口（毫秒）。
+    pub win_default: Vec<u32>,
 }
 
 impl Slot {
     /// 窗口的可读写法。`0` 是**瞬时量**而不是「零秒窗口」。
     #[must_use]
     pub fn window_label(&self) -> String {
-        match self.window_ms {
-            0 => "瞬时".into(),
-            w if w % 60_000 == 0 => format!("{}m", w / 60_000),
-            w if w % 1_000 == 0 => format!("{}s", w / 1_000),
-            w => format!("{w}ms"),
-        }
+        format_window(self.window_ms)
     }
 
     /// 已登记但尚未实现。面板要**照样显示**它（docs/31 §8.1）——
@@ -336,6 +335,11 @@ pub fn parse(text: &str) -> Matrix {
             prior: s["prior"].as_str().unwrap_or_default().to_string(),
             latency: s["latency"].as_str().unwrap_or_default().to_string(),
             default_on: s["default_on"].as_bool().unwrap_or(false),
+            win_custom: s["win_custom"].as_bool().unwrap_or(false),
+            win_default: s["win_default"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_u64().map(|v| v as u32)).collect())
+                .unwrap_or_default(),
         });
     }
     for w in v["pool_detail"].as_array().into_iter().flatten() {
@@ -349,6 +353,72 @@ pub fn parse(text: &str) -> Matrix {
         });
     }
     out
+}
+
+/// 最短 / 最长窗口、每条特征至多几个窗口——**与主仓 `windows.rs` 同一组数**。
+pub const MIN_WINDOW_MS: u32 = 100;
+pub const MAX_WINDOW_MS: u32 = 86_400_000;
+pub const MAX_WINDOWS: usize = 8;
+
+/// 窗口的可读写法（与主仓 `windows::format_window` 同口径）。`0` 是瞬时量。
+#[must_use]
+pub fn format_window(w: u32) -> String {
+    match w {
+        0 => "瞬时".into(),
+        w if w % 86_400_000 == 0 => format!("{}d", w / 86_400_000),
+        w if w % 3_600_000 == 0 => format!("{}h", w / 3_600_000),
+        w if w % 60_000 == 0 => format!("{}m", w / 60_000),
+        w if w % 1_000 == 0 => format!("{}s", w / 1_000),
+        w => format!("{w}ms"),
+    }
+}
+
+/// 一组窗口的写法，如 `1s · 5s · 1m`。
+#[must_use]
+pub fn format_windows(ws: &[u32]) -> String {
+    ws.iter().map(|w| format_window(*w)).collect::<Vec<_>>().join(" · ")
+}
+
+/// 解析窗口长度：`250ms` / `1s` / `1.5s` / `10s` / `1m` / `15m` / `1h` / `1d`；纯数字按毫秒
+/// （与主仓 `windows::parse_window` 同口径——面板先校验，引擎再按同一规则读一遍）。
+pub fn parse_window(s: &str) -> Result<u32, String> {
+    let t = s.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        return Err("空".into());
+    }
+    let (num, mult) = if let Some(x) = t.strip_suffix("ms") {
+        (x, 1.0)
+    } else if let Some(x) = t.strip_suffix('s') {
+        (x, 1_000.0)
+    } else if let Some(x) = t.strip_suffix('m') {
+        (x, 60_000.0)
+    } else if let Some(x) = t.strip_suffix('h') {
+        (x, 3_600_000.0)
+    } else if let Some(x) = t.strip_suffix('d') {
+        (x, 86_400_000.0)
+    } else {
+        (t.as_str(), 1.0)
+    };
+    let v: f64 = num.trim().parse().map_err(|_| format!("「{}」不是时间长度（例：250ms、10s、15m、1h）", s.trim()))?;
+    let ms = (v * mult).round();
+    if !(f64::from(MIN_WINDOW_MS)..=f64::from(MAX_WINDOW_MS)).contains(&ms) {
+        return Err(format!("「{}」超出范围（100ms ~ 1d）", s.trim()));
+    }
+    Ok(ms as u32)
+}
+
+/// 解析逗号 / 空格 / 「·」分隔的一组窗口，升序去重；空串 = `Ok(空)`。
+pub fn parse_windows(s: &str) -> Result<Vec<u32>, String> {
+    let mut v = Vec::new();
+    for part in s.split([',', '，', ' ', '·', '、']).filter(|x| !x.trim().is_empty()) {
+        v.push(parse_window(part)?);
+    }
+    v.sort_unstable();
+    v.dedup();
+    if v.len() > MAX_WINDOWS {
+        return Err(format!("每条特征至多 {MAX_WINDOWS} 个窗口"));
+    }
+    Ok(v)
 }
 
 #[cfg(test)]
@@ -573,5 +643,19 @@ mod tests {
         let m = parse(SAMPLE);
         assert_eq!(m.families(), vec!["delta", "price", "queue"]);
         assert_eq!(m.markets(), vec!["crypto_perp", "equity"]);
+    }
+
+    #[test]
+    fn 窗口解析与引擎同口径() {
+        for (t, ms) in [("250ms", 250), ("1s", 1_000), ("1.5s", 1_500), ("15m", 900_000), ("1h", 3_600_000), ("1d", 86_400_000), ("5000", 5_000)] {
+            assert_eq!(parse_window(t).unwrap(), ms, "{t}");
+            assert_eq!(parse_window(&format_window(ms)).unwrap(), ms);
+        }
+        assert!(parse_window("50ms").is_err());
+        assert!(parse_window("2d").is_err());
+        assert_eq!(parse_windows("1m, 10s  5s·10s").unwrap(), vec![5_000, 10_000, 60_000]);
+        assert_eq!(parse_windows(" ").unwrap(), Vec::<u32>::new());
+        assert!(parse_windows("1s,xyz").is_err());
+        assert_eq!(format_window(0), "瞬时");
     }
 }
