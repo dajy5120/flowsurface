@@ -362,6 +362,8 @@ impl Flowsurface {
             },
             Message::ExitRequested(windows) => {
                 self.save_state_to_disk(&windows);
+                // 特征面板发起的回放是 Cockpit 的子进程：关窗一起停
+                ws::feature_source::shutdown();
                 // 关界面 = 关掉全部后台守护（docs/26 S4b）。**先存盘再停**：
                 // 反过来的话，停服务那几十毫秒里用户已经看不到窗口了，
                 // 而布局还没落盘——崩在这中间就丢布局。

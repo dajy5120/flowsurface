@@ -421,6 +421,9 @@ impl Dashboard {
                             pane::Effect::SwitchTickersInGroup(ticker_info) => {
                                 self.switch_tickers_in_group(handles, main_window.id, ticker_info)
                             }
+                            pane::Effect::ResetFeatureCharts => {
+                                self.reset_chart_panes(main_window.id)
+                            }
                             pane::Effect::FocusWidget(id) => {
                                 return (iced::widget::operation::focus(id), None);
                             }
@@ -1426,6 +1429,30 @@ impl Dashboard {
             .for_each(|(_, _, state)| {
                 state.content.update_theme(theme);
             });
+    }
+
+    /// 各行情图按原来的标的与图种重建（数据清空），流不变。
+    ///
+    /// 特征工作区的四张图由 `feature_chart.jsonl` 喂：换了一份（开始回放 / 切回实时）时，
+    /// 不清的话新旧两段数据会画进同一张图。**不发拉取请求**——这些图的数据只来自图表流，
+    /// 不找交易所要历史。
+    fn reset_chart_panes(&mut self, main_window: window::Id) -> Task<Message> {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            let kind = state.content.kind();
+            let is_chart = matches!(
+                kind,
+                ContentKind::HeatmapChart
+                    | ContentKind::ShaderHeatmap
+                    | ContentKind::FootprintChart
+                    | ContentKind::CandlestickChart
+                    | ContentKind::TimeAndSales
+                    | ContentKind::Ladder
+            );
+            if is_chart && let Some(tk) = state.stream_pair() {
+                state.set_content_and_streams(vec![tk], kind);
+            }
+        }
+        self.refresh_streams(main_window)
     }
 
     fn refresh_streams(&mut self, main_window: window::Id) -> Task<Message> {

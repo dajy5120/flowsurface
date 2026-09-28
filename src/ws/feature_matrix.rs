@@ -544,6 +544,8 @@ pub enum FeatureMatrixMsg {
     TrendTh(usize, String),
     /// 某一列回到自适应宽度（双击表头分隔线）。
     AutoCol(Col),
+    /// 数据源（共用数据选择组件 + 回放控制，见 [`super::feature_source`]）。
+    Source(super::feature_source::SourceMsg),
 }
 
 static STATE: OnceLock<Mutex<ViewState>> = OnceLock::new();
@@ -682,6 +684,10 @@ pub fn handle(m: FeatureMatrixMsg) -> Option<f32> {
             }
         }
         FeatureMatrixMsg::Engine(act) => engine_action(act),
+        FeatureMatrixMsg::Source(s) => {
+            // pane 那一层先截走了（要按返回值清图）；走到这里的只是兜底
+            super::feature_source::handle(s);
+        }
         // 切到默认 / 全开不动窗口，也不丢上一次的自定义键表（再切回自定义时还在）
         FeatureMatrixMsg::SetMode(mode) => apply_mode(mode, None, None, None),
         FeatureMatrixMsg::WinApply => {
@@ -1236,6 +1242,7 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
         }
         // 有副作用或要读快照的，不在这里（见 `handle` / `apply_with`）
         FeatureMatrixMsg::Engine(_)
+        | FeatureMatrixMsg::Source(_)
         | FeatureMatrixMsg::SetMode(_)
         | FeatureMatrixMsg::ApplyPicker
         | FeatureMatrixMsg::OpenPicker

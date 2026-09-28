@@ -1530,6 +1530,54 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
 /// 与进程页「特征引擎」那一行是同一个单元、同一个动作——放在这里是因为
 /// 看特征的人要在看特征的地方启停，而不是切到进程页去找。
 /// 停掉**没有数据缺口**（录制器照常落盘，事后可回放重算），所以不需要二次确认。
+/// 数据源栏：收起时一行（现在读的是什么 + 回放状态），展开是共用数据选择组件 + 回放控制。
+fn source_bar<'a>(s: &super::feature_source::View) -> Element<'a, Msg> {
+    use super::feature_source::{Pace, SourceMsg};
+    let mut head = row![
+        text("数据源").size(11).color(C_HEAD),
+        text(s.reading.clone()).size(11).color(if s.is_replay { C_WARN } else { C_TXT }),
+        chip(if s.open { "▴ 收起".into() } else { "▾ 选择数据".into() }, s.open, Msg::Source(SourceMsg::Toggle)),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    if s.running {
+        head = head.push(chip("■ 停止回放".into(), false, Msg::Source(SourceMsg::Stop)));
+    }
+    let mut b = column![head].spacing(5);
+    if !s.status.is_empty() {
+        b = b.push(text(s.status.clone()).size(10).color(if s.running { C_OK } else { C_DIM }));
+    }
+    if s.open {
+        let opts = super::feature_source::pick_opts();
+        b = b.push(
+            super::data_picker_view::view(&s.pick, &opts).map(|m| Msg::Source(SourceMsg::Data(m))),
+        );
+        if s.pick.local_key().is_some() {
+            let mut pr = row![text("回放速度").size(11).color(C_DIM)].spacing(4).align_y(iced::Alignment::Center);
+            for p in Pace::ALL {
+                pr = pr.push(chip(p.label().into(), s.pace == p, Msg::Source(SourceMsg::Pace(p))));
+            }
+            pr = pr.push(text("　").size(11)).push(chip(
+                if s.running { "↻ 重新开始".into() } else { "▶ 开始回放".into() },
+                false,
+                Msg::Source(SourceMsg::Start),
+            ));
+            b = b.push(pr).push(
+                text(
+                    "回放由特征引擎直接读数据商接口（不转格式），启用集与时间窗口用本面板的配置；\
+                     写自己的一组文件，常驻引擎照常运行。选回 B1 即切回实时。",
+                )
+                .size(10)
+                .color(C_DIM),
+            );
+        }
+    }
+    if !s.note.is_empty() {
+        b = b.push(text(s.note.clone()).size(10).color(C_WARN));
+    }
+    container(b).padding([4, 6]).into()
+}
+
 fn engine_bar<'a>() -> Element<'a, Msg> {
     let note = super::feature_matrix::engine_note();
     let mut r = row![text("特征引擎 ").size(12).color(C_HEAD)]
@@ -1582,6 +1630,8 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
         ));
     }
     b = b.push(vr.align_y(iced::Alignment::Center));
+    let src = super::feature_source::view();
+    b = b.push(source_bar(&src));
     let fold = v.fold_controls && v.view != View::Engine && v.picker.is_none();
     if !fold {
         b = b.push(engine_bar());
@@ -1608,7 +1658,8 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
                 text(format!(
                     "暂无快照（{}）。生成：\n  \
                      cargo run --release -p wealthspring-features --example replay_events_csv -- <目录>\n\
-                     引擎常驻时由 sidecar::SidecarWriter 每 500ms 写一次。面板只读，不连交易所。",
+                     引擎常驻时由 sidecar::SidecarWriter 每 500ms 写一次。面板只读，不连交易所。\n\
+                     选了本地数据：点上面的「▶ 开始回放」，回放跑起来后这里就有快照。",
                     ro::board_path().display()
                 ))
                 .size(11)
@@ -1617,7 +1668,7 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
             .into();
     }
 
-    if super::feature_matrix::engine_state().is_some_and(|st| !st.active) {
+    if !src.is_replay && super::feature_matrix::engine_state().is_some_and(|st| !st.active) {
         // 停了之后旁路文件还在：不说一声，人会把最后一张快照当成现在
         b = b.push(
             text("引擎已停止：下面是停止前的最后一次快照，不再更新")

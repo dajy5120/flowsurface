@@ -246,7 +246,12 @@ static CACHE: OnceLock<Mutex<(Option<SystemTime>, Matrix)>> = OnceLock::new();
 
 /// 面板读的旁路文件。**必须与主仓 `sidecar::board_path()` 算出同一个路径**——
 /// 两边各写一份默认值，表现是面板说「暂无快照」而引擎日志显示一直在写。
+///
+/// 数据源选了本地回放时读回放写的那份（[`super::feature_source::matrix_override`]）。
 pub fn board_path() -> PathBuf {
+    if let Some(p) = super::feature_source::matrix_override() {
+        return p;
+    }
     std::env::var("WS_FEATURE_MATRIX")
         .map(PathBuf::from)
         .unwrap_or_else(|_| super::paths::data_dir().join("cockpit").join("feature_matrix.json"))

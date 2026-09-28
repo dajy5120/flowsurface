@@ -48,7 +48,13 @@ const TF_MS: u64 = 60_000;
 const CHUNK: usize = 20_000;
 
 /// 图表流文件。**必须与主仓 `chartfeed::feed_path()` 算出同一个路径。**
+///
+/// 数据源选了本地回放时读回放写的那份（[`super::feature_source::chart_override`]）——路径变了，
+/// 订阅（按路径建）随之重建、从头读。
 pub fn feed_path() -> PathBuf {
+    if let Some(p) = super::feature_source::chart_override() {
+        return p;
+    }
     std::env::var("WS_FEATURE_CHART")
         .map(PathBuf::from)
         .unwrap_or_else(|_| super::paths::data_dir().join("cockpit").join("feature_chart.jsonl"))

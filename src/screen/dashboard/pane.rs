@@ -55,6 +55,8 @@ pub enum Effect {
     FocusWidget(iced::widget::Id),
     /// 把某个 scrollable 横向滚到 `x`（特征矩阵：表头跟着表体横向滚动）。
     ScrollX(iced::widget::Id, f32),
+    /// 特征图表流换了一份（开始回放 / 切回实时）：各图清空重建，不把两段数据画进同一张图。
+    ResetFeatureCharts,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -1567,6 +1569,12 @@ impl State {
             Event::PredictionInteraction(m) => {
                 // 预测市场：夜跑启停 + 定时开关（副作用为 systemctl，无面板状态）。
                 crate::ws::prediction::handle(m);
+            }
+            Event::FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg::Source(m)) => {
+                // 特征数据源：选择 / 开始 / 停止回放。换了图表流就请上层清图。
+                if crate::ws::feature_source::handle(m) {
+                    return Some(Effect::ResetFeatureCharts);
+                }
             }
             Event::FeatureMatrixInteraction(m) => {
                 // 特征矩阵（docs/31 §8.1）：筛选/折叠只改视图状态；唯一的副作用是
