@@ -188,25 +188,36 @@ fn fcell<'a>(e: impl Into<Element<'a, Msg>>, w: f32, right: bool) -> Element<'a,
         .into()
 }
 
-/// 表体里的分隔带：`line` = 画一条竖线（窗口组边界）。
-fn sep<'a>(line: bool) -> Element<'a, Msg> {
-    let c = container(if line {
-        Element::from(iced::widget::rule::vertical(1.0).style(crate::style::split_ruler))
-    } else {
-        Element::from(text(""))
-    })
-    .width(Length::Fixed(SEP))
-    .height(Length::Fill)
-    .align_x(iced::Alignment::Center);
-    c.into()
+/// 竖线样式：固定颜色（不跟主题取色——深色主题下调色板的「强背景色」太暗，线几乎看不见）。
+fn line_style(c: Color) -> iced::widget::rule::Style {
+    iced::widget::rule::Style {
+        color: c,
+        radius: iced::border::Radius::default(),
+        fill_mode: iced::widget::rule::FillMode::Full,
+        snap: true,
+    }
 }
 
-/// 表头分隔线的样式：比表体的线明显；`strong` = 窗口组边界（更亮）。
-fn head_rule(t: &iced::Theme, strong: bool) -> iced::widget::rule::Style {
-    let mut s = crate::style::split_ruler(t);
-    let p = t.extended_palette();
-    s.color = p.background.strong.color.scale_alpha(if strong { 0.95 } else { 0.6 });
-    s
+/// 表体的列间竖线：浅色；`group` = 窗口组边界（稍深，一眼分组）。
+const C_BODY_LINE: Color = Color::from_rgba(0.72, 0.78, 0.88, 0.16);
+const C_BODY_GROUP: Color = Color::from_rgba(0.72, 0.78, 0.88, 0.38);
+/// 表头的竖线 / 横线：明显的亮色；窗口组边界更亮。
+const C_HEAD_LINE: Color = Color::from_rgba(0.78, 0.84, 0.95, 0.62);
+const C_HEAD_GROUP: Color = Color::from_rgba(0.85, 0.90, 1.0, 0.95);
+
+/// 表体里的分隔带：每列之间一条浅色竖线；`group` = 窗口组边界（稍深）。
+fn sep<'a>(group: bool) -> Element<'a, Msg> {
+    let c = if group { C_BODY_GROUP } else { C_BODY_LINE };
+    container(iced::widget::rule::vertical(1.0).style(move |_t: &iced::Theme| line_style(c)))
+        .width(Length::Fixed(SEP))
+        .height(Length::Fill)
+        .align_x(iced::Alignment::Center)
+        .into()
+}
+
+/// 表头分隔线的样式：比表体的线明显得多；`strong` = 窗口组边界（更亮）。
+fn head_rule(_t: &iced::Theme, strong: bool) -> iced::widget::rule::Style {
+    line_style(if strong { C_HEAD_GROUP } else { C_HEAD_LINE })
 }
 
 /// 表头里的竖线（不可拖，用在上层的窗口标题行）。
