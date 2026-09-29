@@ -1431,6 +1431,29 @@ impl Dashboard {
             });
     }
 
+    /// 各行情图（K 线 / Footprint）的周期与失衡阈值——「图表参数」视图拿来和卡片口径比对（docs/33 批 4）。
+    pub fn pane_charts(&self, main_window: window::Id) -> Vec<crate::ws::chart_params::PaneChart> {
+        self.iter_all_panes(main_window)
+            .filter_map(|(_, _, st)| match &st.content {
+                pane::Content::Kline { chart: Some(c), kind, .. } => {
+                    let footprint = matches!(kind, data::chart::KlineChartKind::Footprint { .. });
+                    let timeframe_ms = match c.basis() {
+                        data::chart::Basis::Time(tf) => Some(tf.to_milliseconds()),
+                        data::chart::Basis::Tick(_) => None,
+                    };
+                    let imbalance = c.studies().and_then(|v| {
+                        v.iter().find_map(|s| match s {
+                            data::chart::kline::FootprintStudy::Imbalance { threshold, .. } => Some(*threshold),
+                            data::chart::kline::FootprintStudy::NPoC { .. } => None,
+                        })
+                    });
+                    Some(crate::ws::chart_params::PaneChart { footprint, timeframe_ms, imbalance })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// 各行情图按原来的标的与图种重建（数据清空），流不变。
     ///
     /// 特征工作区的四张图由 `feature_chart.jsonl` 喂：换了一份（开始回放 / 切回实时）时，

@@ -56,6 +56,21 @@ pub struct ChartSnap {
     pub values: std::collections::HashMap<String, ChartValue>,
     /// 口径参数（原样，按名取）。
     pub params: serde_json::Map<String, serde_json::Value>,
+    /// 可编辑口径参数的规格（引擎下发）。
+    pub editable: Vec<EditSpec>,
+    /// 只读口径参数与原因（引擎下发）。
+    pub read_only: Vec<(String, String)>,
+}
+
+/// 一个可编辑口径参数的规格（与引擎 `chart::EDITABLE` 同一份，随快照下发）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EditSpec {
+    pub key: String,
+    pub lo: f64,
+    pub hi: f64,
+    /// 1 = 一个数；2、3 = 一组从小到大的数；0 = 选项。
+    pub n: usize,
+    pub options: Vec<String>,
 }
 
 fn s(v: &serde_json::Value) -> String {
@@ -118,6 +133,24 @@ pub fn parse(v: &serde_json::Value) -> ChartSnap {
         cards,
         values,
         params: c["params"].as_object().cloned().unwrap_or_default(),
+        editable: c["editable"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|e| EditSpec {
+                key: s(&e["key"]),
+                lo: e["lo"].as_f64().unwrap_or(0.0),
+                hi: e["hi"].as_f64().unwrap_or(0.0),
+                n: e["n"].as_u64().unwrap_or(1) as usize,
+                options: e["options"].as_array().into_iter().flatten().map(s).collect(),
+            })
+            .collect(),
+        read_only: c["read_only"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|x| (s(&x[0]), s(&x[1])))
+            .collect(),
     }
 }
 
@@ -331,11 +364,221 @@ pub fn param_text(k: &str, v: &serde_json::Value) -> String {
         ("recent_traded_secs", Some(x)) => format!("{x} 秒"),
         ("heatmap_levels" | "depth_levels", Some(x)) => format!("前 {x} 档"),
         ("large_trade_mode", _) if v.as_str() == Some("p95_5m") => "近 5 分钟单笔 P95（与大单特征同一阈值）".into(),
+        ("pivot_formula", _) => match v.as_str() {
+            Some("standard") => "标准".into(),
+            Some("fibonacci") => "斐波那契".into(),
+            Some("camarilla") => "Camarilla".into(),
+            Some("woodie") => "Woodie".into(),
+            _ => v.to_string(),
+        },
+        ("vwap_band_method", _) if v.as_str() == Some("vwap_variance") => "VWAP 方差".into(),
+        ("cvd_reset", _) if v.as_str() == Some("session") => "按交易日".into(),
+        ("atr_ma", _) if v.as_str() == Some("wilder") => "Wilder".into(),
         _ => match v {
             serde_json::Value::String(t) => t.clone(),
             serde_json::Value::Array(a) => a.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" / "),
             other => other.to_string(),
         },
+    }
+}
+
+// ── 图上设置 vs 卡片口径（docs/33 批 4）───────────────────────────────────────────
+
+/// 订单流特征工作区里一张行情图的设置（主循环每帧从 dashboard 取一次发布过来）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneChart {
+    /// Footprint（否则是 K 线）。
+    pub footprint: bool,
+    /// 时间周期（按笔数聚合的图为 `None`）。
+    pub timeframe_ms: Option<u64>,
+    /// Footprint 失衡研究的阈值（flowsurface 口径：对侧 × (100 + 阈值)% 才算失衡）。
+    pub imbalance: Option<usize>,
+}
+
+static PANES: std::sync::Mutex<Vec<PaneChart>> = std::sync::Mutex::new(Vec::new());
+
+/// 主循环发布图上设置（变了才替换）。
+pub fn publish_pane_charts(v: Vec<PaneChart>) {
+    if let Ok(mut g) = PANES.lock()
+        && *g != v
+    {
+        *g = v;
+    }
+}
+
+fn fmt_ms(ms: u64) -> String {
+    if ms.is_multiple_of(60_000) { format!("{} 分钟", ms / 60_000) } else { format!("{} 秒", ms / 1_000) }
+}
+
+/// 某张卡片与图上设置不一致的地方（给人看的提示，空 = 一致或没有对应的图）。
+#[must_use]
+pub fn mismatches(card_id: &str, params: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    let panes = PANES.lock().map(|g| g.clone()).unwrap_or_default();
+    let mut out = Vec::new();
+    let bar = params.get("bar_period_ms").and_then(serde_json::Value::as_u64);
+    if matches!(card_id, "c01" | "c02" | "c06" | "c07" | "c10" | "c11")
+        && let Some(b) = bar
+    {
+        {
+            let mut seen = std::collections::BTreeSet::new();
+            for p in &panes {
+                if let Some(tf) = p.timeframe_ms.filter(|tf| *tf != b)
+                    && seen.insert((p.footprint, tf))
+                {
+                    out.push(format!(
+                        "图上{}是 {}，本卡的「当前根 / 上一根」按 {} 算——两边的根不是同一根",
+                        if p.footprint { " Footprint " } else { "的 K 线" },
+                        fmt_ms(tf),
+                        fmt_ms(b)
+                    ));
+                }
+            }
+        }
+    }
+    if card_id == "c06" {
+        let ratio = params.get("imbalance_ratio_pct").and_then(serde_json::Value::as_f64);
+        for p in panes.iter().filter(|p| p.footprint) {
+            if let (Some(t), Some(r)) = (p.imbalance, ratio) {
+                let fs = 100.0 + t as f64;
+                if (fs - r).abs() > 1e-9 {
+                    out.push(format!(
+                        "图上 Footprint 的失衡阈值是 {fs:.0}%（flowsurface 设置 {t}），本卡与特征按 {r:.0}% 算——图上标出的失衡格子与本卡的失衡数不是同一口径"
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+// ── 口径设置（docs/33 批 4）────────────────────────────────────────────────────
+
+/// 口径设置的消息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChartEditMsg {
+    Open,
+    Close,
+    /// `(参数, 输入框文本)`。
+    Input(String, String),
+    /// 应用：写配置文件 `chart` 段并重启特征引擎。
+    Apply,
+    /// 恢复默认：删掉配置里的 `chart` 段并重启。
+    Defaults,
+}
+
+/// 编辑中的草稿：每个可编辑参数一段文本（`bar_period_ms` 以秒显示，数组用逗号分隔）。
+#[derive(Debug, Clone, Default)]
+pub struct Draft {
+    pub text: std::collections::BTreeMap<String, String>,
+    pub error: String,
+}
+
+static DRAFT: std::sync::OnceLock<std::sync::Mutex<Option<Draft>>> = std::sync::OnceLock::new();
+
+fn draft_cell() -> &'static std::sync::Mutex<Option<Draft>> {
+    DRAFT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 当前的草稿（没在编辑是 `None`）。
+#[must_use]
+pub fn draft() -> Option<Draft> {
+    draft_cell().lock().ok().and_then(|g| g.clone())
+}
+
+/// 参数值 → 输入框文本。
+#[must_use]
+pub fn to_text(key: &str, v: &serde_json::Value) -> String {
+    match (key, v) {
+        ("bar_period_ms", _) => v.as_f64().map_or_else(String::new, |x| format!("{}", x / 1_000.0)),
+        (_, serde_json::Value::Array(a)) => a.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
+        (_, serde_json::Value::String(t)) => t.clone(),
+        _ => v.to_string(),
+    }
+}
+
+/// 输入框文本 → 配置值；不合规返回给人看的原因。
+pub fn from_text(spec: &EditSpec, t: &str) -> Result<serde_json::Value, String> {
+    let label = param_label(&spec.key);
+    if spec.n == 0 {
+        let t = t.trim();
+        return if spec.options.iter().any(|o| o == t) {
+            Ok(serde_json::json!(t))
+        } else {
+            Err(format!("{label} 只能是 {}", spec.options.join(" / ")))
+        };
+    }
+    let nums: Result<Vec<f64>, _> = t.split([',', '，', ' ']).filter(|x| !x.trim().is_empty()).map(|x| x.trim().parse::<f64>()).collect();
+    let Ok(mut nums) = nums else { return Err(format!("{label} 要填数字")) };
+    if spec.key == "bar_period_ms" {
+        for x in &mut nums {
+            *x *= 1_000.0;
+        }
+    }
+    let (lo, hi) = if spec.key == "bar_period_ms" { (spec.lo / 1_000.0, spec.hi / 1_000.0) } else { (spec.lo, spec.hi) };
+    if nums.len() != spec.n {
+        return Err(format!("{label} 要填 {} 个数", spec.n));
+    }
+    if nums.iter().any(|x| !(spec.lo..=spec.hi).contains(x)) {
+        return Err(format!("{label} 要在 {lo}–{hi} 之间"));
+    }
+    if nums.windows(2).any(|w| w[0] > w[1]) {
+        return Err(format!("{label} 要从小到大"));
+    }
+    Ok(if spec.n == 1 { serde_json::json!(nums[0]) } else { serde_json::json!(nums) })
+}
+
+/// 处理一条口径设置消息。`write` = 写配置并重启引擎（特征矩阵那一份 `write_and_restart`，不另写一套）。
+pub fn handle_edit(m: ChartEditMsg, snap: &ChartSnap, write: impl FnOnce(String, Box<dyn FnOnce(&mut serde_json::Value)>)) {
+    let Ok(mut g) = draft_cell().lock() else { return };
+    match m {
+        ChartEditMsg::Open => {
+            let text = snap
+                .editable
+                .iter()
+                .map(|e| (e.key.clone(), snap.params.get(&e.key).map_or_else(String::new, |v| to_text(&e.key, v))))
+                .collect();
+            *g = Some(Draft { text, error: String::new() });
+        }
+        ChartEditMsg::Close => *g = None,
+        ChartEditMsg::Input(k, t) => {
+            if let Some(d) = g.as_mut() {
+                d.text.insert(k, t);
+                d.error.clear();
+            }
+        }
+        ChartEditMsg::Defaults => {
+            *g = None;
+            drop(g);
+            write("图表参数口径 → 默认".into(), Box::new(|v: &mut serde_json::Value| {
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("chart");
+                }
+            }));
+        }
+        ChartEditMsg::Apply => {
+            let Some(d) = g.as_mut() else { return };
+            let mut obj = serde_json::Map::new();
+            for e in &snap.editable {
+                let t = d.text.get(&e.key).cloned().unwrap_or_default();
+                match from_text(e, &t) {
+                    Ok(v) => {
+                        obj.insert(e.key.clone(), v);
+                    }
+                    Err(why) => {
+                        d.error = why;
+                        return;
+                    }
+                }
+            }
+            *g = None;
+            drop(g);
+            write("图表参数口径已更新".into(), Box::new(move |v: &mut serde_json::Value| {
+                if !v.is_object() {
+                    *v = serde_json::json!({});
+                }
+                v["chart"] = serde_json::Value::Object(obj);
+            }));
+        }
     }
 }
 
@@ -369,7 +612,38 @@ mod tests {
         // 60s 不在运行时窗口里 → 就近取 30s
         assert!(matches!(cell(&c.cards[0].rows[0], &idx, c), Cell::Value { v: Some(x), window_ms: Some(30000), .. } if x == 1.0));
         assert_eq!(cell(&c.cards[0].rows[1], &idx, c), Cell::Pending);
-        assert_eq!(param_text("cvd_reset", &c.params["cvd_reset"]), "session");
+        assert_eq!(param_text("cvd_reset", &c.params["cvd_reset"]), "按交易日");
+    }
+
+    #[test]
+    fn 图上设置与口径比对() {
+        let params: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"bar_period_ms": 60000, "imbalance_ratio_pct": 300}"#).unwrap();
+        // flowsurface 阈值 200 = 对侧 × 300% → 与 300% 一致；M1 = 60 秒一致
+        publish_pane_charts(vec![PaneChart { footprint: true, timeframe_ms: Some(60_000), imbalance: Some(200) }]);
+        assert!(mismatches("c06", &params).is_empty());
+        publish_pane_charts(vec![
+            PaneChart { footprint: true, timeframe_ms: Some(300_000), imbalance: Some(150) },
+            PaneChart { footprint: false, timeframe_ms: Some(60_000), imbalance: None },
+        ]);
+        let w = mismatches("c06", &params);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w.iter().any(|x| x.contains("250%")) && w.iter().any(|x| x.contains("5 分钟")));
+        assert!(mismatches("c03", &params).is_empty(), "Volume Profile 不按根，不比周期");
+        publish_pane_charts(Vec::new());
+    }
+
+    #[test]
+    fn 口径输入框解析() {
+        let bar = EditSpec { key: "bar_period_ms".into(), lo: 10_000.0, hi: 3_600_000.0, n: 1, options: vec![] };
+        assert_eq!(from_text(&bar, "30").unwrap(), serde_json::json!(30_000.0));
+        assert!(from_text(&bar, "5").is_err(), "秒数换成毫秒后比下限小");
+        let m3 = EditSpec { key: "vwap_band_mults".into(), lo: 0.1, hi: 10.0, n: 3, options: vec![] };
+        assert_eq!(from_text(&m3, "1, 2，3").unwrap(), serde_json::json!([1.0, 2.0, 3.0]));
+        assert!(from_text(&m3, "2, 1, 3").is_err());
+        let pv = EditSpec { key: "pivot_formula".into(), lo: 0.0, hi: 0.0, n: 0, options: vec!["standard".into(), "woodie".into()] };
+        assert!(from_text(&pv, "woodie").is_ok() && from_text(&pv, "x").is_err());
+        assert_eq!(to_text("bar_period_ms", &serde_json::json!(60000)), "60");
     }
 
     #[test]

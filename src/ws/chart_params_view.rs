@@ -4,10 +4,10 @@
 //! → 价梯（价位类参数按价格排在一根竖轴上，现价插在其中）→ 口径行（本卡生效的口径参数）。
 //! 只读快照，**不算任何数**。
 
-use iced::widget::{column, container, row, text, tooltip};
+use iced::widget::{button, column, container, row, text, text_input, tooltip};
 use iced::{Alignment, Color, Element, Length};
 
-use super::chart_params::{self as cp, Card, Cell, SlotIndex};
+use super::chart_params::{self as cp, Card, Cell, ChartEditMsg, SlotIndex};
 use super::feature_matrix::FeatureMatrixMsg as Msg;
 use super::feature_matrix_readout::Matrix;
 
@@ -149,7 +149,94 @@ fn card_view<'a>(i: usize, c: &Card, m: &Matrix, idx: &SlotIndex<'_>, now: Optio
         if ps.is_empty() { String::new() } else { format!(" · 口径：{}", ps.join(" · ")) }
     );
     b = b.push(text(foot).size(9).color(C_DIM));
+    for w in cp::mismatches(&c.id, &m.chart.params) {
+        b = b.push(text(format!("⚠ {w}")).size(9).color(C_WARN));
+    }
 
+    container(b)
+        .padding(8)
+        .width(Length::Fill)
+        .style(|_t: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(C_CARD_BG)),
+            border: iced::Border { color: C_BORDER, width: 1.0, radius: 4.0.into() },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn btn<'a>(label: &str, msg: Msg, active: bool) -> Element<'a, Msg> {
+    button(text(label.to_string()).size(11))
+        .padding([2, 8])
+        .style(move |t, st| crate::style::button::modifier(t, st, active))
+        .on_press(msg)
+        .into()
+}
+
+fn edit_msg(m: ChartEditMsg) -> Msg {
+    Msg::ChartEdit(m)
+}
+
+/// 口径设置（docs/33 批 4）：可编辑项用输入框（枢轴公式用选项），只读项列出原因。
+fn editor<'a>(m: &Matrix, d: &cp::Draft) -> Element<'a, Msg> {
+    let c = &m.chart;
+    let mut b = column![text("口径设置（写配置文件 chart 段，重启特征引擎生效；重启后当日累计从头开始，上一交易日存档保留）").size(11).color(C_HEAD)]
+        .spacing(4);
+    for e in &c.editable {
+        let cur = d.text.get(&e.key).cloned().unwrap_or_default();
+        let label = cp::param_label(&e.key);
+        let hint = match (e.key.as_str(), e.n) {
+            ("bar_period_ms", _) => format!("秒，{}–{}", e.lo / 1_000.0, e.hi / 1_000.0),
+            (_, 0) => String::new(),
+            (_, 1) => format!("{}–{}", e.lo, e.hi),
+            (_, n) => format!("{n} 个数，{}–{}，从小到大，逗号分隔", e.lo, e.hi),
+        };
+        let input: Element<'a, Msg> = if e.n == 0 {
+            let mut r = row![].spacing(4);
+            for o in &e.options {
+                let key = e.key.clone();
+                r = r.push(btn(&cp::param_text(&e.key, &serde_json::json!(o)), edit_msg(ChartEditMsg::Input(key, o.clone())), cur == *o));
+            }
+            r.into()
+        } else {
+            let key = e.key.clone();
+            text_input("", &cur)
+                .on_input(move |t| edit_msg(ChartEditMsg::Input(key.clone(), t)))
+                .size(11)
+                .width(Length::Fixed(140.0))
+                .into()
+        };
+        b = b.push(
+            row![fixed(text(label).size(11).color(C_TXT), W_LABEL, false), input, text(hint).size(10).color(C_DIM)]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        );
+    }
+    if !c.read_only.is_empty() {
+        b = b.push(text("只读").size(10).color(C_DIM));
+        for (k, why) in &c.read_only {
+            let v = c.params.get(k).map_or_else(String::new, |v| cp::param_text(k, v));
+            let label = if cp::param_label(k).is_empty() { k.as_str() } else { cp::param_label(k) };
+            b = b.push(
+                row![
+                    fixed(text(label.to_string()).size(10).color(C_DIM), W_LABEL, false),
+                    fixed(text(v).size(10).color(C_DIM), 220.0, false),
+                    text(why.clone()).size(10).color(C_PEND),
+                ]
+                .spacing(8),
+            );
+        }
+    }
+    if !d.error.is_empty() {
+        b = b.push(text(d.error.clone()).size(11).color(C_WARN));
+    }
+    b = b.push(
+        row![
+            btn("应用（写配置并重启引擎）", edit_msg(ChartEditMsg::Apply), false),
+            btn("恢复默认", edit_msg(ChartEditMsg::Defaults), false),
+            btn("取消", edit_msg(ChartEditMsg::Close), false),
+        ]
+        .spacing(8),
+    );
     container(b)
         .padding(8)
         .width(Length::Fill)
@@ -209,6 +296,11 @@ pub fn view<'a>(m: &Matrix) -> Element<'a, Msg> {
         .spacing(10),
     ]
     .spacing(6);
+    match cp::draft() {
+        Some(d) if !c.editable.is_empty() => b = b.push(editor(m, &d)),
+        _ if !c.editable.is_empty() => b = b.push(btn("✎ 口径设置", edit_msg(ChartEditMsg::Open), false)),
+        _ => {}
+    }
 
     // 双列网格
     for pair in cards.chunks(2) {

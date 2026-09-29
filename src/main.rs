@@ -350,6 +350,10 @@ impl Flowsurface {
                         let _ = l.dashboard.reset_chart_panes_to(main_window_id, Some(ti));
                     }
                 }
+                // 订单流特征工作区的图上设置（K 线周期、Footprint 失衡阈值）发布给「图表参数」视图比对口径
+                if let Some(l) = self.layout_manager.layouts.iter().find(|l| l.id.name == ws::workspace::WS_FEATURES) {
+                    ws::chart_params::publish_pane_charts(l.dashboard.pane_charts(main_window_id));
+                }
 
                 return self
                     .active_dashboard_mut()

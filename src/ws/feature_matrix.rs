@@ -550,6 +550,8 @@ pub enum FeatureMatrixMsg {
     AutoCol(Col),
     /// 数据源（共用数据选择组件 + 回放控制，见 [`super::feature_source`]）。
     Source(super::feature_source::SourceMsg),
+    /// 图表参数的口径设置（docs/33 批 4，见 [`super::chart_params::handle_edit`]）。
+    ChartEdit(super::chart_params::ChartEditMsg),
 }
 
 static STATE: OnceLock<Mutex<ViewState>> = OnceLock::new();
@@ -688,6 +690,10 @@ pub fn handle(m: FeatureMatrixMsg) -> Option<f32> {
             }
         }
         FeatureMatrixMsg::Engine(act) => engine_action(act),
+        FeatureMatrixMsg::ChartEdit(e) => {
+            let snap = super::feature_matrix_readout::snapshot();
+            super::chart_params::handle_edit(e, &snap.chart, |label, edit| write_and_restart(label, edit));
+        }
         FeatureMatrixMsg::Source(s) => {
             // pane 那一层先截走了（要按返回值清图）；走到这里的只是兜底
             super::feature_source::handle(s);
@@ -1247,6 +1253,7 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
         // 有副作用或要读快照的，不在这里（见 `handle` / `apply_with`）
         FeatureMatrixMsg::Engine(_)
         | FeatureMatrixMsg::Source(_)
+        | FeatureMatrixMsg::ChartEdit(_)
         | FeatureMatrixMsg::SetMode(_)
         | FeatureMatrixMsg::ApplyPicker
         | FeatureMatrixMsg::OpenPicker
