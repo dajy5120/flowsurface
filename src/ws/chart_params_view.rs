@@ -53,6 +53,14 @@ const CARD_MIN_W: f32 = 260.0;
 const GAP: f32 = 8.0;
 /// 分隔线（含可拖的把手）的宽度。
 const SEP: f32 = 5.0;
+/// 卡片内滚动条让出的宽度（滚动条 6 + 间距 3）。表头与表体按同一个宽度排，不受滚动条出没影响。
+const SCROLL_RES: f32 = 9.0;
+
+/// 「参数」列的宽度：卡片内宽减去其余三列、四条分隔线与滚动条让位。表头、表体、价梯都用它，所以竖线上下对齐。
+fn label_w(card_w: f32) -> f32 {
+    (card_w - 2.0 - cp::col_w(ChartCol::Value) - cp::col_w(ChartCol::Arrow) - cp::col_w(ChartCol::Tag) - 4.0 * SEP - SCROLL_RES)
+        .max(40.0)
+}
 
 /// 竖线：高度随所在行（行高随文字折行自动撑开）。
 fn vline<'a>(c: Color) -> Element<'a, Msg> {
@@ -68,12 +76,12 @@ fn vline<'a>(c: Color) -> Element<'a, Msg> {
     .into()
 }
 
-/// 表头里的分隔把手：拖动调宽度，双击回到默认宽度。`grow` = 往右拖是加宽这一列（否则是变窄——
-/// 「参数」与「值」之间那条线往右拖，参数列变宽、值列变窄）。
-fn grip<'a>(col: ChartCol, grow: bool) -> Element<'a, Msg> {
+/// 表头里的分隔把手：往右拖 d，左边那列宽 d、右边那列窄 d（线跟着鼠标走，别的列不动）；双击右边那列回到默认宽度。
+fn grip<'a>(left: Option<ChartCol>, right: ChartCol) -> Element<'a, Msg> {
+    let wl = left.map_or(0.0, cp::col_w);
     iced::widget::mouse_area(vline(C_HEAD_LINE))
-        .on_press(Msg::ChartUi(ChartUiMsg::DragStart(col, cp::col_w(col), grow)))
-        .on_double_click(Msg::ChartUi(ChartUiMsg::Auto(col)))
+        .on_press(Msg::ChartUi(ChartUiMsg::DragStart(left, right, wl, cp::col_w(right))))
+        .on_double_click(Msg::ChartUi(ChartUiMsg::Auto(right)))
         .interaction(iced::mouse::Interaction::ResizingHorizontally)
         .into()
 }
@@ -169,6 +177,7 @@ fn card_view<'a>(
     h: f32,
 ) -> Element<'a, Msg> {
     let mismatches = cp::mismatches(&c.id, &m.chart.params);
+    let lw = Length::Fixed(label_w(w));
     let mut body = column![].spacing(0);
     let (mut have, mut total) = (0usize, 0usize);
     let mut ladder: Vec<(String, f64)> = Vec::new();
@@ -227,7 +236,7 @@ fn card_view<'a>(
         };
         let line = container(
             row![
-                cell(text(r.label.clone()).size(11).color(C_TXT), Length::Fill, false),
+                cell(text(r.label.clone()).size(11).color(C_TXT), lw, false),
                 vline(C_LINE),
                 cell(text(val).size(11).color(color), Length::Fixed(cp::col_w(ChartCol::Value)), true),
                 vline(C_LINE),
@@ -264,7 +273,7 @@ fn card_view<'a>(
             let col = if is_now { C_NOW } else { C_TXT };
             body = body.push(
                 row![
-                    cell(text(if is_now { "▶ 现价".to_string() } else { label.clone() }).size(10).color(col), Length::Fill, false),
+                    cell(text(if is_now { "▶ 现价".to_string() } else { label.clone() }).size(10).color(col), lw, false),
                     vline(C_LINE),
                     cell(text(cp::format("price", Some(*p), None, m.tick_size)).size(10).color(col), Length::Fixed(cp::col_w(ChartCol::Value)), true),
                     vline(C_LINE),
@@ -309,14 +318,15 @@ fn card_view<'a>(
     // 表头：分隔线可拖（所有卡片共用一组列宽），双击回到默认
     let head = iced::widget::mouse_area(
         row![
-            cell(text("参数").size(10).color(C_HEAD), Length::Fill, false),
-            grip(ChartCol::Value, false),
+            cell(text("参数").size(10).color(C_HEAD), lw, false),
+            grip(None, ChartCol::Value),
             cell(text("值").size(10).color(C_HEAD), Length::Fixed(cp::col_w(ChartCol::Value)), true),
-            grip(ChartCol::Value, true),
+            grip(Some(ChartCol::Value), ChartCol::Arrow),
             cell(text("涨跌").size(10).color(C_HEAD), Length::Fixed(cp::col_w(ChartCol::Arrow)), false),
-            grip(ChartCol::Arrow, true),
+            grip(Some(ChartCol::Arrow), ChartCol::Tag),
             cell(text("源").size(10).color(C_HEAD), Length::Fixed(cp::col_w(ChartCol::Tag)), false),
-            grip(ChartCol::Tag, true),
+            // 最右是卡片边界，不可拖
+            vline(C_HEAD_LINE),
         ]
         .height(Length::Fixed(22.0))
         .align_y(Alignment::Center),

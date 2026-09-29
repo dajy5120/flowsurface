@@ -490,8 +490,9 @@ pub const COL_MAX: f32 = 320.0;
 /// 列宽消息。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ChartUiMsg {
-    /// 在某条分隔线上按下：`(列, 当前宽度, 往右拖是加宽还是变窄)`。
-    DragStart(ChartCol, f32, bool),
+    /// 在某条分隔线上按下：`(左边那列, 右边那列, 两列当前宽度)`。左边是「参数」列时为 `None`
+    /// （参数列不存宽度，占卡片剩下的宽度）。往右拖 d：左列宽 d、右列窄 d——分隔线跟着鼠标走，别的列不动。
+    DragStart(Option<ChartCol>, ChartCol, f32, f32),
     /// 鼠标在表头里移动（相对表头的 x）。
     Move(f32),
     DragEnd,
@@ -503,8 +504,8 @@ pub enum ChartUiMsg {
 struct Ui {
     widths: std::collections::HashMap<ChartCol, f32>,
     mouse_x: f32,
-    /// (列, 按下时的 x, 按下时的宽度, 往右拖加宽)。
-    drag: Option<(ChartCol, f32, f32, bool)>,
+    /// (左列, 右列, 按下时的 x, 左列宽, 右列宽)。
+    drag: Option<(Option<ChartCol>, ChartCol, f32, f32, f32)>,
 }
 
 static UI: std::sync::OnceLock<std::sync::Mutex<Ui>> = std::sync::OnceLock::new();
@@ -545,14 +546,22 @@ pub fn handle_ui(m: ChartUiMsg) {
     match m {
         ChartUiMsg::Move(x) => {
             g.mouse_x = x;
-            if let Some((c, x0, w0, grow)) = g.drag {
-                let d = if grow { x - x0 } else { x0 - x };
-                g.widths.insert(c, (w0 + d).clamp(COL_MIN, COL_MAX));
+            if let Some((left, right, x0, wl, wr)) = g.drag {
+                // 两列都要留在上下限内：先按右列能让出 / 能接收的量截住 d，左列同样截
+                let mut d = x - x0;
+                d = d.clamp(wr - COL_MAX, wr - COL_MIN);
+                if left.is_some() {
+                    d = d.clamp(COL_MIN - wl, COL_MAX - wl);
+                }
+                g.widths.insert(right, wr - d);
+                if let Some(l) = left {
+                    g.widths.insert(l, wl + d);
+                }
             }
         }
-        ChartUiMsg::DragStart(c, w, grow) => {
+        ChartUiMsg::DragStart(left, right, wl, wr) => {
             let x = g.mouse_x;
-            g.drag = Some((c, x, w, grow));
+            g.drag = Some((left, right, x, wl, wr));
         }
         ChartUiMsg::DragEnd => {
             // 鼠标每次离开表头都会发 DragEnd：没在拖就什么都不做，别每次都写文件
@@ -761,6 +770,29 @@ mod tests {
         let pv = EditSpec { key: "pivot_formula".into(), lo: 0.0, hi: 0.0, n: 0, options: vec!["standard".into(), "woodie".into()] };
         assert!(from_text(&pv, "woodie").is_ok() && from_text(&pv, "x").is_err());
         assert_eq!(to_text("bar_period_ms", &serde_json::json!(60000)), "60");
+    }
+
+    /// 拖一条分隔线只在它左右两列之间转移宽度（线跟着鼠标走、其余列不动），且两列都不越界。
+    /// 只发 Move / DragStart（不发 DragEnd / Auto，那两个会写盘）。
+    #[test]
+    fn 拖分隔线在相邻两列之间转移宽度() {
+        let (v0, a0) = (col_w(ChartCol::Value), col_w(ChartCol::Arrow));
+        handle_ui(ChartUiMsg::Move(100.0));
+        handle_ui(ChartUiMsg::DragStart(Some(ChartCol::Value), ChartCol::Arrow, v0, a0));
+        handle_ui(ChartUiMsg::Move(110.0));
+        assert_eq!(col_w(ChartCol::Value), v0 + 10.0);
+        assert_eq!(col_w(ChartCol::Arrow), a0 - 10.0);
+        // 拖过头：右列到下限就停，两列之和不变
+        handle_ui(ChartUiMsg::Move(100.0 + 10_000.0));
+        assert_eq!(col_w(ChartCol::Arrow), COL_MIN);
+        assert!((col_w(ChartCol::Value) + col_w(ChartCol::Arrow) - (v0 + a0)).abs() < 1e-3);
+        // 拖回原处 = 原宽度
+        handle_ui(ChartUiMsg::Move(100.0));
+        assert_eq!((col_w(ChartCol::Value), col_w(ChartCol::Arrow)), (v0, a0));
+        // 结束拖动但不写盘：直接清掉拖动状态
+        if let Ok(mut g) = ui_cell().lock() {
+            g.drag = None;
+        }
     }
 
     #[test]
