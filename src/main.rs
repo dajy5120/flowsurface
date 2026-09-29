@@ -323,6 +323,10 @@ impl Flowsurface {
                     sp.queue.push((l.id.unique, name.to_string()));
                 }
             }
+            // 只截某一个工作区（性能对照等场景：WS_UI_SPECIMEN_ONLY=新闻资讯）
+            if let Ok(only) = std::env::var("WS_UI_SPECIMEN_ONLY") {
+                sp.queue.retain(|(_, n)| *n == only);
+            }
             // 组件样张页只截一张
             if state.gallery.is_some() {
                 sp.queue.truncate(1);
