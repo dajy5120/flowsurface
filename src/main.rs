@@ -54,9 +54,14 @@ fn main() {
     // 启动画面上等十一个服务依次起来——各面板本来就能处理「守护还没起」。
     // 崩溃时也停掉守护。只覆盖 panic——SIGKILL 那一档要靠
     // `systemctl --user start ws-cockpit`（那时 BindsTo 接管）。
-    ws::lifecycle::install_panic_hook();
-    if let Err(e) = ws::lifecycle::start_all() {
-        log::warn!("拉起后台守护失败（{}）：{e}", ws::lifecycle::TARGET);
+    // 样张模式（docs/35）是日常 Cockpit 之外的第二个实例：**不碰守护**——
+    // 否则它退出时 stop_all 会把日常那个 Cockpit 的全部守护一起停掉。
+    let specimen = ws::specimen::enabled();
+    if !specimen {
+        ws::lifecycle::install_panic_hook();
+        if let Err(e) = ws::lifecycle::start_all() {
+            log::warn!("拉起后台守护失败（{}）：{e}", ws::lifecycle::TARGET);
+        }
     }
 
     // 网络出口的轮询**在这里起**，不是等谁打开那一页。
@@ -65,7 +70,9 @@ fn main() {
     ws::egress::start();
     // 「启动时对外连接开/关」（网络出口页上的设置）。**必须在 iced 起来之前**：
     // 设成关时行情订阅要在第一帧建连前就关掉，否则是先连上再断开
-    ws::egress::apply_startup();
+    if !specimen {
+        ws::egress::apply_startup();
+    }
 
     let daemon = iced::daemon(Flowsurface::new, Flowsurface::update, Flowsurface::view)
         .settings(iced::Settings {
@@ -108,6 +115,7 @@ struct Flowsurface {
     ws_flow: ws::flow::FlowState,                 // WealthSpring 订单流：CVD/不平衡/背离（F4a）
     ws_factory: ws::factory::FactoryPool,         // WealthSpring Factory 现役池（F4c）
     ws_signals: Option<ws::signals::Signals>,     // WealthSpring 引擎信号：吸收/撤补/冰山（F4b–d 精确版）
+    specimen: Option<ws::specimen::Specimen>,     // 界面样张模式（docs/35）：轮换工作区自截图
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +150,9 @@ enum Message {
     NetworkManager(modal::network_manager::Message),
     Layouts(modal::layout_manager::Message),
     AudioStream(modal::audio::Message),
+    /// 样张模式（docs/35）：每 500ms 一拍。
+    SpecimenStep(std::time::Instant),
+    SpecimenShot(iced::window::Screenshot),
 }
 
 impl Flowsurface {
@@ -187,6 +198,7 @@ impl Flowsurface {
             ws_flow: ws::flow::FlowState::default(),
             ws_factory: ws::factory::FactoryPool::default(),
             ws_signals: None,
+            specimen: ws::specimen::Specimen::from_env(),
         };
 
         if let Some(err) = audio_init_err {
@@ -203,6 +215,16 @@ impl Flowsurface {
         // WealthSpring 工作区（docs/08 F6 — P1）：幂等播种 5 个固定工作区
         // （官方原生 / 实盘 / 回测 / 数据录制 / Alpha Factory），不动用户已有 layout。
         ws::workspace::ensure_seeded(&mut state.layout_manager);
+
+        // 样张模式：按侧栏顺序排好要截的工作区
+        if let Some(sp) = state.specimen.as_mut() {
+            for name in ws::workspace::WORKSPACES {
+                if let Some(l) = state.layout_manager.layouts.iter().find(|l| l.id.name == name) {
+                    sp.queue.push((l.id.unique, name.to_string()));
+                }
+            }
+            log::info!("[specimen] {} 个工作区 → {}", sp.queue.len(), sp.dir.display());
+        }
 
         let active_layout_id = state
             .layout_manager
@@ -386,6 +408,30 @@ impl Flowsurface {
                     return window::collect_window_specs(active_windows, Message::ExitRequested);
                 }
             },
+            Message::SpecimenStep(now) => {
+                let main = self.main_window.id;
+                let step = match self.specimen.as_mut() {
+                    Some(sp) => sp.step(now),
+                    None => return Task::none(),
+                };
+                match step {
+                    ws::specimen::Step::Load(uid) => return self.load_layout(uid, main),
+                    ws::specimen::Step::Shoot => {
+                        return iced::window::screenshot(main).map(Message::SpecimenShot);
+                    }
+                    ws::specimen::Step::Nothing => {}
+                }
+            }
+            Message::SpecimenShot(shot) => {
+                let done = self
+                    .specimen
+                    .as_mut()
+                    .is_some_and(|sp| sp.save(&shot.rgba, shot.size.width, shot.size.height));
+                if done {
+                    log::info!("[specimen] 全部截完，退出");
+                    return iced::exit();
+                }
+            }
             Message::ExitRequested(windows) => {
                 self.save_state_to_disk(&windows);
                 // 特征面板发起的回放是 Cockpit 的子进程：关窗一起停
@@ -394,7 +440,9 @@ impl Flowsurface {
                 // 关界面 = 关掉全部后台守护（docs/26 S4b）。**先存盘再停**：
                 // 反过来的话，停服务那几十毫秒里用户已经看不到窗口了，
                 // 而布局还没落盘——崩在这中间就丢布局。
-                if let Err(e) = ws::lifecycle::stop_all() {
+                if self.specimen.is_none()
+                    && let Err(e) = ws::lifecycle::stop_all()
+                {
                     log::warn!("停止后台守护失败（{}）：{e}", ws::lifecycle::TARGET);
                 }
                 return iced::exit();
@@ -1078,6 +1126,11 @@ impl Flowsurface {
             ws::signals::subscription(ws_redis_url, "BTCUSDT".to_string()).map(Message::WsSignals);
 
         let tick = iced::window::frames().map(Message::Tick);
+        let specimen = if self.specimen.is_some() {
+            iced::time::every(std::time::Duration::from_millis(500)).map(Message::SpecimenStep)
+        } else {
+            Subscription::none()
+        };
 
         let hotkeys = keyboard::listen().filter_map(|event| {
             let keyboard::Event::KeyPressed { key, .. } = event else {
@@ -1090,6 +1143,7 @@ impl Flowsurface {
         });
 
         Subscription::batch(vec![
+            specimen,
             exchange_streams,
             ws_replay_streams,
             ws_selfdata_streams,

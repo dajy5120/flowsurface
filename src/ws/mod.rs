@@ -68,6 +68,7 @@ pub mod recorder_view;
 pub mod replay;
 pub mod selfdata;
 pub mod signals;
+pub mod specimen;
 pub mod staleness;
 pub mod svcctl;
 pub mod radar;

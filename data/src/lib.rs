@@ -132,7 +132,13 @@ pub fn open_url(url: &str) -> Result<(), InternalError> {
 
 pub fn data_path(path_name: Option<&str>) -> PathBuf {
     if let Ok(path) = std::env::var("FLOWSURFACE_DATA_PATH") {
-        PathBuf::from(path)
+        // 上游原来直接返回这个目录本身、不拼 `path_name`：设了它之后日志、状态、备份
+        // 全部写到同一个路径上，第一个写日志的就把目录覆盖成文件（docs/35 样张模式踩到）
+        let base = PathBuf::from(path);
+        match path_name {
+            Some(p) => base.join(p),
+            None => base,
+        }
     } else {
         let data_dir = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
         if let Some(path_name) = path_name {
