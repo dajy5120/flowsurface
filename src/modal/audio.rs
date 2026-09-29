@@ -55,6 +55,15 @@ impl AudioStream {
 
         let volume = cfg.volume;
 
+        // 音量关着就不打开音频设备（docs/35 §16.5）：打开的输出流会常驻 ALSA / PipeWire
+        // 两个线程，空闲时也占 CPU。调高音量时再打开（见 `SoundLevelChanged`）。
+        if volume.is_none() {
+            return (
+                AudioStream { cache: None, volume, init_error: None, streams, expanded_card: None },
+                None,
+            );
+        }
+
         match SoundCache::with_default_sounds(volume) {
             Ok(cache) => (
                 AudioStream {
@@ -92,8 +101,21 @@ impl AudioStream {
                     self.volume = Some(value.clamp(0.0, 100.0));
                 }
 
-                if let Some(cache) = &mut self.cache {
-                    cache.set_volume(value);
+                match (self.volume, &mut self.cache) {
+                    // 静音：关掉设备，释放常驻的音频线程
+                    (None, _) => self.cache = None,
+                    (Some(_), Some(cache)) => cache.set_volume(value),
+                    // 从静音调高：这时才打开设备
+                    (Some(_), None) => match SoundCache::with_default_sounds(self.volume) {
+                        Ok(cache) => {
+                            self.cache = Some(cache);
+                            self.init_error = None;
+                        }
+                        Err(err) => {
+                            log::error!("Audio initialization error: {err}");
+                            self.init_error = Some(err);
+                        }
+                    },
                 }
             }
             Message::ToggleStream(is_checked, (exchange, ticker)) => {

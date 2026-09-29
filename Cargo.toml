@@ -42,7 +42,6 @@ iced = { version = "0.14.0", default-features = false, features = [
     "canvas",
     "sipper",
     "advanced",
-    "unconditional-rendering",
     "crisp",
     "x11",
     "wayland",

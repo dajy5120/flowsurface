@@ -345,6 +345,14 @@ impl TickersTable {
         }))
         .map(|_| Message::FetchStats);
 
+        // 200ms 的防抖 / 加载动画 Tick **只在需要时订阅**（docs/35 §16.5）：原来一直在跑，
+        // 列表隐藏时也每秒发 5 条消息、每条触发一次整屏重绘，是空闲 CPU 的来源之一。
+        let needs_tick = self.stats_fetch_state.debounce_pending()
+            || (self.is_shown
+                && (self.stats_fetch_state.any_in_flight() || self.metadata_fetch_state.any_in_flight()));
+        if !needs_tick {
+            return stats_fetch;
+        }
         let debounce_tick =
             iced::time::every(Duration::from_millis(EXCHANGE_TOGGLE_DEBOUNCE_TICK_MS))
                 .map(|_| Message::DebounceExchangeFetchTick);
@@ -1629,6 +1637,10 @@ impl MetadataFetchState {
         self.in_flight_venues.contains(&venue)
     }
 
+    fn any_in_flight(&self) -> bool {
+        !self.in_flight_venues.is_empty()
+    }
+
     fn tick_loading_phase(&mut self) {
         if self.in_flight_venues.is_empty() {
             self.loading_phase = 0;
@@ -1753,6 +1765,11 @@ impl StatsFetchState {
         matches!(self.debounce, DebounceState::Waiting { deadline } if now >= deadline)
     }
 
+    /// A debounce deadline is pending (the 200ms tick must run until it fires).
+    fn debounce_pending(&self) -> bool {
+        matches!(self.debounce, DebounceState::Waiting { .. })
+    }
+
     /// Clears pending debounce after a debounced fetch attempt.
     fn clear_debounce(&mut self) {
         self.debounce = DebounceState::Idle;
@@ -1807,6 +1824,10 @@ impl StatsFetchState {
     /// Returns true when this venue currently has a running stats fetch.
     fn is_in_flight(&self, venue: Venue) -> bool {
         self.in_flight_venues.contains(&venue)
+    }
+
+    fn any_in_flight(&self) -> bool {
+        !self.in_flight_venues.is_empty()
     }
 
     /// Advances loading animation while any venue is in-flight.
