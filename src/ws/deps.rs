@@ -344,9 +344,25 @@ fn fork_behind(repo: &str) -> String {
     }
 }
 
+static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 此刻是不是正在查上游版本（在出网）。
+pub fn checking() -> bool {
+    CHECKING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// 查全部依赖的上游版本。**只在用户点「检查更新」时调**，且要在后台线程里跑
 /// （十几个 HTTP 请求，进渲染线程会卡住整个界面）。
 pub fn check_all() -> String {
+    // 网络出口页据此显示「检查中」——这一路没有常开连接，只在这段时间里出网
+    CHECKING.store(true, std::sync::atomic::Ordering::Relaxed);
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            CHECKING.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let _done = Done;
     refresh_local();
     let mut found = 0;
     let mut failed = 0;

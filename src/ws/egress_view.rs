@@ -123,7 +123,11 @@ fn section<'a>(
 /// 一路出口的一行（两块共用）。
 fn source_line<'a>(s: &egress::Source, r: &egress::Row) -> Element<'a, EgressMsg> {
     let external = s.scope == Scope::External;
+    let on_demand = s.key == "deps-check";
     let state = match (s.kind, r.on) {
+        // 按需的一路：平时就是没连，用「停着」会让人以为能「启动」它
+        _ if on_demand && r.on => ("● 检查中", C_EXT),
+        _ if on_demand => ("○ 按需", C_DIM),
         (Kind::Foreign, true) => ("● 在跑", C_DIM),
         (Kind::Foreign, false) => ("○ 没跑", C_DIM),
         // timer 的「在跑」是「会按时触发」，不是「此刻在执行」。
@@ -194,6 +198,7 @@ fn source_line<'a>(s: &egress::Source, r: &egress::Row) -> Element<'a, EgressMsg
     line = line.push(match s.kind {
         // 停掉本机代理，机器上别的东西全断——这一页不给这个按钮
         Kind::Foreign => cell("（不归这页管）".into(), 150.0, C_DIM, false),
+        _ if on_demand => cell("（按需，无常开连接）".into(), 150.0, C_DIM, false),
         _ if r.on => chip("停止", EgressMsg::Act(s.key.into(), "stop")),
         _ => chip("启动", EgressMsg::Act(s.key.into(), "start")),
     });

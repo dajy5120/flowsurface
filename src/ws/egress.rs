@@ -521,6 +521,14 @@ pub fn action(key: &str, act: &str) -> String {
         // 停掉本机代理，机器上别的东西全断。这不是本项目该管的
         return format!("✗ {} 不归这一页管——它是本项目之外的东西", s.label);
     }
+    if s.key == "deps-check" {
+        // 按需的一路：没有常开连接可停，也没有「开着」这种状态。
+        // 以前它和行情图共用同一个动作，点它的「停止」会把行情订阅关掉
+        return format!(
+            "✗ {} 没有常开连接——只在「进程」页点「检查更新」时发一次，查完即断",
+            s.label
+        );
+    }
     if s.kind == Kind::InProcess {
         set_streams_enabled(act == "start" || act == "enable");
         return format!(
@@ -633,13 +641,13 @@ fn start_external() -> usize {
 
 /// 「启动 Cockpit 时对外连接开不开」。存在 `egress_prefs.json`。
 ///
-/// **缺省是开**：这是加这个开关之前的行为，没设过的人不该被悄悄改掉。
+/// **缺省是关**（用户要求）：没设过的机器启动时不往外发包，要用哪一路再手动开。
 pub fn startup_external_on() -> bool {
     std::fs::read_to_string(prefs_path())
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v.get("startup_external")?.as_str().map(|s| s != "off"))
-        .unwrap_or(true)
+        .and_then(|v| v.get("startup_external")?.as_str().map(|s| s == "on"))
+        .unwrap_or(false)
 }
 
 pub fn set_startup_external(on: bool) -> String {
@@ -947,6 +955,10 @@ fn collect(prev: &mut Prev) -> Vec<Row> {
         let u = units.get(s.unit.trim_end_matches(".service")).cloned().unwrap_or_default();
         let pid = match s.kind {
             Kind::Foreign => pid_of(s.unit),
+            // 版本检查和行情图在**同一个进程**里，按进程数连接分不开两者——
+            // 以前两行显示一模一样的数，同一批连接被数了两遍。
+            // 连接统一记在行情图那一行；检查期间的那十几个 HTTP 请求也会落在那一行
+            Kind::InProcess if s.key == "deps-check" => 0,
             Kind::InProcess => std::process::id(),
             Kind::Service => {
                 if u.active { u.main_pid } else { 0 }
@@ -983,6 +995,11 @@ fn collect(prev: &mut Prev) -> Vec<Row> {
                     conns: (pid != 0).then_some(conns),
                     bps,
                     today,
+                    ..Default::default()
+                },
+                Kind::InProcess if s.key == "deps-check" => Row {
+                    key: s.key.into(),
+                    on: super::deps::checking(),
                     ..Default::default()
                 },
                 Kind::InProcess => Row {
@@ -1341,6 +1358,15 @@ mod tests {
         }
         // 本机代理本身不是本项目的，但它**就是**出网的那一跳
         assert_eq!(ALL.iter().find(|s| s.key == "proxy").unwrap().scope, Scope::External);
+    }
+
+    #[test]
+    fn the_on_demand_version_check_cannot_switch_off_the_market_streams() {
+        // 它和行情图同在一个进程里，曾共用同一个动作：点它的「停止」关掉的是行情订阅
+        let before = streams_enabled();
+        assert!(action("deps-check", "stop").starts_with('✗'));
+        assert!(action("deps-check", "start").starts_with('✗'));
+        assert_eq!(streams_enabled(), before);
     }
 
     #[test]
