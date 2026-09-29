@@ -1,0 +1,193 @@
+{
+  "$schema": "upds/token-export/1.0",
+  "system": "Universal Professional Desktop System",
+  "version": "1.0.0",
+  "note": "Technology-neutral token export. Values are device-independent units; colors are oklch. Adapters resolve fontFamily; everything else is universal core.",
+
+  "color": {
+    "theme": {
+      "light": {
+        "surface.base": "oklch(0.955 0.004 255)",
+        "surface.primary": "oklch(0.995 0.002 255)",
+        "surface.secondary": "oklch(0.975 0.003 255)",
+        "surface.elevated": "oklch(1 0 0)",
+        "surface.well": "oklch(0.968 0.003 255)",
+        "border.subtle": "oklch(0.93 0.004 255)",
+        "border.default": "oklch(0.88 0.006 255)",
+        "border.strong": "oklch(0.84 0.006 255)",
+        "text.primary": "oklch(0.28 0.012 255)",
+        "text.secondary": "oklch(0.50 0.010 255)",
+        "text.tertiary": "oklch(0.62 0.008 255)",
+        "text.disabled": "oklch(0.62 0.008 255 / 0.38)",
+        "accent.primary": "oklch(0.52 0.14 255)",
+        "accent.soft": "oklch(0.52 0.14 255 / 0.14)",
+        "status.success": "oklch(0.50 0.14 150)",
+        "status.warning": "oklch(0.55 0.13 75)",
+        "status.danger": "oklch(0.52 0.16 25)",
+        "status.info": "oklch(0.50 0.13 205)",
+        "state.hover": "oklch(0.28 0.012 255 / 0.05)",
+        "state.scrim": "oklch(0.28 0.012 255 / 0.22)"
+      },
+      "dark": {
+        "surface.base": "oklch(0.175 0.008 255)",
+        "surface.primary": "oklch(0.205 0.008 255)",
+        "surface.secondary": "oklch(0.24 0.008 255)",
+        "surface.elevated": "oklch(0.275 0.009 255)",
+        "surface.well": "oklch(0.19 0.008 255)",
+        "border.subtle": "oklch(0.28 0.008 255)",
+        "border.default": "oklch(0.34 0.010 255)",
+        "border.strong": "oklch(0.40 0.010 255)",
+        "text.primary": "oklch(0.945 0.004 255)",
+        "text.secondary": "oklch(0.745 0.008 255)",
+        "text.tertiary": "oklch(0.615 0.009 255)",
+        "text.disabled": "oklch(0.615 0.009 255 / 0.38)",
+        "accent.primary": "oklch(0.62 0.15 255)",
+        "accent.soft": "oklch(0.52 0.14 255 / 0.24)",
+        "status.success": "oklch(0.74 0.14 150)",
+        "status.warning": "oklch(0.78 0.13 75)",
+        "status.danger": "oklch(0.72 0.14 25)",
+        "status.info": "oklch(0.74 0.12 205)",
+        "state.hover": "oklch(1 0 0 / 0.06)",
+        "state.scrim": "oklch(0.12 0.01 255 / 0.50)"
+      },
+      "oledDark": {
+        "extends": "dark",
+        "surface.base": "oklch(0 0 0)",
+        "surface.primary": "oklch(0.09 0.004 255)",
+        "surface.secondary": "oklch(0.14 0.006 255)",
+        "surface.elevated": "oklch(0.19 0.008 255)",
+        "surface.well": "oklch(0.045 0.003 255)",
+        "border.subtle": "oklch(0.22 0.008 255)",
+        "border.default": "oklch(0.30 0.010 255)"
+      },
+      "highContrast": {
+        "note": "Values are supplied by the OS high-contrast theme; the app maps its semantic names onto system colors and must not substitute its own. Minimums below are contractual.",
+        "text.minContrast": 7.0,
+        "nonText.minContrast": 4.5,
+        "focus.minContrast": 4.5,
+        "materials": "disabled — all translucency falls back to Elevated"
+      }
+    }
+  },
+
+  "space": { "0": 2, "1": 4, "2": 6, "3": 8, "4": 12, "5": 16, "6": 24, "7": 32, "8": 48 },
+
+  "radius": { "none": 0, "sm": 2, "md": 4, "lg": 6 },
+
+  "border": { "hairline": 1, "strong": 1, "focus": 2, "focusOffset": 1 },
+
+  "elevation": {
+    "e0": "none",
+    "e1": "0 1px 2px rgb(0 0 0 / 0.10)",
+    "e2": "0 2px 6px rgb(0 0 0 / 0.12)",
+    "e3": "0 6px 18px rgb(0 0 0 / 0.16)",
+    "e4": "0 14px 40px rgb(0 0 0 / 0.20)"
+  },
+
+  "opacity": { "disabled": 0.38, "ghost": 0.06, "hover": 0.08, "scrim": 0.40 },
+
+  "blur": { "thin": 8, "regular": 20, "thick": 40 },
+
+  "motion": {
+    "instant":    { "duration": 0,   "easing": "none" },
+    "micro":      { "duration": 80,  "easing": "cubic-bezier(0, 0, 0.2, 1)" },
+    "transient":  { "duration": 120, "easing": "cubic-bezier(0.2, 0, 0, 1)" },
+    "structural": { "duration": 160, "easing": "cubic-bezier(0.2, 0, 0, 1)" },
+    "modal":      { "duration": 180, "easing": "cubic-bezier(0.16, 1, 0.3, 1)" },
+    "reduced":    { "duration": 0,   "easing": "none", "note": "cross-fade opacity only" }
+  },
+
+  "typography": {
+    "fontFamily": {
+      "windows": { "ui": "Segoe UI Variable Text", "uiDisplay": "Segoe UI Variable Display", "mono": "Cascadia Mono" },
+      "macos":   { "ui": "SF Pro Text", "uiDisplay": "SF Pro Display", "mono": "SF Mono" },
+      "linux":   { "ui": "system-ui", "uiDisplay": "system-ui", "mono": "Source Code Pro" },
+      "fallback":{ "ui": "IBM Plex Sans", "uiDisplay": "IBM Plex Sans", "mono": "IBM Plex Mono" }
+    },
+    "opticalSizeSwitch": 24,
+    "role": {
+      "display":  { "size": 30,   "lineHeight": 34, "weight": 600, "tracking": -0.020 },
+      "title":    { "size": 20,   "lineHeight": 26, "weight": 600, "tracking": -0.012 },
+      "section":  { "size": 15,   "lineHeight": 20, "weight": 600, "tracking": 0 },
+      "body":     { "size": 13,   "lineHeight": 19, "weight": 400, "tracking": 0 },
+      "label":    { "size": 13,   "lineHeight": 16, "weight": 500, "tracking": 0 },
+      "caption":  { "size": 12,   "lineHeight": 16, "weight": 400, "tracking": 0 },
+      "metadata": { "size": 10.5, "lineHeight": 14, "weight": 500, "tracking": 0.090, "transform": "uppercase", "family": "mono" },
+      "numeric":  { "size": 13,   "lineHeight": 18, "weight": 400, "tracking": 0, "family": "mono", "numerals": "tabular", "align": "right" },
+      "code":     { "size": 12.5, "lineHeight": 18, "weight": 400, "tracking": 0, "family": "mono" }
+    }
+  },
+
+  "density": {
+    "compact":     { "row": 22, "control": 24, "toolbar": 32, "panelHeader": 26, "padding": 8,  "fontSize": 12,   "icon": 14 },
+    "comfortable": { "row": 28, "control": 28, "toolbar": 38, "panelHeader": 30, "padding": 12, "fontSize": 13,   "icon": 16 },
+    "spacious":    { "row": 36, "control": 34, "toolbar": 44, "panelHeader": 36, "padding": 16, "fontSize": 14,   "icon": 18 },
+    "touchMinTarget": 32
+  },
+
+  "material": {
+    "solid":       { "opacity": 1.00, "blur": 0,  "use": "panels, grids, editors" },
+    "subtle":      { "opacity": 1.00, "blur": 0,  "use": "sidebars, toolbars, headers" },
+    "elevated":    { "opacity": 1.00, "blur": 0,  "elevation": "e2", "use": "menus and popovers without blur" },
+    "translucent": { "opacity": 0.72, "blur": 8,  "use": "floating toolbars, notifications" },
+    "glass":       { "opacity": 0.55, "blur": 20, "use": "command palette, menus, overlays" },
+    "acrylic":     { "opacity": 0.86, "blur": 40, "use": "window backdrop (Windows Mica-class)" },
+    "fallback":    "elevated",
+    "fallbackWhen": ["reduced transparency", "high contrast", "remote session", "software renderer", "battery saver"]
+  },
+
+  "layout": {
+    "splitter":        { "line": 1, "hitArea": 8, "keyStep": 8, "keyStepFine": 1 },
+    "panelMin":        { "width": 180, "height": 96 },
+    "sidebar":         { "rail": 44, "min": 180, "max": 480 },
+    "scrollbar":       { "idle": 10, "hover": 14 },
+    "pointerTarget":   { "min": 22, "touch": 32, "separation": 2 },
+    "iconLabelGap":    { "default": 8, "compact": 6 },
+    "treeIndent":      16,
+    "appZoom":         { "min": 0.8, "max": 2.0, "step": 0.1 },
+    "textMeasure":     { "max": 90, "ideal": [60, 75], "unit": "ch" },
+    "breakpoint":      [900, 1280, 1920, 2560],
+    "dpiScale":        [1.0, 1.25, 1.5, 1.75, 2.0]
+  },
+
+  "icon": {
+    "grid": 16,
+    "liveArea": 14,
+    "sizes": [14, 16, 18, 20, 24],
+    "stroke": { "14": 1.25, "16": 1.25, "18": 1.5, "20": 1.5, "24": 2 },
+    "cornerRadius": 1,
+    "color": "currentColor"
+  },
+
+  "performance": {
+    "keystrokeToGlyph": 16,
+    "pointerFeedback": 32,
+    "scrollFps": 60,
+    "paneSwitch": 100,
+    "paletteFirstResults": 50,
+    "coldLaunch": 1500,
+    "idleCpuPercent": 2,
+    "unit": "ms unless stated"
+  },
+
+  "dataSemantics": {
+    "absence": {
+      "zero": "0.00",
+      "missing": "—",
+      "notApplicable": "n/a",
+      "unknown": "···",
+      "withheld": "•••",
+      "invalid": "!"
+    },
+    "provenanceMarker": {
+      "measured": "none",
+      "derived": "italic + leading dot",
+      "stale": "dimmed + age",
+      "estimated": "dotted underline",
+      "overridden": "leading caret",
+      "simulated": "leading tilde"
+    },
+    "rounding": { "money": "half-away-from-zero", "measurement": "half-to-even" },
+    "sorting": { "identifiers": "natural", "text": "locale collation", "absences": "always last" }
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "$schema": "upds/domain-pack/1.0",
+  "pack": "WealthSpring 交易领域包",
+  "version": "1.0.0",
+  "extends": "upds-tokens.json 1.0.0",
+  "note": "UPDS V7 §67：领域语义叠在核心之上，不改核心 token。颜色一律 oklch 或 #rrggbb；每个 token 必须在四个主题下都有值（build.rs 校验）。每个颜色在界面上都要配非颜色的区分方式（▲▼、文字、位置）。",
+
+  "highContrastCore": {
+    "note": "UPDS 规定高对比由操作系统提供；Linux 没有可靠的系统高对比 API（docs/35 D10），这里给一套满足合同最低值的应用内版本：正文 ≥7:1、非文字 ≥4.5:1。",
+    "surface.base": "oklch(0 0 0)",
+    "surface.primary": "oklch(0 0 0)",
+    "surface.secondary": "oklch(0.13 0 0)",
+    "surface.elevated": "oklch(0.18 0 0)",
+    "surface.well": "oklch(0 0 0)",
+    "border.subtle": "oklch(0.62 0 0)",
+    "border.default": "oklch(0.82 0 0)",
+    "border.strong": "oklch(1 0 0)",
+    "text.primary": "oklch(1 0 0)",
+    "text.secondary": "oklch(0.93 0 0)",
+    "text.tertiary": "oklch(0.86 0 0)",
+    "text.disabled": "oklch(0.86 0 0 / 0.55)",
+    "accent.primary": "oklch(0.86 0.14 200)",
+    "accent.soft": "oklch(0.86 0.14 200 / 0.32)",
+    "status.success": "oklch(0.88 0.18 150)",
+    "status.warning": "oklch(0.91 0.17 100)",
+    "status.danger": "oklch(0.80 0.17 30)",
+    "status.info": "oklch(0.88 0.12 220)",
+    "state.hover": "oklch(1 0 0 / 0.14)",
+    "state.scrim": "oklch(0 0 0 / 0.70)"
+  },
+
+  "theme": {
+    "dark": {
+      "trade.green": "oklch(0.74 0.15 150)",
+      "trade.red": "oklch(0.70 0.17 25)",
+      "trade.green.cvd": "oklch(0.76 0.12 225)",
+      "trade.red.cvd": "oklch(0.80 0.15 60)",
+      "trade.flat": "oklch(0.745 0.008 255)",
+      "trade.large": "oklch(0.82 0.14 85)",
+      "book.spread": "oklch(0.745 0.008 255 / 0.22)",
+      "footprint.poc": "oklch(0.84 0.15 90)",
+      "footprint.naked_poc": "oklch(0.84 0.15 90 / 0.65)",
+      "order.working": "oklch(0.72 0.13 255)",
+      "order.cancelled": "oklch(0.615 0.009 255)",
+      "position.avg": "oklch(0.76 0.13 305)",
+      "env.live": "oklch(0.68 0.19 27)",
+      "env.paper": "oklch(0.80 0.14 80)",
+      "env.backtest": "oklch(0.72 0.13 255)",
+      "env.replay": "oklch(0.74 0.13 305)",
+      "env.idle": "oklch(0.615 0.009 255)",
+      "chart.grid": "oklch(0.945 0.004 255 / 0.12)",
+      "chart.axis": "oklch(0.745 0.008 255)",
+      "chart.crosshair": "oklch(0.945 0.004 255 / 0.55)",
+      "chart.reference": "oklch(0.78 0.13 75)",
+      "chart.series": [
+        "oklch(0.62 0.15 255)", "oklch(0.78 0.10 255)", "oklch(0.52 0.12 255)",
+        "oklch(0.76 0.12 205)", "oklch(0.80 0.13 75)", "oklch(0.72 0.14 305)",
+        "oklch(0.74 0.14 150)", "oklch(0.72 0.15 25)"
+      ]
+    },
+    "light": {
+      "trade.green": "oklch(0.52 0.14 150)",
+      "trade.red": "oklch(0.53 0.17 25)",
+      "trade.green.cvd": "oklch(0.50 0.13 240)",
+      "trade.red.cvd": "oklch(0.58 0.15 55)",
+      "trade.flat": "oklch(0.50 0.010 255)",
+      "trade.large": "oklch(0.56 0.13 75)",
+      "book.spread": "oklch(0.50 0.010 255 / 0.18)",
+      "footprint.poc": "oklch(0.58 0.14 80)",
+      "footprint.naked_poc": "oklch(0.58 0.14 80 / 0.65)",
+      "order.working": "oklch(0.52 0.14 255)",
+      "order.cancelled": "oklch(0.60 0.008 255)",
+      "position.avg": "oklch(0.50 0.15 305)",
+      "env.live": "oklch(0.54 0.19 27)",
+      "env.paper": "oklch(0.58 0.13 75)",
+      "env.backtest": "oklch(0.52 0.14 255)",
+      "env.replay": "oklch(0.50 0.15 305)",
+      "env.idle": "oklch(0.58 0.008 255)",
+      "chart.grid": "oklch(0.28 0.012 255 / 0.12)",
+      "chart.axis": "oklch(0.50 0.010 255)",
+      "chart.crosshair": "oklch(0.28 0.012 255 / 0.55)",
+      "chart.reference": "oklch(0.56 0.13 75)",
+      "chart.series": [
+        "oklch(0.52 0.14 255)", "oklch(0.40 0.10 255)", "oklch(0.64 0.10 255)",
+        "oklch(0.52 0.12 205)", "oklch(0.58 0.13 75)", "oklch(0.50 0.15 305)",
+        "oklch(0.52 0.14 150)", "oklch(0.53 0.16 25)"
+      ]
+    },
+    "oledDark": { "extends": "dark" },
+    "highContrast": {
+      "trade.green": "oklch(0.88 0.19 150)",
+      "trade.red": "oklch(0.78 0.19 27)",
+      "trade.green.cvd": "oklch(0.86 0.13 225)",
+      "trade.red.cvd": "oklch(0.88 0.16 70)",
+      "trade.flat": "oklch(0.93 0 0)",
+      "trade.large": "oklch(0.92 0.17 95)",
+      "book.spread": "oklch(1 0 0 / 0.30)",
+      "footprint.poc": "oklch(0.92 0.17 95)",
+      "footprint.naked_poc": "oklch(0.92 0.17 95 / 0.75)",
+      "order.working": "oklch(0.86 0.14 200)",
+      "order.cancelled": "oklch(0.86 0 0)",
+      "position.avg": "oklch(0.86 0.13 305)",
+      "env.live": "oklch(0.78 0.19 27)",
+      "env.paper": "oklch(0.91 0.17 95)",
+      "env.backtest": "oklch(0.86 0.14 220)",
+      "env.replay": "oklch(0.86 0.13 305)",
+      "env.idle": "oklch(0.86 0 0)",
+      "chart.grid": "oklch(1 0 0 / 0.28)",
+      "chart.axis": "oklch(0.93 0 0)",
+      "chart.crosshair": "oklch(1 0 0 / 0.80)",
+      "chart.reference": "oklch(0.91 0.17 95)",
+      "chart.series": [
+        "oklch(0.86 0.14 200)", "oklch(0.92 0.17 95)", "oklch(0.86 0.13 305)",
+        "oklch(0.88 0.18 150)", "oklch(0.80 0.17 30)", "oklch(0.95 0 0)",
+        "oklch(0.86 0.12 250)", "oklch(0.88 0.14 60)"
+      ]
+    }
+  },
+
+  "heatmapScale": {
+    "note": "感知均匀色阶，与主题无关（数据的颜色不随主题变，UPDS V7 §61：界面色与内容色分管线）。缺省 inferno；viridis / cividis 为色弱友好备选。",
+    "inferno": ["#000004", "#420a68", "#932667", "#dd513a", "#fca50a", "#fcffa4"],
+    "viridis": ["#440154", "#414487", "#2a788e", "#22a884", "#7ad151", "#fde725"],
+    "cividis": ["#00224e", "#35456c", "#666970", "#948e77", "#c8b866", "#fee838"]
+  },
+
+  "font": {
+    "note": "界面是中文：UI 字体必须带 CJK；等宽字体必须中英 2:1 严格等宽，表格里中文与数字混排才不错位（docs/35 §4.3）。按顺序取第一个装了的。",
+    "ui": ["Noto Sans CJK SC", "Source Han Sans SC", "IBM Plex Sans"],
+    "mono": ["Sarasa Mono SC", "Noto Sans Mono CJK SC", "IBM Plex Mono"]
+  },
+
+  "defaults": {
+    "theme": "dark",
+    "density": "compact",
+    "upDown": "international",
+    "cvdSafe": false,
+    "heatmapScale": "inferno"
+  }
+}
