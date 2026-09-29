@@ -282,7 +282,7 @@ pub fn card_params(card_id: &str) -> &'static [&'static str] {
         "c08" => &["depth_levels", "recent_traded_secs"],
         "c09" => &["heatmap_levels"],
         "c10" => &["bar_period_ms"],
-        "c11" => &["large_trade_mode", "large_trade_qty", "large_trade_median_pct"],
+        "c11" => &["large_trade_mode"],
         _ => &[],
     }
 }
@@ -311,7 +311,7 @@ pub fn param_label(k: &str) -> &'static str {
         "depth_levels" => "深度档数",
         "recent_traded_secs" => "近期成交窗口",
         "heatmap_levels" => "热图档数",
-        "large_trade_mode" => "大单模式",
+        "large_trade_mode" => "大单阈值",
         "large_trade_qty" => "大单固定阈值",
         "large_trade_median_pct" => "高于中位数",
         _ => "",
@@ -329,6 +329,8 @@ pub fn param_text(k: &str, v: &serde_json::Value) -> String {
         ("value_area_pct" | "imbalance_ratio_pct" | "large_trade_median_pct", Some(x)) => format!("{x}%"),
         ("tpo_period_min" | "opening_range_min", Some(x)) => format!("{x} 分钟"),
         ("recent_traded_secs", Some(x)) => format!("{x} 秒"),
+        ("heatmap_levels" | "depth_levels", Some(x)) => format!("前 {x} 档"),
+        ("large_trade_mode", _) if v.as_str() == Some("p95_5m") => "近 5 分钟单笔 P95（与大单特征同一阈值）".into(),
         _ => match v {
             serde_json::Value::String(t) => t.clone(),
             serde_json::Value::Array(a) => a.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" / "),
