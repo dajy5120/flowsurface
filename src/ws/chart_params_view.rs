@@ -7,7 +7,7 @@
 use iced::widget::{button, column, container, row, text, text_input, tooltip};
 use iced::{Alignment, Color, Element, Length};
 
-use super::chart_params::{self as cp, Card, Cell, ChartEditMsg, SlotIndex};
+use super::chart_params::{self as cp, Card, Cell, ChartCol, ChartEditMsg, ChartUiMsg, SlotIndex};
 use super::feature_matrix::FeatureMatrixMsg as Msg;
 use super::feature_matrix_readout::Matrix;
 
@@ -23,7 +23,6 @@ const C_BORDER: Color = Color::from_rgba(0.72, 0.78, 0.88, 0.28);
 const C_CARD_BG: Color = Color::from_rgba(0.55, 0.62, 0.75, 0.05);
 
 const W_LABEL: f32 = 150.0;
-const W_VALUE: f32 = 118.0;
 
 fn tip<'a>(e: impl Into<Element<'a, Msg>>, t: String) -> Element<'a, Msg> {
     tooltip(e, container(text(t).size(11)).style(crate::style::tooltip).padding(6), tooltip::Position::Top).into()
@@ -52,10 +51,10 @@ const C_DOWN: Color = Color::from_rgb(0.93, 0.36, 0.34);
 /// 卡片最小宽度：窄于它就减少列数。
 const CARD_MIN_W: f32 = 260.0;
 const GAP: f32 = 8.0;
-const W_ARROW: f32 = 48.0;
-const W_TAG: f32 = 20.0;
-const ROW_H: f32 = 19.0;
+/// 分隔线（含可拖的把手）的宽度。
+const SEP: f32 = 5.0;
 
+/// 竖线：高度随所在行（行高随文字折行自动撑开）。
 fn vline<'a>(c: Color) -> Element<'a, Msg> {
     container(iced::widget::rule::vertical(1.0).style(move |_t: &iced::Theme| iced::widget::rule::Style {
         color: c,
@@ -63,8 +62,27 @@ fn vline<'a>(c: Color) -> Element<'a, Msg> {
         fill_mode: iced::widget::rule::FillMode::Full,
         snap: true,
     }))
-    .height(Length::Fixed(ROW_H))
+    .width(Length::Fixed(SEP))
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
     .into()
+}
+
+/// 表头里的分隔把手：拖动调宽度，双击回到默认宽度。`grow` = 往右拖是加宽这一列（否则是变窄——
+/// 「参数」与「值」之间那条线往右拖，参数列变宽、值列变窄）。
+fn grip<'a>(col: ChartCol, grow: bool) -> Element<'a, Msg> {
+    iced::widget::mouse_area(vline(C_HEAD_LINE))
+        .on_press(Msg::ChartUi(ChartUiMsg::DragStart(col, cp::col_w(col), grow)))
+        .on_double_click(Msg::ChartUi(ChartUiMsg::Auto(col)))
+        .interaction(iced::mouse::Interaction::ResizingHorizontally)
+        .into()
+}
+
+/// 滚动条单独占一条、不压在内容上。
+fn vscroll<'a>(e: impl Into<Element<'a, Msg>>) -> iced::widget::Scrollable<'a, Msg> {
+    iced::widget::scrollable(e).direction(iced::widget::scrollable::Direction::Vertical(
+        iced::widget::scrollable::Scrollbar::new().width(6).scroller_width(6).spacing(3),
+    ))
 }
 
 fn hline<'a>(c: Color) -> Element<'a, Msg> {
@@ -78,12 +96,11 @@ fn hline<'a>(c: Color) -> Element<'a, Msg> {
         .into()
 }
 
-/// 定宽 / 填满的格子：垂直居中、裁掉溢出。
+/// 定宽 / 填满的格子：行高随内容（文字折成两行时整行撑高），垂直居中。
 fn cell<'a>(e: impl Into<Element<'a, Msg>>, w: Length, right: bool) -> Element<'a, Msg> {
     container(e)
         .width(w)
-        .height(Length::Fixed(ROW_H))
-        .padding([0, 4])
+        .padding([2, 4])
         .align_y(Alignment::Center)
         .align_x(if right { Alignment::End } else { Alignment::Start })
         .clip(true)
@@ -212,11 +229,12 @@ fn card_view<'a>(
             row![
                 cell(text(r.label.clone()).size(11).color(C_TXT), Length::Fill, false),
                 vline(C_LINE),
-                cell(text(val).size(11).color(color), Length::Fixed(W_VALUE), true),
+                cell(text(val).size(11).color(color), Length::Fixed(cp::col_w(ChartCol::Value)), true),
                 vline(C_LINE),
-                cell(text(arr).size(10).color(arr_c), Length::Fixed(W_ARROW), false),
+                cell(text(arr).size(10).color(arr_c), Length::Fixed(cp::col_w(ChartCol::Arrow)), false),
                 vline(C_LINE),
-                cell(text(tag).size(9).color(tag_c), Length::Fixed(W_TAG), false),
+                cell(text(tag).size(9).color(tag_c), Length::Fixed(cp::col_w(ChartCol::Tag)), false),
+                vline(C_LINE),
             ]
             .align_y(Alignment::Center),
         )
@@ -248,9 +266,10 @@ fn card_view<'a>(
                 row![
                     cell(text(if is_now { "▶ 现价".to_string() } else { label.clone() }).size(10).color(col), Length::Fill, false),
                     vline(C_LINE),
-                    cell(text(cp::format("price", Some(*p), None, m.tick_size)).size(10).color(col), Length::Fixed(W_VALUE), true),
+                    cell(text(cp::format("price", Some(*p), None, m.tick_size)).size(10).color(col), Length::Fixed(cp::col_w(ChartCol::Value)), true),
                     vline(C_LINE),
-                    cell(text(dist).size(9).color(C_DIM), Length::Fixed(W_ARROW + W_TAG + 1.0), true),
+                    cell(text(dist).size(9).color(C_DIM), Length::Fixed(cp::col_w(ChartCol::Arrow) + cp::col_w(ChartCol::Tag) + SEP), true),
+                    vline(C_LINE),
                 ]
                 .align_y(Alignment::Center),
             );
@@ -287,24 +306,31 @@ fn card_view<'a>(
     .padding([4, 6])
     .width(Length::Fill)
     .style(|_t: &iced::Theme| container::Style { background: Some(iced::Background::Color(C_BAND)), ..Default::default() });
-    // 表头
-    let head = row![
-        cell(text("参数").size(10).color(C_HEAD), Length::Fill, false),
-        vline(C_HEAD_LINE),
-        cell(text("值").size(10).color(C_HEAD), Length::Fixed(W_VALUE), true),
-        vline(C_HEAD_LINE),
-        cell(text("涨跌").size(10).color(C_HEAD), Length::Fixed(W_ARROW), false),
-        vline(C_HEAD_LINE),
-        cell(text("源").size(10).color(C_HEAD), Length::Fixed(W_TAG), false),
-    ]
-    .align_y(Alignment::Center);
+    // 表头：分隔线可拖（所有卡片共用一组列宽），双击回到默认
+    let head = iced::widget::mouse_area(
+        row![
+            cell(text("参数").size(10).color(C_HEAD), Length::Fill, false),
+            grip(ChartCol::Value, false),
+            cell(text("值").size(10).color(C_HEAD), Length::Fixed(cp::col_w(ChartCol::Value)), true),
+            grip(ChartCol::Value, true),
+            cell(text("涨跌").size(10).color(C_HEAD), Length::Fixed(cp::col_w(ChartCol::Arrow)), false),
+            grip(ChartCol::Arrow, true),
+            cell(text("源").size(10).color(C_HEAD), Length::Fixed(cp::col_w(ChartCol::Tag)), false),
+            grip(ChartCol::Tag, true),
+        ]
+        .height(Length::Fixed(22.0))
+        .align_y(Alignment::Center),
+    )
+    .on_move(|p| Msg::ChartUi(ChartUiMsg::Move(p.x)))
+    .on_release(Msg::ChartUi(ChartUiMsg::DragEnd))
+    .on_exit(Msg::ChartUi(ChartUiMsg::DragEnd));
 
     container(
         column![
             band,
             head,
             hline(C_HEAD_LINE),
-            iced::widget::scrollable(body).height(Length::Fill),
+            vscroll(body).height(Length::Fill),
         ]
         .spacing(0),
     )
@@ -480,7 +506,7 @@ pub fn view<'a>(m: &Matrix) -> Element<'a, Msg> {
         if rows <= 2 {
             g.into()
         } else {
-            iced::widget::scrollable(g).height(Length::Fill).into()
+            vscroll(g).height(Length::Fill).into()
         }
     });
     b = b.push(container(grid).width(Length::Fill).height(Length::Fill));

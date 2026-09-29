@@ -552,6 +552,8 @@ pub enum FeatureMatrixMsg {
     Source(super::feature_source::SourceMsg),
     /// 图表参数的口径设置（docs/33 批 4，见 [`super::chart_params::handle_edit`]）。
     ChartEdit(super::chart_params::ChartEditMsg),
+    /// 图表参数卡片的列宽（表头拖分隔线）。
+    ChartUi(super::chart_params::ChartUiMsg),
 }
 
 static STATE: OnceLock<Mutex<ViewState>> = OnceLock::new();
@@ -690,6 +692,7 @@ pub fn handle(m: FeatureMatrixMsg) -> Option<f32> {
             }
         }
         FeatureMatrixMsg::Engine(act) => engine_action(act),
+        FeatureMatrixMsg::ChartUi(u) => super::chart_params::handle_ui(u),
         FeatureMatrixMsg::ChartEdit(e) => {
             let snap = super::feature_matrix_readout::snapshot();
             super::chart_params::handle_edit(e, &snap.chart, |label, edit| write_and_restart(label, edit));
@@ -1254,6 +1257,7 @@ pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
         FeatureMatrixMsg::Engine(_)
         | FeatureMatrixMsg::Source(_)
         | FeatureMatrixMsg::ChartEdit(_)
+        | FeatureMatrixMsg::ChartUi(_)
         | FeatureMatrixMsg::SetMode(_)
         | FeatureMatrixMsg::ApplyPicker
         | FeatureMatrixMsg::OpenPicker

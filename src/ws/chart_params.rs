@@ -451,6 +451,123 @@ pub fn mismatches(card_id: &str, params: &serde_json::Map<String, serde_json::Va
     out
 }
 
+// ── 卡片列宽（表头拖分隔线调；所有卡片共用，存盘）──────────────────────────────
+
+/// 卡片表格里可调宽的列（「参数」列占剩下的宽度）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChartCol {
+    Value,
+    Arrow,
+    Tag,
+}
+
+impl ChartCol {
+    pub const ALL: [Self; 3] = [Self::Value, Self::Arrow, Self::Tag];
+
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Value => "value",
+            Self::Arrow => "arrow",
+            Self::Tag => "tag",
+        }
+    }
+
+    #[must_use]
+    pub const fn default_w(self) -> f32 {
+        match self {
+            Self::Value => 110.0,
+            Self::Arrow => 48.0,
+            Self::Tag => 22.0,
+        }
+    }
+}
+
+/// 列宽的上下限。
+pub const COL_MIN: f32 = 16.0;
+pub const COL_MAX: f32 = 320.0;
+
+/// 列宽消息。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChartUiMsg {
+    /// 在某条分隔线上按下：`(列, 当前宽度, 往右拖是加宽还是变窄)`。
+    DragStart(ChartCol, f32, bool),
+    /// 鼠标在表头里移动（相对表头的 x）。
+    Move(f32),
+    DragEnd,
+    /// 双击分隔线：这一列回到默认宽度。
+    Auto(ChartCol),
+}
+
+#[derive(Debug, Clone, Default)]
+struct Ui {
+    widths: std::collections::HashMap<ChartCol, f32>,
+    mouse_x: f32,
+    /// (列, 按下时的 x, 按下时的宽度, 往右拖加宽)。
+    drag: Option<(ChartCol, f32, f32, bool)>,
+}
+
+static UI: std::sync::OnceLock<std::sync::Mutex<Ui>> = std::sync::OnceLock::new();
+
+fn ui_path() -> std::path::PathBuf {
+    super::paths::data_dir().join("cockpit").join("chart_params_ui.json")
+}
+
+fn ui_cell() -> &'static std::sync::Mutex<Ui> {
+    UI.get_or_init(|| {
+        let v: serde_json::Value =
+            std::fs::read_to_string(ui_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let widths = ChartCol::ALL
+            .iter()
+            .filter_map(|c| v["widths"][c.key()].as_f64().map(|w| (*c, (w as f32).clamp(COL_MIN, COL_MAX))))
+            .collect();
+        std::sync::Mutex::new(Ui { widths, ..Ui::default() })
+    })
+}
+
+/// 某列当前宽度。
+#[must_use]
+pub fn col_w(c: ChartCol) -> f32 {
+    ui_cell().lock().ok().and_then(|g| g.widths.get(&c).copied()).unwrap_or(c.default_w())
+}
+
+fn save_ui(g: &Ui) {
+    let o: serde_json::Map<String, serde_json::Value> =
+        g.widths.iter().map(|(c, w)| (c.key().to_string(), serde_json::json!(w.round()))).collect();
+    let p = ui_path();
+    let _ = std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new(".")));
+    let _ = std::fs::write(p, serde_json::json!({ "widths": o }).to_string());
+}
+
+/// 处理列宽消息。
+pub fn handle_ui(m: ChartUiMsg) {
+    let Ok(mut g) = ui_cell().lock() else { return };
+    match m {
+        ChartUiMsg::Move(x) => {
+            g.mouse_x = x;
+            if let Some((c, x0, w0, grow)) = g.drag {
+                let d = if grow { x - x0 } else { x0 - x };
+                g.widths.insert(c, (w0 + d).clamp(COL_MIN, COL_MAX));
+            }
+        }
+        ChartUiMsg::DragStart(c, w, grow) => {
+            let x = g.mouse_x;
+            g.drag = Some((c, x, w, grow));
+        }
+        ChartUiMsg::DragEnd => {
+            // 鼠标每次离开表头都会发 DragEnd：没在拖就什么都不做，别每次都写文件
+            if g.drag.take().is_some() {
+                save_ui(&g);
+            }
+        }
+        ChartUiMsg::Auto(c) => {
+            g.widths.remove(&c);
+            g.drag = None;
+            save_ui(&g);
+        }
+    }
+}
+
 // ── 口径设置（docs/33 批 4）────────────────────────────────────────────────────
 
 /// 口径设置的消息。
