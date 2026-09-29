@@ -9,6 +9,10 @@ mod modal;
 mod notify;
 mod screen;
 mod style;
+// UPDS 适配层（docs/35）：设计 token → iced。适配层先于调用点落地（批 2），
+// 度量与领域色的取值函数在批 3–7 迁移面板时才陆续用上
+#[allow(dead_code)]
+mod ui;
 mod version;
 mod widget;
 mod window;
@@ -74,6 +78,8 @@ fn main() {
         ws::egress::apply_startup();
     }
 
+    log::info!("[ui] 字体：{}；偏好 {}", ui::text::describe_fonts(), ui::tokens::Prefs::path().display());
+
     let daemon = iced::daemon(Flowsurface::new, Flowsurface::update, Flowsurface::view)
         .settings(iced::Settings {
             antialiasing: true,
@@ -82,6 +88,8 @@ fn main() {
                 Cow::Borrowed(style::ICONS_BYTES),
             ],
             default_text_size: style::text_size::BODY.into(),
+            // 界面字体带中文（docs/35 §4.3）：此前中文全靠系统回退，字重与度量和拉丁字母对不上
+            default_font: ui::text::ui_font(),
             ..Default::default()
         })
         .title(Flowsurface::title)
@@ -153,6 +161,9 @@ enum Message {
     /// 样张模式（docs/35）：每 500ms 一拍。
     SpecimenStep(std::time::Instant),
     SpecimenShot(iced::window::Screenshot),
+    /// Ctrl Alt T / Ctrl Alt D：循环主题 / 密度（docs/35 §5.1），写 ui.json，Studio 跟着变。
+    UiCycleTheme,
+    UiCycleDensity,
 }
 
 impl Flowsurface {
@@ -353,7 +364,17 @@ impl Flowsurface {
                     }
                 }
             }
+            Message::UiCycleTheme => {
+                ui::cycle_theme();
+                self.notifications.push(Toast::info(format!("主题：{}", ui::theme_id().label())));
+            }
+            Message::UiCycleDensity => {
+                ui::cycle_density();
+                self.notifications.push(Toast::info(format!("密度：{}", ui::density().label())));
+            }
             Message::Tick(now) => {
+                // 界面偏好可能被 Studio 改了（每秒最多看一次文件修改时间）
+                ui::poll();
                 let main_window_id = self.main_window.id;
                 let handles = self.handles.clone();
 
@@ -995,7 +1016,9 @@ impl Flowsurface {
     }
 
     fn theme(&self, _window: window::Id) -> iced_core::Theme {
-        self.theme.clone().into()
+        // 主题来自设计 token（docs/35 批 2），由 ~/.config/wealthspring/ui.json 决定、与 Studio 共用。
+        // `self.theme`（上游主题选择器 / 主题编辑器）暂时不再生效，批 7 下线主题编辑器。
+        ui::iced_theme()
     }
 
     fn title(&self, _window: window::Id) -> String {
@@ -1133,11 +1156,19 @@ impl Flowsurface {
         };
 
         let hotkeys = keyboard::listen().filter_map(|event| {
-            let keyboard::Event::KeyPressed { key, .. } = event else {
+            let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
                 return None;
             };
-            match key {
+            match key.as_ref() {
                 keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::GoBack),
+                // UPDS V9 §77 Linux：Ctrl Alt T / D 循环主题 / 密度
+                keyboard::Key::Character(c) if modifiers.control() && modifiers.alt() => {
+                    match c.to_ascii_lowercase().as_str() {
+                        "t" => Some(Message::UiCycleTheme),
+                        "d" => Some(Message::UiCycleDensity),
+                        _ => None,
+                    }
+                }
                 _ => None,
             }
         });

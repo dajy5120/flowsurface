@@ -67,6 +67,8 @@ rand = "0.10.1"
 iced_wgpu = "0.14.0"
 exchange.workspace = true
 data.workspace = true
+# 设计 token（docs/35）：UPDS 1.0 核心 + 交易领域包；Studio 也用它
+wealthspring-ui-tokens = { path = "ui-tokens" }
 
 # WealthSpring 集成（docs/08）：自包含读 Redis（活动 run + 回测成交流），见 src/ws/。
 # 不走 git 依赖主仓（私有 + 含本 fork 子模块 → 循环）；wire 契约简单稳定，内联读取（docs/03/07/08）。

@@ -103,13 +103,11 @@ pub fn title_text(theme: &Theme) -> iced::widget::text::Style {
 pub fn tooltip(theme: &Theme) -> Style {
     let palette = theme.extended_palette();
 
+    // UPDS V3 §14：提示 = e1、圆角 md、1px 边框
     Style {
         background: Some(palette.background.weakest.color.into()),
-        border: Border {
-            width: 1.0,
-            color: palette.background.weak.color,
-            radius: 4.0.into(),
-        },
+        border: crate::ui::metrics::hairline(crate::ui::metrics::radius::MD),
+        shadow: crate::ui::metrics::shadow(crate::ui::metrics::Elevation::E1),
         ..Default::default()
     }
 }
@@ -139,7 +137,7 @@ pub mod button {
                 _ => None,
             },
             border: Border {
-                radius: 3.0.into(),
+                radius: crate::ui::metrics::radius::SM.into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -165,7 +163,7 @@ pub mod button {
                 _ => None,
             },
             border: Border {
-                radius: 3.0.into(),
+                radius: crate::ui::metrics::radius::SM.into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -199,7 +197,7 @@ pub mod button {
         Style {
             text_color: palette.background.base.text,
             border: Border {
-                radius: 3.0.into(),
+                radius: crate::ui::metrics::radius::SM.into(),
                 ..Default::default()
             },
             background: match status {
@@ -234,7 +232,7 @@ pub mod button {
                 palette.background.base.text
             },
             border: Border {
-                radius: 3.0.into(),
+                radius: crate::ui::metrics::radius::SM.into(),
                 ..Default::default()
             },
             background: match status {
@@ -273,7 +271,7 @@ pub mod button {
                 }
             },
             border: iced::Border {
-                radius: 3.0.into(),
+                radius: crate::ui::metrics::radius::SM.into(),
                 width: if is_active { 2.0 } else { 1.0 },
                 color: palette.background.weak.color,
             },
@@ -303,7 +301,7 @@ pub mod button {
         Style {
             text_color: palette.background.base.text,
             border: Border {
-                radius: 3.0.into(),
+                radius: crate::ui::metrics::radius::SM.into(),
                 ..Default::default()
             },
             background: Some(palette.background.weakest.color.into()),
@@ -361,7 +359,7 @@ pub mod button {
         Style {
             text_color: palette.background.base.text,
             border: Border {
-                radius: 3.0.into(),
+                radius: crate::ui::metrics::radius::SM.into(),
                 width: if is_selected { 2.0 } else { 0.0 },
                 color: palette.background.strong.color,
             },
@@ -434,13 +432,14 @@ pub fn pane_grid(theme: &Theme) -> widget::pane_grid::Style {
                 radius: 4.0.into(),
             },
         },
+        // UPDS V6 §53：分割线 1px、命中区 8px；拖动 / 悬停时用强调色标出
         picked_split: Line {
-            color: palette.primary.strong.color,
-            width: 4.0,
+            color: palette.primary.base.color,
+            width: 2.0,
         },
         hovered_split: Line {
             color: palette.primary.weak.color,
-            width: 4.0,
+            width: 2.0,
         },
     }
 }
@@ -469,23 +468,15 @@ pub fn pane_background(theme: &Theme, is_focused: bool) -> Style {
         palette.background.strong.color
     };
 
+    let _ = color;
+    // UPDS V2 §11：面板圆角 0；聚焦 = border.strong，失焦 = border.subtle（前缘强调色条在批 3 的标题栏里）
     Style {
         text_color: Some(palette.background.base.text),
         background: Some(palette.background.weakest.color.into()),
-        border: {
-            if is_focused {
-                Border {
-                    width: 1.0,
-                    color: palette.background.strong.color,
-                    radius: 4.0.into(),
-                }
-            } else {
-                Border {
-                    width: 1.0,
-                    color: color.scale_alpha(0.5),
-                    radius: 2.0.into(),
-                }
-            }
+        border: if is_focused {
+            crate::ui::metrics::strong(crate::ui::metrics::radius::NONE)
+        } else {
+            crate::ui::metrics::hairline_subtle(crate::ui::metrics::radius::NONE)
         },
         ..Default::default()
     }
@@ -495,25 +486,12 @@ pub fn pane_background(theme: &Theme, is_focused: bool) -> Style {
 pub fn chart_modal(theme: &Theme) -> Style {
     let palette = theme.extended_palette();
 
+    // 图表设置浮层 = 弹出框：e2、圆角 md、surface.elevated（UPDS V3 §14；不用半透明，D6）
     Style {
         text_color: Some(palette.background.base.text),
-        background: Some(
-            Color {
-                a: 0.99,
-                ..palette.background.base.color
-            }
-            .into(),
-        ),
-        border: Border {
-            width: 1.0,
-            color: palette.background.weak.color,
-            radius: 4.0.into(),
-        },
-        shadow: Shadow {
-            offset: iced::Vector { x: 0.0, y: 0.0 },
-            blur_radius: 12.0,
-            color: Color::BLACK.scale_alpha(if palette.is_dark { 0.4 } else { 0.2 }),
-        },
+        background: Some(crate::ui::color(crate::ui::core().surface_elevated).into()),
+        border: crate::ui::metrics::hairline(crate::ui::metrics::radius::MD),
+        shadow: crate::ui::metrics::shadow(crate::ui::metrics::Elevation::E2),
         snap: true,
     }
 }
@@ -521,24 +499,12 @@ pub fn chart_modal(theme: &Theme) -> Style {
 pub fn dashboard_modal(theme: &Theme) -> Style {
     let palette = theme.extended_palette();
 
+    let _ = palette;
+    // 工作区级对话框：e3、圆角 lg（UPDS V3 §14）
     Style {
-        background: Some(
-            Color {
-                a: 0.99,
-                ..palette.background.base.color
-            }
-            .into(),
-        ),
-        border: Border {
-            width: 1.0,
-            color: palette.background.weak.color,
-            radius: 4.0.into(),
-        },
-        shadow: Shadow {
-            offset: iced::Vector { x: 0.0, y: 0.0 },
-            blur_radius: 20.0,
-            color: Color::BLACK.scale_alpha(if palette.is_dark { 0.8 } else { 0.4 }),
-        },
+        background: Some(crate::ui::color(crate::ui::core().surface_elevated).into()),
+        border: crate::ui::metrics::hairline(crate::ui::metrics::radius::LG),
+        shadow: crate::ui::metrics::shadow(crate::ui::metrics::Elevation::E3),
         ..Default::default()
     }
 }
@@ -546,19 +512,12 @@ pub fn dashboard_modal(theme: &Theme) -> Style {
 pub fn modal_container(theme: &Theme) -> Style {
     let palette = theme.extended_palette();
 
+    // 通用浮层容器：e2、圆角 md
     Style {
         text_color: Some(palette.background.base.text),
-        background: Some(palette.background.weakest.color.into()),
-        border: Border {
-            width: 1.0,
-            color: palette.background.weak.color,
-            radius: 4.0.into(),
-        },
-        shadow: Shadow {
-            offset: iced::Vector { x: 0.0, y: 0.0 },
-            blur_radius: 2.0,
-            color: Color::BLACK.scale_alpha(if palette.is_dark { 0.8 } else { 0.2 }),
-        },
+        background: Some(crate::ui::color(crate::ui::core().surface_elevated).into()),
+        border: crate::ui::metrics::hairline(crate::ui::metrics::radius::MD),
+        shadow: crate::ui::metrics::shadow(crate::ui::metrics::Elevation::E2),
         snap: true,
     }
 }
@@ -629,7 +588,7 @@ pub fn validated_text_input(
     widget::text_input::Style {
         background: background.into(),
         border: Border {
-            radius: 3.0.into(),
+            radius: crate::ui::metrics::radius::SM.into(),
             width: 1.0,
             color: if is_valid {
                 border_color
