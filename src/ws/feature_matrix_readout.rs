@@ -320,6 +320,7 @@ fn record(m: &Matrix) {
     if !m.present || m.as_of == 0 {
         return;
     }
+    record_chart(m);
     let Ok(mut g) = history().lock() else { return };
     let sig = layout_sig(m);
     if sig != g.sig {
@@ -340,6 +341,96 @@ fn record(m: &Matrix) {
     while g.entries.len() > HISTORY_CAP || g.entries.front().is_some_and(|(t, _)| *t < cut) {
         g.entries.pop_front();
     }
+}
+
+// ── 图表参数的历史（涨跌箭头用，docs/33）────────────────────────────────────────
+//
+// 图表参数没有 z：箭头把「N 秒前后的变化」除以该参数自己近 10 分钟的标准差，折成「相当于几个 σ」，
+// 再用特征矩阵同一组阈值定档——同一套设置（比较时长、阈值、绿涨红跌），不是第二套口径。
+
+struct ChartHistory {
+    /// 键的顺序签名（引擎换了版本、键变了就清空）。
+    sig: u64,
+    keys: Vec<String>,
+    entries: std::collections::VecDeque<(u64, Box<[f32]>)>,
+}
+
+static CHART_HISTORY: OnceLock<Mutex<ChartHistory>> = OnceLock::new();
+
+fn chart_history() -> &'static Mutex<ChartHistory> {
+    CHART_HISTORY.get_or_init(|| {
+        Mutex::new(ChartHistory { sig: 0, keys: Vec::new(), entries: std::collections::VecDeque::new() })
+    })
+}
+
+fn record_chart(m: &Matrix) {
+    use std::hash::{Hash, Hasher};
+    let Ok(mut g) = chart_history().lock() else { return };
+    let mut keys: Vec<&String> = m.chart.values.keys().collect();
+    keys.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    keys.hash(&mut h);
+    let sig = h.finish();
+    if sig != g.sig {
+        g.sig = sig;
+        g.keys = keys.iter().map(|k| (*k).clone()).collect();
+        g.entries.clear();
+    }
+    if g.entries.back().is_some_and(|(t, _)| *t > m.as_of) {
+        g.entries.clear();
+    }
+    if g.entries.back().is_some_and(|(t, _)| *t == m.as_of) {
+        return;
+    }
+    let row: Box<[f32]> = g.keys.iter().map(|k| m.chart.values.get(k).and_then(|v| v.v).map_or(f32::NAN, |x| x as f32)).collect();
+    g.entries.push_back((m.as_of, row));
+    let cut = m.as_of.saturating_sub(HISTORY_MS * 1_000_000 + 5_000_000_000);
+    while g.entries.len() > HISTORY_CAP || g.entries.front().is_some_and(|(t, _)| *t < cut) {
+        g.entries.pop_front();
+    }
+}
+
+/// 缓存：(快照时刻, 比较时长) → 键 → 折成 σ 的变化。每份新快照才重算一次。
+type ChartDz = std::collections::HashMap<String, f64>;
+static CHART_DZ: OnceLock<Mutex<(u64, u64, std::sync::Arc<ChartDz>)>> = OnceLock::new();
+
+/// 图表参数 `lookback_ms` 前后的变化，折成该参数近 10 分钟标准差的倍数。历史不够长 / 没有变化幅度（σ = 0）的键不在表里。
+#[must_use]
+pub fn chart_dz(now_ns: u64, lookback_ms: u64) -> std::sync::Arc<ChartDz> {
+    let cell = CHART_DZ.get_or_init(|| Mutex::new((0, 0, std::sync::Arc::default())));
+    if let Ok(c) = cell.lock()
+        && c.0 == now_ns
+        && c.1 == lookback_ms
+    {
+        return c.2.clone();
+    }
+    let mut out = ChartDz::new();
+    if let Ok(g) = chart_history().lock()
+        && let Some(target) = now_ns.checked_sub(lookback_ms * 1_000_000)
+        && let (Some((_, past)), Some((_, cur))) =
+            (g.entries.iter().rev().find(|(t, _)| *t <= target), g.entries.back())
+    {
+        for (i, k) in g.keys.iter().enumerate() {
+            let (a, b) = (past[i], cur[i]);
+            if a.is_nan() || b.is_nan() {
+                continue;
+            }
+            let xs: Vec<f64> = g.entries.iter().map(|(_, r)| f64::from(r[i])).filter(|x| !x.is_nan()).collect();
+            if xs.len() < 10 {
+                continue;
+            }
+            let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+            let sd = (xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / xs.len() as f64).sqrt();
+            if sd > 0.0 {
+                out.insert(k.clone(), f64::from(b - a) / sd);
+            }
+        }
+    }
+    let out = std::sync::Arc::new(out);
+    if let Ok(mut c) = cell.lock() {
+        *c = (now_ns, lookback_ms, out.clone());
+    }
+    out
 }
 
 /// `lookback_ms` 之前（按事件时钟）的那份快照：每格 `(z, 值)`，没有则 NaN。历史还不够长时 `None`。

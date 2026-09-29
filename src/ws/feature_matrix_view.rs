@@ -1676,8 +1676,9 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
         );
     }
     if v.view == View::Chart {
+        // 不套外层滚动：卡片网格要拿到面板的真实高度（两行排满一屏、卡片内各自滚动）
         b = b.push(top_bar(&m)).push(super::chart_params_view::view(&m));
-        return container(scrollable(b.width(Length::Fill)))
+        return container(b.width(Length::Fill).height(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
