@@ -50,6 +50,8 @@ pub mod feature_lab_readout;
 pub mod data_picker;
 pub mod data_picker_view;
 pub mod feature_source;
+pub mod chart_params;
+pub mod chart_params_view;
 pub mod backtest_launch;
 pub mod backtest_launch_view;
 pub mod feature_matrix;

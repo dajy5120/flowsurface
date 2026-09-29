@@ -9,7 +9,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-/// 两个视图。
+/// 三个视图：特征矩阵 / 图表参数（docs/33）/ 引擎健康。
 ///
 /// docs/31 §8.1 原设计还有一个「② 实时向量」（按阶段折叠、异常高亮）。做下来它与特征矩阵的
 /// 列、行、筛选都一样，只差折叠与异常标黄——同一张表放两遍，徒增困惑。2026-09-29 合并：
@@ -23,17 +23,20 @@ pub enum View {
     /// 特征矩阵：七阶段纵向分节，阶段可折叠，有异常窗口的阶段标黄。
     #[default]
     Matrix,
+    /// 图表参数（docs/33）：12 张经典图表卡片，参数取自特征与图表参数层。
+    Chart,
     /// 引擎自身的健康（簿同步、缓冲容量、刷新率）。
     Engine,
 }
 
 impl View {
-    pub const ALL: [Self; 2] = [Self::Matrix, Self::Engine];
+    pub const ALL: [Self; 3] = [Self::Matrix, Self::Chart, Self::Engine];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Matrix => "特征矩阵",
+            Self::Chart => "图表参数",
             Self::Engine => "引擎健康",
         }
     }

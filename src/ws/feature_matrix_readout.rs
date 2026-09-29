@@ -147,6 +147,12 @@ pub struct Matrix {
     pub saturated_windows: usize,
     pub pool_detail: Vec<PoolWindow>,
     pub slots: Vec<Slot>,
+    /// 标的最小价格变动（引擎配置或估出来的）。图表参数卡片按它定价格小数位。
+    pub tick_size: Option<f64>,
+    /// 引擎配置的市场（`crypto_perp` / `futures` …）。
+    pub market: Option<String>,
+    /// 图表参数（docs/33）：卡片定义、口径、图表参数值。
+    pub chart: super::chart_params::ChartSnap,
     /// 面板最后一次重新解析的墙钟时刻（只是「这一帧读到了」的凭据，不是数据时间）。
     pub refreshed: String,
 }
@@ -393,6 +399,9 @@ pub fn parse(text: &str) -> Matrix {
         pool_windows: v["pool_windows"].as_u64().unwrap_or(0) as usize,
         window_drops: v["window_drops"].as_u64().unwrap_or(0),
         saturated_windows: v["saturated_windows"].as_u64().unwrap_or(0) as usize,
+        tick_size: v["tick_size"].as_f64(),
+        market: v["market"].as_str().map(str::to_string),
+        chart: super::chart_params::parse(&v),
         ..Default::default()
     };
     for (idx, s) in v["slots"].as_array().into_iter().flatten().enumerate() {

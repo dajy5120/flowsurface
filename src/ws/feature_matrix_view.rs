@@ -1675,6 +1675,13 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
                 .color(C_WARN),
         );
     }
+    if v.view == View::Chart {
+        b = b.push(top_bar(&m)).push(super::chart_params_view::view(&m));
+        return container(scrollable(b.width(Length::Fill)))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    }
     if v.view == View::Engine {
         b = b.push(top_bar(&m)).push(engine_view(&m));
         return container(scrollable(b.width(Length::Fill)))
