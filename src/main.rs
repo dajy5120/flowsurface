@@ -104,6 +104,76 @@ fn main() {
     }
 }
 
+/// 全局快捷键（UPDS V9 §77 Linux 列，docs/35 §5.1）。
+///
+/// 用 `listen_with` 而不是 `keyboard::listen`：后者只给「没被控件吃掉」的按键，
+/// 而命令面板的输入框聚焦时会吃掉 Esc——那样按 Esc 关不掉面板。
+/// 所以：命令面板的 ↑↓ / Esc 不管有没有被吃都收；其余快捷键只收没被吃掉的
+/// （输入框里打字时 Ctrl J 之类不该触发外壳动作）。
+fn shortcut(
+    event: iced::Event,
+    status: iced::event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    use keyboard::key::Named;
+    use ui::command::Cmd;
+    use ui::shell::ShellEvent;
+    let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else {
+        return None;
+    };
+    let captured = status == iced::event::Status::Captured;
+    match key.as_ref() {
+        keyboard::Key::Named(Named::ArrowUp) => {
+            return Some(Message::Shell(ShellEvent::PaletteMove(-1)));
+        }
+        keyboard::Key::Named(Named::ArrowDown) => {
+            return Some(Message::Shell(ShellEvent::PaletteMove(1)));
+        }
+        keyboard::Key::Named(Named::Escape) => {
+            return Some(if captured {
+                Message::Shell(ShellEvent::PaletteClose)
+            } else {
+                Message::GoBack
+            });
+        }
+        _ => {}
+    }
+    if captured {
+        return None;
+    }
+    let (ctrl, shift, alt) = (modifiers.control(), modifiers.shift(), modifiers.alt());
+    let cmd = match key.as_ref() {
+        keyboard::Key::Named(Named::F6) => Some(if shift {
+            Cmd::FocusPrevPane
+        } else {
+            Cmd::FocusNextPane
+        }),
+        keyboard::Key::Character(c) if ctrl => {
+            let c = c.to_ascii_lowercase();
+            match (shift, alt, c.as_str()) {
+                (false, false, "k") => Some(Cmd::TogglePalette),
+                (false, false, "j") => Some(Cmd::ToggleBottom),
+                (false, false, "i") => Some(Cmd::ToggleInspector),
+                (false, false, ",") => Some(Cmd::OpenSettings),
+                (true, false, "m") => Some(Cmd::ToggleMaximize),
+                (false, true, "t") => Some(Cmd::CycleTheme),
+                (false, true, "d") => Some(Cmd::CycleDensity),
+                // Ctrl Shift 1–5：各组的第一个工作区
+                (true, false, d @ ("1" | "2" | "3" | "4" | "5")) => {
+                    let i = d.parse::<usize>().unwrap_or(1) - 1;
+                    ws::workspace::GROUPS
+                        .get(i)
+                        .and_then(|(_, ws)| ws.first())
+                        .map(|n| Cmd::Workspace((*n).to_string()))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    cmd.map(Message::RunCommand)
+}
+
 struct Flowsurface {
     main_window: window::Window,
     sidebar: dashboard::Sidebar,
@@ -124,6 +194,8 @@ struct Flowsurface {
     ws_factory: ws::factory::FactoryPool,         // WealthSpring Factory 现役池（F4c）
     ws_signals: Option<ws::signals::Signals>,     // WealthSpring 引擎信号：吸收/撤补/冰山（F4b–d 精确版）
     specimen: Option<ws::specimen::Specimen>,     // 界面样张模式（docs/35）：轮换工作区自截图
+    shell: ui::shell::Shell,                      // 外壳（docs/35 批 3）：命令面板 / 底部面板 / 检查器
+    commands: Vec<ui::command::Entry>,            // 命令注册表（UPDS V2 §12）
 }
 
 #[derive(Debug, Clone)]
@@ -161,9 +233,10 @@ enum Message {
     /// 样张模式（docs/35）：每 500ms 一拍。
     SpecimenStep(std::time::Instant),
     SpecimenShot(iced::window::Screenshot),
-    /// Ctrl Alt T / Ctrl Alt D：循环主题 / 密度（docs/35 §5.1），写 ui.json，Studio 跟着变。
-    UiCycleTheme,
-    UiCycleDensity,
+    /// 外壳事件（命令面板输入、上下移动……）
+    Shell(ui::shell::ShellEvent),
+    /// 执行一条命令（命令面板、快捷键、外壳按钮都走这里，UPDS V2 §12）
+    RunCommand(ui::command::Cmd),
 }
 
 impl Flowsurface {
@@ -210,6 +283,8 @@ impl Flowsurface {
             ws_factory: ws::factory::FactoryPool::default(),
             ws_signals: None,
             specimen: ws::specimen::Specimen::from_env(),
+            shell: ui::shell::Shell::default(),
+            commands: ui::command::registry(&ws::workspace::WORKSPACES),
         };
 
         if let Some(err) = audio_init_err {
@@ -227,6 +302,14 @@ impl Flowsurface {
         // （官方原生 / 实盘 / 回测 / 数据录制 / Alpha Factory），不动用户已有 layout。
         ws::workspace::ensure_seeded(&mut state.layout_manager);
 
+        // 样张模式下可把外壳的三个浮动区全打开，截图验证它们（docs/35 批 3）
+        if state.specimen.is_some() && std::env::var_os("WS_UI_SPECIMEN_SHELL").is_some() {
+            state.shell.bottom = true;
+            state.shell.inspector = true;
+            state.shell.bottom_tab = ui::shell::BottomTab::Problems;
+            state.shell.palette = Some(ui::shell::Palette { query: "主题".into(), sel: 1 });
+            state.shell.log.refresh();
+        }
         // 样张模式：按侧栏顺序排好要截的工作区
         if let Some(sp) = state.specimen.as_mut() {
             for name in ws::workspace::WORKSPACES {
@@ -364,17 +447,19 @@ impl Flowsurface {
                     }
                 }
             }
-            Message::UiCycleTheme => {
-                ui::cycle_theme();
-                self.notifications.push(Toast::info(format!("主题：{}", ui::theme_id().label())));
+            Message::Shell(ev) => {
+                if let Some(cmd) = self.shell.update(ev, &self.commands) {
+                    return self.run_command(cmd);
+                }
             }
-            Message::UiCycleDensity => {
-                ui::cycle_density();
-                self.notifications.push(Toast::info(format!("密度：{}", ui::density().label())));
-            }
+            Message::RunCommand(cmd) => return self.run_command(cmd),
             Message::Tick(now) => {
                 // 界面偏好可能被 Studio 改了（每秒最多看一次文件修改时间）
                 ui::poll();
+                // 底部面板开着才读日志尾巴（每 2 秒一次）
+                if self.shell.bottom {
+                    self.shell.log.refresh();
+                }
                 let main_window_id = self.main_window.id;
                 let handles = self.handles.clone();
 
@@ -493,7 +578,10 @@ impl Flowsurface {
             Message::GoBack => {
                 let main_window = self.main_window.id;
 
-                if self.confirm_dialog.is_some() {
+                // Esc 每次只退一层作用域（UPDS V2 §12）：命令面板在最上层，先关它
+                if self.shell.palette.is_some() {
+                    self.shell.palette = None;
+                } else if self.confirm_dialog.is_some() {
                     self.confirm_dialog = None;
                 } else if self.sidebar.active_menu().is_some() {
                     self.sidebar.set_menu(None);
@@ -971,20 +1059,55 @@ impl Flowsurface {
                 }
             };
 
+            // 外壳（docs/35 批 3，UPDS V2 §9）：命令栏 / 侧栏 / 工作区 + 底部面板 / 检查器 / 状态栏
+            let info = self.shell_info();
+            let work: Element<'_, Message> = if self.shell.bottom {
+                column![
+                    dashboard_view,
+                    ui::shell::bottom_panel(&self.shell, &info).map(Message::Shell),
+                ]
+                .spacing(4)
+                .into()
+            } else {
+                dashboard_view
+            };
+            let work: Element<'_, Message> = if self.shell.inspector {
+                row![work, ui::shell::inspector(&info).map(Message::Shell)]
+                    .spacing(4)
+                    .into()
+            } else {
+                work
+            };
+            let command_bar = ui::shell::command_bar(&info).map(Message::Shell);
+            let status_bar = ui::shell::status_bar(&info).map(Message::Shell);
+
             let base = column![
                 header_title,
+                command_bar,
                 match sidebar_pos {
-                    sidebar::Position::Left => row![sidebar_view, dashboard_view,],
-                    sidebar::Position::Right => row![dashboard_view, sidebar_view],
+                    sidebar::Position::Left => row![sidebar_view, work,],
+                    sidebar::Position::Right => row![work, sidebar_view],
                 }
+                .height(iced::Length::Fill)
                 .spacing(4)
-                .padding(8),
+                .padding(iced::Padding { top: 4.0, right: 8.0, bottom: 4.0, left: 8.0 }),
+                status_bar,
             ];
 
-            if let Some(menu) = self.sidebar.active_menu() {
+            let base: Element<'_, Message> = if let Some(menu) = self.sidebar.active_menu() {
                 self.view_with_modal(base.into(), dashboard, menu)
             } else {
                 base.into()
+            };
+
+            // 命令面板（Ctrl K）浮在一切之上（UPDS V2 §12：e3 覆盖层）
+            match &self.shell.palette {
+                Some(p) => {
+                    let overlay =
+                        ui::shell::palette_overlay(p, &self.commands).map(Message::Shell);
+                    iced::widget::stack![base, overlay].into()
+                }
+                None => base,
             }
         } else {
             container(
@@ -1155,23 +1278,7 @@ impl Flowsurface {
             Subscription::none()
         };
 
-        let hotkeys = keyboard::listen().filter_map(|event| {
-            let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
-                return None;
-            };
-            match key.as_ref() {
-                keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::GoBack),
-                // UPDS V9 §77 Linux：Ctrl Alt T / D 循环主题 / 密度
-                keyboard::Key::Character(c) if modifiers.control() && modifiers.alt() => {
-                    match c.to_ascii_lowercase().as_str() {
-                        "t" => Some(Message::UiCycleTheme),
-                        "d" => Some(Message::UiCycleDensity),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
-        });
+        let hotkeys = iced::event::listen_with(shortcut);
 
         Subscription::batch(vec![
             specimen,
@@ -1210,6 +1317,144 @@ impl Flowsurface {
             .get_mut(active_layout.unique)
             .map(|layout| &mut layout.dashboard)
             .expect("No active dashboard")
+    }
+
+    /// 执行一条命令（docs/35 批 3）。命令面板、快捷键、外壳按钮共用这一个入口。
+    fn run_command(&mut self, cmd: ui::command::Cmd) -> Task<Message> {
+        use ui::command::Cmd;
+        let main = self.main_window.id;
+        match cmd {
+            Cmd::Workspace(name) => {
+                let uid = self
+                    .layout_manager
+                    .layouts
+                    .iter()
+                    .find(|l| l.id.name == name)
+                    .map(|l| l.id.unique);
+                if let Some(uid) = uid {
+                    return self.update(Message::Layouts(
+                        modal::layout_manager::Message::SelectActive(uid),
+                    ));
+                }
+            }
+            Cmd::Theme(t) => ui::update(|p| p.theme = t),
+            Cmd::CycleTheme => {
+                ui::cycle_theme();
+                self.notifications
+                    .push(Toast::info(format!("主题：{}", ui::theme_id().label())));
+            }
+            Cmd::Density(d) => ui::update(|p| p.density = d),
+            Cmd::CycleDensity => {
+                ui::cycle_density();
+                self.notifications
+                    .push(Toast::info(format!("密度：{}", ui::density().label())));
+            }
+            Cmd::ToggleUpDown => ui::update(|p| {
+                p.up_down = match p.up_down {
+                    ui::UpDown::International => ui::UpDown::China,
+                    ui::UpDown::China => ui::UpDown::International,
+                }
+            }),
+            Cmd::ToggleCvd => ui::update(|p| p.cvd_safe = !p.cvd_safe),
+            Cmd::ToggleHideValues => ui::update(|p| p.hide_values = !p.hide_values),
+            Cmd::TogglePalette => {
+                if self.shell.palette.take().is_none() {
+                    self.shell.palette = Some(ui::shell::Palette::default());
+                    return iced::widget::operation::focus(ui::shell::palette_input_id());
+                }
+            }
+            Cmd::ToggleBottom => self.shell.bottom = !self.shell.bottom,
+            Cmd::ToggleInspector => self.shell.inspector = !self.shell.inspector,
+            Cmd::BottomTab(tab) => {
+                self.shell.bottom = true;
+                self.shell.bottom_tab = tab;
+                self.shell.log.refresh();
+            }
+            Cmd::FocusNextPane | Cmd::FocusPrevPane => {
+                let step: i64 = if cmd == Cmd::FocusNextPane { 1 } else { -1 };
+                let dashboard = self.active_dashboard_mut();
+                let mut panes: Vec<pane_grid::Pane> =
+                    dashboard.panes.iter().map(|(p, _)| *p).collect();
+                panes.sort();
+                if !panes.is_empty() {
+                    let cur = dashboard
+                        .focus
+                        .filter(|(w, _)| *w == main)
+                        .and_then(|(_, p)| panes.iter().position(|x| *x == p));
+                    let n = panes.len() as i64;
+                    let next = match cur {
+                        Some(i) => (i as i64 + step).rem_euclid(n) as usize,
+                        None => 0,
+                    };
+                    dashboard.focus = Some((main, panes[next]));
+                }
+            }
+            Cmd::ToggleMaximize => {
+                let dashboard = self.active_dashboard_mut();
+                if dashboard.panes.maximized().is_some() {
+                    dashboard.panes.restore();
+                } else if let Some((w, p)) = dashboard.focus
+                    && w == main
+                {
+                    dashboard.panes.maximize(p);
+                }
+            }
+            Cmd::OpenSettings => self.sidebar.set_menu(Some(sidebar::Menu::Settings)),
+            Cmd::OpenLayouts => self.sidebar.set_menu(Some(sidebar::Menu::Layout)),
+            Cmd::OpenDataFolder => return self.update(Message::DataFolderRequested),
+        }
+        Task::none()
+    }
+
+    /// 外壳需要的一帧信息（命令栏、状态栏、检查器）。
+    fn shell_info(&self) -> ui::shell::Info {
+        let badge = ws::provenance::badge(ws::workspace::replay_mode());
+        let current = ws::active_run::current();
+        let run = match &current {
+            Some(ar) if ar.mode != "stopped" => {
+                let mut s = format!("run {}", ar.run_id);
+                if !ar.symbol.is_empty() {
+                    s.push_str(&format!(" · {}", ar.symbol));
+                }
+                if !ar.source.is_empty() {
+                    s.push_str(&format!(" · {}", ar.source));
+                }
+                s
+            }
+            _ => String::new(),
+        };
+        let mut activity = Vec::new();
+        if let Some(ar) = current.filter(|a| a.mode == "backtest" || a.mode == "live") {
+            let what = if ar.mode == "live" { "模拟盘运行" } else { "回测运行" };
+            let src = if ar.source.is_empty() { "来源未声明".to_string() } else { ar.source.clone() };
+            activity.push(format!("● {what} · run {} · {} · {src}", ar.run_id, ar.symbol));
+        }
+        if ws::feature_source::chart_override().is_some() {
+            activity.push("● 特征回放进行中（订单流特征工作区）".to_string());
+        }
+        let dashboard = self.active_dashboard();
+        let focused = dashboard
+            .focus
+            .filter(|(w, _)| *w == self.main_window.id)
+            .and_then(|(_, p)| dashboard.panes.get(p))
+            .map(|st| st.content.to_string());
+        ui::shell::Info {
+            workspace: self
+                .layout_manager
+                .active_layout_id()
+                .map(|l| l.name.clone())
+                .unwrap_or_default(),
+            env: ui::shell::Env::from_badge(&badge.label),
+            env_label: badge.label,
+            env_detail: badge.detail,
+            run,
+            streams_on: ws::egress::streams_enabled(),
+            wire: ws::egress::wire_rate(),
+            egress_conns: ws::egress::external_conns(),
+            focused,
+            pane_count: dashboard.panes.len(),
+            activity,
+        }
     }
 
     fn load_layout(&mut self, layout_uid: uuid::Uuid, main_window: window::Id) -> Task<Message> {

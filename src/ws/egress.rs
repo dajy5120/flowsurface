@@ -932,6 +932,21 @@ pub fn rows() -> Vec<Row> {
     ROWS.get_or_init(|| Mutex::new(Vec::new())).lock().map(|g| g.clone()).unwrap_or_default()
 }
 
+/// 本项目对外连接条数（状态栏用，docs/35 批 3）。
+///
+/// **不标记「有人在看」**：状态栏每帧都调，要是像 [`rows`] 那样写 `LAST_VIEW`，
+/// 后台轮询就永远停在 2 秒一轮的快档（一轮约 85ms），白白吃掉 4% 的一个核。
+pub fn external_conns() -> u32 {
+    let Some(m) = ROWS.get() else { return 0 };
+    let Ok(rows) = m.lock() else { return 0 };
+    ALL.iter()
+        .zip(rows.iter())
+        .filter(|(s, _)| s.kind != Kind::Foreign && s.scope == Scope::External)
+        .filter_map(|(_, r)| r.conns)
+        .map(|c| c.total())
+        .sum()
+}
+
 /// 扫一轮。**只在后台线程里调**：起 systemctl / ss 子进程，不可进渲染线程。
 fn collect(prev: &mut Prev) -> Vec<Row> {
     let b = sample_bytes();

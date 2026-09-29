@@ -39,41 +39,48 @@ pub const WS_OBSERVATORY: &str = "接口观察终端"; // REST/WS/TCP/FIX 统一
 pub const WS_EGRESS: &str = "网络出口"; // 谁在往外发包 + 手动启停（一页看全）
 pub const WS_NEWS: &str = "新闻资讯"; // 交易所/监管/媒体统一时间线（docs/25）
 pub const WS_PROCS: &str = "进程"; // 常驻单元状态与启停（docs/26 S4）——「网络出口」的邻居
-/// **这个数组的顺序就是侧边栏从上到下的顺序**（`main.rs` 按它取 layout）。
+/// 侧栏的**五组**（docs/35 §5.3，按 UPDS 应用模式分组；2026-09-29 用户采纳方案后重排）。
 ///
-/// 当前排法（2026-09-18 按用户指定）大致是「看世界 → 备数据 → 做研究 → 管机器」：
+/// 此前（2026-09-18 按用户指定）是「看世界 → 备数据 → 做研究 → 管机器」平铺 15 个图标；
+/// 界面重构把它们按用途分成五组，组名显示在侧栏里，组首工作区有 Ctrl Shift 1–5 直达：
 ///
-/// | 段 | 工作区 |
-/// |---|---|
-/// | 外部信息 | 新闻资讯 · 全球市场 · 官方原生 · 预测市场 · 期权/0DTE |
-/// | 数据 | 数据录制 · Tardis 历史回放 · 接口观察终端 |
-/// | 跑策略 | 回测 · 实时数据回测 |
-/// | 研究产线 | Alpha Factory · C4 影子 |
-/// | 机器自身 | 进程 · 网络出口 |
+/// | 组 | 工作区 | UPDS 模式 |
+/// |---|---|---|
+/// | 实时 | 官方原生 · 订单流特征 · 实时数据回测 · 全球市场 | 监控终端 |
+/// | 回测 | 回测 · Tardis 历史回放 | 数据分析 |
+/// | 研究 | Alpha Factory · C4 影子 · 期权/0DTE · 预测市场 | 数据分析 / 仪表盘 |
+/// | 数据 | 数据录制 · 接口观察终端 | 仪表盘 |
+/// | 系统 | 进程 · 网络出口 · 新闻资讯 | 设置 / 仪表盘 |
 ///
-/// 改顺序只改这里。**加/删项要同时改 `icon()` 与 `pane_template()` 的 match 臂**，
+/// 改分组只改这里；[`WORKSPACES`] 必须是它按顺序摊平的结果（有测试钉住）。
+pub const GROUPS: [(&str, &[&str]); 5] = [
+    ("实时", &[WS_OFFICIAL, WS_FEATURES, WS_LIVE, WS_GLOBAL]),
+    ("回测", &[WS_BACKTEST, WS_TARDIS]),
+    ("研究", &[WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]),
+    ("数据", &[WS_RECORDER, WS_OBSERVATORY]),
+    ("系统", &[WS_PROCS, WS_EGRESS, WS_NEWS]),
+];
+
+/// **侧边栏从上到下的顺序**（`main.rs` 按它取 layout）= [`GROUPS`] 按顺序摊平。
+///
+/// **加/删项要同时改 `GROUPS`、`icon()` 与 `pane_template()` 的 match 臂**，
 /// 漏了会落到 `_ => Starter` 兜底（有测试钉住）。
 pub const WORKSPACES: [&str; 15] = [
-    // 外部信息
-    WS_NEWS,
-    WS_GLOBAL,
     WS_OFFICIAL,
-    WS_PREDICTION,
-    WS_OPTIONS,
-    // 数据
     WS_FEATURES,
-    WS_RECORDER,
-    WS_TARDIS,
-    WS_OBSERVATORY,
-    // 跑策略
-    WS_BACKTEST,
     WS_LIVE,
-    // 研究产线
+    WS_GLOBAL,
+    WS_BACKTEST,
+    WS_TARDIS,
     WS_FACTORY,
     WS_C4,
-    // 机器自身
+    WS_OPTIONS,
+    WS_PREDICTION,
+    WS_RECORDER,
+    WS_OBSERVATORY,
     WS_PROCS,
     WS_EGRESS,
+    WS_NEWS,
 ];
 
 /// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
@@ -267,6 +274,12 @@ pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 侧栏顺序等于分组摊平() {
+        let flat: Vec<&str> = GROUPS.iter().flat_map(|(_, ws)| ws.iter().copied()).collect();
+        assert_eq!(flat, WORKSPACES.to_vec(), "WORKSPACES 必须是 GROUPS 按顺序摊平");
+    }
 
     /// 每个工作区模板都必须是合法 `data::Pane` JSON——否则该工作区在运行期静默变空
     /// （`dashboard_from_template` 只记 error 后跳过）。加 pane 时容易写错，这里锁死。

@@ -1474,12 +1474,27 @@ impl State {
             }
         };
 
+        // UPDS V2 §11：聚焦面板 = 标题栏前缘 2px 强调色条 + 强边框（边框在 pane_background）。
+        // 失焦时色条透明但仍占位，标题不会因为焦点变化左右跳。
+        let accent_bar = container(iced::widget::space::horizontal())
+            .width(Length::Fixed(2.0))
+            .height(Length::Fill)
+            .style(move |_| container::Style {
+                background: is_focused
+                    .then(|| crate::ui::color(crate::ui::core().accent_primary).into()),
+                ..Default::default()
+            });
+        let header_h = crate::ui::metrics::panel_header() + 4.0;
         let title_bar = pane_grid::TitleBar::new(
-            top_left_buttons
-                .padding(padding::left(4))
-                .align_y(Alignment::Center)
-                .spacing(8)
-                .height(Length::Fixed(32.0)),
+            row![
+                accent_bar,
+                top_left_buttons
+                    .padding(padding::left(4))
+                    .align_y(Alignment::Center)
+                    .spacing(8)
+                    .height(Length::Fixed(header_h)),
+            ]
+            .height(Length::Fixed(header_h)),
         )
         .controls(top_right_buttons)
         .style(style::pane_title_bar);

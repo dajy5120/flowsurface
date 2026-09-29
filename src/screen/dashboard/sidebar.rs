@@ -207,8 +207,19 @@ impl Sidebar {
         };
 
         // WealthSpring 工作区切换（docs/08 F6 — P1）：合并进侧边栏顶部的图标按钮组。
-        let mut col = column![].width(32).spacing(8);
+        let mut col = column![].width(32).spacing(8).align_x(Alignment::Center);
         for &(uid, name, is_active) in workspaces {
+            // 分组标题（docs/35 §5.3）：组首工作区前放组名，组与组之间留一点空
+            if let Some((i, (group, _))) = crate::ws::workspace::GROUPS
+                .iter()
+                .enumerate()
+                .find(|(_, (_, ws))| ws.first() == Some(&name))
+            {
+                if i > 0 {
+                    col = col.push(space::vertical().height(2));
+                }
+                col = col.push(crate::ui::text::metadata(*group));
+            }
             col = col.push(button_with_tooltip(
                 icon_text(crate::ws::workspace::icon(name), 14)
                     .width(24)
