@@ -36,69 +36,39 @@ use super::radar_readout::{
 };
 use super::treemap::{squarify_nested, Rect};
 
-const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
-const C_DIM: Color = Color::from_rgb(0.55, 0.55, 0.6);
-const C_TXT: Color = Color::from_rgb(0.85, 0.87, 0.92);
-const C_GOLD: Color = Color::from_rgb(0.9, 0.8, 0.4);
-const C_BAD: Color = Color::from_rgb(0.9, 0.45, 0.4);
-/// 状态「正常/运行中」的提示色（与涨跌色板无关，不随色板切换）。
-const C_OK: Color = Color::from_rgb(0.35, 0.78, 0.98);
-/// 可点开原文的单元格。**必须与普通文本明显不同**——看不出哪些能点，
-/// 等于这些链接不存在。
-const C_LINK: Color = Color::from_rgb(0.47, 0.72, 1.0);
-
 // ───────────────────────── 离散色阶 ─────────────────────────
 
-const C_NEUTRAL: Color = Color::from_rgb(0.24, 0.25, 0.29);
+/// 中性格：树图里「没变化」的底色，也是低可信数据褪色时的混合目标。
+fn c_neutral() -> Color {
+    crate::ui::pal::card_bg()
+}
 
 /// 一套色阶：3 档/侧 + 中性，由弱到强。
 ///
 /// **7 档而非 9 档**，同 TradingView（图例就是 −13/−8/−3/0/3/8/13 七格）。
 /// 档位越少每档越可分辨；9 档在几百个小格上相邻档已经看不出差别。
 ///
-/// TV 在浅色背景上把「最极端」做成**深色**（深红/深绿）；深色背景要反过来——
-/// 最极端 = 最亮，否则极端值反而沉进背景里。
+/// 界面重构（docs/35 批 6）后色阶从设计 token 生成：强档 = 领域色本身，弱档向面板底色混合——
+/// 深色主题上弱档更暗、浅色主题上弱档更浅，**两边都是「越极端越显眼」**
+/// （原先写死的 RGB 只适配深色背景）。
 pub(crate) struct Ramp {
     pub up: [Color; 3],
     pub down: [Color; 3],
 }
 
-const BLUE: [Color; 3] = [
-    Color::from_rgb(0.24, 0.42, 0.56),
-    Color::from_rgb(0.20, 0.55, 0.82),
-    Color::from_rgb(0.32, 0.72, 1.00),
-];
-const ORANGE: [Color; 3] = [
-    Color::from_rgb(0.60, 0.40, 0.26),
-    Color::from_rgb(0.82, 0.48, 0.19),
-    Color::from_rgb(1.00, 0.62, 0.20),
-];
-const GREEN: [Color; 3] = [
-    Color::from_rgb(0.22, 0.47, 0.36),
-    Color::from_rgb(0.13, 0.64, 0.42),
-    Color::from_rgb(0.22, 0.83, 0.52),
-];
-const RED: [Color; 3] = [
-    Color::from_rgb(0.56, 0.29, 0.32),
-    Color::from_rgb(0.82, 0.27, 0.31),
-    Color::from_rgb(1.00, 0.37, 0.39),
-];
-
-/// 文字专用（同分档、更高亮度）：填充档是给大色块设计的，
-/// 最弱档直接当深色背景上的文字读不出来。
+/// 文字专用（同分档、更醒目）：填充档是给大色块设计的，最弱档直接当文字读不出来。
+/// 向正文色混合——深色主题提亮、浅色主题压暗。
 fn brighten(c: Color) -> Color {
-    Color::from_rgb(
-        (c.r * 0.45 + 0.55).min(1.0),
-        (c.g * 0.45 + 0.55).min(1.0),
-        (c.b * 0.45 + 0.55).min(1.0),
-    )
+    crate::ui::pal::mix(c, crate::ui::pal::txt(), 0.45)
 }
 
+/// 「绿涨 / 红涨」说的是颜色本身，用真实的绿 / 红色相（跟随色弱开关，不随全局涨跌约定互换）。
 pub(crate) fn ramp(p: Palette) -> Ramp {
+    use crate::ui::pal::{green, info, red, steps3, warn};
     match p {
-        Palette::BlueOrange => Ramp { up: BLUE, down: ORANGE },
-        Palette::GreenUp => Ramp { up: GREEN, down: RED },
-        Palette::RedUp => Ramp { up: RED, down: GREEN },
+        Palette::BlueOrange => Ramp { up: steps3(info()), down: steps3(warn()) },
+        Palette::GreenUp => Ramp { up: steps3(green()), down: steps3(red()) },
+        Palette::RedUp => Ramp { up: steps3(red()), down: steps3(green()) },
     }
 }
 
@@ -177,11 +147,7 @@ fn pick(
 }
 
 fn fade(c: Color, toward: Color, t: f32) -> Color {
-    Color::from_rgb(
-        c.r + (toward.r - c.r) * t,
-        c.g + (toward.g - c.g) * t,
-        c.b + (toward.b - c.b) * t,
-    )
+    Color { a: 1.0, ..crate::ui::pal::mix(c, toward, t) }
 }
 
 /// 值 → 树图填充色。`scale` 是**该资产类**的色阶（目录下发，见 `asset_scale`）——
@@ -195,8 +161,8 @@ pub(crate) fn scale_color(
     p: Palette,
     trusted: bool,
 ) -> Color {
-    let c = pick(v, key, scale, &ramp(p), false, C_NEUTRAL);
-    if trusted { c } else { fade(c, C_NEUTRAL, 0.6) }
+    let c = pick(v, key, scale, &ramp(p), false, c_neutral());
+    if trusted { c } else { fade(c, c_neutral(), 0.6) }
 }
 
 /// 值 → 表格文字色（同一分档，更高亮度）。
@@ -207,8 +173,8 @@ pub(crate) fn scale_text(
     p: Palette,
     trusted: bool,
 ) -> Color {
-    let c = pick(v, key, scale, &ramp(p), true, C_DIM);
-    if trusted { c } else { fade(c, C_DIM, 0.55) }
+    let c = pick(v, key, scale, &ramp(p), true, crate::ui::pal::dim());
+    if trusted { c } else { fade(c, crate::ui::pal::dim(), 0.55) }
 }
 
 fn edge_label(key: &str, e: f64) -> String {
@@ -701,29 +667,29 @@ pub(crate) fn cell_text(
     match k {
         SortKey::Symbol => (
             r.symbol.clone(),
-            if trusted { C_TXT } else { C_DIM },
+            if trusted { crate::ui::pal::txt() } else { crate::ui::pal::dim() },
         ),
-        SortKey::Venue => (r.venue.trim_start_matches("binance:").to_string(), C_DIM),
+        SortKey::Venue => (r.venue.trim_start_matches("binance:").to_string(), crate::ui::pal::dim()),
         // 数据等级用颜色分档：A 常态、C/D 明显发暗——扫一眼就知道哪些行是延迟的
         SortKey::Tier => (
             r.tier.clone(),
             match r.tier.as_str() {
-                "A" => C_TXT,
-                "B" => C_HEAD,
-                _ => C_GOLD,
+                "A" => crate::ui::pal::txt(),
+                "B" => crate::ui::pal::head(),
+                _ => crate::ui::pal::warn(),
             },
         ),
-        SortKey::Country => (r.country.clone(), C_DIM),
-        SortKey::Sector => (r.sector.clone(), C_DIM),
+        SortKey::Country => (r.country.clone(), crate::ui::pal::dim()),
+        SortKey::Sector => (r.sector.clone(), crate::ui::pal::dim()),
         SortKey::Mcap => (
             if r.mcap > 0.0 { usd(r.mcap) } else { "—".into() },
-            C_DIM,
+            crate::ui::pal::dim(),
         ),
         SortKey::Metric(key) => {
             // 文本列（评级 / 财务期间 / K 线形态）走 `t` 段：它们不是数字，
             // 从 `m` 里取只会永远拿到 None、整列显示「—」
             if let Some(s) = r.t.get(key) {
-                return (s.clone(), C_TXT);
+                return (s.clone(), crate::ui::pal::txt());
             }
             let v = r.m.get(key).copied();
             let txt = match v {
@@ -744,12 +710,12 @@ pub(crate) fn cell_text(
             {
                 scale_text(v, "change", sc, p, true)
             } else {
-                C_TXT
+                crate::ui::pal::txt()
             };
             (txt, col)
         }
-        SortKey::Price => (price(r.price), C_TXT),
-        SortKey::Turnover => (usd(r.quote_vol_24h), C_DIM),
+        SortKey::Price => (price(r.price), crate::ui::pal::txt()),
+        SortKey::Turnover => (usd(r.quote_vol_24h), crate::ui::pal::dim()),
         SortKey::Ret(i) => (opt_pct(r.ret[i]), scale_text(r.ret[i].map(|x| (x.exp() - 1.0) * 100.0), "change", sc, p, trusted)),
         SortKey::Z(i) => (opt_z(r.z_ret[i]), scale_text(r.z_ret[i], "own:speed_z", sc, p, trusted)),
         SortKey::VolZ => (opt_z(r.z_vol), scale_text(r.z_vol, "own:zvol", sc, p, trusted)),
@@ -870,7 +836,7 @@ impl<M> canvas::Program<M> for TreemapCanvas {
                 frame.fill_text(Text {
                     content: "暂无数据——启动守护并等待首轮快照".into(),
                     position: Point::new(8.0, h / 2.0),
-                    color: C_DIM,
+                    color: crate::ui::pal::dim(),
                     size: iced::Pixels(11.0),
                     ..Default::default()
                 });
@@ -892,7 +858,7 @@ impl<M> canvas::Program<M> for TreemapCanvas {
                         frame.fill_text(Text {
                             content: t,
                             position: Point::new(gl.header.x + 2.0, gl.header.y + 1.0),
-                            color: C_TXT,
+                            color: crate::ui::pal::txt(),
                             size: iced::Pixels(10.0),
                             ..Default::default()
                         });
@@ -943,7 +909,8 @@ impl<M> canvas::Program<M> for TreemapCanvas {
                         frame.fill_text(Text {
                             content: lab.clone(),
                             position: Point::new(cx - text_units(&lab) * fs / 2.0, cy),
-                            color: Color::WHITE,
+                            // 底色随涨跌幅变：按格子亮度选深 / 浅字（浅色主题的淡格子上白字读不出来）
+                            color: crate::ui::pal::on(d.color),
                             size: iced::Pixels(fs),
                             ..Default::default()
                         });
@@ -954,7 +921,7 @@ impl<M> canvas::Program<M> for TreemapCanvas {
                         frame.fill_text(Text {
                             content: v.clone(),
                             position: Point::new(cx - text_units(&v) * vfs / 2.0, cy),
-                            color: Color::from_rgba(1.0, 1.0, 1.0, 0.88),
+                            color: crate::ui::pal::alpha(crate::ui::pal::on(d.color), 0.88),
                             size: iced::Pixels(vfs),
                             ..Default::default()
                         });
@@ -982,7 +949,7 @@ fn legend<'a>(key: &'static str, p: Palette, scale: [f64; 3]) -> Element<'a, Rad
         (r.down[2], format!("-{}", edge_label(key, e[2]))),
         (r.down[1], format!("-{}", edge_label(key, e[1]))),
         (r.down[0], format!("-{}", edge_label(key, e[0]))),
-        (C_NEUTRAL, if center(key) == 1.0 { "1×".into() } else { "0".into() }),
+        (c_neutral(), if center(key) == 1.0 { "1×".into() } else { "0".into() }),
         (r.up[0], format!("+{}", edge_label(key, e[0]))),
         (r.up[1], format!("+{}", edge_label(key, e[1]))),
         (r.up[2], format!("+{}", edge_label(key, e[2]))),
@@ -991,12 +958,12 @@ fn legend<'a>(key: &'static str, p: Palette, scale: [f64; 3]) -> Element<'a, Rad
     let mut swatches = row![].spacing(1);
     for (c, l) in cells {
         labels = labels.push(
-            container(text(l).size(9).color(C_DIM))
+            container(text(l).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()))
                 .width(Length::Fixed(SW))
                 .align_x(iced::Alignment::Center),
         );
         swatches = swatches.push(
-            container(text(" ").size(8))
+            container(text(" ").size(crate::ui::text::s_meta()))
                 .width(Length::Fixed(SW))
                 .height(Length::Fixed(9.0))
                 .style(move |_: &Theme| container::Style {
@@ -1084,8 +1051,8 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
             } else {
                 format!("　{pushed} 条全市场 · {} 仅本地样本", local.join("、"))
             })
-            .size(10)
-            .color(if local.is_empty() { C_DIM } else { C_GOLD }),
+            .size(crate::ui::text::s_meta())
+            .color(if local.is_empty() { crate::ui::pal::dim() } else { crate::ui::pal::warn() }),
         );
     }
 
@@ -1109,8 +1076,8 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
             // ⓢ = 能下推到服务端（全市场），无标记 = 只在已加载的行里筛
             r = r.push(
                 text(format!("{}{} ", d.label, if d.server.is_some() { "ⓢ" } else { "" }))
-                    .size(11)
-                    .color(C_DIM),
+                    .size(crate::ui::text::s_small())
+                    .color(crate::ui::pal::dim()),
             );
             if is_enum {
                 // 官方枚举下拉 = **搜索框 + 多选复选框列表 + 虚拟滚动**
@@ -1124,8 +1091,8 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
                                 radar_filter::set_enum_query(fi, t);
                                 RadarMsg::ManualEdited
                             })
-                            .size(11)
-                            .padding([2, 6])
+                            .size(crate::ui::text::s_small())
+                            .padding(crate::ui::metrics::pad2(0, 2))
                             .width(Length::Fixed(90.0)),
                     );
                 }
@@ -1151,7 +1118,7 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
                         format!("已选 {}", sel.len())
                     })
                     .text_size(11)
-                    .padding([2, 6])
+                    .padding(crate::ui::metrics::pad2(0, 2))
                     .width(Length::Fixed(132.0)),
                 );
                 // 已选的列出来，点 ✕ 去掉——只显示「已选 N」看不出选了什么
@@ -1163,7 +1130,7 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
                     ));
                 }
                 if sel.len() > 3 {
-                    r = r.push(text(format!("+{}", sel.len() - 3)).size(10).color(C_DIM));
+                    r = r.push(text(format!("+{}", sel.len() - 3)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
                 }
                 n_shown += 1;
                 if n_shown.is_multiple_of(4) {
@@ -1179,7 +1146,7 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
                     RadarMsg::SetFilter { fi: o.fi, pi: o.pi }
                 })
                 .text_size(11)
-                .padding([2, 6])
+                .padding(crate::ui::metrics::pad2(0, 2))
                 .width(Length::Fixed(132.0)),
             );
             // 选了「手动设置」就地出两个输入框（下界 / 上界，空 = 该侧不限）
@@ -1192,8 +1159,8 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
                                 radar_filter::set_manual(fi, is_lo, t);
                                 RadarMsg::ManualEdited
                             })
-                            .size(11)
-                            .padding([2, 6])
+                            .size(crate::ui::text::s_small())
+                            .padding(crate::ui::metrics::pad2(0, 2))
                             .width(Length::Fixed(72.0)),
                     );
                 }
@@ -1214,16 +1181,16 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
                 "带 ⓢ 的下推到服务端、在整个市场上筛（生效有一轮延迟）；\
                  其余只在已加载的行里筛。列出的都是当前资产类适用的——换一类会换一批",
             )
-            .size(10)
-            .color(C_DIM),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()),
         );
     }
     col.into()
 }
 
 fn chip<'a>(label: &str, active: bool, msg: RadarMsg) -> Element<'a, RadarMsg> {
-    button(text(label.to_string()).size(11))
-        .padding([2, 7])
+    button(text(label.to_string()).size(crate::ui::text::s_small()))
+        .padding(crate::ui::metrics::pad2(0, 2))
         .style(move |t, st| crate::style::button::modifier(t, st, active))
         .on_press(msg)
         .into()
@@ -1232,7 +1199,7 @@ fn chip<'a>(label: &str, active: bool, msg: RadarMsg) -> Element<'a, RadarMsg> {
 /// 表格单元。数值列**右对齐**（同 TradingView）：右对齐后小数点纵向成列，
 /// 一眼能比大小；左对齐的数字列要逐行读才知道谁大。
 fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, RadarMsg> {
-    container(text(s).size(11).color(c))
+    container(text(s).size(crate::ui::text::s_small()).color(c))
         .width(Length::Fixed(w))
         .align_x(if numeric {
             iced::Alignment::End
@@ -1263,10 +1230,10 @@ fn head_cell<'a>(col: &Col, v: ViewState) -> Element<'a, RadarMsg> {
     container(
         button(
             text(label)
-                .size(11)
-                .color(if active { C_HEAD } else { C_DIM }),
+                .size(crate::ui::text::s_small())
+                .color(if active { crate::ui::pal::head() } else { crate::ui::pal::dim() }),
         )
-        .padding([1, 2])
+        .padding(crate::ui::metrics::pad2(0, 0))
         .style(|t, st| crate::style::button::transparent(t, st, false))
         .on_press(RadarMsg::SortBy(col.key)),
     )
@@ -1298,7 +1265,7 @@ fn fetch_progress<'a>(p: &super::radar_readout::FetchProgress) -> Element<'a, Ra
     let cur = if p.cur.is_empty() { String::new() } else { format!("　正在抓 {}", p.cur) };
     column![
         progress_bar(0.0..=1.0, p.frac()),
-        text(format!("{line}{cur}")).size(10).color(C_DIM),
+        text(format!("{line}{cur}")).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
     ]
     .spacing(3)
     .into()
@@ -1599,13 +1566,13 @@ impl std::fmt::Display for MarketOpt {
 /// 0..1 → 定宽条形。纯文本块拼的，够表达占比且不必再起一层 canvas。
 fn bar<'a>(frac: Option<f64>, width: usize, c: Color) -> Element<'a, RadarMsg> {
     let Some(f) = frac else {
-        return text("—").size(11).color(C_DIM).into();
+        return text("—").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()).into();
     };
     let n = ((f.clamp(0.0, 1.0)) * width as f64).round() as usize;
     row![
-        text("█".repeat(n)).size(11).color(c),
-        text("░".repeat(width.saturating_sub(n))).size(11).color(C_NEUTRAL),
-        text(format!(" {:>3.0}%", f * 100.0)).size(11).color(C_TXT),
+        text("█".repeat(n)).size(crate::ui::text::s_small()).color(c),
+        text("░".repeat(width.saturating_sub(n))).size(crate::ui::text::s_small()).color(c_neutral()),
+        text(format!(" {:>3.0}%", f * 100.0)).size(crate::ui::text::s_small()).color(crate::ui::pal::txt()),
     ]
     .into()
 }
@@ -1624,8 +1591,8 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
     let mut col = column![].spacing(3);
     if p.venues.is_empty() {
         return text("暂无加密全景数据——守护还没跑完第一轮（默认 30s）")
-            .size(11)
-            .color(C_DIM)
+            .size(crate::ui::text::s_small())
+            .color(crate::ui::pal::dim())
             .into();
     }
     let up = ramp(v.palette).up[2];
@@ -1660,7 +1627,7 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
         ("对中位价差", 104.0, true),
         ("状态", 320.0, false),
     ] {
-        hdr = hdr.push(cell(t.into(), w, C_HEAD, n));
+        hdr = hdr.push(cell(t.into(), w, crate::ui::pal::head(), n));
     }
     col = col.push(hdr);
     for x in &p.venues {
@@ -1670,7 +1637,7 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
         };
         col = col.push(
             row![
-                cell(x.label.clone(), 150.0, C_TXT, false),
+                cell(x.label.clone(), 150.0, crate::ui::pal::txt(), false),
                 cell(
                     match x.kind.as_str() {
                         "spot" => "现货",
@@ -1679,34 +1646,34 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
                     }
                     .into(),
                     52.0,
-                    C_DIM,
+                    crate::ui::pal::dim(),
                     false
                 ),
-                cell(x.pairs.to_string(), 62.0, C_DIM, true),
+                cell(x.pairs.to_string(), 62.0, crate::ui::pal::dim(), true),
                 // 抓取失败时成交额是 0；直接显示 0 和「今天没人交易」一模一样，
                 // 故失败行的数值列一律显示「—」
                 cell(
                     if x.err.is_empty() { usd(x.vol_usd) } else { "—".into() },
                     104.0,
-                    C_TXT,
+                    crate::ui::pal::txt(),
                     true
                 ),
                 cell(
                     x.btc.map(|b| format!("{b:.0}")).unwrap_or_else(|| "—".into()),
                     96.0,
-                    C_TXT,
+                    crate::ui::pal::txt(),
                     true
                 ),
                 cell(
                     bp.map(|b| format!("{b:+.1}")).unwrap_or_else(|| "—".into()),
                     104.0,
-                    bp.map_or(C_DIM, |b| if b.abs() > 20.0 { C_GOLD } else { C_DIM }),
+                    bp.map_or(crate::ui::pal::dim(), |b| if b.abs() > 20.0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
                     true
                 ),
                 cell(
                     if x.err.is_empty() { String::new() } else { format!("⚠ {}", x.err) },
                     320.0,
-                    C_GOLD,
+                    crate::ui::pal::warn(),
                     false
                 ),
             ]
@@ -1735,11 +1702,11 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
         }) {
             c = c.push(
                 row![
-                    link_cell(r.symbol.clone(), &r.url, 150.0, C_TXT, false),
-                    cell(r.venue.clone(), 92.0, C_DIM, false),
-                    cell(money_cell(r.price), 104.0, C_TXT, true),
+                    link_cell(r.symbol.clone(), &r.url, 150.0, crate::ui::pal::txt(), false),
+                    cell(r.venue.clone(), 92.0, crate::ui::pal::dim(), false),
+                    cell(money_cell(r.price), 104.0, crate::ui::pal::txt(), true),
                     cell(format!("{:+.2}%", r.chg_pct), 72.0, sign(r.chg_pct), true),
-                    cell(money(r.vol_usd), 104.0, C_TXT, true),
+                    cell(money(r.vol_usd), 104.0, crate::ui::pal::txt(), true),
                 ]
                 .spacing(3),
             );
@@ -1791,15 +1758,15 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
     }) {
         col = col.push(
             row![
-                link_cell(r.symbol.clone(), &r.url, 150.0, C_TXT, false),
-                cell(r.venue.clone(), 92.0, C_DIM, false),
-                cell(money_cell(r.price), 104.0, C_TXT, true),
+                link_cell(r.symbol.clone(), &r.url, 150.0, crate::ui::pal::txt(), false),
+                cell(r.venue.clone(), 92.0, crate::ui::pal::dim(), false),
+                cell(money_cell(r.price), 104.0, crate::ui::pal::txt(), true),
                 cell(format!("{:+.2}%", r.chg_pct), 72.0, sign(r.chg_pct), true),
                 cell(format!("{:+.4}%", r.funding * 100.0), 84.0, sign(r.funding), true),
                 cell(format!("{:+.0}%", r.funding_apr * 100.0), 84.0, sign(r.funding_apr), true),
                 // 币安要逐对再请求一次才有未平仓，这里给不出——显示「—」而不是 0
-                cell(money(r.oi_usd), 104.0, C_TXT, true),
-                cell(money(r.vol_usd), 104.0, C_TXT, true),
+                cell(money(r.oi_usd), 104.0, crate::ui::pal::txt(), true),
+                cell(money(r.vol_usd), 104.0, crate::ui::pal::txt(), true),
             ]
             .spacing(3),
         );
@@ -1821,27 +1788,27 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
             ("名义成交", 116.0, true),
             ("隐波", 72.0, true),
         ] {
-            h = h.push(cell(t.into(), w, C_HEAD, n));
+            h = h.push(cell(t.into(), w, crate::ui::pal::head(), n));
         }
         col = col.push(h);
         for r in &p.options {
             col = col.push(
                 row![
-                    link_cell(r.currency.clone(), &r.url, 92.0, C_TXT, false),
-                    cell(r.n.to_string(), 62.0, C_DIM, true),
+                    link_cell(r.currency.clone(), &r.url, 92.0, crate::ui::pal::txt(), false),
+                    cell(r.n.to_string(), 62.0, crate::ui::pal::dim(), true),
                     cell(
                         r.underlying.map(|x| format!("{x:.0}")).unwrap_or_else(|| "—".into()),
                         96.0,
-                        C_TXT,
+                        crate::ui::pal::txt(),
                         true
                     ),
-                    cell(usd(r.oi_usd), 116.0, C_TXT, true),
-                    cell(usd(r.vol_usd), 116.0, C_DIM, true),
-                    cell(usd(r.vol_notional_usd), 116.0, C_TXT, true),
+                    cell(usd(r.oi_usd), 116.0, crate::ui::pal::txt(), true),
+                    cell(usd(r.vol_usd), 116.0, crate::ui::pal::dim(), true),
+                    cell(usd(r.vol_notional_usd), 116.0, crate::ui::pal::txt(), true),
                     cell(
                         r.iv.map(|x| format!("{x:.1}%")).unwrap_or_else(|| "—".into()),
                         72.0,
-                        C_GOLD,
+                        crate::ui::pal::warn(),
                         true
                     ),
                 ]
@@ -1878,8 +1845,8 @@ fn crypto_listings<'a>(p: &Panorama) -> Element<'a, RadarMsg> {
         // 筛空了要说是筛空的。空白会被当成「守护没抓到」
         col = col.push(
             text(format!("这段时间内没有新上市（共 {} 条，放宽时间范围看看）", p.listings.len()))
-                .size(11)
-                .color(C_DIM),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::dim()),
         );
         return col.into();
     }
@@ -1890,9 +1857,9 @@ fn crypto_listings<'a>(p: &Panorama) -> Element<'a, RadarMsg> {
     }) {
         col = col.push(
             row![
-                link_cell(r.symbol.clone(), &r.url, 150.0, C_TXT, false),
-                cell(r.venue.clone(), 116.0, C_DIM, false),
-                cell(day_cell(r.listed_ms), 116.0, C_TXT, true),
+                link_cell(r.symbol.clone(), &r.url, 150.0, crate::ui::pal::txt(), false),
+                cell(r.venue.clone(), 116.0, crate::ui::pal::dim(), false),
+                cell(day_cell(r.listed_ms), 116.0, crate::ui::pal::txt(), true),
             ]
             .spacing(3),
         );
@@ -1905,8 +1872,8 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a
     let mut col = column![].spacing(3);
     if p.sources.is_empty() {
         return text("暂无预测市场数据——守护还没跑完第一轮（默认 30s）")
-            .size(11)
-            .color(C_DIM)
+            .size(crate::ui::text::s_small())
+            .color(crate::ui::pal::dim())
             .into();
     }
     let up = ramp(v.palette).up[2];
@@ -1923,10 +1890,10 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a
     ));
     col = col.push(
         text("价格就是概率；涨跌是**概率点**，不是收益率。")
-            .size(10)
-            .color(C_DIM),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()),
     );
-    let mut sr = row![text("来源 ").size(10).color(C_DIM)].spacing(6);
+    let mut sr = row![text("来源 ").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(6);
     for s in &p.sources {
         sr = sr.push(
             // 同宏观那边：有数据就把条数一起显示，别让部分失败看着像整块挂了
@@ -1935,13 +1902,13 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a
                 (0, false) => format!("{} ⚠ {}", s.label, clip(&s.err, 42)),
                 (n, false) => format!("{} {n} 条 ⚠ {}", s.label, clip(&s.err, 34)),
             })
-            .size(10)
+            .size(crate::ui::text::s_meta())
             .color(if s.err.is_empty() {
-                C_DIM
+                crate::ui::pal::dim()
             } else if s.rows > 0 {
-                C_GOLD
+                crate::ui::pal::warn()
             } else {
-                C_BAD
+                crate::ui::pal::bad()
             }),
         );
     }
@@ -1978,15 +1945,15 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a
             let chg = r.chg_24h;
             c = c.push(
                 row![
-                    cell(r.platform.clone(), 88.0, C_DIM, false),
-                    cell(r.category.clone(), 84.0, C_DIM, false),
+                    cell(r.platform.clone(), 88.0, crate::ui::pal::dim(), false),
+                    cell(r.category.clone(), 84.0, crate::ui::pal::dim(), false),
                     // 问题本身是链接：这一列最宽、也最像人会去点的那一处
-                    link_cell(clip(&r.title, 46), &r.url, 340.0, C_TXT, false),
-                    cell(clip(&r.outcome, 20), 150.0, C_TXT, false),
+                    link_cell(clip(&r.title, 46), &r.url, 340.0, crate::ui::pal::txt(), false),
+                    cell(clip(&r.outcome, 20), 150.0, crate::ui::pal::txt(), false),
                     cell(
                         r.prob.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "—".into()),
                         62.0,
-                        C_TXT,
+                        crate::ui::pal::txt(),
                         true
                     ),
                     // 「+10pt」不是「+10%」：0.45→0.55 是十个概率点，
@@ -1994,17 +1961,17 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a
                     cell(
                         chg.map(|x| format!("{:+.0}pt", x * 100.0)).unwrap_or_else(|| "—".into()),
                         78.0,
-                        chg.map_or(C_DIM, |x| if x >= 0.0 { up } else { dn }),
+                        chg.map_or(crate::ui::pal::dim(), |x| if x >= 0.0 { up } else { dn }),
                         true
                     ),
-                    cell(usd(r.vol_usd), 96.0, C_TXT, true),
+                    cell(usd(r.vol_usd), 96.0, crate::ui::pal::txt(), true),
                     // 两家的窗口不是同一个：Polymarket 严格 24h、Kalshi 是「近期」。
                     // 口径必须跟着数字走，否则这一列在混排下就是在比两个不同的量
-                    cell(r.vol_window.clone(), 52.0, C_GOLD, false),
+                    cell(r.vol_window.clone(), 52.0, crate::ui::pal::warn(), false),
                     cell(
                         r.close_ms.map(day_cell).unwrap_or_else(|| "—".into()),
                         88.0,
-                        C_DIM,
+                        crate::ui::pal::dim(),
                         true
                     ),
                 ]
@@ -2037,8 +2004,8 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a
     if fresh.is_empty() && !p.fresh.is_empty() {
         col = col.push(
             text(format!("这段时间内没有新盘（共 {} 条，放宽时间范围看看）", p.fresh.len()))
-                .size(11)
-                .color(C_DIM),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::dim()),
         );
     }
     col = col.push(table(
@@ -2099,10 +2066,10 @@ impl Tier {
     /// 这一屏能不能当实时用。
     fn color(self) -> Color {
         match self {
-            Tier::Live => C_OK,
-            Tier::NearLive => C_HEAD,
-            Tier::Delayed | Tier::Close => C_GOLD,
-            Tier::Periodic => C_DIM,
+            Tier::Live => crate::ui::pal::ok(),
+            Tier::NearLive => crate::ui::pal::head(),
+            Tier::Delayed | Tier::Close => crate::ui::pal::warn(),
+            Tier::Periodic => crate::ui::pal::dim(),
         }
     }
 }
@@ -2121,16 +2088,16 @@ fn fresh_bar<'a>(
 ) -> Element<'a, RadarMsg> {
     let mut r = row![].spacing(6).align_y(iced::Alignment::Center);
     r = r.push(
-        container(text(tier.badge().to_string()).size(10).color(tier.color()))
-            .padding([1, 5])
+        container(text(tier.badge().to_string()).size(crate::ui::text::s_meta()).color(tier.color()))
+            .padding(crate::ui::metrics::pad2(0, 1))
             .style(move |_: &Theme| container::Style {
                 border: iced::Border { color: tier.color(), width: 1.0, radius: 3.0.into() },
                 ..Default::default()
             }),
     );
-    r = r.push(text(note.to_string()).size(10).color(C_DIM));
-    r = r.push(text(format!("· 自动 {period}")).size(10).color(C_DIM));
-    r = r.push(text(format!("· {}", ago(fetched_ms))).size(10).color(age_color(fetched_ms)));
+    r = r.push(text(note.to_string()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
+    r = r.push(text(format!("· 自动 {period}")).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
+    r = r.push(text(format!("· {}", ago(fetched_ms))).size(crate::ui::text::s_meta()).color(age_color(fetched_ms)));
     if let Some(b) = block {
         r = r.push(chip("⟳ 立即刷新", false, RadarMsg::ForceBlock(b)));
     }
@@ -2162,12 +2129,12 @@ fn ago(ms: i64) -> String {
 /// 宏观那种一小时一刷的块因此常年是黄的——那正是实情。
 fn age_color(ms: i64) -> Color {
     if ms <= 0 {
-        return C_GOLD;
+        return crate::ui::pal::warn();
     }
     match (chrono::Local::now().timestamp_millis() - ms).max(0) / 1000 {
-        0..=599 => C_DIM,
-        600..=3599 => C_GOLD,
-        _ => C_BAD,
+        0..=599 => crate::ui::pal::dim(),
+        600..=3599 => crate::ui::pal::warn(),
+        _ => crate::ui::pal::bad(),
     }
 }
 
@@ -2208,7 +2175,7 @@ fn sort_head<'a>(table: u8, cols: &[Hd], default_col: u8) -> Element<'a, RadarMs
         };
         h = h.push(
             button(
-                container(text(label).size(11).color(if i == active { C_TXT } else { C_HEAD }))
+                container(text(label).size(crate::ui::text::s_small()).color(if i == active { crate::ui::pal::txt() } else { crate::ui::pal::head() }))
                     .width(Length::Fixed(*w))
                     .align_x(if *numeric {
                         iced::Alignment::End
@@ -2216,7 +2183,7 @@ fn sort_head<'a>(table: u8, cols: &[Hd], default_col: u8) -> Element<'a, RadarMs
                         iced::Alignment::Start
                     }),
             )
-            .padding(0)
+            .padding(iced::Padding::ZERO)
             .style(|_, _| button::Style::default())
             .on_press(RadarMsg::SortTable { table, col: i }),
         );
@@ -2286,11 +2253,11 @@ fn sv(x: &str) -> SortVal {
 fn link_cell<'a>(s: String, url: &str, w: f32, c: Color, numeric: bool) -> Element<'a, RadarMsg> {
     match super::radar_readout::register_link(url) {
         Some(id) => button(
-            container(text(s).size(11).color(C_LINK))
+            container(text(s).size(crate::ui::text::s_small()).color(crate::ui::pal::accent()))
                 .width(Length::Fixed(w))
                 .align_x(if numeric { iced::Alignment::End } else { iced::Alignment::Start }),
         )
-        .padding(0)
+        .padding(iced::Padding::ZERO)
         .style(|_, _| button::Style::default())
         .on_press(RadarMsg::OpenLink(id))
         .into(),
@@ -2301,7 +2268,7 @@ fn link_cell<'a>(s: String, url: &str, w: f32, c: Color, numeric: bool) -> Eleme
 /// 「近 N 天」选择条。
 fn days_bar<'a>(table: u8, default_days: u16, opts: &[(u16, &str)]) -> Element<'a, RadarMsg> {
     let cur = super::radar::table_days(table, default_days);
-    let mut r = row![text("时间 ").size(10).color(C_DIM)].spacing(3);
+    let mut r = row![text("时间 ").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(3);
     for (d, l) in opts {
         r = r.push(chip(l, *d == cur, RadarMsg::SetDays { table, days: *d }));
     }
@@ -2327,8 +2294,8 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState, fetched: i64) -> Element<'a
     let mut col = column![].spacing(3);
     if p.universe == 0 && p.indices.is_empty() {
         return text("暂无股票全景数据——守护还没跑完第一轮（默认 5 分钟）")
-            .size(11)
-            .color(C_DIM)
+            .size(crate::ui::text::s_small())
+            .color(crate::ui::pal::dim())
             .into();
     }
     let up = ramp(v.palette).up[2];
@@ -2354,7 +2321,7 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState, fetched: i64) -> Element<'a
         Some(blk::EQUITY),
     ));
     for (what, err) in &p.errors {
-        col = col.push(text(format!("⚠ {what}：{err}")).size(10).color(C_GOLD));
+        col = col.push(text(format!("⚠ {what}：{err}")).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
     }
 
     col = col.push(equity_ipos(p));
@@ -2381,20 +2348,20 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState, fetched: i64) -> Element<'a
             ("低", 108.0, true),
             ("最后成交", 160.0, false),
         ] {
-            h = h.push(cell(t.into(), w, C_HEAD, n));
+            h = h.push(cell(t.into(), w, crate::ui::pal::head(), n));
         }
         col = col.push(h);
         for q in &p.indices {
             col = col.push(
                 row![
-                    link_cell(q.label.clone(), &q.url, 116.0, C_TXT, false),
-                    cell(format!("{:.2}", q.price), 104.0, C_TXT, true),
+                    link_cell(q.label.clone(), &q.url, 116.0, crate::ui::pal::txt(), false),
+                    cell(format!("{:.2}", q.price), 104.0, crate::ui::pal::txt(), true),
                     cell(format!("{:+.2}", q.chg), 88.0, sign(q.chg), true),
                     cell(format!("{:+.2}%", q.chg_pct), 80.0, sign(q.chg), true),
-                    cell(format!("{:.2}", q.open), 96.0, C_DIM, true),
-                    cell(format!("{:.2}", q.high), 96.0, C_DIM, true),
-                    cell(format!("{:.2}", q.low), 108.0, C_DIM, true),
-                    cell(q.last_trade.clone(), 160.0, C_DIM, false),
+                    cell(format!("{:.2}", q.open), 96.0, crate::ui::pal::dim(), true),
+                    cell(format!("{:.2}", q.high), 96.0, crate::ui::pal::dim(), true),
+                    cell(format!("{:.2}", q.low), 108.0, crate::ui::pal::dim(), true),
+                    cell(q.last_trade.clone(), 160.0, crate::ui::pal::dim(), false),
                 ]
                 .spacing(3),
             );
@@ -2429,17 +2396,17 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState, fetched: i64) -> Element<'a
             let r = &r;
             c = c.push(
                 row![
-                    link_cell(r.symbol.clone(), &r.url, 76.0, C_TXT, false),
-                    link_cell(clip(&r.name, 32), &r.url, 250.0, C_DIM, false),
-                    cell(clip(&r.sector, 18), 150.0, C_DIM, false),
-                    cell(money_cell(r.price), 96.0, C_TXT, true),
+                    link_cell(r.symbol.clone(), &r.url, 76.0, crate::ui::pal::txt(), false),
+                    link_cell(clip(&r.name, 32), &r.url, 250.0, crate::ui::pal::dim(), false),
+                    cell(clip(&r.sector, 18), 150.0, crate::ui::pal::dim(), false),
+                    cell(money_cell(r.price), 96.0, crate::ui::pal::txt(), true),
                     cell(format!("{:+.2}%", r.chg_pct), 76.0, sign(r.chg_pct), true),
-                    cell(usd(r.turnover), 96.0, C_TXT, true),
+                    cell(usd(r.turnover), 96.0, crate::ui::pal::txt(), true),
                     // 0 是「原表没给」（多为 ETF），不是市值为零
                     cell(
                         if r.mcap > 0.0 { usd(r.mcap) } else { "—".into() },
                         96.0,
-                        C_DIM,
+                        crate::ui::pal::dim(),
                         true
                     ),
                 ]
@@ -2498,31 +2465,31 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState, fetched: i64) -> Element<'a
         let frac = (sr.n > 0).then(|| sr.adv as f64 / sr.n as f64);
         col = col.push(
             row![
-                cell(clip(&sr.sector, 22), 190.0, C_TXT, false),
-                cell(sr.n.to_string(), 60.0, C_DIM, true),
+                cell(clip(&sr.sector, 22), 190.0, crate::ui::pal::txt(), false),
+                cell(sr.n.to_string(), 60.0, crate::ui::pal::dim(), true),
                 cell(sr.adv.to_string(), 60.0, up, true),
                 cell(sr.dec.to_string(), 72.0, dn, true),
                 container(bar(frac, 14, up)).width(Length::Fixed(150.0)),
                 cell(
                     sr.wtd_chg.map(|x| format!("{x:+.2}%")).unwrap_or_else(|| "—".into()),
                     88.0,
-                    sr.wtd_chg.map_or(C_DIM, sign),
+                    sr.wtd_chg.map_or(crate::ui::pal::dim(), sign),
                     true
                 ),
                 // 加权只覆盖了几只——与「只数」差很多时那个加权值代表性就差
                 cell(
                     format!("{}/{}", sr.wtd_n, sr.n),
                     76.0,
-                    if sr.n > 0 && sr.wtd_n * 4 < sr.n * 3 { C_GOLD } else { C_DIM },
+                    if sr.n > 0 && sr.wtd_n * 4 < sr.n * 3 { crate::ui::pal::warn() } else { crate::ui::pal::dim() },
                     true
                 ),
                 cell(
                     sr.median_chg.map(|x| format!("{x:+.2}%")).unwrap_or_else(|| "—".into()),
                     80.0,
-                    sr.median_chg.map_or(C_DIM, sign),
+                    sr.median_chg.map_or(crate::ui::pal::dim(), sign),
                     true
                 ),
-                cell(usd(sr.turnover), 96.0, C_TXT, true),
+                cell(usd(sr.turnover), 96.0, crate::ui::pal::txt(), true),
             ]
             .spacing(3),
         );
@@ -2542,20 +2509,20 @@ fn equity_ipos<'a>(p: &EquityPanorama) -> Element<'a, RadarMsg> {
     let want = super::radar::ipo_month();
     super::radar_readout::set_ipo_month(&want);
     let got = if p.month.is_empty() { "—" } else { p.month.as_str() };
-    let mut mr = row![text("月份 ").size(10).color(C_DIM)].spacing(3);
+    let mut mr = row![text("月份 ").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(3);
     mr = mr.push(chip("‹ 上一月", false, RadarMsg::IpoMonth(-1)));
     mr = mr.push(
-        container(text(got.to_string()).size(11).color(C_TXT)).width(Length::Fixed(76.0)),
+        container(text(got.to_string()).size(crate::ui::text::s_small()).color(crate::ui::pal::txt())).width(Length::Fixed(76.0)),
     );
     mr = mr.push(chip("下一月 ›", false, RadarMsg::IpoMonth(1)));
     if want != p.month && !p.month.is_empty() {
-        mr = mr.push(text(format!("　查询 {want} 中…")).size(10).color(C_GOLD));
+        mr = mr.push(text(format!("　查询 {want} 中…")).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
     }
     col = col.push(mr.align_y(iced::Alignment::Center));
 
     if p.ipos.is_empty() {
         // 空月份要说清是「这个月没有」，别让人以为是抓取坏了
-        col = col.push(text(format!("{got} 没有新股记录")).size(11).color(C_DIM));
+        col = col.push(text(format!("{got} 没有新股记录")).size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
         return col.into();
     }
     const COLS: [Hd; 8] = [
@@ -2582,14 +2549,14 @@ fn equity_ipos<'a>(p: &EquityPanorama) -> Element<'a, RadarMsg> {
     }) {
         col = col.push(
             row![
-                link_cell(r.symbol.clone(), &r.url, 76.0, C_TXT, false),
-                link_cell(clip(&r.company, 34), &r.url, 280.0, C_TXT, false),
-                cell(r.status.clone(), 76.0, C_GOLD, false),
-                cell(clip(&r.exchange, 18), 150.0, C_DIM, false),
-                cell(dash(&r.price), 88.0, C_DIM, true),
-                cell(dash(&r.shares), 116.0, C_DIM, true),
-                cell(dash(&r.value), 130.0, C_TXT, true),
-                cell(dash(&r.date), 104.0, C_DIM, true),
+                link_cell(r.symbol.clone(), &r.url, 76.0, crate::ui::pal::txt(), false),
+                link_cell(clip(&r.company, 34), &r.url, 280.0, crate::ui::pal::txt(), false),
+                cell(r.status.clone(), 76.0, crate::ui::pal::warn(), false),
+                cell(clip(&r.exchange, 18), 150.0, crate::ui::pal::dim(), false),
+                cell(dash(&r.price), 88.0, crate::ui::pal::dim(), true),
+                cell(dash(&r.shares), 116.0, crate::ui::pal::dim(), true),
+                cell(dash(&r.value), 130.0, crate::ui::pal::txt(), true),
+                cell(dash(&r.date), 104.0, crate::ui::pal::dim(), true),
             ]
             .spacing(3),
         );
@@ -2621,8 +2588,8 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState, fetched: i64) -> Element<'a, Rad
     let mut col = column![].spacing(3);
     if m.sources.is_empty() {
         return text("暂无宏观数据——守护还没跑完第一轮（默认 1 小时）")
-            .size(11)
-            .color(C_DIM)
+            .size(crate::ui::text::s_small())
+            .color(crate::ui::pal::dim())
             .into();
     }
     let up = ramp(v.palette).up[2];
@@ -2639,10 +2606,10 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState, fetched: i64) -> Element<'a, Rad
     ));
     col = col.push(
         text("⚠ 每行的观测日期都不一样：政策利率是当天、通胀是上个月、世行数据是去年。不看「观测」列就会把去年的数当今天的。")
-            .size(10)
-            .color(C_GOLD),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::warn()),
     );
-    let mut sr = row![text("来源 ").size(10).color(C_DIM)].spacing(8);
+    let mut sr = row![text("来源 ").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(8);
     for s in &m.sources {
         sr = sr.push(
             // **条数和错误都要显示**：欧央行五条序列里超时一条时，只显示错误
@@ -2654,18 +2621,18 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState, fetched: i64) -> Element<'a, Rad
                 (0, false) => format!("{} · {}", s.label, clip(&s.err, 42)),
                 (n, false) => format!("{} {n} · 部分失败：{}", s.label, clip(&s.err, 34)),
             })
-            .size(10)
+            .size(crate::ui::text::s_meta())
             // 「未配置」是等用户去配，不是故障——用暗色，别拿警告色喊
             .color(if s.err.is_empty() {
-                C_DIM
+                crate::ui::pal::dim()
             } else if s.err.starts_with("未配置") {
                 // 「未配置」是等用户去配，不是故障
-                C_NEUTRAL
+                c_neutral()
             } else if s.rows > 0 {
                 // 部分失败：还有数据，别用整块失败那个颜色喊
-                C_GOLD
+                crate::ui::pal::warn()
             } else {
-                C_BAD
+                crate::ui::pal::bad()
             }),
         );
     }
@@ -2698,19 +2665,19 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState, fetched: i64) -> Element<'a, Rad
         let r = &r;
         col = col.push(
             row![
-                cell(r.source.clone(), 96.0, C_DIM, false),
-                cell(clip(&r.area, 14), 130.0, C_TXT, false),
-                link_cell(clip(&r.label, 22), &r.url, 200.0, C_TXT, false),
-                cell(format!("{:.3}", r.value), 128.0, C_TXT, true),
-                cell(r.unit.clone(), 60.0, C_DIM, false),
+                cell(r.source.clone(), 96.0, crate::ui::pal::dim(), false),
+                cell(clip(&r.area, 14), 130.0, crate::ui::pal::txt(), false),
+                link_cell(clip(&r.label, 22), &r.url, 200.0, crate::ui::pal::txt(), false),
+                cell(format!("{:.3}", r.value), 128.0, crate::ui::pal::txt(), true),
+                cell(r.unit.clone(), 60.0, crate::ui::pal::dim(), false),
                 cell(
                     r.chg.map(|x| format!("{x:+.3}")).unwrap_or_else(|| "—".into()),
                     96.0,
-                    r.chg.map_or(C_DIM, |x| if x >= 0.0 { up } else { dn }),
+                    r.chg.map_or(crate::ui::pal::dim(), |x| if x >= 0.0 { up } else { dn }),
                     true
                 ),
                 // 这一列是整张表能不能读的关键，用高亮色
-                cell(r.obs.clone(), 104.0, C_HEAD, true),
+                cell(r.obs.clone(), 104.0, crate::ui::pal::head(), true),
             ]
             .spacing(3),
         );
@@ -2731,8 +2698,8 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState, fetched: i64) -> Element<'a, Rad
     if kept.is_empty() && !m.news.is_empty() {
         col = col.push(
             text(format!("这段时间内没有新闻（共 {} 条，放宽时间范围看看）", m.news.len()))
-                .size(11)
-                .color(C_DIM),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::dim()),
         );
     }
     for x in sort_rows(&kept, tbl::MACRO_NEWS, 2, |x: &NewsRow, i| match i {
@@ -2744,9 +2711,9 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState, fetched: i64) -> Element<'a, Rad
     }) {
         col = col.push(
             row![
-                cell(x.source.clone(), 116.0, C_DIM, false),
-                link_cell(clip(&x.title, 96), &x.link, 820.0, C_TXT, false),
-                cell(x.published.clone(), 220.0, C_DIM, false),
+                cell(x.source.clone(), 116.0, crate::ui::pal::dim(), false),
+                link_cell(clip(&x.title, 96), &x.link, 820.0, crate::ui::pal::txt(), false),
+                cell(x.published.clone(), 220.0, crate::ui::pal::dim(), false),
             ]
             .spacing(3),
         );
@@ -2762,11 +2729,11 @@ fn dash(s: &str) -> String {
 /// 小节标题 + 一句口径说明。口径写在标题旁边而不是文档里——
 /// 看板上的数字要能自己解释自己。
 fn section<'a>(title: &str, note: &str) -> Element<'a, RadarMsg> {
-    let mut r = row![text(format!("▍{title}")).size(12).color(C_HEAD)].spacing(8);
+    let mut r = row![text(format!("▍{title}")).size(crate::ui::text::s_body()).color(crate::ui::pal::head())].spacing(8);
     if !note.is_empty() {
-        r = r.push(text(note.to_string()).size(10).color(C_DIM));
+        r = r.push(text(note.to_string()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     }
-    container(r).padding([6, 0]).into()
+    container(r).padding(crate::ui::metrics::pad2(2, 0)).into()
 }
 
 /// 毫秒 → `MM-DD HH:MM`。0 或负数当没有。
@@ -2795,8 +2762,8 @@ fn overview_view<'a>(rows: &[OverviewRow], v: ViewState, fetched: i64) -> Elemen
     let mut col = column![].spacing(3);
     if rows.is_empty() {
         return text("暂无总览数据——需开启股票层（radar.toml 的 [equities]）")
-            .size(11)
-            .color(C_DIM)
+            .size(crate::ui::text::s_small())
+            .color(crate::ui::pal::dim())
             .into();
     }
     // TradingView 的指数报价是延迟档（docs/22 §0）。总览一屏全是它
@@ -2809,20 +2776,20 @@ fn overview_view<'a>(rows: &[OverviewRow], v: ViewState, fetched: i64) -> Elemen
     ));
     col = col.push(
         text("各国指数 · 本币 / 美元并列。本币计价的国家横比是假的——指数涨而本币贬，对美元投资者可能是亏的。")
-            .size(10)
-            .color(C_GOLD),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::warn()),
     );
-    let mut hdr = row![cell("指数".into(), 150.0, C_HEAD, false), cell("币".into(), 40.0, C_HEAD, false)]
+    let mut hdr = row![cell("指数".into(), 150.0, crate::ui::pal::head(), false), cell("币".into(), 40.0, crate::ui::pal::head(), false)]
         .spacing(3);
     for w in OV_WINDOWS {
-        hdr = hdr.push(cell(format!("{w} 本币"), 82.0, C_HEAD, true));
-        hdr = hdr.push(cell(format!("{w} 美元"), 82.0, C_HEAD, true));
+        hdr = hdr.push(cell(format!("{w} 本币"), 82.0, crate::ui::pal::head(), true));
+        hdr = hdr.push(cell(format!("{w} 美元"), 82.0, crate::ui::pal::head(), true));
     }
     col = col.push(hdr);
     for r in rows {
         let mut tr = row![
-            cell(r.label.clone(), 150.0, C_TXT, false),
-            cell(r.currency.clone(), 40.0, C_DIM, false)
+            cell(r.label.clone(), 150.0, crate::ui::pal::txt(), false),
+            cell(r.currency.clone(), 40.0, crate::ui::pal::dim(), false)
         ]
         .spacing(3);
         for i in 0..OV_WINDOWS.len() {
@@ -2850,8 +2817,8 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState, fetched: i64) -> Element<
     let mut col = column![].spacing(3);
     if rows.is_empty() {
         return text("暂无宽度数据——需开启股票层（radar.toml 的 [equities]）")
-            .size(11)
-            .color(C_DIM)
+            .size(crate::ui::text::s_small())
+            .color(crate::ui::pal::dim())
             .into();
     }
     col = col.push(fresh_bar(
@@ -2865,13 +2832,13 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState, fetched: i64) -> Element<
     // 澳大利亚 100% 与美国 28% 的可信度完全不同，一句话概括不了
     col = col.push(
         text("⚠ 每市场按市值取前 N 只算，覆盖率见「样本」列。覆盖不足时这是大盘股宽度，不是全市场 A/D。")
-            .size(10)
-            .color(C_GOLD),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::warn()),
     );
     col = col.push(
         text("热图说今天谁红谁绿；宽度说这个市场是健康上涨，还是靠几只权重撑着。")
-            .size(10)
-            .color(C_DIM),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()),
     );
     let up = ramp(v.palette).up[2];
     let dn = ramp(v.palette).down[2];
@@ -2883,13 +2850,13 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState, fetched: i64) -> Element<
         ("跌", 46.0),
         ("涨跌比", 56.0),
     ] {
-        hdr = hdr.push(cell(t.into(), w, C_HEAD, t != "市场"));
+        hdr = hdr.push(cell(t.into(), w, crate::ui::pal::head(), t != "市场"));
     }
-    hdr = hdr.push(cell("上涨占比".into(), 172.0, C_HEAD, false));
-    hdr = hdr.push(cell("站上 MA200".into(), 172.0, C_HEAD, false));
-    hdr = hdr.push(cell("新高".into(), 46.0, C_HEAD, true));
-    hdr = hdr.push(cell("新低".into(), 46.0, C_HEAD, true));
-    hdr = hdr.push(cell("净新高".into(), 56.0, C_HEAD, true));
+    hdr = hdr.push(cell("上涨占比".into(), 172.0, crate::ui::pal::head(), false));
+    hdr = hdr.push(cell("站上 MA200".into(), 172.0, crate::ui::pal::head(), false));
+    hdr = hdr.push(cell("新高".into(), 46.0, crate::ui::pal::head(), true));
+    hdr = hdr.push(cell("新低".into(), 46.0, crate::ui::pal::head(), true));
+    hdr = hdr.push(cell("净新高".into(), 56.0, crate::ui::pal::head(), true));
     col = col.push(hdr);
 
     for b in rows {
@@ -2902,11 +2869,11 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState, fetched: i64) -> Element<
         } else if b.net_new_high < 0 {
             dn
         } else {
-            C_DIM
+            crate::ui::pal::dim()
         };
         col = col.push(
             row![
-                cell(b.market.clone(), 92.0, C_TXT, false),
+                cell(b.market.clone(), 92.0, crate::ui::pal::txt(), false),
                 // 「样本/总数 覆盖率」——覆盖 28% 与 100% 的可信度差得远，
                 // 只显示样本数看不出这一点
                 cell(
@@ -2916,12 +2883,12 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState, fetched: i64) -> Element<
                     },
                     130.0,
                     // 覆盖不足一半的标黄：那更接近「大盘股宽度」
-                    if b.coverage.is_some_and(|c| c < 0.5) { C_GOLD } else { C_DIM },
+                    if b.coverage.is_some_and(|c| c < 0.5) { crate::ui::pal::warn() } else { crate::ui::pal::dim() },
                     true,
                 ),
                 cell(b.adv.to_string(), 46.0, up, true),
                 cell(b.dec.to_string(), 46.0, dn, true),
-                cell(ratio, 56.0, C_TXT, true),
+                cell(ratio, 56.0, crate::ui::pal::txt(), true),
                 container(bar(b.adv_pct, 16, up)).width(Length::Fixed(172.0)),
                 container(bar(b.above_ma200_pct, 16, up)).width(Length::Fixed(172.0)),
                 cell(b.new_high.to_string(), 46.0, up, true),
@@ -2940,27 +2907,27 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // Arc：每帧只是引用计数加一，不再深拷贝整份读数（见 snapshot 的说明）
     let st = super::radar_readout::snapshot();
     let v = super::radar::view();
-    let mut body = column![].spacing(6).padding(10);
+    let mut body = column![].spacing(6).padding(crate::ui::metrics::space(3));
 
     body = body.push(
         text("全市场雷达 · 加密热层（docs/22 · 发现工具·非交易信号）")
-            .size(14)
-            .color(C_HEAD),
+            .size(crate::ui::text::s_section())
+            .color(crate::ui::pal::head()),
     );
 
     // ── 守护控制条 ──
     let running = st.svc.active;
     body = body.push(
         row![
-            text("守护 ").size(11).color(C_DIM),
+            text("守护 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
             chip("▶ 启动", running, RadarMsg::Start),
             chip("■ 停止", !running, RadarMsg::Stop),
             text(format!("　{}", if running { "运行中" } else { "未运行" }))
-                .size(11)
-                .color(if running { C_OK } else { C_DIM }),
-            text("　").size(11),
-            button(text("⟳ 立即获取").size(11)).padding([2, 7]).on_press(RadarMsg::Refresh),
-            text(format!("  刷新于 {}", st.refreshed)).size(10).color(C_DIM),
+                .size(crate::ui::text::s_small())
+                .color(if running { crate::ui::pal::ok() } else { crate::ui::pal::dim() }),
+            text("　").size(crate::ui::text::s_small()),
+            button(text("⟳ 立即获取").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 2)).on_press(RadarMsg::Refresh),
+            text(format!("  刷新于 {}", st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center),
@@ -2968,14 +2935,14 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     let am = super::radar::action_message();
     if !am.is_empty() {
         let bad = am.starts_with('✗');
-        body = body.push(text(am).size(10).color(if bad { C_BAD } else { C_OK }));
+        body = body.push(text(am).size(crate::ui::text::s_meta()).color(if bad { crate::ui::pal::bad() } else { crate::ui::pal::ok() }));
     }
 
     if !st.present || st.rows.is_empty() {
         body = body.push(
             text("暂无快照——点上方「▶ 启动」拉起 ws-radar 守护（首轮约 5s 出数据）")
-                .size(11)
-                .color(C_DIM),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::dim()),
         );
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
@@ -3009,9 +2976,9 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         };
         tr = tr.push(
             container(
-                text(format!("{} ×{n}", tier.badge())).size(10).color(tier.color()),
+                text(format!("{} ×{n}", tier.badge())).size(crate::ui::text::s_meta()).color(tier.color()),
             )
-            .padding([1, 5])
+            .padding(crate::ui::metrics::pad2(0, 1))
             .style(move |_: &Theme| container::Style {
                 border: iced::Border { color: tier.color(), width: 1.0, radius: 3.0.into() },
                 ..Default::default()
@@ -3026,8 +2993,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             if st.slow_stamp.is_empty() { "—" } else { &st.slow_stamp },
             super::staleness::suffix(&st.slow_stamp),
         ))
-        .size(10)
-        .color(C_DIM),
+        .size(crate::ui::text::s_meta())
+        .color(crate::ui::pal::dim()),
     );
     tr = tr.push(chip("⟳ 立即刷新", false, RadarMsg::Refresh));
     body = body.push(tr);
@@ -3044,8 +3011,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
                 String::new()
             }
         ))
-        .size(10)
-        .color(if warm == 0 { C_GOLD } else { C_DIM }),
+        .size(crate::ui::text::s_meta())
+        .color(if warm == 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
     );
     let bf = &st.backfill;
     if bf.running {
@@ -3057,8 +3024,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
                 bf.pct() * 100.0,
                 if bf.failed > 0 { format!("　失败 {}", bf.failed) } else { String::new() }
             ))
-            .size(10)
-            .color(C_HEAD),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::head()),
         );
     } else if warm == 0 {
         body = body.push(
@@ -3067,13 +3034,13 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             } else {
                 "⏳ 尚未热身，z 值不可信（等待表见 docs/22 §8.1）"
             })
-            .size(10)
-            .color(C_GOLD),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::warn()),
         );
     }
 
     // ── 视图切换 ──
-    let mut mr = row![text("视图 ").size(11).color(C_DIM)].spacing(3);
+    let mut mr = row![text("视图 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
     for (m, l) in [
         (ViewMode::Heatmap, "热图"),
         (ViewMode::Screener, "筛选器"),
@@ -3090,7 +3057,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // 表达形式**单独一行**（官方页面左上角那三个小图标）。热图页没有这个
     // 选择——它本来就是热图。
     if v.mode == ViewMode::Screener {
-        let mut fr = row![text("形式 ").size(11).color(C_DIM)].spacing(3);
+        let mut fr = row![text("形式 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
         for (f, l) in [(Form::Table, "表格"), (Form::Heatmap, "热图")] {
             fr = fr.push(chip(l, f == v.form, RadarMsg::SetForm(f)));
         }
@@ -3103,7 +3070,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         let am = super::radar::action_message();
         if !am.is_empty() {
             let bad = am.starts_with('✗') || am.starts_with("拒绝") || am.starts_with("打开失败");
-            body = body.push(text(am).size(10).color(if bad { C_BAD } else { C_OK }));
+            body = body.push(text(am).size(crate::ui::text::s_meta()).color(if bad { crate::ui::pal::bad() } else { crate::ui::pal::ok() }));
         }
         let inner = match v.mode {
             ViewMode::Overview => overview_view(&st.overview, v, st.fetched.overview),
@@ -3122,8 +3089,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
                 if st.slow_stamp.is_empty() { "—" } else { &st.slow_stamp },
                 super::staleness::suffix(&st.slow_stamp),
             ))
-            .size(10)
-            .color(C_DIM),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()),
         );
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
@@ -3136,7 +3103,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // ── 资产类过滤 ──
     // 股票的成交额远大于加密，同图时加密会被挤到几乎看不见（实测 BTC 只剩一个小格）。
     let vis = memo_visible(st.generation, v, &st.rows, &st.catalog.coin_presets);
-    let mut ar = row![text("资产 ").size(11).color(C_DIM)].spacing(3);
+    let mut ar = row![text("资产 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
     // 每个视图允许的资产类不同：官方热图只有 股票/ETF/加密，筛选器有六类。
     // 把两套混在一起就是原来「下拉一半无效」的根源。
     let kinds: &[AssetFilter] = if v.mode == ViewMode::Screener {
@@ -3253,22 +3220,22 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             &radar_filter::wire(&v, radar_filter::now_s()),
         );
     }
-    ar = ar.push(text("　来源 ").size(11).color(C_DIM));
+    ar = ar.push(text("　来源 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
     ar = ar.push(
         pick_list(opts, Some(cur), |o: MarketOpt| RadarMsg::SetSource(o.key))
             .text_size(11)
-            .padding([2, 6]),
+            .padding(crate::ui::metrics::pad2(0, 2)),
     );
     // 选了一个守护还没在拉的来源时，等的是守护下一次抓取。放个按钮在下拉
     // 旁边，让「我要现在就看」有个明确的入口，而不是干等。
-    ar = ar.push(text(" ").size(11));
+    ar = ar.push(text(" ").size(crate::ui::text::s_small()));
     ar = ar.push(
-        button(text("⟳ 立即获取").size(11)).padding([2, 6]).on_press(RadarMsg::Refresh),
+        button(text("⟳ 立即获取").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 2)).on_press(RadarMsg::Refresh),
     );
     ar = ar.push(
         text(format!("　{} / {} 行", vis.len(), st.rows.len()))
-            .size(10)
-            .color(C_DIM),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()),
     );
     body = body.push(ar.align_y(iced::Alignment::Center));
     // 筛选栏放在空表判断**之前**——被筛空时也得有清除的入口。
@@ -3298,8 +3265,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
                     _ => format!("「{}」正在抓取", cur),
                 }
             })
-            .size(11)
-            .color(C_GOLD),
+            .size(crate::ui::text::s_small())
+            .color(crate::ui::pal::warn()),
         );
         // 干等而没有任何反馈时，人分不清是「在抓」还是「卡住了」。
         // 进度条 + 数字 + 倒计时，三样都给。**抓完了就不再显示**——
@@ -3346,23 +3313,23 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     // 分组维度由目录按资产类下发——官方股票只有「没有分组 / 板块」，
     // ETF 是「没有分组 / 资产类别」，加密**根本没有分组下拉**。
     if draw_map {
-        let mut r1 = row![text("大小 ").size(11).color(C_DIM)].spacing(3);
+        let mut r1 = row![text("大小 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
         r1 = r1.push(
             pick_list(size_list.clone(), Some(cur_size), RadarMsg::SetSize)
                 .text_size(11)
-                .padding([2, 6])
+                .padding(crate::ui::metrics::pad2(0, 2))
                 .width(Length::Fixed(190.0)),
         );
-        r1 = r1.push(text("　颜色 ").size(11).color(C_DIM));
+        r1 = r1.push(text("　颜色 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
         r1 = r1.push(
             pick_list(color_list.clone(), Some(cur_color), RadarMsg::SetColor)
                 .text_size(11)
-                .padding([2, 6])
+                .padding(crate::ui::metrics::pad2(0, 2))
                 .width(Length::Fixed(210.0)),
         );
         let groups = asset_groups(&st.catalog, v.asset);
         if !groups.is_empty() {
-            r1 = r1.push(text("　分组 ").size(11).color(C_DIM));
+            r1 = r1.push(text("　分组 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
             for g in groups {
                 let gb = group_of(&g.code);
                 r1 = r1.push(chip(&g.label, gb == v.group_by, RadarMsg::SetGroupBy(gb)));
@@ -3371,7 +3338,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         body = body.push(r1.align_y(iced::Alignment::Center));
 
         // 色板与色阶**单独一排**
-        let mut r2 = row![text("色板 ").size(11).color(C_DIM)].spacing(3);
+        let mut r2 = row![text("色板 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
         for (pal, l) in [
             (Palette::BlueOrange, "蓝橙"),
             (Palette::GreenUp, "绿涨红跌"),
@@ -3379,7 +3346,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         ] {
             r2 = r2.push(chip(l, pal == v.palette, RadarMsg::SetPalette(pal)));
         }
-        r2 = r2.push(text("　").size(11));
+        r2 = r2.push(text("　").size(crate::ui::text::s_small()));
         r2 = r2.push(legend(v.color.key, v.palette, asset_scale(&st.catalog, v.asset)));
         body = body.push(r2.align_y(iced::Alignment::Center));
     }
@@ -3393,7 +3360,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         _ => None,
     };
     if let Some(h) = hint.filter(|_| draw_map) {
-        body = body.push(text(h).size(10).color(C_GOLD));
+        body = body.push(text(h).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
     }
 
     // ── 树图 ──
@@ -3427,8 +3394,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
                     v.size.label
                 ),
             })
-            .size(11)
-            .color(C_GOLD),
+            .size(crate::ui::text::s_small())
+            .color(crate::ui::pal::warn()),
         );
     }
     let mk_tile = |i: usize| {
@@ -3547,7 +3514,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     let idx = memo_order(st.generation, ev, &st.rows, &st.catalog.coin_presets);
     // **只列官方的列组**。雷达自有的三组（涨跌幅 / 速度 z / 参考）已移除——
     // 官方筛选器没有它们，摆在一起让人以为是官方的。
-    let mut cs = row![text("列组 ").size(11).color(C_DIM)].spacing(3);
+    let mut cs = row![text("列组 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
     for (i, t) in asset_tabs(&st.catalog, v.asset).iter().enumerate() {
         let c = ColumnSet::Tv(i);
         cs = cs.push(chip(&t.label, c == v.cols, RadarMsg::SetColumns(c)));
@@ -3555,8 +3522,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     let shown = idx.len().min(80);
     cs = cs.push(
         text(format!("　{} / {} 条 · 点列头排序", shown, idx.len()))
-            .size(10)
-            .color(C_DIM),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()),
     );
     // 色板不在这一行：官方筛选器的表格没有配色切换（热图页才有）。
     body = body.push(cs.align_y(iced::Alignment::Center));
@@ -3581,7 +3548,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         } else {
             ""
         };
-        tr = tr.push(cell(flag.into(), 22.0, C_GOLD, false));
+        tr = tr.push(cell(flag.into(), 22.0, crate::ui::pal::warn(), false));
         body = body.push(tr);
     }
 
@@ -3592,8 +3559,8 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             st.stamp,
             super::staleness::suffix(&st.stamp),
         ))
-        .size(10)
-        .color(C_DIM),
+        .size(crate::ui::text::s_meta())
+        .color(crate::ui::pal::dim()),
     );
 
     scrollable(body).width(Length::Fill).height(Length::Fill).into()
@@ -4122,7 +4089,7 @@ mod tests {
             for probe in [-9.0, -3.0, -1.0, -0.1, 0.0, 0.1, 1.0, 3.0, 9.0] {
                 let c = scale_color(Some(probe), cb, STOCK_SCALE, P, true);
                 let r = ramp(P);
-                let known = std::iter::once(C_NEUTRAL)
+                let known = std::iter::once(c_neutral())
                     .chain(r.up.iter().copied())
                     .chain(r.down.iter().copied())
                     .any(|k| (k.r - c.r).abs() < 1e-6 && (k.g - c.g).abs() < 1e-6);
@@ -4138,14 +4105,14 @@ mod tests {
         let down = scale_color(Some(-4.0), "own:speed_z", STOCK_SCALE, P, true);
         assert!(up.b > up.r, "涨端应偏蓝");
         assert!(down.r > down.b, "跌端应偏橙");
-        let dist = |c: Color| (c.r - C_NEUTRAL.r).abs() + (c.b - C_NEUTRAL.b).abs();
+        let dist = |c: Color| (c.r - c_neutral().r).abs() + (c.b - c_neutral().b).abs();
         assert!(dist(scale_color(Some(4.0), "own:speed_z", STOCK_SCALE, P, false)) < dist(up));
     }
 
     #[test]
     fn missing_value_is_neutral() {
         let c = scale_color(None, "own:speed_z", STOCK_SCALE, P, true);
-        assert!((c.r - C_NEUTRAL.r).abs() < 1e-6 && (c.b - C_NEUTRAL.b).abs() < 1e-6);
+        assert!((c.r - c_neutral().r).abs() < 1e-6 && (c.b - c_neutral().b).abs() < 1e-6);
     }
 
     #[test]
@@ -4276,7 +4243,7 @@ mod tests {
         r.m.insert("change".into(), -4.0);
         r.m.insert("price_earnings_ttm".into(), 27.5);
         let neutral = cell_text(&r, SortKey::Metric("price_earnings_ttm"), &c, P).1;
-        assert!((neutral.r - C_TXT.r).abs() < 1e-6, "估值类应保持中性色");
+        assert!((neutral.r - crate::ui::pal::txt().r).abs() < 1e-6, "估值类应保持中性色");
         let chg = cell_text(&r, SortKey::Metric("change"), &c, P).1;
         assert!(chg.r > chg.b, "跌应偏橙");
     }
@@ -4511,7 +4478,7 @@ mod tests {
         let dn = scale_text(Some(-3.0), "own:speed_z", STOCK_SCALE, P, true);
         assert!(up.b > up.r, "涨端应偏蓝");
         assert!(dn.r > dn.b, "跌端应偏橙");
-        assert!((scale_text(None, "own:speed_z", STOCK_SCALE, P, true).r - C_DIM.r).abs() < 1e-6);
+        assert!((scale_text(None, "own:speed_z", STOCK_SCALE, P, true).r - crate::ui::pal::dim().r).abs() < 1e-6);
     }
 
     #[test]
@@ -4674,11 +4641,11 @@ mod freshness_tests {
     fn stale_data_changes_color() {
         // 一屏数据放了一小时还显示成常态色，等于没标
         let now = chrono::Local::now().timestamp_millis();
-        assert_eq!(age_color(now), C_DIM);
-        assert_eq!(age_color(now - 1_200_000), C_GOLD);
-        assert_eq!(age_color(now - 7_200_000), C_BAD);
+        assert_eq!(age_color(now), crate::ui::pal::dim());
+        assert_eq!(age_color(now - 1_200_000), crate::ui::pal::warn());
+        assert_eq!(age_color(now - 7_200_000), crate::ui::pal::bad());
         // 没抓过也要显眼
-        assert_eq!(age_color(0), C_GOLD);
+        assert_eq!(age_color(0), crate::ui::pal::warn());
     }
 
     #[test]

@@ -163,7 +163,7 @@ impl AudioStream {
                 .spacing(8),
             )
             .style(style::modal_container)
-            .padding(8)
+            .padding(crate::ui::metrics::space(3))
         });
 
         let volume_container = {
@@ -224,7 +224,7 @@ impl AudioStream {
                     let mut stream_row = row![stream_checkbox, space::horizontal(),]
                         .height(36)
                         .align_y(iced::Alignment::Center)
-                        .padding(4)
+                        .padding(crate::ui::metrics::space(1))
                         .spacing(4);
 
                     let is_expanded = self
@@ -265,14 +265,14 @@ impl AudioStream {
                                         text(format!("Buy/sell trade count in buffer ≥ {}", v)),
                                         threshold_slider
                                     ]
-                                    .padding(8)
+                                    .padding(crate::ui::metrics::space(3))
                                     .spacing(4),
                                 );
                             }
                             data::audio::Threshold::Qty(v) => {
                                 column = column.push(
                                     row![text(format!("Any trade's size in buffer ≥ {}", v))]
-                                        .padding(8)
+                                        .padding(crate::ui::metrics::space(3))
                                         .spacing(4),
                                 );
                             }
@@ -297,7 +297,7 @@ impl AudioStream {
             column![volume_container, audio_contents,].spacing(20)
         })
         .max_width(320)
-        .padding(24)
+        .padding(crate::ui::metrics::space(6))
         .style(style::dashboard_modal)
         .into()
     }

@@ -198,7 +198,7 @@ impl ThemeEditor {
 
         container(content)
             .max_width(380)
-            .padding(24)
+            .padding(crate::ui::metrics::space(6))
             .style(style::dashboard_modal)
             .into()
     }

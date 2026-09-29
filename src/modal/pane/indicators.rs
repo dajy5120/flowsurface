@@ -26,7 +26,7 @@ where
 
     container(content_row)
         .max_width(200)
-        .padding(16)
+        .padding(crate::ui::metrics::space(5))
         .style(style::chart_modal)
         .into()
 }

@@ -543,7 +543,7 @@ pub fn view<'a, T: Chart>(
                 iced::widget::tooltip::Position::Top
             ),
         ]
-        .padding(2)
+        .padding(crate::ui::metrics::space(0))
     };
 
     let y_labels_width = state.y_labels_width();

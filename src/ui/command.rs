@@ -21,6 +21,11 @@ pub enum Cmd {
     ToggleCvd,
     /// 隐藏数值（演示 / 截图）
     ToggleHideValues,
+    /// 直接设定（设置面板的分段按钮用）
+    UpDown(super::UpDown),
+    Cvd(bool),
+    HideValues(bool),
+    HeatmapScale(&'static str),
     TogglePalette,
     ToggleBottom,
     ToggleInspector,

@@ -18,7 +18,6 @@ mod widget;
 mod window;
 mod ws; // WealthSpring 集成（docs/08）：Redis 控制面 + 回测行情流
 
-use data::config::theme::default_theme;
 use data::{layout::WindowSpec, sidebar};
 use layout::{LayoutId, configuration};
 use modal::{
@@ -220,7 +219,6 @@ enum Message {
     GoBack,
     DataFolderRequested,
     OpenUrlRequested(Cow<'static, str>),
-    ThemeSelected(iced_core::Theme),
     ScaleFactorChanged(data::ScaleFactor),
     SetTimezone(data::UserTimezone),
     ToggleTradeFetch(bool),
@@ -313,6 +311,10 @@ impl Flowsurface {
             state.shell.bottom_tab = ui::shell::BottomTab::Problems;
             state.shell.palette = Some(ui::shell::Palette { query: "主题".into(), sel: 1 });
             state.shell.log.refresh();
+        }
+        // 样张模式下打开设置面板截图（docs/35 批 7）
+        if state.specimen.is_some() && std::env::var_os("WS_UI_SPECIMEN_SETTINGS").is_some() {
+            state.sidebar.set_menu(Some(sidebar::Menu::Settings));
         }
         // 样张模式：按侧栏顺序排好要截的工作区
         if let Some(sp) = state.specimen.as_mut() {
@@ -469,7 +471,9 @@ impl Flowsurface {
             }
             Message::Tick(now) => {
                 // 界面偏好可能被 Studio 改了（每秒最多看一次文件修改时间）
-                ui::poll();
+                if ui::poll() {
+                    self.apply_ui_change();
+                }
                 // 底部面板开着才读日志尾巴（每 2 秒一次）
                 if self.shell.bottom {
                     self.shell.log.refresh();
@@ -615,13 +619,6 @@ impl Flowsurface {
                     }
                 }
             }
-            Message::ThemeSelected(theme) => {
-                self.theme = data::Theme(theme.clone());
-
-                let main_window = self.main_window.id;
-                self.active_dashboard_mut()
-                    .theme_updated(main_window, &theme);
-            }
             Message::Dashboard {
                 layout_id: id,
                 event: msg,
@@ -705,7 +702,8 @@ impl Flowsurface {
                             }
                         }
                         Some(dashboard::Event::RequestPalette) => {
-                            let theme = self.theme.0.clone();
+                            // 图表的调色板来自设计 token（docs/35），不再是上游主题
+                            let theme = ui::iced_theme();
 
                             let main_window = self.main_window.id;
                             self.active_dashboard_mut()
@@ -1341,8 +1339,40 @@ impl Flowsurface {
             .expect("No active dashboard")
     }
 
+    /// 外观偏好变了（本进程改的或 Studio 改的）：通知图表重取调色板。
+    ///
+    /// 图表会缓存颜色（着色器热图的色阶、K 线的涨跌色……），原来靠上游的 `ThemeSelected`
+    /// 通知它们；主题改由设计 token 决定之后，这一步必须显式做，否则要重启图表才变色。
+    fn apply_ui_change(&mut self) {
+        let main = self.main_window.id;
+        let theme = ui::iced_theme();
+        for dashboard in self.layout_manager.iter_dashboards_mut() {
+            dashboard.theme_updated(main, &theme);
+        }
+    }
+
     /// 执行一条命令（docs/35 批 3）。命令面板、快捷键、外壳按钮共用这一个入口。
     fn run_command(&mut self, cmd: ui::command::Cmd) -> Task<Message> {
+        let look = matches!(
+            cmd,
+            ui::command::Cmd::Theme(_)
+                | ui::command::Cmd::CycleTheme
+                | ui::command::Cmd::Density(_)
+                | ui::command::Cmd::CycleDensity
+                | ui::command::Cmd::ToggleUpDown
+                | ui::command::Cmd::ToggleCvd
+                | ui::command::Cmd::UpDown(_)
+                | ui::command::Cmd::Cvd(_)
+                | ui::command::Cmd::HeatmapScale(_)
+        );
+        let task = self.run_command_inner(cmd);
+        if look {
+            self.apply_ui_change();
+        }
+        task
+    }
+
+    fn run_command_inner(&mut self, cmd: ui::command::Cmd) -> Task<Message> {
         use ui::command::Cmd;
         let main = self.main_window.id;
         match cmd {
@@ -1379,6 +1409,10 @@ impl Flowsurface {
             }),
             Cmd::ToggleCvd => ui::update(|p| p.cvd_safe = !p.cvd_safe),
             Cmd::ToggleHideValues => ui::update(|p| p.hide_values = !p.hide_values),
+            Cmd::UpDown(v) => ui::update(|p| p.up_down = v),
+            Cmd::Cvd(v) => ui::update(|p| p.cvd_safe = v),
+            Cmd::HideValues(v) => ui::update(|p| p.hide_values = v),
+            Cmd::HeatmapScale(v) => ui::update(|p| p.heatmap_scale = v.to_string()),
             Cmd::TogglePalette => {
                 if self.shell.palette.take().is_none() {
                     self.shell.palette = Some(ui::shell::Palette::default());
@@ -1516,26 +1550,35 @@ impl Flowsurface {
         match menu {
             sidebar::Menu::Settings => {
                 let settings_modal = {
-                    let theme_picklist = {
-                        let mut themes: Vec<iced::Theme> = iced_core::Theme::ALL.to_vec();
-
-                        let default_theme = iced_core::Theme::Custom(default_theme().into());
-                        themes.push(default_theme);
-
-                        if let Some(custom_theme) = &self.theme_editor.custom_theme {
-                            themes.push(custom_theme.clone());
-                        }
-
-                        pick_list(themes, Some(self.theme.0.clone()), |theme| {
-                            Message::ThemeSelected(theme)
-                        })
+                    // 外观（docs/35 批 7）：与 Studio 共用 ~/.config/wealthspring/ui.json，改了两边同时变。
+                    // 取代上游的主题下拉框与主题编辑器——自定义颜色会绕过 token 的对比度与色弱检查。
+                    let appearance = {
+                        use ui::command::Cmd;
+                        let p = ui::prefs();
+                        let run = Message::RunCommand;
+                        let item = |label: &'static str, body: Element<'static, Message>| -> Element<'static, Message> {
+                            column![ui::text::caption(label), body].spacing(4).into()
+                        };
+                        column![
+                            item("主题", ui::widgets::segmented(
+                                &[("深色", ui::ThemeId::Dark), ("浅色", ui::ThemeId::Light), ("OLED", ui::ThemeId::OledDark), ("高对比", ui::ThemeId::HighContrast)],
+                                &p.theme, move |t| run(Cmd::Theme(t)))),
+                            item("密度", ui::widgets::segmented(
+                                &[("紧凑", ui::Density::Compact), ("舒适", ui::Density::Comfortable), ("宽松", ui::Density::Spacious)],
+                                &p.density, move |d| run(Cmd::Density(d)))),
+                            item("涨跌颜色", ui::widgets::segmented(
+                                &[("绿涨红跌", ui::UpDown::International), ("红涨绿跌", ui::UpDown::China)],
+                                &p.up_down, move |v| run(Cmd::UpDown(v)))),
+                            item("色弱安全配色", ui::widgets::segmented(&[("关", false), ("开", true)], &p.cvd_safe, move |v| run(Cmd::Cvd(v)))),
+                            item("隐藏数值（演示 / 截图）", ui::widgets::segmented(&[("关", false), ("开", true)], &p.hide_values, move |v| run(Cmd::HideValues(v)))),
+                            item("热图色阶", ui::widgets::segmented(
+                                &[("inferno", "inferno"), ("viridis", "viridis"), ("cividis", "cividis")],
+                                &match p.heatmap_scale.as_str() { "viridis" => "viridis", "cividis" => "cividis", _ => "inferno" },
+                                move |v| run(Cmd::HeatmapScale(v)))),
+                            ui::text::caption("主题编辑器已下线：自定义颜色会绕过对比度与色弱检查。快捷键 Ctrl Alt T / D 循环主题 / 密度。"),
+                        ]
+                        .spacing(10)
                     };
-
-                    let toggle_theme_editor = button(text("Theme editor")).on_press(
-                        Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(Some(
-                            sidebar::Menu::ThemeEditor,
-                        ))),
-                    );
 
                     let toggle_network_editor = button(text("Network")).on_press(Message::Sidebar(
                         dashboard::sidebar::Message::ToggleSidebarMenu(Some(
@@ -1617,7 +1660,7 @@ impl Flowsurface {
                             ]
                             .align_y(Alignment::Center)
                             .spacing(8)
-                            .padding(4),
+                            .padding(crate::ui::metrics::space(1)),
                         )
                         .style(style::modal_container)
                     };
@@ -1663,7 +1706,7 @@ impl Flowsurface {
 
                         let github_link_button =
                             button(text(version_label).size(crate::style::text_size::EMPHASIS))
-                                .padding(0)
+                                .padding(iced::Padding::ZERO)
                                 .style(style::button::text_link)
                                 .on_press(Message::OpenUrlRequested(Cow::Borrowed(
                                     version::GITHUB_REPOSITORY_URL,
@@ -1680,7 +1723,7 @@ impl Flowsurface {
                                 .align_y(Alignment::Center),
                             )
                             .style(style::tooltip)
-                            .padding(8),
+                            .padding(crate::ui::metrics::space(3)),
                             TooltipPosition::Top,
                         )
                         .into();
@@ -1690,7 +1733,7 @@ impl Flowsurface {
                         {
                             let commit_button =
                                 button(text(commit_label).size(crate::style::text_size::SMALL))
-                                    .padding(0)
+                                    .padding(iced::Padding::ZERO)
                                     .style(style::button::text_link_secondary)
                                     .on_press(Message::OpenUrlRequested(Cow::Owned(commit_url)));
 
@@ -1715,11 +1758,11 @@ impl Flowsurface {
                         column![text("Sidebar position").size(crate::style::text_size::SECTION), sidebar_pos_picklist,].spacing(12),
                         column![text("Time zone").size(crate::style::text_size::SECTION), timezone_picklist,].spacing(12),
                         column![text("Market data").size(crate::style::text_size::SECTION), size_in_quote_currency_checkbox,].spacing(12),
-                        column![text("Theme").size(crate::style::text_size::SECTION), theme_picklist,].spacing(12),
+                        column![text("外观").size(crate::style::text_size::SECTION), appearance,].spacing(12),
                         column![text("Interface scale").size(crate::style::text_size::SECTION), scale_factor,].spacing(12),
                         column![
                             text("Experimental").size(crate::style::text_size::SECTION),
-                            column![trade_fetch_checkbox, toggle_theme_editor, toggle_network_editor].spacing(8),
+                            column![trade_fetch_checkbox, toggle_network_editor].spacing(8),
                         ]
                         .spacing(12),
                         footer,
@@ -1735,8 +1778,8 @@ impl Flowsurface {
 
                     container(content)
                         .align_x(Alignment::Start)
-                        .max_width(240)
-                        .padding(24)
+                        .max_width(320) // 外观一组的四段分段按钮约需 300px，240 会把「高对比」挤成三行
+                        .padding(crate::ui::metrics::space(6))
                         .style(style::dashboard_modal)
                 };
 
@@ -1860,7 +1903,7 @@ impl Flowsurface {
 
                     container(col.align_x(Alignment::Center).spacing(20))
                         .width(260)
-                        .padding(24)
+                        .padding(crate::ui::metrics::space(6))
                         .style(style::dashboard_modal)
                 };
 

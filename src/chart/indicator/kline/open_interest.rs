@@ -65,7 +65,7 @@ impl OpenInterestIndicator {
             // Open interest is snapshotted at candle open, not computed from close like regular indicators.
             // Shift left by 1 so each OI value aligns with the equivalent candle close.
             .shift(-1)
-            .padding(0.08)
+            .padding(crate::ui::metrics::space(0))
             .with_tooltip(tooltip);
 
         indicator_row(

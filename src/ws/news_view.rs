@@ -11,16 +11,6 @@ use iced::{Color, Element, Length};
 
 use super::news_readout::{self as ro, ago, NewsRow, SourcePick, SourceRow, View};
 
-const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
-const C_DIM: Color = Color::from_rgb(0.55, 0.55, 0.6);
-const C_TXT: Color = Color::from_rgb(0.85, 0.87, 0.92);
-const C_GOLD: Color = Color::from_rgb(0.9, 0.8, 0.4);
-const C_BAD: Color = Color::from_rgb(0.9, 0.45, 0.4);
-const C_OK: Color = Color::from_rgb(0.35, 0.78, 0.98);
-/// 可点标题的颜色。**整行里最亮的东西**——它是唯一可交互的部分。
-const C_LINK: Color = Color::from_rgb(0.55, 0.88, 1.00);
-const C_LINK_HOVER: Color = Color::from_rgb(0.82, 0.95, 1.00);
-
 /// 标题链接的样式。
 ///
 /// 「点了没反应」查了半天之后（xdg-open 那个 bug），另一半问题是
@@ -33,10 +23,10 @@ const C_LINK_HOVER: Color = Color::from_rgb(0.82, 0.95, 1.00);
 fn link_style(_t: &iced::Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
     use iced::widget::button::Status;
     let (text_color, bg) = match status {
-        Status::Hovered => (C_LINK_HOVER, Some(Color { a: 0.14, ..C_LINK })),
-        Status::Pressed => (C_LINK_HOVER, Some(Color { a: 0.24, ..C_LINK })),
-        Status::Disabled => (C_DIM, None),
-        Status::Active => (C_LINK, None),
+        Status::Hovered => (crate::ui::pal::link_hover(), Some(Color { a: 0.14, ..crate::ui::pal::link() })),
+        Status::Pressed => (crate::ui::pal::link_hover(), Some(Color { a: 0.24, ..crate::ui::pal::link() })),
+        Status::Disabled => (crate::ui::pal::dim(), None),
+        Status::Active => (crate::ui::pal::link(), None),
     };
     iced::widget::button::Style {
         text_color,
@@ -85,23 +75,23 @@ pub enum NewsMsg {
 }
 
 fn chip<'a>(label: &str, msg: NewsMsg) -> Element<'a, NewsMsg> {
-    button(text(label.to_string()).size(11))
-        .padding([2, 7])
+    button(text(label.to_string()).size(crate::ui::text::s_small()))
+        .padding(crate::ui::metrics::pad2(0, 2))
         .style(|t, st| crate::style::button::modifier(t, st, false))
         .on_press(msg)
         .into()
 }
 
 fn chip_on<'a>(label: &str, active: bool, msg: NewsMsg) -> Element<'a, NewsMsg> {
-    button(text(label.to_string()).size(11))
-        .padding([2, 7])
+    button(text(label.to_string()).size(crate::ui::text::s_small()))
+        .padding(crate::ui::metrics::pad2(0, 2))
         .style(move |t, st| crate::style::button::modifier(t, st, active))
         .on_press(msg)
         .into()
 }
 
 fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, NewsMsg> {
-    container(text(s).size(11).color(c))
+    container(text(s).size(crate::ui::text::s_small()).color(c))
         .width(Length::Fixed(w))
         .align_x(if numeric { iced::Alignment::End } else { iced::Alignment::Start })
         .into()
@@ -116,14 +106,14 @@ fn clip(s: &str, n: usize) -> String {
 
 /// 分级的颜色。一级来源要看得出来——媒体是派生的、更晚的。
 ///
-/// 都比 [`C_LINK`] 暗：**整行里最亮的必须是可点的那部分**，
+/// 都比 [`crate::ui::pal::accent()`] 暗：**整行里最亮的必须是可点的那部分**，
 /// 否则「哪儿能点」这件事又要靠猜。
 fn tier_color(tier: &str) -> Color {
     match tier {
-        "regulator" => Color { a: 0.85, ..C_OK },
-        "exchange" => Color { a: 0.80, ..C_HEAD },
-        "corporate" => Color { a: 0.80, ..C_TXT },
-        _ => C_DIM,
+        "regulator" => Color { a: 0.85, ..crate::ui::pal::ok() },
+        "exchange" => Color { a: 0.80, ..crate::ui::pal::head() },
+        "corporate" => Color { a: 0.80, ..crate::ui::pal::txt() },
+        _ => crate::ui::pal::dim(),
     }
 }
 
@@ -133,27 +123,27 @@ fn tier_color(tier: &str) -> Color {
 /// 前者只看状态码永远发现不了，后者一眼就能看见。
 pub fn source_lamp(s: &SourceRow) -> (&'static str, Color, String) {
     if s.failing() {
-        return ("✕", C_BAD, format!("连续失败 {} 次", s.consecutive_fails));
+        return ("✕", crate::ui::pal::bad(), format!("连续失败 {} 次", s.consecutive_fails));
     }
     if s.is_stale {
         // **这一行是这一页的理由**
         let d = s.stale_secs.unwrap_or(0) / 86400;
-        return ("⚠", C_BAD, format!("陈了 {d} 天（一直返回 200）"));
+        return ("⚠", crate::ui::pal::bad(), format!("陈了 {d} 天（一直返回 200）"));
     }
     if s.no_timestamps {
         // 不是故障：源就是不给时间。但要说出来——看门狗对它用的是
         // 另一套判据（我们上次见到新条目是什么时候）
-        return ("◍", C_HEAD, "源不给时间戳，按「上次有新条目」判新鲜度".into());
+        return ("◍", crate::ui::pal::head(), "源不给时间戳，按「上次有新条目」判新鲜度".into());
     }
     if s.never_seen() {
-        return ("○", C_DIM, "还没抓到".into());
+        return ("○", crate::ui::pal::dim(), "还没抓到".into());
     }
-    ("●", C_OK, String::new())
+    ("●", crate::ui::pal::ok(), String::new())
 }
 
 pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
     let st = ro::snapshot();
-    let mut body = column![].spacing(4).padding(8);
+    let mut body = column![].spacing(4).padding(crate::ui::metrics::space(3));
 
     // ── 顶栏 ──
     let stale_txt = if st.stale_sources > 0 {
@@ -163,7 +153,7 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
     };
     body = body.push(
         row![
-            text("新闻资讯").size(13).color(C_TXT),
+            text("新闻资讯").size(crate::ui::text::s_emph()).color(crate::ui::pal::txt()),
             chip("▶ 启动", NewsMsg::Start),
             chip("■ 停止", NewsMsg::Stop),
             text(if st.svc.active {
@@ -171,10 +161,10 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
             } else {
                 "守护未运行".into()
             })
-            .size(10)
-            .color(if st.svc.active { C_DIM } else { C_GOLD }),
-            text(format!("{} 条在窗内", st.total)).size(11).color(C_TXT),
-            text(stale_txt).size(11).color(if st.stale_sources > 0 { C_BAD } else { C_DIM }),
+            .size(crate::ui::text::s_meta())
+            .color(if st.svc.active { crate::ui::pal::dim() } else { crate::ui::pal::warn() }),
+            text(format!("{} 条在窗内", st.total)).size(crate::ui::text::s_small()).color(crate::ui::pal::txt()),
+            text(stale_txt).size(crate::ui::text::s_small()).color(if st.stale_sources > 0 { crate::ui::pal::bad() } else { crate::ui::pal::dim() }),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
@@ -194,15 +184,15 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
     if v == View::Feed && st.stale_sources > 0 {
         vr = vr.push(
             text(format!("⚠ {} 个源已陈，去「源管理」看", st.stale_sources))
-                .size(10)
-                .color(C_BAD),
+                .size(crate::ui::text::s_meta())
+                .color(crate::ui::pal::bad()),
         );
     }
     body = body.push(vr);
 
     if !st.present || st.sources.is_empty() {
         body = body.push(
-            text("还没有快照——守护没起，或者刚起还没抓完第一轮").size(11).color(C_DIM),
+            text("还没有快照——守护没起，或者刚起还没抓完第一轮").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
         );
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
@@ -267,12 +257,12 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
         .unwrap_or_else(|| opts[0].clone());
     body = body.push(
         row![
-            text("时间线").size(11).color(C_HEAD),
-            pick_list(opts.clone(), Some(selected), NewsMsg::PickSource).text_size(11).padding([2, 6]),
+            text("时间线").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
+            pick_list(opts.clone(), Some(selected), NewsMsg::PickSource).text_size(11).padding(crate::ui::metrics::pad2(0, 2)),
             text_input("筛选：词=都要有 · \"词组\" · -排除 · tier:/kind:/sym:/lang:/src:", &q)
                 .on_input(NewsMsg::FilterEdited)
-                .size(11)
-                .padding([2, 6])
+                .size(crate::ui::text::s_small())
+                .padding(crate::ui::metrics::pad2(0, 2))
                 .width(Length::Fixed(420.0)),
             // **筛掉了多少必须说**。只显示一张短表的话，
             // 「筛选筛没了」和「本来就没有」分不出来
@@ -281,20 +271,20 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
             } else {
                 format!("{} / {} 条（筛掉 {}）", shown.len(), st.items.len(), st.items.len() - shown.len())
             })
-            .size(10)
-            .color(if shown.is_empty() && !st.items.is_empty() { C_GOLD } else { C_DIM }),
+            .size(crate::ui::text::s_meta())
+            .color(if shown.is_empty() && !st.items.is_empty() { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
     );
     body = body.push(
-        text("`~` = 源没给发布时间，这里显示的是我们抓到的时刻").size(10).color(C_DIM),
+        text("`~` = 源没给发布时间，这里显示的是我们抓到的时刻").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
     );
     for it in shown.iter().take(120) {
         body = body.push(item_row(it, st.now_ms));
     }
     if st.items.is_empty() {
-        body = body.push(text("窗内还没有条目").size(11).color(C_DIM));
+        body = body.push(text("窗内还没有条目").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
     } else if shown.is_empty() {
         // 空列表要说清是**筛选**筛没的，不是没新闻——
         // 而且要说清是哪一个筛的：下拉还是关键词
@@ -304,12 +294,12 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
             _ => "这条筛选",
         };
         body = body.push(
-            text(format!("{who}把 {} 条全筛掉了", st.items.len())).size(11).color(C_GOLD),
+            text(format!("{who}把 {} 条全筛掉了", st.items.len())).size(crate::ui::text::s_small()).color(crate::ui::pal::warn()),
         );
     }
 
     body = body.push(
-        text(format!("快照 {} · 读于 {}", st.stamp, st.refreshed)).size(10).color(C_DIM),
+        text(format!("快照 {} · 读于 {}", st.stamp, st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
     );
     scrollable(body).width(Length::Fill).height(Length::Fill).into()
 }
@@ -329,12 +319,12 @@ fn watch_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
     let mut body = column![].spacing(4);
     // ── 按标的订阅（N5）──
     let mut wr = row![
-        text("订阅").size(11).color(C_HEAD),
+        text("订阅").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
         text_input("标的代码，如 AAPL（回车添加）", &ro::watch_input())
             .on_input(NewsMsg::WatchEdited)
             .on_submit(NewsMsg::WatchAdd)
-            .size(11)
-            .padding([2, 6])
+            .size(crate::ui::text::s_small())
+            .padding(crate::ui::metrics::pad2(0, 2))
             .width(Length::Fixed(200.0)),
         chip("添加", NewsMsg::WatchAdd),
     ]
@@ -347,8 +337,8 @@ fn watch_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
         wr = wr.push(
             row![
                 text(format!("{} ({})", w.symbol, w.in_window))
-                    .size(11)
-                    .color(if ok { C_OK } else { C_GOLD }),
+                    .size(crate::ui::text::s_small())
+                    .color(if ok { crate::ui::pal::ok() } else { crate::ui::pal::warn() }),
                 chip("×", NewsMsg::WatchRemove(w.symbol.clone())),
             ]
             .spacing(2)
@@ -360,8 +350,8 @@ fn watch_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
         body = body.push(
             text("SEC 一手申报，默认只收重大表格（8-K/10-Q/13D…）——\
                   Form 4 内部人交易占了申报总量的六成，收进来会把 8-K 埋掉")
-                .size(10)
-                .color(C_DIM),
+                .size(crate::ui::text::s_meta())
+                .color(crate::ui::pal::dim()),
         );
     }
 
@@ -372,22 +362,22 @@ fn watch_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
     // 几个月前的东西，而它们看起来和刚发生的一样
     body = body.push(
         row![
-            text("SEC 全文检索").size(11).color(C_HEAD),
+            text("SEC 全文检索").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
             text_input("在所有申报里找一个词，如 material weakness（回车）", &ro::search_input())
                 .on_input(NewsMsg::SearchEdited)
                 .on_submit(NewsMsg::SearchRun)
-                .size(11)
-                .padding([2, 6])
+                .size(crate::ui::text::s_small())
+                .padding(crate::ui::metrics::pad2(0, 2))
                 .width(Length::Fixed(320.0)),
             chip("检索", NewsMsg::SearchRun),
             chip("清空", NewsMsg::SearchClear),
             // 失败也要说出来——空结果和「没搜到」看起来一样
             text(st.search.status.clone())
-                .size(10)
+                .size(crate::ui::text::s_meta())
                 .color(if st.search.status.contains("失败") || st.search.status.contains("取不到") {
-                    C_BAD
+                    crate::ui::pal::bad()
                 } else {
-                    C_DIM
+                    crate::ui::pal::dim()
                 }),
         ]
         .spacing(6)
@@ -397,11 +387,11 @@ fn watch_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
         let what = if h.what.is_empty() { String::new() } else { format!(" · {}", h.what) };
         body = body.push(
             row![
-                cell(h.date.clone(), 82.0, C_DIM, false),
+                cell(h.date.clone(), 82.0, crate::ui::pal::dim(), false),
                 cell(h.form.clone(), 54.0, tier_color("regulator"), false),
                 // 和时间线一致：标题就是链接
-                button(text(format!("{}{}", h.who, what)).size(11).width(Length::Fill))
-                    .padding([1, 4])
+                button(text(format!("{}{}", h.who, what)).size(crate::ui::text::s_small()).width(Length::Fill))
+                    .padding(crate::ui::metrics::pad2(0, 1))
                     .style(link_style)
                     .on_press(NewsMsg::Open(h.url.clone()))
                     .width(Length::Fill),
@@ -421,14 +411,14 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
     let (id, label, url, tier) = ro::add_form();
     body = body.push(
         row![
-            text("加源").size(11).color(C_HEAD),
-            text_input("id", &id).on_input(|t| NewsMsg::AddEdited("id", t)).size(11).padding([2, 6]).width(Length::Fixed(96.0)),
-            text_input("显示名", &label).on_input(|t| NewsMsg::AddEdited("label", t)).size(11).padding([2, 6]).width(Length::Fixed(120.0)),
+            text("加源").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
+            text_input("id", &id).on_input(|t| NewsMsg::AddEdited("id", t)).size(crate::ui::text::s_small()).padding(crate::ui::metrics::pad2(0, 2)).width(Length::Fixed(96.0)),
+            text_input("显示名", &label).on_input(|t| NewsMsg::AddEdited("label", t)).size(crate::ui::text::s_small()).padding(crate::ui::metrics::pad2(0, 2)).width(Length::Fixed(120.0)),
             text_input("RSS / Atom 地址", &url)
                 .on_input(|t| NewsMsg::AddEdited("url", t))
                 .on_submit(NewsMsg::AddSource)
-                .size(11).padding([2, 6]).width(Length::Fixed(300.0)),
-            text_input("分级(media)", &tier).on_input(|t| NewsMsg::AddEdited("tier", t)).size(11).padding([2, 6]).width(Length::Fixed(96.0)),
+                .size(crate::ui::text::s_small()).padding(crate::ui::metrics::pad2(0, 2)).width(Length::Fixed(300.0)),
+            text_input("分级(media)", &tier).on_input(|t| NewsMsg::AddEdited("tier", t)).size(crate::ui::text::s_small()).padding(crate::ui::metrics::pad2(0, 2)).width(Length::Fixed(96.0)),
             chip("先测一下", NewsMsg::ProbeSource(url.clone())),
             chip("添加", NewsMsg::AddSource),
         ]
@@ -438,22 +428,22 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
     let note = ro::add_note();
     if !note.is_empty() {
         body = body.push(
-            text(note.clone()).size(10).color(if note.starts_with('✔') { C_OK } else { C_BAD }));
+            text(note.clone()).size(crate::ui::text::s_meta()).color(if note.starts_with('✔') { crate::ui::pal::ok() } else { crate::ui::pal::bad() }));
     }
     body = body.push(
         text("只能加 RSS / Atom。JSON 接口（交易所公告那种）要写提取规则，那是代码不是配置——\
               在配置里填错一个字段的表现是「这个源什么都抓不到」，查不出为什么")
-            .size(10)
-            .color(C_DIM));
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()));
 
     // ── 测试结果 ──
     if let Some(p) = &st.probe {
         body = body.push(
             row![
-                text(if p.ok { "✔" } else { "✗" }).size(13).color(if p.ok { C_OK } else { C_BAD }),
-                text(clip(&p.url, 52)).size(10).color(C_DIM),
-                text(format!("HTTP {} · {}ms · {}B", p.status, p.ms, p.bytes)).size(10).color(C_DIM),
-                text(p.verdict.clone()).size(11).color(if p.ok { C_OK } else { C_GOLD }),
+                text(if p.ok { "✔" } else { "✗" }).size(crate::ui::text::s_emph()).color(if p.ok { crate::ui::pal::ok() } else { crate::ui::pal::bad() }),
+                text(clip(&p.url, 52)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
+                text(format!("HTTP {} · {}ms · {}B", p.status, p.ms, p.bytes)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
+                text(p.verdict.clone()).size(crate::ui::text::s_small()).color(if p.ok { crate::ui::pal::ok() } else { crate::ui::pal::warn() }),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center)
@@ -463,11 +453,11 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
     // ── 源健康 + 管理 ──
     body = body.push(
         row![
-            text("源").size(11).color(C_HEAD),
+            text("源").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
             text(format!("{} 个，{} 个开着", st.sources.len(), st.sources.iter().filter(|s| s.enabled).count()))
-                .size(10)
-                .color(C_DIM),
-            text("HTTP 200 不等于有新闻——「见过的最新」那一列才是判断依据").size(10).color(C_DIM),
+                .size(crate::ui::text::s_meta())
+                .color(crate::ui::pal::dim()),
+            text("HTTP 200 不等于有新闻——「见过的最新」那一列才是判断依据").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center));
@@ -482,7 +472,7 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
         ("状态", 210.0, false),
         ("", 150.0, false),
     ] {
-        h = h.push(cell(t.into(), w, C_HEAD, n));
+        h = h.push(cell(t.into(), w, crate::ui::pal::head(), n));
     }
     body = body.push(h);
 
@@ -492,7 +482,7 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
     for s in rows {
         let (lamp, lc, why) = source_lamp(s);
         // 关掉的源仍然列出来——删掉和关掉是两回事
-        let (lamp, lc) = if s.enabled { (lamp, lc) } else { ("◌", C_DIM) };
+        let (lamp, lc) = if s.enabled { (lamp, lc) } else { ("◌", crate::ui::pal::dim()) };
         // 三种「没有时间」要分开：源不给时间 / 还没抓到 / 真的陈了
         let newest = match (s.newest_ms, s.no_timestamps, s.last_new_ms) {
             (Some(m), _, _) => ago(m, st.now_ms),
@@ -504,14 +494,14 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
         };
         let mut r = row![
             cell(lamp.into(), 20.0, lc, false),
-            cell(s.label.clone(), 118.0, if s.enabled { C_TXT } else { C_DIM }, false),
+            cell(s.label.clone(), 118.0, if s.enabled { crate::ui::pal::txt() } else { crate::ui::pal::dim() }, false),
             cell(s.tier_label.clone(), 52.0, tier_color(&s.tier), false),
-            cell(newest, 80.0, if s.is_stale { C_BAD } else { C_DIM }, false),
-            cell(s.in_window.to_string(), 40.0, C_DIM, true),
+            cell(newest, 80.0, if s.is_stale { crate::ui::pal::bad() } else { crate::ui::pal::dim() }, false),
+            cell(s.in_window.to_string(), 40.0, crate::ui::pal::dim(), true),
             cell(
                 format!("{}/{}/{}", s.ok, s.not_modified, s.fails),
                 100.0,
-                if s.fails > 0 { C_GOLD } else { C_DIM },
+                if s.fails > 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() },
                 false
             ),
             cell(
@@ -547,14 +537,14 @@ fn item_row<'a>(it: &NewsRow, now: i64) -> Element<'a, NewsMsg> {
     // 比不显示时间糟得多
     let when = format!("{}{}", ago(it.sort_ms, now), if it.time_guessed { "~" } else { "" });
     let mut r = row![
-        cell(when, 62.0, if it.time_guessed { C_GOLD } else { C_DIM }, false),
+        cell(when, 62.0, if it.time_guessed { crate::ui::pal::warn() } else { crate::ui::pal::dim() }, false),
         cell(it.source.clone(), 92.0, tier_color(&it.tier), false),
     ]
     .spacing(6)
     .align_y(iced::Alignment::Center);
 
     if !it.symbols.is_empty() {
-        r = r.push(cell(it.symbols.join(","), 70.0, C_HEAD, false));
+        r = r.push(cell(it.symbols.join(","), 70.0, crate::ui::pal::dim(), false));
     }
     // **标题本身就是链接**，点了在浏览器里看原文。
     //
@@ -566,12 +556,12 @@ fn item_row<'a>(it: &NewsRow, now: i64) -> Element<'a, NewsMsg> {
     r = r.push(if it.url.is_empty() {
         // 没有链接的（Deribit 那种没有单条页面的）显示成普通文本，
         // 不给一个点了没反应的假按钮
-        Element::from(text(it.title.clone()).size(11).color(C_DIM).width(Length::Fill))
+        Element::from(text(it.title.clone()).size(crate::ui::text::s_small()).color(crate::ui::pal::dim()).width(Length::Fill))
     } else {
-        button(text(it.title.clone()).size(11).width(Length::Fill))
+        button(text(it.title.clone()).size(crate::ui::text::s_small()).width(Length::Fill))
             // 上下留 1px、左右 4px：悬停时那块背景才有形状，
             // padding 全 0 的话背景紧贴字，看着像渲染错误
-            .padding([1, 4])
+            .padding(crate::ui::metrics::pad2(0, 1))
             .style(link_style)
             .on_press(NewsMsg::Open(it.url.clone()))
             .width(Length::Fill)
@@ -583,15 +573,15 @@ fn item_row<'a>(it: &NewsRow, now: i64) -> Element<'a, NewsMsg> {
         let gap = (e - it.sort_ms) / 86_400_000;
         if gap.abs() >= 1 {
             r = r.push(
-                text(format!("生效 {}", ago(e, now))).size(10).color(C_GOLD),
+                text(format!("生效 {}", ago(e, now))).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()),
             );
         }
     }
     if !it.dupes.is_empty() {
-        r = r.push(text(format!("+{} 家", it.dupes.len())).size(10).color(C_DIM));
+        r = r.push(text(format!("+{} 家", it.dupes.len())).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     }
     if it.revised {
-        r = r.push(text("改过").size(10).color(C_GOLD));
+        r = r.push(text("改过").size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
     }
     r.into()
 }
@@ -619,7 +609,7 @@ mod tests {
         // 「取得到」和「取到的是新的」是两件事
         let (lamp, c, why) = source_lamp(&src(true, 0, Some(1)));
         assert_eq!(lamp, "⚠");
-        assert_eq!(c, C_BAD, "必须是红的");
+        assert_eq!(c, crate::ui::pal::bad(), "必须是红的");
         assert!(why.contains("589") && why.contains("200"), "{why}");
     }
 
@@ -665,7 +655,7 @@ mod tests {
         let s = SourceRow { no_timestamps: true, ok: 50, ..Default::default() };
         let (lamp, c, why) = source_lamp(&s);
         assert_eq!(lamp, "◍");
-        assert_ne!(c, C_BAD, "不给时间戳不是故障");
+        assert_ne!(c, crate::ui::pal::bad(), "不给时间戳不是故障");
         assert!(why.contains("不给时间"), "{why}");
     }
 
@@ -680,7 +670,7 @@ mod tests {
         // 从没抓到又是第三种：刚启动而已，不是故障
         let (l2, c2, w2) = source_lamp(&src(false, 0, None));
         assert_eq!(l2, "○");
-        assert_ne!(c2, C_BAD, "刚启动不该是红的");
+        assert_ne!(c2, crate::ui::pal::bad(), "刚启动不该是红的");
         assert!(w2.contains("还没抓到"));
 
         // 正常
@@ -701,9 +691,9 @@ mod tests {
         let hover = link_style(&t, Status::Hovered);
 
         // 静止时就该和正文不一样——不能等悬停才显形
-        assert_ne!(active.text_color, C_TXT);
-        assert_ne!(active.text_color, C_DIM);
-        assert_eq!(active.text_color, C_LINK);
+        assert_ne!(active.text_color, crate::ui::pal::txt());
+        assert_ne!(active.text_color, crate::ui::pal::dim());
+        assert_eq!(active.text_color, crate::ui::pal::link());
 
         // 悬停有两个变化：变亮 + 出现背景块。
         // 只靠颜色变化的话，对色觉不敏感的人等于没有反馈
@@ -720,26 +710,26 @@ mod tests {
     fn nothing_else_in_a_news_row_outshines_the_link() {
         // 整行里最亮的必须是可点的那部分，否则「哪儿能点」又要靠猜。
         //
-        // 比的是**这一行里实际用到的颜色**，不是全局的 C_TXT——
+        // 比的是**这一行里实际用到的颜色**，不是全局的 crate::ui::pal::txt()——
         // 拿近白的正文色比，任何一个还认得出是蓝色的链接色都会输，
-        // 而正文色在新闻行里根本不出现（标题非链接时用的是 C_DIM）
+        // 而正文色在新闻行里根本不出现（标题非链接时用的是 crate::ui::pal::dim()）
         fn lum(c: Color) -> f32 {
             (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) * c.a
         }
         let in_a_row = [
-            ("时间", C_DIM),
-            ("时间是猜的 / 生效时间", C_GOLD),
+            ("时间", crate::ui::pal::dim()),
+            ("时间是猜的 / 生效时间", crate::ui::pal::warn()),
             ("分级-监管", tier_color("regulator")),
             ("分级-交易所", tier_color("exchange")),
             ("分级-公司", tier_color("corporate")),
             ("分级-媒体", tier_color("media")),
-            ("标的", C_HEAD),
+            ("标的", crate::ui::pal::dim()),
         ];
         for (what, c) in in_a_row {
-            assert!(lum(C_LINK) > lum(c), "{what} 比链接还亮");
+            assert!(lum(crate::ui::pal::link()) > lum(c), "{what} 比链接还亮");
         }
         // 而且要亮出可感知的差距，不是小数点后第三位
-        assert!(lum(C_LINK) - lum(C_GOLD) > 0.02, "和最亮的那个只差一点，等于没差");
+        assert!(lum(crate::ui::pal::link()) - lum(crate::ui::pal::warn()) > 0.02, "和最亮的那个只差一点，等于没差");
     }
 
     #[test]

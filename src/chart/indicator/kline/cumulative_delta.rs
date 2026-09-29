@@ -86,7 +86,7 @@ impl CumulativeDeltaIndicator {
             .stroke_width(1.0)
             .show_points(true)
             .point_radius_factor(0.2)
-            .padding(0.08)
+            .padding(crate::ui::metrics::space(0))
             // Only treat bars as valid when they belong to a long enough
             // run of consecutive directional data
             .valid_when(|point: &CumulativeDeltaPoint| point.reliable)

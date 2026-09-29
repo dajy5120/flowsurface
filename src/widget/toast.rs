@@ -119,7 +119,7 @@ where
                 )
                 .style(|theme| toast.status.style(theme))
                 .width(Fill)
-                .padding(4);
+                .padding(crate::ui::metrics::space(1));
 
                 let body = container(
                     text(toast.body.as_str())
@@ -129,11 +129,11 @@ where
                 .width(Fill)
                 .max_height(MAX_TOAST_BODY_HEIGHT)
                 .clip(true)
-                .padding(4);
+                .padding(crate::ui::metrics::space(1));
 
                 container(column![header, body])
                     .style(style::chart_modal)
-                    .padding(4)
+                    .padding(crate::ui::metrics::space(1))
                     .max_width(200)
                     .into()
             })

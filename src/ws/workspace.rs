@@ -38,7 +38,11 @@ pub const WS_GLOBAL: &str = "全球市场"; // 全市场雷达 + 树图（docs/2
 pub const WS_OBSERVATORY: &str = "接口观察终端"; // REST/WS/TCP/FIX 统一观察与录制（docs/23）
 pub const WS_EGRESS: &str = "网络出口"; // 谁在往外发包 + 手动启停（一页看全）
 pub const WS_NEWS: &str = "新闻资讯"; // 交易所/监管/媒体统一时间线（docs/25）
-pub const WS_PROCS: &str = "进程"; // 常驻单元状态与启停（docs/26 S4）——「网络出口」的邻居
+pub const WS_PROCS: &str = "进程"; // 常驻单元状态与启停（docs/26 S4）——已并入「资源」
+/// 资源（docs/35 批 7，UPDS V7 §60 资源可见性）：「进程」与「网络出口」合成一个工作区，
+/// 左右两栏——常驻单元的状态与启停、谁在往外发包与流量。两页原本各占一个工作区，
+/// 看「这台机器在花什么」要来回切；UPDS 要求资源一处看全。
+pub const WS_RESOURCES: &str = "资源";
 /// 侧栏的**五组**（docs/35 §5.3，按 UPDS 应用模式分组；2026-09-29 用户采纳方案后重排）。
 ///
 /// 此前（2026-09-18 按用户指定）是「看世界 → 备数据 → 做研究 → 管机器」平铺 15 个图标；
@@ -50,7 +54,7 @@ pub const WS_PROCS: &str = "进程"; // 常驻单元状态与启停（docs/26 S4
 /// | 回测 | 回测 · Tardis 历史回放 | 数据分析 |
 /// | 研究 | Alpha Factory · C4 影子 · 期权/0DTE · 预测市场 | 数据分析 / 仪表盘 |
 /// | 数据 | 数据录制 · 接口观察终端 | 仪表盘 |
-/// | 系统 | 进程 · 网络出口 · 新闻资讯 | 设置 / 仪表盘 |
+/// | 系统 | 资源（进程 + 网络出口）· 新闻资讯 | 设置 / 仪表盘 |
 ///
 /// 改分组只改这里；[`WORKSPACES`] 必须是它按顺序摊平的结果（有测试钉住）。
 pub const GROUPS: [(&str, &[&str]); 5] = [
@@ -58,14 +62,14 @@ pub const GROUPS: [(&str, &[&str]); 5] = [
     ("回测", &[WS_BACKTEST, WS_TARDIS]),
     ("研究", &[WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]),
     ("数据", &[WS_RECORDER, WS_OBSERVATORY]),
-    ("系统", &[WS_PROCS, WS_EGRESS, WS_NEWS]),
+    ("系统", &[WS_RESOURCES, WS_NEWS]),
 ];
 
 /// **侧边栏从上到下的顺序**（`main.rs` 按它取 layout）= [`GROUPS`] 按顺序摊平。
 ///
 /// **加/删项要同时改 `GROUPS`、`icon()` 与 `pane_template()` 的 match 臂**，
 /// 漏了会落到 `_ => Starter` 兜底（有测试钉住）。
-pub const WORKSPACES: [&str; 15] = [
+pub const WORKSPACES: [&str; 14] = [
     WS_OFFICIAL,
     WS_FEATURES,
     WS_LIVE,
@@ -78,8 +82,7 @@ pub const WORKSPACES: [&str; 15] = [
     WS_PREDICTION,
     WS_RECORDER,
     WS_OBSERVATORY,
-    WS_PROCS,
-    WS_EGRESS,
+    WS_RESOURCES,
     WS_NEWS,
 ];
 
@@ -95,7 +98,13 @@ const RENAMES: [(&str, &str); 1] = [("实盘", WS_LIVE)];
 /// 与 [`RENAMES`] 的区别：这里是**多对一**。第一个存在的旧名就地改名，
 /// 其余的**删掉**而不是留着——留着会变成侧边栏看不见、配置文件里却一直躺着的孤儿
 /// （侧边栏按 `WORKSPACES` 列，不在列里就不显示，但 layout 对象还在）。
-const MERGES: [(&str, &str); 2] = [("录制数据回测", WS_BACKTEST), ("自有数据回测", WS_BACKTEST)];
+const MERGES: [(&str, &str); 4] = [
+    ("录制数据回测", WS_BACKTEST),
+    ("自有数据回测", WS_BACKTEST),
+    // docs/35 批 7：进程 + 网络出口 → 资源（模板在启动时刷新成左右两栏）
+    (WS_PROCS, WS_RESOURCES),
+    (WS_EGRESS, WS_RESOURCES),
+];
 
 /// 工作区在侧边栏的图标（合并进 FS 原生侧边栏，docs/08 F6 — P1）。
 pub fn icon(name: &str) -> crate::style::Icon {
@@ -113,8 +122,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
         WS_GLOBAL => Icon::Search,        // 全市场扫描
         WS_FEATURES => Icon::ChartOutline, // 订单流特征：矩阵 + 同源图表（docs/31）
         WS_OBSERVATORY => Icon::Search,   // 接口观察（docs/23）
-        WS_EGRESS => Icon::Link,          // 网络出口总闸
-        WS_PROCS => Icon::Cog,            // 进程：常驻单元状态与启停
+        WS_RESOURCES => Icon::Cog,        // 资源：进程 + 网络出口
         WS_NEWS => Icon::Star,            // 新闻资讯（docs/25）
         _ => Icon::Layout,
     }
@@ -202,10 +210,10 @@ fn pane_template(name: &str) -> &'static str {
         WS_OBSERVATORY => r#"{"Observatory":{"settings":{},"link_group":null}}"#,
         // 网络出口总闸：**零交易所连接**——它只数 /proc 和调 systemctl。
         // 这个工作区本身要是也拉行情，那就荒唐了
-        WS_EGRESS => r#"{"NetEgress":{"settings":{},"link_group":null}}"#,
+        // 左：进程（常驻单元状态与启停）；右：网络出口（对外 / 内部连接与流量）
+        WS_RESOURCES => r#"{"Split":{"axis":"Vertical","ratio":0.46,"a":{"Procs":{"settings":{},"link_group":null}},"b":{"NetEgress":{"settings":{},"link_group":null}}}}"#,
         // 进程（docs/26 S4）：**零交易所连接**——只调 systemctl。
         // 和「网络出口」是邻居：一个管进程、一个管出口。
-        WS_PROCS => r#"{"Procs":{"settings":{},"link_group":null}}"#,
         // 新闻资讯：**零交易所连接**——全部在 ws-news 守护里，这个 pane 只读快照
         WS_NEWS => r#"{"News":{"settings":{},"link_group":null}}"#,
         _ => r#"{"Starter":{"link_group":null}}"#,
@@ -515,6 +523,22 @@ mod replay_mode_tests {
         }
         // 两个旧的收拢成一个 → 净减一；其余工作区按缺补齐。
         assert!(m.layouts.len() >= before - 1);
+    }
+
+    /// docs/35 批 7：「进程」「网络出口」并入「资源」，且资源工作区里两个面板都在。
+    #[test]
+    fn 进程与网络出口并入资源() {
+        let mut m = LayoutManager::new();
+        for old in [WS_PROCS, WS_EGRESS] {
+            let dash = dashboard_from_template(WS_NEWS).expect("任一模板即可");
+            m.insert_layout(LayoutId { unique: Uuid::new_v4(), name: old.to_string() }, dash);
+        }
+        ensure_seeded(&mut m);
+        let names: Vec<&str> = m.layouts.iter().map(|l| l.id.name.as_str()).collect();
+        assert_eq!(names.iter().filter(|n| **n == WS_RESOURCES).count(), 1, "{names:?}");
+        assert!(!names.contains(&WS_PROCS) && !names.contains(&WS_EGRESS), "不留孤儿：{names:?}");
+        let tpl = pane_template(WS_RESOURCES);
+        assert!(tpl.contains("\"Procs\"") && tpl.contains("\"NetEgress\""), "两个面板都要在");
     }
 
     /// 只有一个旧工作区时也要正确改名（用户可能只播种过其中一个）。

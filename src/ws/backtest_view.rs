@@ -556,7 +556,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
                 super::staleness::suffix(&m.run)
             ))
             .size(crate::ui::text::s_meta())
-            .color(if stale { super::staleness::C_STALE } else { crate::ui::pal::dim() })
+            .color(if stale { crate::ui::pal::pend() } else { crate::ui::pal::dim() })
         },
     ]
     .spacing(2);

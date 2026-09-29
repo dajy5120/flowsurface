@@ -84,6 +84,74 @@ def migrate(path: str) -> None:
     print(f'{path}: 迁移完成' + (f'；未识别常量 {unknown}' if unknown else ''))
 
 
+
+
+# ── 行内颜色（批 6–7）──────────────────────────────────────────────────
+#
+#     python3 scripts/ui_migrate.py --inline status src/ws/recorder_view.rs
+#     python3 scripts/ui_migrate.py --inline market src/ws/radar_view.rs
+#
+# 按色相 / 明度 / 上下文把 `Color::from_rgb(a)(...)` 归到语义：
+# - 灰：明度 > 0.72 正文、> 0.58 次要、其余三级
+# - 与分组标题 / 大标题同一行（s_section / s_title）的彩色 → 正文色（UPDS：层级靠字号与位置）
+# - 绿 / 红：status 模式 → 成功 / 危险；market 模式 → 涨 / 跌（随涨跌约定）
+# - 黄橙 → 警告；青蓝 → 信息；紫 → 系列 6
+# - from_rgba 保留原透明度（可以是表达式）
+
+import colorsys
+
+
+def classify(r, g, b, mode, heading):
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    if s < 0.18 or max(r, g, b) - min(r, g, b) < 0.12:
+        return 'txt()' if l > 0.72 else ('dim()' if l > 0.58 else 'pend()')
+    if heading:
+        return 'head()'
+    deg = h * 360
+    if 80 <= deg < 170:
+        return 'up()' if mode == 'market' else 'ok()'
+    if deg < 25 or deg >= 330:
+        return 'down()' if mode == 'market' else 'bad()'
+    if 25 <= deg < 80:
+        return 'warn()'
+    if 170 <= deg < 255:
+        return 'info()'
+    return 'series(5)'
+
+
+NUM = r'\s*(-?\d+(?:\.\d+)?)\s*'
+
+
+def inline(path, mode):
+    lines = open(path, encoding='utf-8').read().split('\n')
+    n = 0
+    for i, line in enumerate(lines):
+        heading = 's_section()' in line or 's_title()' in line
+
+        def rgb(m):
+            nonlocal n
+            n += 1
+            return 'crate::ui::pal::' + classify(float(m.group(1)), float(m.group(2)), float(m.group(3)), mode, heading)
+
+        def rgba(m):
+            nonlocal n
+            n += 1
+            c = classify(float(m.group(1)), float(m.group(2)), float(m.group(3)), mode, heading)
+            return f'crate::ui::pal::alpha(crate::ui::pal::{c}, {m.group(4).strip()})'
+
+        line = re.sub(r'(?:iced::)?Color::from_rgb8?\(' + NUM + ',' + NUM + ',' + NUM + r'\)', rgb, line)
+        line = re.sub(r'(?:iced::)?Color::from_rgba\(' + NUM + ',' + NUM + ',' + NUM + r',([^()]*(?:\([^()]*\)[^()]*)*)\)', rgba, line)
+        lines[i] = line
+    open(path, 'w', encoding='utf-8').write('\n'.join(lines))
+    print(f'{path}: 行内颜色 {n} 处（{mode} 模式）')
+
+
+if __name__ == '__main__' and len(sys.argv) > 2 and sys.argv[1] == '--inline':
+    for p in sys.argv[3:]:
+        inline(p, sys.argv[2])
+    sys.exit(0)
+
+
 if __name__ == '__main__':
     for p in sys.argv[1:]:
         migrate(p)

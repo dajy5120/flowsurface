@@ -11,16 +11,9 @@ use super::pm_replay::{PmReplayMsg, PmReplayState, Speed};
 use super::pm_replay_readout as ro;
 use super::tardis_board_view::{ChartCanvas, cache_for, clip_to};
 
-const C_HEAD: Color = Color::from_rgb(0.85, 0.72, 0.95);
-const C_DIM: Color = Color::from_rgb(0.50, 0.54, 0.60);
-const C_TXT: Color = Color::from_rgb(0.84, 0.87, 0.92);
-const C_UP: Color = Color::from_rgb(0.30, 0.80, 0.48);
-const C_DOWN: Color = Color::from_rgb(0.90, 0.38, 0.38);
-const C_WARN: Color = Color::from_rgb(0.88, 0.70, 0.34);
-
 fn chip<'a>(label: String, active: bool, c: Color, msg: PmReplayMsg) -> Element<'a, PmReplayMsg> {
-    button(text(label).size(12).color(if active { Color::from_rgb(0.98, 0.99, 1.0) } else { c }))
-        .padding([3, 8])
+    button(text(label).size(crate::ui::text::s_body()).color(if active { crate::ui::pal::txt() } else { c }))
+        .padding(crate::ui::metrics::pad2(0, 3))
         .style(move |t, s| crate::style::button::modifier(t, s, active))
         .on_press(msg)
         .into()
@@ -30,9 +23,9 @@ fn chip<'a>(label: String, active: bool, c: Color, msg: PmReplayMsg) -> Element<
 /// 不能让它看起来像一个结果。
 fn verdict(resolved: &str) -> (&'static str, Color) {
     match resolved {
-        "UP" => ("涨", C_UP),
-        "DOWN" => ("跌", C_DOWN),
-        _ => ("未判", C_DIM),
+        "UP" => ("涨", crate::ui::pal::up()),
+        "DOWN" => ("跌", crate::ui::pal::down()),
+        _ => ("未判", crate::ui::pal::dim()),
     }
 }
 
@@ -57,42 +50,42 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
 
     let mut body = column![
         text("预测市场回放 · 币安钱包 BTC 5 分钟涨跌（自录数据，零交易所连接）")
-            .size(15)
-            .color(C_HEAD),
+            .size(crate::ui::text::s_section())
+            .color(crate::ui::pal::head()),
         text(
             "回放单位是**一轮**：5 分钟市场每轮换一个市场与一套盘口，跨轮把曲线接起来\
              只会画出一次假的暴跌。"
         )
-        .size(10)
-        .color(C_DIM),
+        .size(crate::ui::text::s_meta())
+        .color(crate::ui::pal::dim()),
     ]
     .spacing(6)
-    .padding(10);
+    .padding(crate::ui::metrics::space(3));
 
     // ── 选择器 ──
     if let Some(e) = &cat.error {
-        body = body.push(text(e.clone()).size(11).color(C_WARN));
+        body = body.push(text(e.clone()).size(crate::ui::text::s_small()).color(crate::ui::pal::warn()));
     }
-    let mut syms = row![text("符号").size(12).color(C_DIM)].spacing(6).align_y(Alignment::Center);
+    let mut syms = row![text("符号").size(crate::ui::text::s_body()).color(crate::ui::pal::dim())].spacing(6).align_y(Alignment::Center);
     for s in &cat.symbols {
         syms = syms.push(chip(
             s.symbol.clone(),
             s.symbol == app.symbol,
-            C_TXT,
+            crate::ui::pal::txt(),
             PmReplayMsg::PickSymbol(s.symbol.clone()),
         ));
     }
-    syms = syms.push(chip("⟳ 刷新清单".into(), false, C_DIM, PmReplayMsg::RefreshCatalog));
+    syms = syms.push(chip("⟳ 刷新清单".into(), false, crate::ui::pal::dim(), PmReplayMsg::RefreshCatalog));
     body = body.push(syms);
 
     if let Some(sym) = cat.symbol(&app.symbol) {
-        let mut dates = row![text("日期").size(12).color(C_DIM)].spacing(6).align_y(Alignment::Center);
+        let mut dates = row![text("日期").size(crate::ui::text::s_body()).color(crate::ui::pal::dim())].spacing(6).align_y(Alignment::Center);
         for d in sym.dates.iter().take(10) {
             let n = d.rounds.len();
             dates = dates.push(chip(
                 format!("{} ({n})", d.date),
                 d.date == app.date,
-                C_TXT,
+                crate::ui::pal::txt(),
                 PmReplayMsg::PickDate(d.date.clone()),
             ));
         }
@@ -101,20 +94,20 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
 
     // ── 加载 + 播放 ──
     // 点轮次已自动加载，这颗按钮是给「录了更多数据后重取当前这一轮」用的。
-    let mut ctl = row![chip("↻ 重新加载".into(), false, C_DIM, PmReplayMsg::Load)]
+    let mut ctl = row![chip("↻ 重新加载".into(), false, crate::ui::pal::dim(), PmReplayMsg::Load)]
         .spacing(6)
         .align_y(Alignment::Center);
     ctl = ctl.push(if playing {
-        chip("⏸ 暂停".into(), true, C_TXT, PmReplayMsg::Pause)
+        chip("⏸ 暂停".into(), true, crate::ui::pal::txt(), PmReplayMsg::Pause)
     } else {
-        chip("▶ 回放".into(), false, C_TXT, PmReplayMsg::Play)
+        chip("▶ 回放".into(), false, crate::ui::pal::txt(), PmReplayMsg::Play)
     });
-    ctl = ctl.push(chip("⏮ 回到开头".into(), false, C_DIM, PmReplayMsg::Rewind));
+    ctl = ctl.push(chip("⏮ 回到开头".into(), false, crate::ui::pal::dim(), PmReplayMsg::Rewind));
     for s in Speed::ALL {
-        ctl = ctl.push(chip(s.to_string(), s == app.speed, C_TXT, PmReplayMsg::PickSpeed(s)));
+        ctl = ctl.push(chip(s.to_string(), s == app.speed, crate::ui::pal::txt(), PmReplayMsg::PickSpeed(s)));
     }
     if let Some(d) = &busy {
-        ctl = ctl.push(text(format!("  正在生成{d}…")).size(11).color(C_WARN));
+        ctl = ctl.push(text(format!("  正在生成{d}…")).size(crate::ui::text::s_small()).color(crate::ui::pal::warn()));
     }
     body = body.push(ctl);
 
@@ -130,8 +123,8 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
                     hms(head.unwrap_or(t0) - t0),
                     hms(t1 - t0)
                 ))
-                .size(11)
-                .color(C_TXT),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::txt()),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -142,8 +135,8 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
     if rounds.is_empty() {
         body = body.push(
             text("这一天没有轮次记录。录制器跑过吗？（「进程」页可启停，清单要点「刷新清单」重扫）")
-                .size(11)
-                .color(C_WARN),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::warn()),
         );
     } else {
         // **换行排，不用横向滚动条。**
@@ -175,14 +168,14 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
             column![
                 row![
                     text(format!("轮次 {} / {n_all}　绿=涨 红=跌 灰=未判", rounds.len()))
-                        .size(12)
-                        .color(C_DIM),
-                    chip("◀ 上一轮".into(), false, C_TXT, PmReplayMsg::Step(-1)),
-                    chip("下一轮 ▶".into(), false, C_TXT, PmReplayMsg::Step(1)),
+                        .size(crate::ui::text::s_body())
+                        .color(crate::ui::pal::dim()),
+                    chip("◀ 上一轮".into(), false, crate::ui::pal::txt(), PmReplayMsg::Step(-1)),
+                    chip("下一轮 ▶".into(), false, crate::ui::pal::txt(), PmReplayMsg::Step(1)),
                     chip(
                         if app.only_resolved { "只看已结算 ✓".into() } else { "只看已结算".to_string() },
                         app.only_resolved,
-                        C_TXT,
+                        crate::ui::pal::txt(),
                         PmReplayMsg::ToggleOnlyResolved(!app.only_resolved),
                     ),
                     text(if filtered > 0 {
@@ -190,8 +183,8 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
                     } else {
                         String::new()
                     })
-                    .size(10)
-                    .color(C_DIM),
+                    .size(crate::ui::text::s_meta())
+                    .color(crate::ui::pal::dim()),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -204,19 +197,19 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
     let msg = super::pm_replay::message();
     let hint = if app.hint.is_empty() { msg } else { app.hint.clone() };
     if !hint.is_empty() {
-        body = body.push(text(hint.clone()).size(11).color(if hint.starts_with('✗') {
-            C_DOWN
+        body = body.push(text(hint.clone()).size(crate::ui::text::s_small()).color(if hint.starts_with('✗') {
+            crate::ui::pal::down()
         } else {
-            C_DIM
+            crate::ui::pal::dim()
         }));
     }
 
     // ── 图 ──
     if let Some(e) = &p.error {
-        body = body.push(text(e.clone()).size(12).color(C_DOWN));
+        body = body.push(text(e.clone()).size(crate::ui::text::s_body()).color(crate::ui::pal::down()));
     } else if !p.loaded {
         body = body.push(
-            text("在下面点一个轮次即可加载。").size(12).color(C_DIM),
+            text("在下面点一个轮次即可加载。").size(crate::ui::text::s_body()).color(crate::ui::pal::dim()),
         );
     } else {
         // 已加载的是不是当前选的那一轮——不是就说出来，别让人以为在看当前选择。
@@ -224,14 +217,14 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
         let (v, vc) = verdict(&p.resolved);
         body = body.push(
             row![
-                text(format!("{} · {}", p.date, p.question)).size(12).color(C_TXT),
-                text(format!("  结算 {v}")).size(13).color(vc),
+                text(format!("{} · {}", p.date, p.question)).size(crate::ui::text::s_body()).color(crate::ui::pal::txt()),
+                text(format!("  结算 {v}")).size(crate::ui::text::s_emph()).color(vc),
                 text(format!(
                     "  {} 条簿更新 → {} 个两本齐全的采样点",
                     p.rows, p.samples
                 ))
-                .size(11)
-                .color(C_DIM),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::dim()),
             ]
             .spacing(2),
         );
@@ -242,13 +235,13 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
                     "丢掉 {} 条「只有一本簿」的更新——半份簿算不出失衡度（会把另一侧当成 0）",
                     p.rows - p.samples
                 ))
-                .size(10)
-                .color(C_DIM),
+                .size(crate::ui::text::s_meta())
+                .color(crate::ui::pal::dim()),
             );
         }
         if stale {
             body = body.push(
-                text("⚠ 图上是上次加载的那一轮，点「↻ 重新加载」换成当前选择").size(11).color(C_WARN),
+                text("⚠ 图上是上次加载的那一轮，点「↻ 重新加载」换成当前选择").size(crate::ui::text::s_small()).color(crate::ui::pal::warn()),
             );
         }
         // ── 那一刻的盘口 ──
@@ -261,23 +254,23 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
             None if p.frames.is_empty() => {
                 body = body.push(
                     text("（这份面板没有逐帧盘口——用旧版 pm_replay.py 生成的，重新「加载」一次）")
-                        .size(11)
-                        .color(C_WARN),
+                        .size(crate::ui::text::s_small())
+                        .color(crate::ui::pal::warn()),
                 );
             }
             None => {
                 // 播放头在第一帧之前：还没有任何一刻两本簿都到齐。
-                body = body.push(text("两本簿还没凑齐").size(11).color(C_DIM));
+                body = body.push(text("两本簿还没凑齐").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
             }
             Some(f) => {
                 let lag = (at - f.ts) / 1000.0;
                 body = body.push(
                     row![
-                        text("盘口 @ ").size(12).color(C_DIM),
-                        text(hms(f.ts - p.start_ms)).size(13).color(C_TXT),
+                        text("盘口 @ ").size(crate::ui::text::s_body()).color(crate::ui::pal::dim()),
+                        text(hms(f.ts - p.start_ms)).size(crate::ui::text::s_emph()).color(crate::ui::pal::txt()),
                         // 帧是降采样过的，播放头落在两帧之间很正常。说出滞后多少，
                         // 好过让人以为看到的是精确那一刻。
-                        text(format!("  (帧滞后 {lag:.2}s)")).size(10).color(C_DIM),
+                        text(format!("  (帧滞后 {lag:.2}s)")).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
                         text(format!(
                             "　费率 {:.2}%　{} 人　量 {}　流动性 {}",
                             p.round.fee_bps / 100.0,
@@ -285,8 +278,8 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
                             super::pm_binance_view::usd(p.round.volume),
                             super::pm_binance_view::usd(p.round.liquidity),
                         ))
-                        .size(10)
-                        .color(C_DIM),
+                        .size(crate::ui::text::s_meta())
+                        .color(crate::ui::pal::dim()),
                     ]
                     .align_y(Alignment::Center),
                 );
@@ -297,14 +290,14 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
                             "押涨 Up",
                             "买这本 = 押 BTC 涨",
                             &f.book.up,
-                            C_UP,
+                            crate::ui::pal::up(),
                         ))
                         .width(Length::FillPortion(1)),
                         container(super::pm_binance_view::ladder_block(
                             "押跌 Down",
                             "独立的一本簿，不是 Up 的另一侧",
                             &f.book.down,
-                            C_DOWN,
+                            crate::ui::pal::down(),
                         ))
                         .width(Length::FillPortion(1)),
                     ]
@@ -327,12 +320,12 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
             .height(Length::Fixed(200.0))
             .into();
             let mut col =
-                column![text(ch.title.clone()).size(13).color(Color::from_rgb(0.85, 0.88, 0.92)), cv]
+                column![text(ch.title.clone()).size(crate::ui::text::s_emph()).color(crate::ui::pal::txt()), cv]
                     .spacing(3);
             if !ch.note.is_empty() {
-                col = col.push(text(ch.note.clone()).size(10).color(C_DIM));
+                col = col.push(text(ch.note.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
             }
-            body = body.push(container(col).padding(4));
+            body = body.push(container(col).padding(crate::ui::metrics::space(1)));
         }
         let _ = clip_to; // 裁剪发生在 ChartCanvas 内部；这里只是把播放头传进去
     }

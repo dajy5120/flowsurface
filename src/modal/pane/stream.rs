@@ -358,7 +358,7 @@ impl Modifier {
         match self.view_mode {
             ViewMode::BasisSelection => {
                 let mut basis_selection_column =
-                    column![].padding(4).spacing(8).align_x(Horizontal::Center);
+                    column![].padding(crate::ui::metrics::space(1)).spacing(8).align_x(Horizontal::Center);
 
                 let allows_tick_basis = match kind {
                     ModifierKind::Candlestick(_) | ModifierKind::Footprint(_, _) => true,
@@ -522,7 +522,7 @@ impl Modifier {
                     ),
                 ))
                 .max_width(240)
-                .padding(16)
+                .padding(crate::ui::metrics::space(5))
                 .style(style::chart_modal)
                 .into()
             }
@@ -533,14 +533,14 @@ impl Modifier {
             } => {
                 let Some(exchange) = self.exchange else {
                     return container(text("Exchange information is not available"))
-                        .padding(16)
+                        .padding(crate::ui::metrics::space(5))
                         .style(style::chart_modal)
                         .into();
                 };
 
                 if let Some(ticksize) = selected_ticksize {
                     let mut ticksizes_column =
-                        column![].padding(4).spacing(8).align_x(Horizontal::Center);
+                        column![].padding(crate::ui::metrics::space(1)).spacing(8).align_x(Horizontal::Center);
 
                     ticksizes_column = ticksizes_column
                         .push(text("Tick size multiplier").size(crate::style::text_size::EMPHASIS))
@@ -616,12 +616,12 @@ impl Modifier {
                         ),
                     ))
                     .max_width(240)
-                    .padding(16)
+                    .padding(crate::ui::metrics::space(5))
                     .style(style::chart_modal)
                     .into()
                 } else {
                     container(text("No ticksize available for this chart type"))
-                        .padding(16)
+                        .padding(crate::ui::metrics::space(5))
                         .style(style::chart_modal)
                         .into()
                 }

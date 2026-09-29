@@ -40,7 +40,7 @@ pub fn tooltip_with_delay<'a, Message: 'a>(
     match tooltip {
         Some(tooltip) => iced::widget::tooltip(
             content,
-            container(text(tooltip)).style(style::tooltip).padding(8),
+            container(text(tooltip)).style(style::tooltip).padding(crate::ui::metrics::space(3)),
             position,
         )
         .delay(delay)
@@ -81,7 +81,7 @@ pub fn confirm_dialog_container<'a, Message: 'a + Clone>(
         .align_x(Alignment::Center)
         .spacing(16),
     )
-    .padding(24)
+    .padding(crate::ui::metrics::space(6))
     .style(style::dashboard_modal)
     .into()
 }
@@ -106,7 +106,7 @@ where
         row![label, slider]
             .align_y(Alignment::Center)
             .spacing(8)
-            .padding(8),
+            .padding(crate::ui::metrics::space(3)),
     )
     .style(style::modal_container)
     .into()
@@ -146,7 +146,7 @@ where
     };
 
     container(content)
-        .padding(2)
+        .padding(crate::ui::metrics::space(0))
         .style(style::dragger_row_container)
         .into()
 }
@@ -202,7 +202,7 @@ where
     iced::widget::stack![
         container(slider).style(modal_container),
         row![text(label), space::horizontal(), text(to_string(&current))]
-            .padding([0, 10])
+            .padding(crate::ui::metrics::pad2(0, 3))
             .height(Fill)
             .align_y(Center),
     ]

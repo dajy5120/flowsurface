@@ -10,12 +10,6 @@ use super::data_picker::{
     self as dp, market_label, BSource, DataPick, DataPickMsg, Load, PickOpts, Pipeline, Purpose, TimeMode,
 };
 
-const C_HEAD: Color = Color::from_rgb(0.70, 0.80, 0.95);
-const C_DIM: Color = Color::from_rgb(0.55, 0.58, 0.64);
-const C_OK: Color = Color::from_rgb(0.35, 0.78, 0.50);
-const C_WARN: Color = Color::from_rgb(0.90, 0.72, 0.32);
-const C_BAD: Color = Color::from_rgb(0.90, 0.40, 0.40);
-
 type El<'a> = Element<'a, DataPickMsg>;
 
 /// 下拉框的一项：键 + 显示名。
@@ -32,18 +26,18 @@ impl std::fmt::Display for Choice {
 }
 
 fn label<'a>(t: &str) -> El<'a> {
-    iced::widget::container(text(t.to_string()).size(11).color(C_HEAD))
+    iced::widget::container(text(t.to_string()).size(crate::ui::text::s_small()).color(crate::ui::pal::head()))
         .width(Length::Fixed(64.0))
         .into()
 }
 
 fn dim<'a>(t: String) -> El<'a> {
-    text(t).size(10).color(C_DIM).into()
+    text(t).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()).into()
 }
 
 fn chip<'a>(t: String, active: bool, msg: Option<DataPickMsg>) -> El<'a> {
-    let b = button(text(t).size(11))
-        .padding([2, 8])
+    let b = button(text(t).size(crate::ui::text::s_small()))
+        .padding(crate::ui::metrics::pad2(0, 3))
         .style(move |th, st| crate::style::button::modifier(th, st, active));
     match msg {
         Some(m) => b.on_press(m).into(),
@@ -54,7 +48,7 @@ fn chip<'a>(t: String, active: bool, msg: Option<DataPickMsg>) -> El<'a> {
 fn with_tip<'a>(e: El<'a>, tip: String) -> El<'a> {
     tooltip(
         e,
-        iced::widget::container(text(tip).size(11)).style(crate::style::tooltip).padding(6),
+        iced::widget::container(text(tip).size(crate::ui::text::s_small())).style(crate::style::tooltip).padding(crate::ui::metrics::space(2)),
         tooltip::Position::Bottom,
     )
     .into()
@@ -71,7 +65,7 @@ fn pick<'a>(
     pick_list(options, sel, move |c: Choice| on(c.key))
         .placeholder(placeholder)
         .text_size(11)
-        .padding([2, 6])
+        .padding(crate::ui::metrics::pad2(0, 2))
         .width(Length::Fixed(width))
         .into()
 }
@@ -91,7 +85,7 @@ fn symbol_row<'a>(p: &DataPick, all: usize, items: Vec<Choice>) -> El<'a> {
         v.push(
             text_input("搜索代码", &p.search)
                 .on_input(DataPickMsg::Search)
-                .size(11)
+                .size(crate::ui::text::s_small())
                 .width(Length::Fixed(90.0))
                 .into(),
         );
@@ -165,7 +159,7 @@ pub fn view<'a>(p: &DataPick, opts: &PickOpts) -> El<'a> {
                     ]));
                     if let Some(venue) = p.venue.as_deref() {
                         if dp::LIVE_VENUES.iter().any(|(x, ok)| *x == venue && !*ok) {
-                            warn = Some((format!("{venue} 的实时还没接进管线 B（Nautilus 有现成适配器，需要配置后才能用）"), C_WARN));
+                            warn = Some((format!("{venue} 的实时还没接进管线 B（Nautilus 有现成适配器，需要配置后才能用）"), crate::ui::pal::warn()));
                         }
                         b = b.push(native_rows(p, venue, &mut warn));
                     }
@@ -184,19 +178,19 @@ pub fn view<'a>(p: &DataPick, opts: &PickOpts) -> El<'a> {
                     ]));
                     if let Some(pv) = dp::PROVIDERS.iter().find(|x| Some(x.0) == p.vendor.as_deref()) {
                         if !pv.4 {
-                            warn = Some((format!("{} 还没接", pv.1), C_WARN));
+                            warn = Some((format!("{} 还没接", pv.1), crate::ui::pal::warn()));
                         }
-                        b = b.push(line(vec![label("市场"), text(market_label(pv.2)).size(11).into()]));
+                        b = b.push(line(vec![label("市场"), text(market_label(pv.2)).size(crate::ui::text::s_small()).into()]));
                         b = b.push(line(vec![
                             label("标的"),
                             text_input("手填代码 / 市场 slug", p.symbol.as_deref().unwrap_or(""))
                                 .on_input(DataPickMsg::Symbol)
-                                .size(11)
+                                .size(crate::ui::text::s_small())
                                 .width(Length::Fixed(220.0))
                                 .into(),
                             dim("第三方 API 的标的由提供方定义，这里手填".into()),
                         ]));
-                        b = b.push(line(vec![label("时间"), text("实时").size(11).color(C_OK).into()]));
+                        b = b.push(line(vec![label("时间"), text("实时").size(crate::ui::text::s_small()).color(crate::ui::pal::ok()).into()]));
                     }
                 }
                 Some(s) => {
@@ -224,13 +218,13 @@ pub fn view<'a>(p: &DataPick, opts: &PickOpts) -> El<'a> {
     let (t, c) = if let Some(w) = warn {
         w
     } else if !p.note.is_empty() {
-        (p.note.clone(), C_DIM)
+        (p.note.clone(), crate::ui::pal::dim())
     } else if let Some(s) = p.selection(opts) {
-        (format!("已选：{}", s.describe()), C_OK)
+        (format!("已选：{}", s.describe()), crate::ui::pal::ok())
     } else {
-        ("依次选：管线 → 来源 → 市场 → 标的 → 时间".into(), C_DIM)
+        ("依次选：管线 → 来源 → 市场 → 标的 → 时间".into(), crate::ui::pal::dim())
     };
-    b.push(text(t).size(10).color(c)).into()
+    b.push(text(t).size(crate::ui::text::s_meta()).color(c)).into()
 }
 
 /// 管线 A / B1：交易所的市场与交易对（取 flowsurface 已拉到的列表）。
@@ -240,7 +234,7 @@ fn native_rows<'a>(p: &DataPick, venue: &str, warn: &mut Option<(String, Color)>
     if markets.is_empty() {
         *warn = Some((
             format!("{venue} 的交易对列表还没拉到：打开任一行情面板的标的列表（它会向交易所拉取），或直接手填代码"),
-            C_WARN,
+            crate::ui::pal::warn(),
         ));
         let mks: Vec<Choice> = ["linear", "spot", "inverse"].iter().map(|m| Choice { key: (*m).into(), label: market_label(m) }).collect();
         b = b.push(line(vec![label("市场"), pick(mks, p.market.as_deref(), "选市场".into(), 130.0, DataPickMsg::Market)]));
@@ -249,7 +243,7 @@ fn native_rows<'a>(p: &DataPick, venue: &str, warn: &mut Option<(String, Color)>
                 label("标的"),
                 text_input("手填代码，如 BTCUSDT", p.symbol.as_deref().unwrap_or(""))
                     .on_input(DataPickMsg::Symbol)
-                    .size(11)
+                    .size(crate::ui::text::s_small())
                     .width(Length::Fixed(170.0))
                     .into(),
             ]));
@@ -267,7 +261,7 @@ fn native_rows<'a>(p: &DataPick, venue: &str, warn: &mut Option<(String, Color)>
         }
     }
     if p.symbol.is_some() {
-        b = b.push(line(vec![label("时间"), text("实时").size(11).color(C_OK).into()]));
+        b = b.push(line(vec![label("时间"), text("实时").size(crate::ui::text::s_small()).color(crate::ui::pal::ok()).into()]));
     }
     b.into()
 }
@@ -280,7 +274,7 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
         label("根目录"),
         text_input("数据根目录", &p.root)
             .on_input(DataPickMsg::Root)
-            .size(11)
+            .size(crate::ui::text::s_small())
             .width(Length::Fixed(380.0))
             .into(),
         chip("选择目录…".into(), false, Some(DataPickMsg::BrowseRoot)),
@@ -295,13 +289,13 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
             return b.into();
         }
         Load::Failed(e) => {
-            *warn = Some((format!("扫描失败：{e}"), C_BAD));
+            *warn = Some((format!("扫描失败：{e}"), crate::ui::pal::bad()));
             return b.into();
         }
         Load::Ready(s) => s,
     };
     if !sc.exists {
-        *warn = Some((format!("目录不存在：{}", sc.root), C_BAD));
+        *warn = Some((format!("目录不存在：{}", sc.root), crate::ui::pal::bad()));
         return b.into();
     }
     let n_sym = {
@@ -323,7 +317,7 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
         )),
     ]));
     if sc.items.is_empty() {
-        *warn = Some(("这个目录下没扫到认得的数据（目录结构要与该数据商一致）".into(), C_WARN));
+        *warn = Some(("这个目录下没扫到认得的数据（目录结构要与该数据商一致）".into(), crate::ui::pal::warn()));
         return b.into();
     }
 
@@ -362,7 +356,7 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
         v.push(
             text_input("HH:MM", &p.start)
                 .on_input(DataPickMsg::Start)
-                .size(11)
+                .size(crate::ui::text::s_small())
                 .width(Length::Fixed(60.0))
                 .into(),
         );
@@ -393,7 +387,7 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
                 v.push(chip(format!("{} {t}", if on { "☑" } else { "☐" }), on, Some(DataPickMsg::ToggleType(t.clone()))));
             }
             if types.iter().all(|t| p.excluded.contains(t)) {
-                *warn = Some(("一类数据都没勾".into(), C_WARN));
+                *warn = Some(("一类数据都没勾".into(), crate::ui::pal::warn()));
             }
             b = b.push(line(v));
         }

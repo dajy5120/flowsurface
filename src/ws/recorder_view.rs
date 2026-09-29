@@ -8,7 +8,7 @@
 use iced::widget::{
     button, checkbox, column, container, pick_list, row, scrollable, text, text_input,
 };
-use iced::{Alignment, Color, Element, Length};
+use iced::{Alignment, Element, Length};
 
 use super::recorder::{ALL, DET_PAGE, GOAL_DAYS, RecorderMsg, RecorderPaneState, TierOpt};
 
@@ -42,7 +42,7 @@ fn group(n: u64) -> String {
     out
 }
 fn cell<'a>(s: &str, w: f32) -> Element<'a, RecorderMsg> {
-    container(text(s.to_string()).size(12))
+    container(text(s.to_string()).size(crate::ui::text::s_body()))
         .width(Length::Fixed(w))
         .into()
 }
@@ -83,20 +83,20 @@ fn details(
     let total_bytes: u64 = hit.iter().map(|r| r.bytes).sum();
 
     let mut col = column![
-        text("④ 录制明细(逐 币种 × 类型 × 日期)").size(16).color(Color::from_rgb(0.85, 0.7, 1.0)),
+        text("④ 录制明细(逐 币种 × 类型 × 日期)").size(crate::ui::text::s_section()).color(crate::ui::pal::head()),
         row![
-            text("币种").size(12),
+            text("币种").size(crate::ui::text::s_body()),
             pick_list(opts_sym, Some(app.det_sym.clone()), RecorderMsg::DetailSym).text_size(12),
-            text("  类型").size(12),
+            text("  类型").size(crate::ui::text::s_body()),
             pick_list(opts_stream, Some(app.det_stream.clone()), RecorderMsg::DetailStream)
                 .text_size(12),
             text(format!("   {} 个分区 · 合计 {}", hit.len(), fmt_size(total_bytes)))
-                .size(12)
-                .color(Color::from_rgb(0.7, 0.75, 0.8)),
+                .size(crate::ui::text::s_body())
+                .color(crate::ui::pal::txt()),
         ]
         .spacing(6)
         .align_y(Alignment::Center),
-        text(format!("存储根目录  {}", st.data_dir)).size(11).color(Color::from_rgb(0.55, 0.6, 0.65)),
+        text(format!("存储根目录  {}", st.data_dir)).size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
     ]
     .spacing(6);
 
@@ -117,11 +117,11 @@ fn details(
 
     for r in hit.iter().take(app.det_limit) {
         let flags = if r.orphan > 0 {
-            (format!("{} / {}", r.inprogress, r.orphan), Color::from_rgb(0.9, 0.5, 0.4))
+            (format!("{} / {}", r.inprogress, r.orphan), crate::ui::pal::bad())
         } else if r.inprogress > 0 {
-            (format!("{} / 0", r.inprogress), Color::from_rgb(0.8, 0.75, 0.45))
+            (format!("{} / 0", r.inprogress), crate::ui::pal::warn())
         } else {
-            ("—".to_string(), Color::from_rgb(0.5, 0.5, 0.5))
+            ("—".to_string(), crate::ui::pal::pend())
         };
         col = col.push(
             row![
@@ -132,7 +132,7 @@ fn details(
                 cell(&format!("{} ~ {}", r.first, r.last), 110.0),
                 cell(&r.segs.to_string(), 60.0),
                 cell(&fmt_size(r.bytes), 90.0),
-                container(text(flags.0).size(12).color(flags.1)).width(Length::Fixed(90.0)),
+                container(text(flags.0).size(crate::ui::text::s_body()).color(flags.1)).width(Length::Fixed(90.0)),
                 cell(&r.rel, 300.0),
             ]
             .spacing(6),
@@ -141,16 +141,16 @@ fn details(
 
     if hit.is_empty() {
         col = col.push(
-            text("(没有符合条件的分区)").size(12).color(Color::from_rgb(0.5, 0.5, 0.5)),
+            text("(没有符合条件的分区)").size(crate::ui::text::s_body()).color(crate::ui::pal::pend()),
         );
     } else if hit.len() > app.det_limit {
         col = col.push(
             row![
-                button(text(format!("显示更多(+{DET_PAGE})")).size(12))
+                button(text(format!("显示更多(+{DET_PAGE})")).size(crate::ui::text::s_body()))
                     .on_press(RecorderMsg::DetailMore),
                 text(format!("  还有 {} 个分区未显示", hit.len() - app.det_limit))
-                    .size(11)
-                    .color(Color::from_rgb(0.55, 0.6, 0.65)),
+                    .size(crate::ui::text::s_small())
+                    .color(crate::ui::pal::dim()),
             ]
             .spacing(6)
             .align_y(Alignment::Center),
@@ -192,13 +192,13 @@ fn coverage(app: &RecorderPaneState, st: &super::recorder_readout::SvcState) -> 
 
     let mut col = column![
         text("⑤ 按日覆盖（那天真正录到的时间段 · 洞在哪 · 最长可跑窗口）")
-            .size(16)
-            .color(Color::from_rgb(0.55, 0.9, 0.75)),
+            .size(crate::ui::text::s_section())
+            .color(crate::ui::pal::ok()),
         text(
             "区间取自 parquet 页脚统计，只看得见**段间**的洞（段是 600 秒轮转）——             数字是「至少这么碎」。能不能跑最终由回测入口的窗口体检说了算。"
         )
-        .size(11)
-        .color(Color::from_rgb(0.55, 0.6, 0.65)),
+        .size(crate::ui::text::s_small())
+        .color(crate::ui::pal::dim()),
     ]
     .spacing(6);
 
@@ -218,11 +218,11 @@ fn coverage(app: &RecorderPaneState, st: &super::recorder_readout::SvcState) -> 
     for c in hit.iter().take(app.det_limit) {
         // 最长可跑窗口是这一行里最该被看见的数：不足 60 分钟基本挑不出可用回测窗口。
         let (lw, lc) = if c.longest_s >= 3600 {
-            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), Color::from_rgb(0.45, 0.85, 0.5))
+            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), crate::ui::pal::ok())
         } else if c.longest_s >= 600 {
-            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), Color::from_rgb(0.85, 0.8, 0.4))
+            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), crate::ui::pal::warn())
         } else {
-            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), Color::from_rgb(0.9, 0.5, 0.4))
+            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), crate::ui::pal::bad())
         };
         let runs: String = c
             .runs
@@ -246,14 +246,14 @@ fn coverage(app: &RecorderPaneState, st: &super::recorder_readout::SvcState) -> 
                 cell(&dur(c.covered_s), 80.0),
                 cell(&c.runs.len().to_string(), 60.0),
                 container(
-                    text(c.gaps.len().to_string()).size(12).color(if c.gaps.is_empty() {
-                        Color::from_rgb(0.45, 0.85, 0.5)
+                    text(c.gaps.len().to_string()).size(crate::ui::text::s_body()).color(if c.gaps.is_empty() {
+                        crate::ui::pal::ok()
                     } else {
-                        Color::from_rgb(0.85, 0.8, 0.4)
+                        crate::ui::pal::warn()
                     })
                 )
                 .width(Length::Fixed(55.0)),
-                container(text(lw).size(12).color(lc)).width(Length::Fixed(150.0)),
+                container(text(lw).size(crate::ui::text::s_body()).color(lc)).width(Length::Fixed(150.0)),
                 cell(
                     &format!(
                         "✓ {}{}   ✗ {}{}",
@@ -276,12 +276,12 @@ fn coverage(app: &RecorderPaneState, st: &super::recorder_readout::SvcState) -> 
         } else {
             "首次扫描中…（要读一遍各段的时间戳列，约 20 秒；之后按 mtime 缓存，几乎零成本）"
         };
-        col = col.push(text(msg).size(12).color(Color::from_rgb(0.5, 0.5, 0.5)));
+        col = col.push(text(msg).size(crate::ui::text::s_body()).color(crate::ui::pal::pend()));
     } else if hit.len() > app.det_limit {
         col = col.push(
             text(format!("（还有 {} 天未显示，用上方「显示更多」）", hit.len() - app.det_limit))
-                .size(11)
-                .color(Color::from_rgb(0.55, 0.6, 0.65)),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::dim()),
         );
     }
     col.into()
@@ -301,16 +301,16 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
     use super::pm_binance_readout as pm;
 
     let st = pm::snapshot();
-    let head = Color::from_rgb(0.85, 0.72, 0.95);
-    let dimc = Color::from_rgb(0.55, 0.6, 0.65);
+    let head = crate::ui::pal::series(5);
+    let dimc = crate::ui::pal::dim();
     let mut col = column![
         text("⑥ 预测市场录制 — 币安钱包 BTC 5 分钟涨跌（ws-pm-recorder，独立于上面的行情录制）")
-            .size(16)
+            .size(crate::ui::text::s_section())
             .color(head),
         text(
             "这份数据**没有第三方历史源**：5 分钟市场结束即消失，不录就永远没有，             事后一秒都补不回来。启停在「进程」页，连接在「网络出口」页。"
         )
-        .size(11)
+        .size(crate::ui::text::s_small())
         .color(dimc),
     ]
     .spacing(6);
@@ -318,11 +318,11 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
     // 活着没有——用两条流都新鲜来判，只看一条会漏掉「WS 在推但 REST 挂了」。
     let alive = pm::recording_alive(&st);
     let (dot, dc, t) = if !st.present {
-        ("○", Color::from_rgb(0.6, 0.6, 0.6), "无快照（守护没跑过，或数据目录不对）".to_string())
+        ("○", crate::ui::pal::dim(), "无快照（守护没跑过，或数据目录不对）".to_string())
     } else if alive {
         (
             "●",
-            Color::from_rgb(0.4, 0.85, 0.45),
+            crate::ui::pal::ok(),
             format!(
                 "录制中  本次 {} 条簿 / {} 轮  WS {} 条（重订 {} 次）",
                 st.rec.book_rows, st.rec.rounds, st.rec.ws_msgs, st.rec.resubs
@@ -331,7 +331,7 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
     } else {
         (
             "✗",
-            Color::from_rgb(0.9, 0.45, 0.4),
+            crate::ui::pal::bad(),
             format!(
                 "未在录  Up 陈旧 {}ms / Down 陈旧 {}ms{}",
                 st.rec.up_stale_ms,
@@ -345,7 +345,7 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
         )
     };
     col = col.push(
-        row![text(format!("{dot} ")).size(16).color(dc), text(t).size(13).color(dc)]
+        row![text(format!("{dot} ")).size(crate::ui::text::s_section()).color(dc), text(t).size(crate::ui::text::s_emph()).color(dc)]
             .align_y(Alignment::Center),
     );
 
@@ -363,17 +363,17 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
         .spacing(6),
     );
     if st.days.is_empty() {
-        col = col.push(text("(还没有已封档的分段)").size(12).color(dimc));
+        col = col.push(text("(还没有已封档的分段)").size(crate::ui::text::s_body()).color(dimc));
     }
     for d in &st.days {
         // 一轮 5 分钟，所以「够不够跑」的门槛比行情流低得多：
         // 30 分钟已能覆盖 6 轮，2 小时以上才谈得上有点样本。
         let (lc, _) = if d.longest_s >= 7200 {
-            (Color::from_rgb(0.45, 0.85, 0.5), 0)
+            (crate::ui::pal::ok(), 0)
         } else if d.longest_s >= 1800 {
-            (Color::from_rgb(0.85, 0.8, 0.4), 0)
+            (crate::ui::pal::warn(), 0)
         } else {
-            (Color::from_rgb(0.9, 0.5, 0.4), 0)
+            (crate::ui::pal::bad(), 0)
         };
         let runs: String = d
             .runs
@@ -391,7 +391,7 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
                 cell(&dur(d.covered_s), 85.0),
                 cell(&d.gaps.to_string(), 50.0),
                 container(
-                    text(format!("{} @{}", dur(d.longest_s), hm(d.longest_at))).size(12).color(lc)
+                    text(format!("{} @{}", dur(d.longest_s), hm(d.longest_at))).size(crate::ui::text::s_body()).color(lc)
                 )
                 .width(Length::Fixed(150.0)),
                 cell(&format!("{}/{}", d.rounds_resolved, d.rounds), 110.0),
@@ -406,7 +406,7 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
             pm::PM_GAP_NS / 1_000_000_000,
             if st.days_scanned.is_empty() { "—" } else { &st.days_scanned }
         ))
-        .size(10)
+        .size(crate::ui::text::s_meta())
         .color(dimc),
     );
     col.into()
@@ -416,20 +416,20 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     let st = super::recorder_readout::snapshot();
 
     let config = column![
-        text("录制驾驶舱 — 24/7 守护录制控制").size(20).color(Color::from_rgb(0.55, 0.8, 1.0)),
+        text("录制驾驶舱 — 24/7 守护录制控制").size(crate::ui::text::s_title()).color(crate::ui::pal::head()),
         row![
-            text("保存位置").size(13),
+            text("保存位置").size(crate::ui::text::s_emph()),
             text_input("~/ws-data", &app.data_dir)
                 .on_input(RecorderMsg::DataDir)
                 .width(Length::FillPortion(4)),
-            button(text("应用配置并重启").size(13)).on_press(RecorderMsg::ApplyConfig),
+            button(text("应用配置并重启").size(crate::ui::text::s_emph())).on_press(RecorderMsg::ApplyConfig),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
-        text(app.hint.clone()).size(12).color(if app.hint.starts_with('✗') {
-            Color::from_rgb(0.9, 0.4, 0.4)
+        text(app.hint.clone()).size(crate::ui::text::s_body()).color(if app.hint.starts_with('✗') {
+            crate::ui::pal::bad()
         } else {
-            Color::from_rgb(0.6, 0.7, 0.6)
+            crate::ui::pal::dim()
         }),
     ]
     .spacing(7);
@@ -437,7 +437,7 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     let mut syms_col = column![text(
         "录制币种与档位(应用后写入 recorder.toml;全 L2=增量盘口+成交+资金费,轻量=顶档快照+成交)"
     )
-    .size(12)]
+    .size(crate::ui::text::s_body())]
     .spacing(4);
     let mut line = row![].spacing(14);
     for (i, (s, sel)) in app.syms.iter().enumerate() {
@@ -466,7 +466,7 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
             text_input("自定义币种…", &app.custom)
                 .on_input(RecorderMsg::CustomInput)
                 .width(Length::Fixed(170.0)),
-            button(text("添加").size(12)).on_press(RecorderMsg::AddCustom),
+            button(text("添加").size(crate::ui::text::s_body())).on_press(RecorderMsg::AddCustom),
         ]
         .spacing(6),
     );
@@ -475,27 +475,27 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     let (dot, dotc, runtxt) = if st.active {
         (
             "●",
-            Color::from_rgb(0.4, 0.85, 0.45),
+            crate::ui::pal::ok(),
             format!("运行中  已 {}  重启 {} 次", fmt_dur(st.uptime_secs), st.restarts),
         )
     } else {
-        ("○", Color::from_rgb(0.6, 0.6, 0.6), "已停止".to_string())
+        ("○", crate::ui::pal::dim(), "已停止".to_string())
     };
     let svc_ctrl = column![
         row![
-            text("① 24/7 守护服务").size(16).color(Color::from_rgb(0.5, 0.8, 1.0)),
-            text(format!("  {dot} ")).size(16).color(dotc),
-            text(runtxt).size(13),
+            text("① 24/7 守护服务").size(crate::ui::text::s_section()).color(crate::ui::pal::head()),
+            text(format!("  {dot} ")).size(crate::ui::text::s_section()).color(dotc),
+            text(runtxt).size(crate::ui::text::s_emph()),
         ]
         .align_y(Alignment::Center),
         row![
-            button(text("▶ 启动").size(14)).on_press(RecorderMsg::Start),
-            button(text("■ 停止").size(14)).on_press(RecorderMsg::Stop),
-            button(text("↻ 重启").size(14)).on_press(RecorderMsg::Restart),
-            button(text("⟳ 刷新").size(14)).on_press(RecorderMsg::Refresh),
+            button(text("▶ 启动").size(crate::ui::text::s_section())).on_press(RecorderMsg::Start),
+            button(text("■ 停止").size(crate::ui::text::s_section())).on_press(RecorderMsg::Stop),
+            button(text("↻ 重启").size(crate::ui::text::s_section())).on_press(RecorderMsg::Restart),
+            button(text("⟳ 刷新").size(crate::ui::text::s_section())).on_press(RecorderMsg::Refresh),
             text(format!("  刷新于 {}", st.refreshed))
-                .size(11)
-                .color(Color::from_rgb(0.5, 0.5, 0.5)),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::pend()),
         ]
         .spacing(8),
         // F0 72h 验收：验收对象就是本服务的录制质量，故并入①区。
@@ -504,27 +504,27 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
             let (adot, adotc, atxt) = if st.accept.active {
                 (
                     "●",
-                    Color::from_rgb(0.4, 0.85, 0.45),
+                    crate::ui::pal::ok(),
                     format!("验收运行中  已 {}", fmt_dur(st.accept.uptime_secs)),
                 )
             } else if st.accept_verdict.starts_with("PASS") {
-                ("✔", Color::from_rgb(0.4, 0.85, 0.45), format!("上次验收 {} PASS", st.accept_day))
+                ("✔", crate::ui::pal::ok(), format!("上次验收 {} PASS", st.accept_day))
             } else if !st.accept_verdict.is_empty() {
                 (
                     "✗",
-                    Color::from_rgb(0.9, 0.45, 0.4),
+                    crate::ui::pal::bad(),
                     format!("上次验收 {} {}", st.accept_day, st.accept_verdict),
                 )
             } else {
-                ("○", Color::from_rgb(0.6, 0.6, 0.6), "未跑过验收".to_string())
+                ("○", crate::ui::pal::dim(), "未跑过验收".to_string())
             };
             row![
-                button(text("▶ 跑 F0 验收").size(13)).on_press(RecorderMsg::RunAccept),
-                text(format!("  {adot} ")).size(14).color(adotc),
-                text(atxt).size(12).color(Color::from_rgb(0.75, 0.77, 0.82)),
+                button(text("▶ 跑 F0 验收").size(crate::ui::text::s_emph())).on_press(RecorderMsg::RunAccept),
+                text(format!("  {adot} ")).size(crate::ui::text::s_section()).color(adotc),
+                text(atxt).size(crate::ui::text::s_body()).color(crate::ui::pal::txt()),
                 text("  (覆盖率≥99%×2整日，报告写数据目录)")
-                    .size(10)
-                    .color(Color::from_rgb(0.5, 0.5, 0.5)),
+                    .size(crate::ui::text::s_meta())
+                    .color(crate::ui::pal::pend()),
             ]
             .spacing(4)
             .align_y(Alignment::Center)
@@ -535,8 +535,8 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     // ② 录制实况
     let mut live = column![
         text("② 录制实况(每 symbol 累计计数 · ↑=正在增长 · 来自服务日志)")
-            .size(15)
-            .color(Color::from_rgb(0.5, 0.9, 0.6))
+            .size(crate::ui::text::s_section())
+            .color(crate::ui::pal::ok())
     ]
     .spacing(2);
     live = live.push(
@@ -553,17 +553,17 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     );
     for (sym, s) in &st.live {
         let (mark, mc) = if s.growing {
-            ("↑ 录制中", Color::from_rgb(0.45, 0.85, 0.5))
+            ("↑ 录制中", crate::ui::pal::ok())
         } else if st.active {
-            ("静默", Color::from_rgb(0.85, 0.8, 0.4))
+            ("静默", crate::ui::pal::warn())
         } else {
-            ("—", Color::from_rgb(0.5, 0.5, 0.5))
+            ("—", crate::ui::pal::pend())
         };
         let stream = |n: u64| if n > 0 { group(n) } else { "—".into() };
         live = live.push(
             row![
                 cell(sym, 90.0),
-                container(text(mark.to_string()).size(12).color(mc)).width(Length::Fixed(76.0)),
+                container(text(mark.to_string()).size(crate::ui::text::s_body()).color(mc)).width(Length::Fixed(76.0)),
                 cell(&stream(s.l2), 140.0),
                 cell(&stream(s.trades), 120.0),
                 cell(&stream(s.mark), 90.0),
@@ -575,7 +575,7 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     }
     if st.live.is_empty() {
         live = live.push(
-            text("(服务未运行或暂无日志——点「启动」)").size(12).color(Color::from_rgb(0.5, 0.5, 0.5)),
+            text("(服务未运行或暂无日志——点「启动」)").size(crate::ui::text::s_body()).color(crate::ui::pal::pend()),
         );
     }
 
@@ -584,7 +584,7 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     let filled = (pct * 24.0) as usize;
     let bar: String = "▓".repeat(filled) + &"░".repeat(24 - filled);
     let mut overview = column![
-        text("③ 已录制总览(磁盘落盘,跨全部日期)").size(16).color(Color::from_rgb(0.9, 0.8, 0.4)),
+        text("③ 已录制总览(磁盘落盘,跨全部日期)").size(crate::ui::text::s_section()).color(crate::ui::pal::head()),
         text(if st.span_days > 0 {
             format!(
                 "时间跨度  {} ~ {}({} 天)      总大小  {}",
@@ -593,13 +593,13 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
         } else {
             "时间跨度  暂无落盘数据".into()
         })
-        .size(13),
+        .size(crate::ui::text::s_emph()),
         text(format!(
             "30 天目标进度  {bar}  {}/{} 天",
             st.span_days, GOAL_DAYS
         ))
-        .size(13)
-        .color(Color::from_rgb(0.7, 0.8, 0.6)),
+        .size(crate::ui::text::s_emph())
+        .color(crate::ui::pal::ok()),
     ]
     .spacing(5);
     overview = overview.push(
@@ -624,7 +624,7 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
     }
     if st.lake.is_empty() {
         overview =
-            overview.push(text("(该目录暂无落盘)").size(12).color(Color::from_rgb(0.5, 0.5, 0.5)));
+            overview.push(text("(该目录暂无落盘)").size(crate::ui::text::s_body()).color(crate::ui::pal::pend()));
     }
 
     let left = column![svc_ctrl, vgap(12.0), live].spacing(6).width(Length::FillPortion(3));
@@ -647,7 +647,7 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
             pm_section(),
         ]
         .spacing(10)
-        .padding(14),
+        .padding(crate::ui::metrics::space(4)),
     ))
     .width(Length::Fill)
     .height(Length::Fill)

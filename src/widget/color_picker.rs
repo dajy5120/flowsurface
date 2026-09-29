@@ -55,7 +55,7 @@ pub fn color_picker<'a, Message: 'a>(
 
 fn bordered<'a, Message: 'a>(element: impl Into<Element<'a, Message>>) -> Container<'a, Message> {
     container(element)
-        .padding(1)
+        .padding(crate::ui::metrics::space(0))
         .style(|theme| container::Style {
             text_color: None,
             background: None,

@@ -668,7 +668,7 @@ impl TickersTable {
         };
 
         container(row_content)
-            .padding(2)
+            .padding(crate::ui::metrics::space(0))
             .style(style::dragger_row_container)
             .into()
     }
@@ -851,7 +851,7 @@ impl TickersTable {
                 .on_input(Message::UpdateSearchQuery)
                 .id("full_ticker_search_box")
                 .align_x(Horizontal::Left)
-                .padding(6),
+                .padding(crate::ui::metrics::space(2)),
             button(
                 icon_text(Icon::Sort, 14)
                     .align_x(Horizontal::Center)
@@ -1303,7 +1303,7 @@ impl TickersTable {
                 .on_input(on_search)
                 .id(search_box_id.clone())
                 .align_x(Alignment::Start)
-                .padding(6),
+                .padding(crate::ui::metrics::space(2)),
         ]
         .align_y(Alignment::Center)
         .spacing(4)
@@ -1455,7 +1455,7 @@ impl TickersTable {
 
         let chip_el: Option<Element<'a, M>> = chip_label.map(|lbl| {
             container(text(lbl).size(crate::style::text_size::SMALL))
-                .padding([2, 6])
+                .padding(crate::ui::metrics::pad2(0, 2))
                 .style(style::dragger_row_container)
                 .into()
         });

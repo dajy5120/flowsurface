@@ -237,7 +237,7 @@ impl LayoutManager {
         for layout in &self.layouts {
             let layout_id = &layout.id;
 
-            let mut layout_row = row![].height(iced::Length::Fixed(32.0)).padding(4);
+            let mut layout_row = row![].height(iced::Length::Fixed(32.0)).padding(crate::ui::metrics::space(1));
 
             let is_active = self.active_layout_id == Some(layout_id.unique);
             match &self.edit_mode {

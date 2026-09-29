@@ -377,7 +377,7 @@ impl HeatmapShader {
         let chart = HeatmapShaderWidget::new(&self.scene, x_axis, y_axis, overlay)
             .with_y_axis_gutter(self.y_axis_gutter);
 
-        iced::widget::container(chart).padding(1).into()
+        iced::widget::container(chart).padding(crate::ui::metrics::space(0)).into()
     }
 
     pub fn update_theme(&mut self, theme: &iced_core::Theme) {

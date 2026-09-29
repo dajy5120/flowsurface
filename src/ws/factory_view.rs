@@ -12,18 +12,11 @@ use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
 
 use super::factory_readout::{FactoryReadout, HORIZONS, IcDecay};
 
-const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
-const C_GREEN: Color = Color::from_rgb(0.45, 0.85, 0.5);
-const C_GOLD: Color = Color::from_rgb(0.9, 0.8, 0.4);
-const C_PURPLE: Color = Color::from_rgb(0.8, 0.6, 0.9);
-const C_DIM: Color = Color::from_rgb(0.55, 0.55, 0.6);
-const C_RED: Color = Color::from_rgb(0.9, 0.45, 0.4);
-
 fn vgap<'a, M: 'a>(h: f32) -> Element<'a, M> {
     container(text("")).height(Length::Fixed(h)).into()
 }
 fn sec<'a, M: 'a>(title: &str, c: Color) -> Element<'a, M> {
-    text(title.to_string()).size(15).color(c).into()
+    text(title.to_string()).size(crate::ui::text::s_section()).color(c).into()
 }
 /// 缺失值一律显示 `—`，**不要退化成 0 或 NaN**。
 /// 「没记录」和「值是 0」是两回事：实测同一批影子 run，C4 面板显示 fills 711，
@@ -36,12 +29,12 @@ fn opt_f(v: Option<f64>, prec: usize) -> String {
 }
 
 fn cell<'a, M: 'a>(s: &str, w: f32) -> Element<'a, M> {
-    container(text(s.to_string()).size(11))
+    container(text(s.to_string()).size(crate::ui::text::s_small()))
         .width(Length::Fixed(w))
         .into()
 }
 fn cellc<'a, M: 'a>(s: &str, w: f32, c: Color) -> Element<'a, M> {
-    container(text(s.to_string()).size(11).color(c))
+    container(text(s.to_string()).size(crate::ui::text::s_small()).color(c))
         .width(Length::Fixed(w))
         .into()
 }
@@ -65,11 +58,11 @@ fn group(n: i64) -> String {
 }
 fn src_color(s: &str) -> Color {
     match s {
-        "seed" => Color::from_rgb(0.5, 0.8, 0.6),
-        "gp" => Color::from_rgb(0.9, 0.7, 0.4),
-        "llm" => Color::from_rgb(0.7, 0.6, 0.95),
-        "combo" => Color::from_rgb(0.6, 0.85, 0.95),
-        _ => C_DIM,
+        "seed" => crate::ui::pal::ok(),
+        "gp" => crate::ui::pal::warn(),
+        "llm" => crate::ui::pal::series(5),
+        "combo" => crate::ui::pal::info(),
+        _ => crate::ui::pal::dim(),
     }
 }
 fn fmt_bp(v: f64) -> String {
@@ -88,13 +81,13 @@ fn expr_cell<'a, M: 'a>(expr: &str, hypothesis: &str, leak: &str, w: f32) -> Ele
     } else {
         format!("{}{leak}", trunc(expr, 40))
     };
-    let base = container(text(label).size(11)).width(Length::Fixed(w));
+    let base = container(text(label).size(crate::ui::text::s_small())).width(Length::Fixed(w));
     if has {
         iced::widget::tooltip(
             base,
-            container(text(format!("假设：{hypothesis}")).size(11))
+            container(text(format!("假设：{hypothesis}")).size(crate::ui::text::s_small()))
                 .style(crate::style::tooltip)
-                .padding(8)
+                .padding(crate::ui::metrics::space(3))
                 .max_width(360.0),
             iced::widget::tooltip::Position::Top,
         )
@@ -104,15 +97,6 @@ fn expr_cell<'a, M: 'a>(expr: &str, hypothesis: &str, leak: &str, w: f32) -> Ele
     }
 }
 
-/// IC 衰减曲线的 6 条线配色（与 stage-a top 强度序一致）。
-const DECAY_PALETTE: [Color; 6] = [
-    Color::from_rgb(0.45, 0.85, 0.55),
-    Color::from_rgb(0.5, 0.7, 0.95),
-    Color::from_rgb(0.9, 0.75, 0.4),
-    Color::from_rgb(0.85, 0.5, 0.85),
-    Color::from_rgb(0.5, 0.85, 0.85),
-    Color::from_rgb(0.9, 0.55, 0.5),
-];
 
 /// IC 衰减曲线：x=视界（500ms→5m 等距），y=ic_mean（含 0 基线），每 alpha 一条线。
 struct DecayChart {
@@ -127,15 +111,15 @@ impl<M> canvas::Program<M> for DecayChart {
         const MB: f32 = 16.0;
         const MT: f32 = 6.0;
         const MR: f32 = 8.0;
-        let axis = Color::from_rgb(0.5, 0.5, 0.55);
-        let grid = Color::from_rgba(0.6, 0.6, 0.65, 0.2);
+        let axis = crate::ui::pal::pend();
+        let grid = crate::ui::pal::alpha(crate::ui::pal::dim(), 0.2);
         let geo = self.cache.draw(r, b.size(), |frame: &mut Frame| {
             let (w, h) = (frame.width(), frame.height());
             if self.lines.is_empty() {
                 frame.fill_text(Text {
                     content: "数据不足（尚无 Stage-A 评估）".into(),
                     position: Point::new(ML + 4.0, h / 2.0 - 6.0),
-                    color: C_DIM,
+                    color: crate::ui::pal::dim(),
                     size: iced::Pixels(11.0),
                     ..Default::default()
                 });
@@ -193,7 +177,7 @@ impl<M> canvas::Program<M> for DecayChart {
             }
             // 每 alpha 一条折线 + 顶点圆点
             for (li, l) in self.lines.iter().enumerate() {
-                let col = DECAY_PALETTE[li % DECAY_PALETTE.len()];
+                let col = crate::ui::pal::series(li);
                 if l.pts.len() >= 2 {
                     let path = Path::new(|p| {
                         p.move_to(Point::new(mx(l.pts[0].0), my(l.pts[0].1)));
@@ -240,7 +224,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
         .collect::<Vec<_>>()
         .join("  ");
     let status_line: Element<super::factory::FactoryMsg> = if !st.started {
-        text("启动 Factory poller…").size(13).color(C_DIM).into()
+        text("启动 Factory poller…").size(crate::ui::text::s_emph()).color(crate::ui::pal::dim()).into()
     } else if st.db_ok {
         text(format!(
             "alphas 状态  {status_s}      evals {}   全局 trials {}   combos {}      刷新 {}",
@@ -249,28 +233,28 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
             st.n_combos,
             st.refreshed
         ))
-        .size(13)
-        .color(C_GREEN)
+        .size(crate::ui::text::s_emph())
+        .color(crate::ui::pal::up())
         .into()
     } else {
         text(format!(
             "✗ 读不到 Registry（{}）——工厂尚未产出或路径不对",
             super::factory_readout::db_path_display()
         ))
-        .size(13)
-        .color(C_RED)
+        .size(crate::ui::text::s_emph())
+        .color(crate::ui::pal::down())
         .into()
     };
     let header = column![
-        text("Alpha Factory 驾驶舱").size(22).color(C_HEAD),
+        text("Alpha Factory 驾驶舱").size(crate::ui::text::s_title()).color(crate::ui::pal::head()),
         status_line,
-        text(format!("生成来源  {gensrc_s}")).size(12).color(C_DIM),
-        text(format!("晋级阈值  {thr_s}")).size(11).color(C_DIM),
+        text(format!("生成来源  {gensrc_s}")).size(crate::ui::text::s_body()).color(crate::ui::pal::dim()),
+        text(format!("晋级阈值  {thr_s}")).size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
     ]
     .spacing(5);
 
     // —— 左列：Stage-A 排行 + Stage-B ——
-    let mut sa = column![sec("② Stage-A 排行（按 |IC t|，F2/F3）", C_GREEN)].spacing(2);
+    let mut sa = column![sec("② Stage-A 排行（按 |IC t|，F2/F3）", crate::ui::pal::up())].spacing(2);
     sa = sa.push(
         row![
             cell("源", 46.0),
@@ -301,13 +285,13 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
     // IC 衰减曲线（top6 alpha 的跨视界 IC 廓线）+ 配色图例
     let mut decay_legend = column![].spacing(1);
     for (i, l) in st.ic_decay.iter().enumerate() {
-        let col = DECAY_PALETTE[i % DECAY_PALETTE.len()];
+        let col = crate::ui::pal::series(i);
         decay_legend = decay_legend.push(
-            text(format!("● [{}] {}", l.gen_src, trunc(&l.expr, 44))).size(9).color(col),
+            text(format!("● [{}] {}", l.gen_src, trunc(&l.expr, 44))).size(crate::ui::text::s_meta()).color(col),
         );
     }
     let decay = column![
-        sec("IC 衰减曲线（top6 · 视界 500ms→5m，F2）", C_GREEN),
+        sec("IC 衰减曲线（top6 · 视界 500ms→5m，F2）", crate::ui::pal::up()),
         container(
             Canvas::new(DecayChart { lines: st.ic_decay.clone(), cache: Cache::new() })
                 .width(Length::Fill)
@@ -316,7 +300,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
         decay_legend,
     ]
     .spacing(3);
-    let mut sb = column![sec("⑤ Stage-B 事件回测（Nautilus，F5）", C_GREEN)].spacing(2);
+    let mut sb = column![sec("⑤ Stage-B 事件回测（Nautilus，F5）", crate::ui::pal::up())].spacing(2);
     for b in &st.stage_b {
         sb = sb.push(
             row![
@@ -328,7 +312,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
         );
     }
     if st.stage_b.is_empty() {
-        sb = sb.push(text("（暂无 Stage-B 记录）").size(11).color(C_DIM));
+        sb = sb.push(text("（暂无 Stage-B 记录）").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
     }
     let left = column![sa, vgap(8.0), decay, vgap(10.0), sb]
         .spacing(4)
@@ -337,7 +321,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
     // —— 中列：现役池 + 组合 ——
     let mut pool = column![sec(
         &format!("③ 现役池（去相关后 {} 条，F4）", st.pool.len()),
-        C_GOLD
+        crate::ui::pal::warn()
     )]
     .spacing(2);
     pool = pool.push(
@@ -360,7 +344,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
             .spacing(4),
         );
     }
-    let mut combos = column![sec("④ 组合（ICIR/Ridge 双法，F4）", C_GOLD)].spacing(2);
+    let mut combos = column![sec("④ 组合（ICIR/Ridge 双法，F4）", crate::ui::pal::warn())].spacing(2);
     combos = combos.push(
         row![
             cell("方法", 90.0),
@@ -381,7 +365,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
                 cellc(
                     &c.status,
                     70.0,
-                    if c.status == "paper" { C_GREEN } else { C_DIM }
+                    if c.status == "paper" { crate::ui::pal::up() } else { crate::ui::pal::dim() }
                 ),
             ]
             .spacing(4),
@@ -392,7 +376,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
         .width(Length::FillPortion(4));
 
     // —— 右列：影子实盘 + 数据底座 + Nightly ——
-    let mut live = column![sec("⑥ 影子实盘 / realized IC（F6）", C_PURPLE)].spacing(2);
+    let mut live = column![sec("⑥ 影子实盘 / realized IC（F6）", crate::ui::pal::series(5))].spacing(2);
     for l in &st.live {
         live = live.push(
             text(format!(
@@ -403,14 +387,14 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
                 l.n_trades.map_or_else(|| "—".to_string(), |n| n.to_string()),
                 l.age
             ))
-            .size(11)
-            .color(Color::from_rgb(0.72, 0.74, 0.8)),
+            .size(crate::ui::text::s_small())
+            .color(crate::ui::pal::txt()),
         );
     }
     if st.live.is_empty() {
-        live = live.push(text("（暂无影子/实盘记录——跑 shadow_run）").size(11).color(C_DIM));
+        live = live.push(text("（暂无影子/实盘记录——跑 shadow_run）").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
     }
-    let mut lake = column![sec("① 数据底座（F0/F1）", C_HEAD)].spacing(2);
+    let mut lake = column![sec("① 数据底座（F0/F1）", crate::ui::pal::head())].spacing(2);
     lake = lake.push(
         row![
             cell("币种", 90.0),
@@ -431,21 +415,19 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
             .spacing(4),
         );
     }
-    let mut nightly = column![sec("⑦ Nightly 流水线（F7）", C_PURPLE)].spacing(2);
+    let mut nightly = column![sec("⑦ Nightly 流水线（F7）", crate::ui::pal::series(5))].spacing(2);
     // 手动启停（docs/20 §26）。定时器与手动运行相互独立：关了定时器仍可手动跑。
     {
         use super::factory::FactoryMsg;
-        const C_GREEN: Color = Color::from_rgb(0.45, 0.85, 0.5);
-        const C_RED: Color = Color::from_rgb(0.9, 0.45, 0.4);
         let running = st.svc.active;
         // 状态行：nightly 是 oneshot，「重启次数」无意义，看的是上次跑没跑成。
         let (dot, dotc, run) = if running {
-            ("●", C_GREEN, format!("运行中  已 {}", super::svcctl::fmt_dur(st.svc.uptime_secs)))
+            ("●", crate::ui::pal::up(), format!("运行中  已 {}", super::svcctl::fmt_dur(st.svc.uptime_secs)))
         } else if st.svc.ever_ran() {
             let ok = st.svc.last_ok();
             (
                 if ok { "○" } else { "✗" },
-                if ok { C_DIM } else { C_RED },
+                if ok { crate::ui::pal::dim() } else { crate::ui::pal::down() },
                 format!(
                     "空闲  上次 {} {}",
                     super::svcctl::fmt_stamp(&st.svc.last_finish),
@@ -453,12 +435,12 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
                 ),
             )
         } else {
-            ("○", C_DIM, "空闲  未跑过".to_string())
+            ("○", crate::ui::pal::dim(), "空闲  未跑过".to_string())
         };
         nightly = nightly.push(
             row![
-                text(format!("{dot} ")).size(13).color(dotc),
-                text(run).size(11).color(Color::from_rgb(0.85, 0.87, 0.92)),
+                text(format!("{dot} ")).size(crate::ui::text::s_emph()).color(dotc),
+                text(run).size(crate::ui::text::s_small()).color(crate::ui::pal::txt()),
                 text(if st.timer_enabled && !st.timer_next.is_empty() {
                     format!("　下次定时 {}", st.timer_next)
                 } else if st.timer_enabled {
@@ -466,31 +448,31 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
                 } else {
                     "　每日定时已关".to_string()
                 })
-                .size(10)
-                .color(C_DIM),
+                .size(crate::ui::text::s_meta())
+                .color(crate::ui::pal::dim()),
             ]
             .align_y(iced::Alignment::Center),
         );
         // 动作按钮常驻、当前状态那个置灰（灰掉的=现在就是这个态），不用切换式按钮
         // ——切换式按钮上写「每日定时 开」时，分不清是「当前开」还是「点了会开」。
         let ctl = row![
-            text("运行 ").size(11).color(C_DIM),
-            button(text("▶ 立即运行").size(11))
-                .padding([2, 8])
+            text("运行 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
+            button(text("▶ 立即运行").size(crate::ui::text::s_small()))
+                .padding(crate::ui::metrics::pad2(0, 3))
                 .on_press_maybe((!running).then_some(FactoryMsg::RunNightly)),
-            button(text("■ 停止").size(11))
-                .padding([2, 8])
+            button(text("■ 停止").size(crate::ui::text::s_small()))
+                .padding(crate::ui::metrics::pad2(0, 3))
                 .on_press_maybe(running.then_some(FactoryMsg::StopNightly)),
-            text("　每日定时 ").size(11).color(C_DIM),
-            button(text(if st.timer_enabled { "✔ 开" } else { "开" }).size(11))
-                .padding([2, 8])
+            text("　每日定时 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
+            button(text(if st.timer_enabled { "✔ 开" } else { "开" }).size(crate::ui::text::s_small()))
+                .padding(crate::ui::metrics::pad2(0, 3))
                 .on_press_maybe((!st.timer_enabled).then_some(FactoryMsg::SetTimer(true))),
-            button(text(if st.timer_enabled { "关" } else { "✔ 关" }).size(11))
-                .padding([2, 8])
+            button(text(if st.timer_enabled { "关" } else { "✔ 关" }).size(crate::ui::text::s_small()))
+                .padding(crate::ui::metrics::pad2(0, 3))
                 .on_press_maybe(st.timer_enabled.then_some(FactoryMsg::SetTimer(false))),
-            text("　").size(11),
-            button(text("⟳ 刷新").size(11)).padding([2, 8]).on_press(FactoryMsg::Refresh),
-            text(format!("  刷新于 {}", st.refreshed)).size(10).color(C_DIM),
+            text("　").size(crate::ui::text::s_small()),
+            button(text("⟳ 刷新").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 3)).on_press(FactoryMsg::Refresh),
+            text(format!("  刷新于 {}", st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center);
@@ -499,10 +481,10 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
         let am = super::factory::action_message();
         if !am.is_empty() {
             let bad = am.starts_with('✗');
-            nightly = nightly.push(text(am).size(10).color(if bad {
-                Color::from_rgb(0.9, 0.45, 0.45)
+            nightly = nightly.push(text(am).size(crate::ui::text::s_meta()).color(if bad {
+                crate::ui::pal::bad()
             } else {
-                Color::from_rgb(0.55, 0.75, 0.6)
+                crate::ui::pal::ok()
             }));
         }
     }
@@ -510,30 +492,30 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
     let lv = &st.nightly_live;
     if lv.seen {
         let hc = if lv.running {
-            Color::from_rgb(0.45, 0.85, 0.5)
+            crate::ui::pal::ok()
         } else if lv.header.starts_with('❌') {
-            Color::from_rgb(0.9, 0.45, 0.4)
+            crate::ui::pal::bad()
         } else {
-            Color::from_rgb(0.6, 0.75, 0.95)
+            crate::ui::pal::info()
         };
-        nightly = nightly.push(text(format!("{} · {}", lv.date, lv.header)).size(11).color(hc));
+        nightly = nightly.push(text(format!("{} · {}", lv.date, lv.header)).size(crate::ui::text::s_small()).color(hc));
         let start = lv.steps.len().saturating_sub(10);
         for (step, rc, secs) in &lv.steps[start..] {
             let mark = if *rc == 0 { "✅" } else { "❌" };
-            let c = if *rc == 0 { C_DIM } else { Color::from_rgb(0.9, 0.45, 0.4) };
+            let c = if *rc == 0 { crate::ui::pal::dim() } else { crate::ui::pal::bad() };
             nightly = nightly.push(
-                text(format!("{mark} {} · {secs:.0}s", trunc(step, 38))).size(10).color(c),
+                text(format!("{mark} {} · {secs:.0}s", trunc(step, 38))).size(crate::ui::text::s_meta()).color(c),
             );
         }
         nightly = nightly.push(vgap(6.0));
     }
     nightly = nightly.push(
         text(trunc(&st.nightly_title, 60))
-            .size(12)
-            .color(Color::from_rgb(0.8, 0.8, 0.85)),
+            .size(crate::ui::text::s_body())
+            .color(crate::ui::pal::txt()),
     );
     for l in st.nightly_lines.iter().take(16) {
-        nightly = nightly.push(text(trunc(l, 56)).size(10).color(C_DIM));
+        nightly = nightly.push(text(trunc(l, 56)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     }
     let right = column![live, vgap(10.0), lake, vgap(10.0), nightly]
         .spacing(4)
@@ -548,7 +530,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
     .height(Length::Fill);
 
     container(column![header, vgap(10.0), body].spacing(8))
-        .padding(14)
+        .padding(crate::ui::metrics::space(4))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

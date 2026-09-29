@@ -697,7 +697,7 @@ impl Dashboard {
             )
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(8);
+            .padding(crate::ui::metrics::space(3));
 
             Element::new(content).map(move |message| Message::Pane(window, message))
         } else {

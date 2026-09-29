@@ -33,7 +33,7 @@ where
 {
     container(scrollable_content(content))
         .width(Length::Shrink)
-        .padding(28)
+        .padding(crate::ui::metrics::space(6))
         .max_width(max_width)
         .style(style::chart_modal)
         .into()
@@ -192,7 +192,7 @@ pub fn heatmap_cfg_view<'a>(
         Some(
             container(column![coalescer_kinds, threshold_slider].spacing(8))
                 .style(style::modal_container)
-                .padding(8)
+                .padding(crate::ui::metrics::space(3))
                 .into(),
         )
     } else {
@@ -553,7 +553,7 @@ pub fn timesales_cfg_view<'a>(
 
         let mut inner = column![enable_checkbox]
             .width(Length::Fill)
-            .padding(4)
+            .padding(crate::ui::metrics::space(1))
             .spacing(8);
 
         if let Some(ctrls) = controls {
@@ -562,7 +562,7 @@ pub fn timesales_cfg_view<'a>(
 
         container(inner)
             .style(style::modal_container)
-            .padding(8)
+            .padding(crate::ui::metrics::space(3))
             .into()
     };
 
@@ -853,7 +853,7 @@ pub mod study {
                     .step(10.0);
 
                     column![text(format!("Lookback: {lookback} datapoints")), slider_ui]
-                        .padding(8)
+                        .padding(crate::ui::metrics::space(3))
                         .spacing(4)
                         .into()
                 }
@@ -875,7 +875,7 @@ pub mod study {
                             })
                             .step(25.0);
 
-                        column![info_text, threshold_slider,].padding(8).spacing(4)
+                        column![info_text, threshold_slider,].padding(crate::ui::metrics::space(3)).spacing(4)
                     };
 
                     let color_scaling = {
@@ -911,10 +911,10 @@ pub mod study {
                             .spacing(2);
 
                             column![color_scale_checkbox, scaling_slider]
-                                .padding(8)
+                                .padding(crate::ui::metrics::space(3))
                                 .spacing(8)
                         } else {
-                            column![color_scale_checkbox].padding(8)
+                            column![color_scale_checkbox].padding(crate::ui::metrics::space(3))
                         }
                     };
 
@@ -929,11 +929,11 @@ pub mod study {
                             },
                         );
 
-                        column![cbox].padding(8).spacing(4)
+                        column![cbox].padding(crate::ui::metrics::space(3)).spacing(4)
                     };
 
                     split_column![qty_threshold, color_scaling, ignore_zeros_checkbox]
-                        .padding(4)
+                        .padding(crate::ui::metrics::space(1))
                         .into()
                 }
             }
@@ -1005,7 +1005,7 @@ pub mod study {
                             )),
                             slider,
                         ]
-                        .padding(8)
+                        .padding(crate::ui::metrics::space(3))
                         .spacing(4)
                         .into()
                     }
@@ -1017,7 +1017,7 @@ pub mod study {
                         );
 
                         column![row![space::horizontal(), switch_kind,],]
-                            .padding(8)
+                            .padding(crate::ui::metrics::space(3))
                             .spacing(4)
                             .into()
                     }

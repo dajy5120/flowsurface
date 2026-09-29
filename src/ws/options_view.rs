@@ -10,49 +10,42 @@ use iced::{Color, Element, Length};
 
 use super::options_readout::{OptionsReadout, StrategyRow};
 
-const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
-const C_GREEN: Color = Color::from_rgb(0.45, 0.85, 0.5);
-const C_RED: Color = Color::from_rgb(0.9, 0.45, 0.4);
-const C_GOLD: Color = Color::from_rgb(0.9, 0.8, 0.4);
-const C_DIM: Color = Color::from_rgb(0.55, 0.55, 0.6);
-const C_TXT: Color = Color::from_rgb(0.85, 0.87, 0.92);
-
 fn sign_c(v: f64) -> Color {
     if v >= 0.0 {
-        C_GREEN
+        crate::ui::pal::up()
     } else {
-        C_RED
+        crate::ui::pal::down()
     }
 }
 fn sec<'a, M: 'a>(title: &str) -> Element<'a, M> {
-    text(title.to_string()).size(14).color(C_HEAD).into()
+    text(title.to_string()).size(crate::ui::text::s_section()).color(crate::ui::pal::head()).into()
 }
 fn cell<'a, M: 'a>(s: String, w: f32, c: Color) -> Element<'a, M> {
-    container(text(s).size(11).color(c)).width(Length::Fixed(w)).into()
+    container(text(s).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
 }
 
 fn strategy_block<'a, M: 'a>(r: &StrategyRow) -> Element<'a, M> {
     let gate = if r.gate_ok { "✅ 净>0" } else { "❌ 净≤0" };
     column![
         row![
-            cell(r.code.clone(), 44.0, C_GOLD),
-            cell(r.role.clone(), 80.0, C_DIM),
+            cell(r.code.clone(), 44.0, crate::ui::pal::warn()),
+            cell(r.role.clone(), 80.0, crate::ui::pal::dim()),
             cell(format!("净 {:+.3}", r.net), 90.0, sign_c(r.net)),
-            cell(format!("探针 {gate}", ), 90.0, if r.gate_ok { C_GREEN } else { C_RED }),
-            cell(format!("成交 {}", r.n_fills), 70.0, C_TXT),
+            cell(format!("探针 {gate}", ), 90.0, if r.gate_ok { crate::ui::pal::up() } else { crate::ui::pal::down() }),
+            cell(format!("成交 {}", r.n_fills), 70.0, crate::ui::pal::txt()),
         ]
         .spacing(4),
         // 摩擦分解（探针·docs/16 §5 净捕获 vs 摩擦）
         row![
-            cell(format!("权利金 {:+.2}", r.premium), 100.0, C_TXT),
-            cell(format!("费 {:+.2}", r.fees), 70.0, C_RED),
-            cell(format!("价差 {:+.2}", r.spread_cost), 80.0, C_RED),
-            cell(format!("对冲 {:+.2}", r.hedge_cost), 80.0, C_RED),
+            cell(format!("权利金 {:+.2}", r.premium), 100.0, crate::ui::pal::txt()),
+            cell(format!("费 {:+.2}", r.fees), 70.0, crate::ui::pal::down()),
+            cell(format!("价差 {:+.2}", r.spread_cost), 80.0, crate::ui::pal::down()),
+            cell(format!("对冲 {:+.2}", r.hedge_cost), 80.0, crate::ui::pal::down()),
             cell(format!("结算 {:+.2}", r.settle_pnl), 80.0, sign_c(r.settle_pnl)),
             cell(format!("持仓残差 {:+.2}", r.hedge_mkt_pnl), 110.0, sign_c(r.hedge_mkt_pnl)),
         ]
         .spacing(4),
-        text(r.desc.clone()).size(10).color(C_DIM),
+        text(r.desc.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
     ]
     .spacing(3)
     .into()
@@ -60,15 +53,15 @@ fn strategy_block<'a, M: 'a>(r: &StrategyRow) -> Element<'a, M> {
 
 pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     let st: OptionsReadout = super::options_readout::snapshot();
-    let mut body = column![].spacing(8).padding(10);
+    let mut body = column![].spacing(8).padding(crate::ui::metrics::space(3));
 
     body = body.push(sec("期权 / 0DTE 回测·探针（docs/18 · 不下真实单）"));
 
     if !st.present || st.rows.is_empty() {
         body = body.push(
             text("暂无回测快照——运行 `python -m factory.options.run_backtest --strategy all` 生成")
-                .size(11)
-                .color(C_DIM),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::dim()),
         );
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
@@ -81,8 +74,8 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         } else {
             format!("数据源={}", st.data_source)
         })
-        .size(11)
-        .color(if synthetic { C_GOLD } else { C_GREEN }),
+        .size(crate::ui::text::s_small())
+        .color(if synthetic { crate::ui::pal::warn() } else { crate::ui::pal::up() }),
     );
 
     // 逐策略
@@ -92,8 +85,8 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
 
     body = body.push(
         text("研究结论：买方排除·卖方不立项·唯一可辩护=vol-order 试点(须先证净捕获>摩擦)")
-            .size(10)
-            .color(C_DIM),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()),
     );
     body = body.push(
         text(format!(
@@ -103,12 +96,12 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
             st.refreshed
         ))
         .color(if super::staleness::is_stale(&st.stamp) {
-            super::staleness::C_STALE
+            crate::ui::pal::pend()
         } else {
-            C_DIM
+            crate::ui::pal::dim()
         })
-            .size(10)
-            .color(C_DIM),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()),
     );
 
     scrollable(body).width(Length::Fill).height(Length::Fill).into()

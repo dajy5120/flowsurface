@@ -20,19 +20,6 @@ const ML: f32 = 58.0;
 const MR: f32 = 10.0;
 const MT: f32 = 10.0;
 const MB: f32 = 20.0;
-const C_AXIS: Color = Color { r: 0.52, g: 0.54, b: 0.58, a: 1.0 };
-const C_GRID: Color = Color { r: 0.28, g: 0.29, b: 0.33, a: 0.55 };
-const C_UP: Color = Color { r: 0.29, g: 0.74, b: 0.49, a: 1.0 };
-const C_DN: Color = Color { r: 0.86, g: 0.36, b: 0.40, a: 1.0 };
-const C_DIM: Color = Color { r: 0.55, g: 0.60, b: 0.66, a: 1.0 };
-const PALETTE: [Color; 6] = [
-    Color { r: 0.36, g: 0.62, b: 0.95, a: 1.0 },
-    Color { r: 0.30, g: 0.74, b: 0.49, a: 1.0 },
-    Color { r: 0.92, g: 0.62, b: 0.28, a: 1.0 },
-    Color { r: 0.66, g: 0.50, b: 0.92, a: 1.0 },
-    Color { r: 0.30, g: 0.78, b: 0.78, a: 1.0 },
-    Color { r: 0.86, g: 0.40, b: 0.45, a: 1.0 },
-];
 
 fn finite_range(vals: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -195,7 +182,7 @@ impl ChartCanvas {
     ) {
         let pw = w - ML - MR;
         let ph = h - MT - MB;
-        let axis = Stroke::default().with_color(C_AXIS).with_width(1.0);
+        let axis = Stroke::default().with_color(crate::ui::pal::axis()).with_width(1.0);
         frame.stroke(
             &Path::line(Point::new(ML, MT + ph), Point::new(ML + pw, MT + ph)),
             axis,
@@ -207,13 +194,13 @@ impl ChartCanvas {
             let y = MT + ph * (1.0 - t);
             frame.stroke(
                 &Path::line(Point::new(ML, y), Point::new(ML + pw, y)),
-                Stroke::default().with_color(C_GRID).with_width(1.0),
+                Stroke::default().with_color(crate::ui::pal::grid()).with_width(1.0),
             );
             let val = yr.0 + (yr.1 - yr.0) * t as f64;
             frame.fill_text(Text {
                 content: fmt_tick(val, yr.1 - yr.0),
                 position: Point::new(2.0, y - 6.0),
-                color: C_AXIS,
+                color: crate::ui::pal::axis(),
                 size: iced::Pixels(9.0),
                 ..Default::default()
             });
@@ -238,7 +225,7 @@ impl ChartCanvas {
             frame.fill_text(Text {
                 content: s,
                 position: Point::new(x - 18.0, MT + ph + 5.0),
-                color: C_AXIS,
+                color: crate::ui::pal::axis(),
                 size: iced::Pixels(9.0),
                 ..Default::default()
             });
@@ -247,7 +234,7 @@ impl ChartCanvas {
             frame.fill_text(Text {
                 content: y_label.to_string(),
                 position: Point::new(w - MR - 34.0, 0.0),
-                color: C_AXIS,
+                color: crate::ui::pal::axis(),
                 size: iced::Pixels(9.0),
                 ..Default::default()
             });
@@ -286,7 +273,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                 frame.fill_text(Text {
                     content: msg.to_string(),
                     position: Point::new(ML + 6.0, h / 2.0),
-                    color: C_AXIS,
+                    color: crate::ui::pal::axis(),
                     size: iced::Pixels(11.0),
                     ..Default::default()
                 });
@@ -321,7 +308,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                         frame.fill_rectangle(
                             Point::new(ML, y - bar_h / 2.0),
                             Size::new(sx(*a).max(1.0), bar_h),
-                            C_UP,
+                            crate::ui::pal::up(),
                         );
                     }
                     for (p, a) in ch.ask_price.iter().zip(ch.ask_amount.iter()) {
@@ -332,7 +319,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                         frame.fill_rectangle(
                             Point::new(ML, y - bar_h / 2.0),
                             Size::new(sx(*a).max(1.0), bar_h),
-                            Color { a: 0.85, ..C_DN },
+                            Color { a: 0.85, ..crate::ui::pal::down() },
                         );
                     }
                     return;
@@ -395,11 +382,11 @@ impl<M> canvas::Program<M> for ChartCanvas {
                     for ti in 0..last.min(nt) {
                         let x = sx(ch.x[ti]);
                         for (k, q) in ch.z_bid[ti].iter().enumerate().take(nl) {
-                            cell(x, k, *q, C_UP); // 买单堆积
+                            cell(x, k, *q, crate::ui::pal::up()); // 买单堆积
                         }
                         if let Some(row) = ch.z_ask.get(ti) {
                             for (k, q) in row.iter().enumerate().take(nl) {
-                                cell(x, k, *q, C_DN); // 卖单堆积
+                                cell(x, k, *q, crate::ui::pal::down()); // 卖单堆积
                             }
                         }
                     }
@@ -416,7 +403,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                             frame.stroke(
                                 &Path::line(q, p),
                                 Stroke::default()
-                                    .with_color(Color { r: 0.92, g: 0.94, b: 0.97, a: 0.75 })
+                                    .with_color(crate::ui::pal::alpha(crate::ui::pal::txt(), 0.75))
                                     .with_width(1.0),
                             );
                         }
@@ -430,7 +417,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                         frame.stroke(
                             &Path::line(Point::new(x, MT), Point::new(x, MT + ph)),
                             Stroke::default()
-                                .with_color(Color { r: 0.95, g: 0.78, b: 0.35, a: 0.85 })
+                                .with_color(crate::ui::pal::alpha(crate::ui::pal::reference(), 0.85))
                                 .with_width(1.2),
                         );
                     }
@@ -473,7 +460,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                             continue;
                         }
                         let x = sx(ch.x[i]);
-                        let col = if c >= o { C_UP } else { C_DN };
+                        let col = if c >= o { crate::ui::pal::up() } else { crate::ui::pal::down() };
                         frame.stroke(
                             &Path::line(Point::new(x, sy(hh)), Point::new(x, sy(ll))),
                             Stroke::default().with_color(col).with_width(1.0),
@@ -499,7 +486,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                             frame.fill_rectangle(
                                 Point::new(sx(ch.x[i]) - bw / 2.0, vy0 - hgt),
                                 Size::new(bw, hgt),
-                                Color { a: 0.55, ..if up { C_UP } else { C_DN } },
+                                Color { a: 0.55, ..if up { crate::ui::pal::up() } else { crate::ui::pal::down() } },
                             );
                         }
                     }
@@ -524,9 +511,9 @@ impl<M> canvas::Program<M> for ChartCanvas {
                             3.0
                         };
                         let col = match ch.cls.get(i).copied().unwrap_or(0) {
-                            1 => C_UP,
-                            2 => C_DN,
-                            _ => C_DIM,
+                            1 => crate::ui::pal::up(),
+                            2 => crate::ui::pal::down(),
+                            _ => crate::ui::pal::dim(),
                         };
                         frame.fill(
                             &Path::circle(Point::new(sx(ch.x[i]), sy(y)), rad),
@@ -550,7 +537,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                     let bw = (pw / n.max(1) as f32 / k as f32 * 0.8).clamp(0.7, 10.0);
                     let zero = sy(0.0f64.clamp(yr.0, yr.1));
                     for (si, (_, vals)) in ch.series.iter().enumerate() {
-                        let col = PALETTE[si % PALETTE.len()];
+                        let col = crate::ui::pal::series(si);
                         for i in 0..n.min(vals.len()) {
                             let v = vals[i];
                             if !v.is_finite() {
@@ -577,7 +564,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                     Self::axes(frame, w, h, xr, yr, ch.x_is_time, &ch.y_label, false);
                     let sy = |v: f64| MT + ph * (1.0 - ((v - yr.0) / (yr.1 - yr.0)) as f32);
                     for (si, (_, vals)) in ch.series.iter().enumerate() {
-                        let col = PALETTE[si % PALETTE.len()];
+                        let col = crate::ui::pal::series(si);
                         let mut pending: Option<Point> = None;
                         for i in 0..n.min(vals.len()) {
                             let v = vals[i];
@@ -600,7 +587,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                         frame.fill_text(Text {
                             content: name.clone(),
                             position: Point::new(ML + 6.0 + si as f32 * 88.0, MT + 1.0),
-                            color: PALETTE[si % PALETTE.len()],
+                            color: crate::ui::pal::series(si),
                             size: iced::Pixels(9.0),
                             ..Default::default()
                         });
@@ -618,7 +605,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
                 frame.stroke(
                     &Path::line(Point::new(x, MT), Point::new(x, MT + ph)),
                     Stroke::default()
-                        .with_color(Color { r: 0.95, g: 0.78, b: 0.35, a: 0.85 })
+                        .with_color(crate::ui::pal::alpha(crate::ui::pal::reference(), 0.85))
                         .with_width(1.2),
                 );
             }
@@ -634,21 +621,21 @@ fn chip<'a>(
     enabled: bool,
     msg: TardisBoardMsg,
 ) -> Element<'a, TardisBoardMsg> {
-    let t = text(label).size(12).color(if !enabled {
-        Color { r: 0.45, g: 0.47, b: 0.50, a: 1.0 }
+    let t = text(label).size(crate::ui::text::s_body()).color(if !enabled {
+        crate::ui::pal::pend()
     } else if active {
-        Color::from_rgb(0.98, 0.99, 1.0)
+        crate::ui::pal::txt()
     } else {
-        Color::from_rgb(0.80, 0.84, 0.88)
+        crate::ui::pal::dim()
     });
     let b = button(t)
-        .padding([3, 8])
+        .padding(crate::ui::metrics::pad2(0, 3))
         .style(move |theme, status| crate::style::button::modifier(theme, status, active));
     if enabled { b.on_press(msg).into() } else { b.into() }
 }
 
 fn label<'a>(s: &str) -> Element<'a, TardisBoardMsg> {
-    text(s.to_string()).size(12).into()
+    text(s.to_string()).size(crate::ui::text::s_body()).into()
 }
 
 pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
@@ -681,11 +668,11 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
 
     let header = column![
         text("历史数据面板（Tardis / Databento / 本地录制）— 数据 → 数据类型 → 图表")
-            .size(19)
-            .color(Color::from_rgb(0.55, 0.8, 1.0)),
+            .size(crate::ui::text::s_title())
+            .color(crate::ui::pal::info()),
         text("零交易所流：全部数据来自本地历史文件，不建立任何实时连接")
-            .size(10)
-            .color(Color::from_rgb(0.5, 0.55, 0.6)),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::pend()),
     ]
     .spacing(3);
 
@@ -742,8 +729,8 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
         ))
         .width(Length::Fixed(104.0)),
         {
-            let b = button(text(if loading.is_some() { "加载中…" } else { "加载" }).size(12))
-                .padding([3, 12]);
+            let b = button(text(if loading.is_some() { "加载中…" } else { "加载" }).size(crate::ui::text::s_body()))
+                .padding(crate::ui::metrics::pad2(0, 4));
             // 加载中不再接受点击（避免叠起多个子进程）
             if loading.is_none() { b.on_press(TardisBoardMsg::Load) } else { b }
         },
@@ -780,9 +767,9 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
         label("④ 回放"),
         pick_list(Speed::ALL.to_vec(), Some(app.speed), TardisBoardMsg::SpeedPick).text_size(12),
         if playing {
-            button(text("■ 停止").size(12)).padding([3, 12]).on_press(TardisBoardMsg::StopPlay)
+            button(text("■ 停止").size(crate::ui::text::s_body())).padding(crate::ui::metrics::pad2(0, 4)).on_press(TardisBoardMsg::StopPlay)
         } else {
-            button(text("▶ 回放").size(12)).padding([3, 12]).on_press(TardisBoardMsg::Play)
+            button(text("▶ 回放").size(crate::ui::text::s_body())).padding(crate::ui::metrics::pad2(0, 4)).on_press(TardisBoardMsg::Play)
         },
         // 进度条：拖动即 seek（回放中带新起点重起 feeder，静止时只挪游标）
         slider(0.0..=100.0, bar_pct, TardisBoardMsg::Seek)
@@ -793,11 +780,11 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
             None if ph_matches && ph.state == "done" => "播完（整窗）".to_string(),
             None => "整窗".to_string(),
         })
-        .size(11)
+        .size(crate::ui::text::s_small())
         .color(if head.is_some() {
-            Color::from_rgb(0.95, 0.78, 0.35)
+            crate::ui::pal::warn()
         } else {
-            C_DIM
+            crate::ui::pal::dim()
         }),
     ]
     .spacing(6)
@@ -807,14 +794,14 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     let export_row = row![
         label("⑤ 导出"),
         {
-            let b = button(text("⬇ CSV").size(12)).padding([3, 10]);
+            let b = button(text("⬇ CSV").size(crate::ui::text::s_body())).padding(crate::ui::metrics::pad2(0, 3));
             if loading.is_none() && p.loaded { b.on_press(TardisBoardMsg::ExportCsv) } else { b }
         },
         {
-            let b = button(text("📷 存图").size(12)).padding([3, 10]);
+            let b = button(text("📷 存图").size(crate::ui::text::s_body())).padding(crate::ui::metrics::pad2(0, 3));
             if loading.is_none() && p.loaded { b.on_press(TardisBoardMsg::ExportPng) } else { b }
         },
-        text("→ ~/ws-data/cockpit/export/").size(10).color(C_DIM),
+        text("→ ~/ws-data/cockpit/export/").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
@@ -826,24 +813,24 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
             if m.is_empty() { app.hint.clone() } else { m }
         }
     };
-    let hint = text(hint_text.clone()).size(11).color(if hint_text.starts_with('✗') {
-        Color::from_rgb(0.9, 0.45, 0.45)
+    let hint = text(hint_text.clone()).size(crate::ui::text::s_small()).color(if hint_text.starts_with('✗') {
+        crate::ui::pal::down()
     } else if loading.is_some() {
-        Color::from_rgb(0.85, 0.78, 0.45)
+        crate::ui::pal::warn()
     } else {
-        Color::from_rgb(0.55, 0.68, 0.58)
+        crate::ui::pal::dim()
     });
 
     let mut body = column![].spacing(10);
     if let Some(e) = cat.error.clone() {
-        body = body.push(text(e).size(11).color(Color::from_rgb(0.9, 0.6, 0.4)));
+        body = body.push(text(e).size(crate::ui::text::s_small()).color(crate::ui::pal::down()));
     }
     if !p.loaded {
         body = body.push(
-            text("尚未加载 —— 选好上面三层后点「加载」").size(12).color(C_DIM),
+            text("尚未加载 —— 选好上面三层后点「加载」").size(crate::ui::text::s_body()).color(crate::ui::pal::dim()),
         );
     } else if let Some(e) = p.error.clone() {
-        body = body.push(text(format!("· {e}")).size(12).color(Color::from_rgb(0.9, 0.6, 0.4)));
+        body = body.push(text(format!("· {e}")).size(crate::ui::text::s_body()).color(crate::ui::pal::down()));
     } else {
         // 下方图是**已加载**的那一份；若与当前三层选择不符，明示，避免误读成当前选择的结果。
         // 对比模式下 p.symbol 是多符号拼接，不能拿去比；改比「模式是否一致」。
@@ -865,15 +852,15 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
                 p.charts.len(),
                 if stale { "　⚠ 这是上次加载的结果，点「加载」刷新" } else { "" }
             ))
-            .size(11)
-            .color(if stale { Color::from_rgb(0.85, 0.66, 0.35) } else { C_DIM }),
+            .size(crate::ui::text::s_small())
+            .color(if stale { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
         );
         for ch in &p.charts {
             let is_main = !ch.title.starts_with("衍生");
-            let title = text(ch.title.clone()).size(13).color(if is_main {
-                Color::from_rgb(0.85, 0.88, 0.92)
+            let title = text(ch.title.clone()).size(crate::ui::text::s_emph()).color(if is_main {
+                crate::ui::pal::txt()
             } else {
-                Color::from_rgb(0.62, 0.68, 0.75)
+                crate::ui::pal::info()
             });
             let cv: Element<'_, TardisBoardMsg> =
                 canvas_widget(ChartCanvas {
@@ -894,11 +881,9 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
                     .into();
             let mut col = column![title, cv].spacing(3);
             if !ch.note.is_empty() {
-                col = col.push(text(ch.note.clone()).size(10).color(Color::from_rgb(
-                    0.48, 0.52, 0.57,
-                )));
+                col = col.push(text(ch.note.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
             }
-            body = body.push(container(col).padding(4));
+            body = body.push(container(col).padding(crate::ui::metrics::space(1)));
         }
     }
 
@@ -915,7 +900,7 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
             scrollable(body).height(Length::Fill)
         ]
             .spacing(8)
-            .padding(12),
+            .padding(crate::ui::metrics::space(4)),
     )
     .width(Length::Fill)
     .height(Length::Fill)

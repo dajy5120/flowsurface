@@ -97,3 +97,64 @@ pub fn stale() -> Color {
     let (w, b) = (warn(), bad());
     Color { r: (w.r + b.r) / 2.0, g: (w.g + b.g) / 2.0, b: (w.b + b.b) / 2.0, a: 1.0 }
 }
+
+/// 真实的绿 / 红色相（跟随色弱开关，但**不随涨跌约定互换**）。
+/// 给自带「绿涨 / 红涨」选项的面板用（雷达）：选项名说的是颜色本身，不能被全局约定改掉。
+pub fn green() -> Color {
+    let p = super::prefs();
+    let pk = super::theme_id().pack();
+    color(if p.cvd_safe { pk.trade_green_cvd } else { pk.trade_green })
+}
+pub fn red() -> Color {
+    let p = super::prefs();
+    let pk = super::theme_id().pack();
+    color(if p.cvd_safe { pk.trade_red_cvd } else { pk.trade_red })
+}
+
+/// 把 `c` 向面板底色混合 `t`（0 = 原色、1 = 底色）。色阶的弱档用它：
+/// 深色主题上弱档更暗、浅色主题上弱档更浅，两边都是「越极端越显眼」。
+pub fn toward_bg(c: Color, t: f32) -> Color {
+    let bg = color(core().surface_primary);
+    Color {
+        r: c.r + (bg.r - c.r) * t,
+        g: c.g + (bg.g - c.g) * t,
+        b: c.b + (bg.b - c.b) * t,
+        a: c.a,
+    }
+}
+
+/// 三档色阶（弱 → 强）。
+pub fn steps3(c: Color) -> [Color; 3] {
+    [toward_bg(c, 0.55), toward_bg(c, 0.28), c]
+}
+
+/// 线性混合：`t = 0` 是 `a`、`t = 1` 是 `b`（保留 `a` 的透明度）。
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a }
+}
+
+/// 可点击的链接文字：强调色的色相，但**比同一行里的次要文字、警告色都醒目**
+/// ——「哪儿能点」不能靠猜（新闻面板有测试钉住）。深色主题提亮、浅色主题压暗。
+pub fn link() -> Color {
+    let dark = super::theme_id().is_dark();
+    mix(accent(), if dark { Color::WHITE } else { Color::BLACK }, if dark { 0.55 } else { 0.2 })
+}
+
+/// 链接悬停：比静止时更醒目（再配一块背景，见新闻面板）。
+pub fn link_hover() -> Color {
+    let dark = super::theme_id().is_dark();
+    mix(accent(), if dark { Color::WHITE } else { Color::BLACK }, if dark { 0.78 } else { 0.4 })
+}
+
+/// 压在一块彩色底上的文字色：按底色亮度选深字或浅字（取浅色 / 深色主题的正文色），
+/// 保证对比度——树图格子、色块标签这类「底色随数据变」的地方用它。
+pub fn on(bg: Color) -> Color {
+    let lin = |x: f32| if x <= 0.04045 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) };
+    let l = 0.2126 * lin(bg.r) + 0.7152 * lin(bg.g) + 0.0722 * lin(bg.b);
+    // 与黑、白两端的对比度相等处 ≈ 0.179
+    if l > 0.179 {
+        color(super::tokens::CORE_LIGHT.text_primary)
+    } else {
+        color(super::tokens::CORE_DARK.text_primary)
+    }
+}

@@ -17,21 +17,14 @@ use iced::{Color, Element, Length};
 
 use super::feature_lab_readout::{self as ro, FeatureLab};
 
-const C_HEAD: Color = Color::from_rgb(0.70, 0.80, 0.95);
-const C_DIM: Color = Color::from_rgb(0.50, 0.54, 0.60);
-const C_TXT: Color = Color::from_rgb(0.84, 0.87, 0.92);
-const C_OK: Color = Color::from_rgb(0.30, 0.80, 0.48);
-const C_BAD: Color = Color::from_rgb(0.90, 0.38, 0.38);
-const C_WARN: Color = Color::from_rgb(0.90, 0.72, 0.32);
-
 fn cell<'a, M: 'a>(t: String, w: f32, c: Color) -> Element<'a, M> {
-    container(text(t).size(11).color(c)).width(Length::Fixed(w)).into()
+    container(text(t).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
 }
 fn dim<'a, M: 'a>(t: String) -> Element<'a, M> {
-    text(t).size(10).color(C_DIM).into()
+    text(t).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()).into()
 }
 fn sec<'a, M: 'a>(t: String) -> Element<'a, M> {
-    text(t).size(14).color(C_HEAD).into()
+    text(t).size(crate::ui::text::s_section()).color(crate::ui::pal::head()).into()
 }
 fn num(v: Option<f64>) -> String {
     match v {
@@ -46,14 +39,15 @@ fn num(v: Option<f64>) -> String {
 /// 逐行读 35 行数字是看不出族级结构的。
 fn fam_color(f: &str) -> Color {
     match f {
-        "ret" => Color::from_rgb(0.55, 0.75, 0.95),
-        "vol" => Color::from_rgb(0.85, 0.72, 0.95),
-        "flow" => Color::from_rgb(0.40, 0.85, 0.60),
-        "impact" => Color::from_rgb(0.95, 0.70, 0.45),
-        "geom" => Color::from_rgb(0.70, 0.70, 0.75),
-        "pm" => Color::from_rgb(0.95, 0.60, 0.70),
-        "cross" => Color::from_rgb(0.60, 0.90, 0.90),
-        _ => C_TXT,
+        // 七个族 = 领域包的七个图表系列色（感知均匀、彼此可分，docs/35 §4.2）
+        "ret" => crate::ui::pal::series(0),
+        "vol" => crate::ui::pal::series(5),
+        "flow" => crate::ui::pal::series(6),
+        "impact" => crate::ui::pal::series(4),
+        "geom" => crate::ui::pal::series(1),
+        "pm" => crate::ui::pal::series(7),
+        "cross" => crate::ui::pal::series(3),
+        _ => crate::ui::pal::txt(),
     }
 }
 
@@ -61,7 +55,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     let st: FeatureLab = ro::snapshot();
     let mut b = column![sec("订单流与市场微观结构 · 特征库（docs/30）".into())]
         .spacing(8)
-        .padding(10);
+        .padding(crate::ui::metrics::space(3));
 
     if !st.present {
         return b
@@ -70,23 +64,23 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
                     "暂无快照。生成：python -m factory.prediction.feature_lab\n\
                      （只读已落盘数据，不连交易所）",
                 )
-                .size(11)
-                .color(C_DIM),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::dim()),
             )
             .into();
     }
     if !st.ready {
-        return b.push(text(st.reason.clone()).size(12).color(C_WARN)).into();
+        return b.push(text(st.reason.clone()).size(crate::ui::text::s_body()).color(crate::ui::pal::warn())).into();
     }
 
     // ① 样本是否够判定 —— 放最前面
     let ok = ro::sample_sufficient(&st);
     let (dot, dc, msg) = if ok {
-        ("●", C_OK, format!("样本足够：{} 轮 ≥ 需要的 {:.0} 轮", st.power.have, st.power.multi))
+        ("●", crate::ui::pal::ok(), format!("样本足够：{} 轮 ≥ 需要的 {:.0} 轮", st.power.have, st.power.multi))
     } else {
         (
             "○",
-            C_WARN,
+            crate::ui::pal::warn(),
             format!(
                 "样本不足：现有 {} 轮，检出 2 个概率点的优势需 {:.0} 轮（约 {:.0} 天）——\
                  下面表里的任何「显著」都还不该当成发现",
@@ -95,8 +89,8 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         )
     };
     b = b.push(row![
-        text(format!("{dot} ")).size(15).color(dc),
-        text(msg).size(12).color(dc),
+        text(format!("{dot} ")).size(crate::ui::text::s_section()).color(dc),
+        text(msg).size(crate::ui::text::s_body()).color(dc),
     ]);
     b = b.push(dim(format!(
         "{} 轮 / {} 快照，样本 UP 率 {:.3}　快照 {}　刷新 {}",
@@ -106,12 +100,12 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     // ② 多重比较账
     b = b.push(sec("多重比较".into()));
     b = b.push(row![
-        cell(format!("检验 {}", st.n_tests), 90.0, C_TXT),
+        cell(format!("检验 {}", st.n_tests), 90.0, crate::ui::pal::txt()),
         cell(format!("朴素 p<0.05 命中 {}", st.naive_hits), 160.0,
-             if st.naive_hits as f64 > st.expected_by_chance { C_WARN } else { C_DIM }),
-        cell(format!("偶然期望 {:.1}", st.expected_by_chance), 110.0, C_DIM),
+             if st.naive_hits as f64 > st.expected_by_chance { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
+        cell(format!("偶然期望 {:.1}", st.expected_by_chance), 110.0, crate::ui::pal::dim()),
         cell(format!("FDR(q={:.2}) 通过 {}", st.q, st.fdr_hits), 150.0,
-             if st.fdr_hits > 0 { C_OK } else { C_DIM }),
+             if st.fdr_hits > 0 { crate::ui::pal::ok() } else { crate::ui::pal::dim() }),
     ]);
     b = b.push(dim(
         "朴素命中要和「偶然期望」比，不是和 0 比。FDR 用 Benjamini–Hochberg 控制\
@@ -133,29 +127,29 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
             .into(),
     ));
     b = b.push(row![
-        cell("特征".into(), 130.0, C_DIM),
-        cell("族".into(), 60.0, C_DIM),
-        cell("系数".into(), 70.0, C_DIM),
-        cell("95%CI".into(), 150.0, C_DIM),
-        cell("每σ概率点".into(), 90.0, C_DIM),
-        cell("p".into(), 70.0, C_DIM),
-        cell("判定".into(), 90.0, C_DIM),
+        cell("特征".into(), 130.0, crate::ui::pal::dim()),
+        cell("族".into(), 60.0, crate::ui::pal::dim()),
+        cell("系数".into(), 70.0, crate::ui::pal::dim()),
+        cell("95%CI".into(), 150.0, crate::ui::pal::dim()),
+        cell("每σ概率点".into(), 90.0, crate::ui::pal::dim()),
+        cell("p".into(), 70.0, crate::ui::pal::dim()),
+        cell("判定".into(), 90.0, crate::ui::pal::dim()),
     ]);
     for r in &st.rows {
         let (verdict, vc) = if r.fdr_pass {
-            ("FDR 通过", C_OK)
+            ("FDR 通过", crate::ui::pal::ok())
         } else if r.naive_sig {
-            ("仅朴素显著", C_WARN)
+            ("仅朴素显著", crate::ui::pal::warn())
         } else {
-            ("—", C_DIM)
+            ("—", crate::ui::pal::dim())
         };
         b = b.push(row![
-            cell(r.feature.clone(), 130.0, C_TXT),
+            cell(r.feature.clone(), 130.0, crate::ui::pal::txt()),
             cell(r.family.clone(), 60.0, fam_color(&r.family)),
-            cell(format!("{:+.3}", r.coef), 70.0, C_TXT),
-            cell(format!("[{:+.3},{:+.3}]", r.ci_lo, r.ci_hi), 150.0, C_DIM),
-            cell(format!("{:+.2}", r.pts_per_sd * 100.0), 90.0, C_TXT),
-            cell(format!("{:.3}", r.p), 70.0, C_DIM),
+            cell(format!("{:+.3}", r.coef), 70.0, crate::ui::pal::txt()),
+            cell(format!("[{:+.3},{:+.3}]", r.ci_lo, r.ci_hi), 150.0, crate::ui::pal::dim()),
+            cell(format!("{:+.2}", r.pts_per_sd * 100.0), 90.0, crate::ui::pal::txt()),
+            cell(format!("{:.3}", r.p), 70.0, crate::ui::pal::dim()),
             cell(verdict.into(), 90.0, vc),
         ]);
     }
@@ -168,21 +162,21 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
             .into(),
     ));
     b = b.push(row![
-        cell("特征".into(), 130.0, C_DIM),
-        cell("族".into(), 60.0, C_DIM),
-        cell("覆盖".into(), 70.0, C_DIM),
-        cell("p05".into(), 100.0, C_DIM),
-        cell("p50".into(), 100.0, C_DIM),
-        cell("p95".into(), 100.0, C_DIM),
-        cell("".into(), 80.0, C_DIM),
+        cell("特征".into(), 130.0, crate::ui::pal::dim()),
+        cell("族".into(), 60.0, crate::ui::pal::dim()),
+        cell("覆盖".into(), 70.0, crate::ui::pal::dim()),
+        cell("p05".into(), 100.0, crate::ui::pal::dim()),
+        cell("p50".into(), 100.0, crate::ui::pal::dim()),
+        cell("p95".into(), 100.0, crate::ui::pal::dim()),
+        cell("".into(), 80.0, crate::ui::pal::dim()),
     ]);
     for c in &st.coverage {
         let cc = if !c.present || c.cover < 0.5 {
-            C_BAD
+            crate::ui::pal::bad()
         } else if c.cover < 0.9 {
-            C_WARN
+            crate::ui::pal::warn()
         } else {
-            C_TXT
+            crate::ui::pal::txt()
         };
         let flag = if !c.present {
             "缺列"
@@ -194,13 +188,13 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
             ""
         };
         b = b.push(row![
-            cell(c.name.clone(), 130.0, C_TXT),
+            cell(c.name.clone(), 130.0, crate::ui::pal::txt()),
             cell(c.family.clone(), 60.0, fam_color(&c.family)),
             cell(format!("{:.1}%", c.cover * 100.0), 70.0, cc),
-            cell(num(c.p05), 100.0, C_DIM),
-            cell(num(c.p50), 100.0, C_DIM),
-            cell(num(c.p95), 100.0, C_DIM),
-            cell(flag.into(), 80.0, if flag.starts_with('⚠') { C_WARN } else { C_DIM }),
+            cell(num(c.p05), 100.0, crate::ui::pal::dim()),
+            cell(num(c.p50), 100.0, crate::ui::pal::dim()),
+            cell(num(c.p95), 100.0, crate::ui::pal::dim()),
+            cell(flag.into(), 80.0, if flag.starts_with('⚠') { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
         ]);
     }
 
@@ -215,16 +209,16 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     for r in &st.registry {
         if r.family != last_fam {
             last_fam = r.family.clone();
-            b = b.push(text(format!("[{}]", r.family)).size(12).color(fam_color(&r.family)));
+            b = b.push(text(format!("[{}]", r.family)).size(crate::ui::text::s_body()).color(fam_color(&r.family)));
         }
         b = b.push(row![
-            cell(r.name.clone(), 130.0, C_TXT),
+            cell(r.name.clone(), 130.0, crate::ui::pal::txt()),
             cell(
                 r.window_s.map(|w| format!("{w}s")).unwrap_or_else(|| "—".into()),
                 55.0,
-                C_DIM
+                crate::ui::pal::dim()
             ),
-            cell(r.source.clone(), 75.0, C_DIM),
+            cell(r.source.clone(), 75.0, crate::ui::pal::dim()),
             cell(
                 match r.prior {
                     1 => "先验 +".into(),
@@ -232,11 +226,11 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
                     _ => String::new(),
                 },
                 60.0,
-                C_DIM
+                crate::ui::pal::dim()
             ),
-            container(text(r.doc.clone()).size(10).color(C_TXT)).width(Length::Fixed(330.0)),
+            container(text(r.doc.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::txt())).width(Length::Fixed(330.0)),
         ]);
-        b = b.push(container(dim(format!("　假设：{}", r.hypothesis))).padding(1));
+        b = b.push(container(dim(format!("　假设：{}", r.hypothesis))).padding(crate::ui::metrics::space(0)));
     }
 
     container(scrollable(b)).width(Length::Fill).height(Length::Fill).into()

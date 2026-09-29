@@ -17,13 +17,6 @@ use super::observatory_lib as lib;
 use super::observatory_readout::{self as ro, StreamStat};
 use super::observatory_table::{Palette, TailTable};
 
-const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
-const C_DIM: Color = Color::from_rgb(0.55, 0.55, 0.6);
-const C_TXT: Color = Color::from_rgb(0.85, 0.87, 0.92);
-const C_GOLD: Color = Color::from_rgb(0.9, 0.8, 0.4);
-const C_BAD: Color = Color::from_rgb(0.9, 0.45, 0.4);
-const C_OK: Color = Color::from_rgb(0.35, 0.78, 0.98);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObsMsg {
     Start,
@@ -86,7 +79,7 @@ pub enum ObsMsg {
 }
 
 fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, ObsMsg> {
-    container(text(s).size(11).color(c))
+    container(text(s).size(crate::ui::text::s_small()).color(c))
         .width(Length::Fixed(w))
         .align_x(if numeric { iced::Alignment::End } else { iced::Alignment::Start })
         .into()
@@ -97,8 +90,8 @@ fn chip<'a>(label: &str, msg: ObsMsg) -> Element<'a, ObsMsg> {
 }
 
 fn chip_on<'a>(label: &str, active: bool, msg: ObsMsg) -> Element<'a, ObsMsg> {
-    button(text(label.to_string()).size(11))
-        .padding([2, 7])
+    button(text(label.to_string()).size(crate::ui::text::s_small()))
+        .padding(crate::ui::metrics::pad2(0, 2))
         .style(move |t, st| crate::style::button::modifier(t, st, active))
         .on_press(msg)
         .into()
@@ -141,11 +134,11 @@ fn ns(v: Option<f64>) -> String {
 /// 健康度 → (文案, 颜色)。
 fn health_badge(h: &str, connected: bool) -> (&'static str, Color) {
     match h {
-        "live" => ("● 在收", C_OK),
-        "idle" => ("○ 已连接·对端安静", C_HEAD),
-        "connecting" if connected => ("◐ 重连中", C_GOLD),
-        "connecting" => ("◐ 连接中", C_GOLD),
-        _ => ("✕ 未连接", C_BAD),
+        "live" => ("● 在收", crate::ui::pal::ok()),
+        "idle" => ("○ 已连接·对端安静", crate::ui::pal::head()),
+        "connecting" if connected => ("◐ 重连中", crate::ui::pal::warn()),
+        "connecting" => ("◐ 连接中", crate::ui::pal::warn()),
+        _ => ("✕ 未连接", crate::ui::pal::bad()),
     }
 }
 
@@ -163,11 +156,11 @@ fn is_addr_key(k: &str) -> bool {
 /// 后者说明退避在跑，等一会儿就好。
 fn session_lamp(st: &ro::ObsReadout) -> (&'static str, Color, String) {
     match st.health.as_str() {
-        "live" => ("●", C_OK, "在收".into()),
-        "idle" => ("●", C_HEAD, "已连接·对端安静".into()),
+        "live" => ("●", crate::ui::pal::ok(), "在收".into()),
+        "idle" => ("●", crate::ui::pal::head(), "已连接·对端安静".into()),
         "connecting" => (
             "◐",
-            C_GOLD,
+            crate::ui::pal::warn(),
             if st.next_retry_secs > 0 {
                 // 退避倒计时要给：不给的话「连不上」看起来就像卡死了
                 format!("重连中·{}s 后重试", st.next_retry_secs)
@@ -175,22 +168,22 @@ fn session_lamp(st: &ro::ObsReadout) -> (&'static str, Color, String) {
                 "连接中".into()
             },
         ),
-        "lost" => ("✕", C_BAD, "已断开".into()),
+        "lost" => ("✕", crate::ui::pal::bad(), "已断开".into()),
         // 守护给了个我们不认识的状态。**别装作正常**
-        other if !other.is_empty() => ("?", C_GOLD, format!("未知状态 {other}")),
-        _ => ("○", C_DIM, "未连接".into()),
+        other if !other.is_empty() => ("?", crate::ui::pal::warn(), format!("未知状态 {other}")),
+        _ => ("○", crate::ui::pal::dim(), "未连接".into()),
     }
 }
 
 pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     let t0 = Instant::now();
     let st = ro::snapshot();
-    let mut body = column![].spacing(4).padding(8);
+    let mut body = column![].spacing(4).padding(crate::ui::metrics::space(3));
 
     // ── 守护 + 健康度 ──
     let (badge, bc) = health_badge(&st.health, st.connected);
     let mut top = row![
-        text("观察终端").size(13).color(C_TXT),
+        text("观察终端").size(crate::ui::text::s_emph()).color(crate::ui::pal::txt()),
         chip("▶ 启动", ObsMsg::Start),
         chip("■ 停止", ObsMsg::Stop),
         text(if st.svc.active {
@@ -198,9 +191,9 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         } else {
             "守护未运行".to_string()
         })
-        .size(10)
-        .color(if st.svc.active { C_DIM } else { C_GOLD }),
-        text(badge.to_string()).size(11).color(bc),
+        .size(crate::ui::text::s_meta())
+        .color(if st.svc.active { crate::ui::pal::dim() } else { crate::ui::pal::warn() }),
+        text(badge.to_string()).size(crate::ui::text::s_small()).color(bc),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
@@ -211,16 +204,16 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         } else {
             format!("⚠ {}", clip(&st.last_err, 56))
         };
-        top = top.push(text(t).size(10).color(C_GOLD));
+        top = top.push(text(t).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
     }
     if !st.secret_warn.is_empty() {
         // 明文密钥不阻止连接，但静默接受等于假装没这回事：请求文件是
         // tmpfs 上的普通文件，同一用户的任何进程都读得到
-        top = top.push(text(format!("🔑 {}", clip(&st.secret_warn, 56))).size(10).color(C_GOLD));
+        top = top.push(text(format!("🔑 {}", clip(&st.secret_warn, 56))).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
     }
     // 模式切换。**同一个会话上的三种界面**，不是三个程序
     let mode = ro::mode();
-    let mut mr = row![text("模式").size(10).color(C_DIM)].spacing(4)
+    let mut mr = row![text("模式").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(4)
         .align_y(iced::Alignment::Center);
     for m in ro::Mode::ALL {
         mr = mr.push(chip_on(m.label(), m == mode, ObsMsg::SetMode(m)));
@@ -241,8 +234,8 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
                     "⏸ 已暂停于 {} · 后端仍在收（这期间又来了 {behind} 条，没丢）",
                     f.at
                 ))
-                .size(10)
-                .color(C_GOLD),
+                .size(crate::ui::text::s_meta())
+                .color(crate::ui::pal::warn()),
             );
         }
         None => mr = mr.push(chip("⏸ 暂停", ObsMsg::TogglePause)),
@@ -254,8 +247,8 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         return body
             .push(
                 text("暂无快照——点「▶ 启动」拉起 ws-observatory 守护")
-                    .size(11)
-                    .color(C_DIM),
+                    .size(crate::ui::text::s_small())
+                    .color(crate::ui::pal::dim()),
             )
             .into();
     }
@@ -272,10 +265,10 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         body = body.push(
             container(
                 text("⏵ 回放态——表里是历史数据。「滞后」列算的是**当时**的链路延迟，不是现在的")
-                    .size(11)
-                    .color(C_GOLD),
+                    .size(crate::ui::text::s_small())
+                    .color(crate::ui::pal::warn()),
             )
-            .padding([3, 8]),
+            .padding(crate::ui::metrics::pad2(0, 3)),
         );
     }
 
@@ -288,14 +281,14 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         "表单由 Adapter 自述生成——加协议或加字段只改守护侧一处",
     ));
     let (pick, vals) = ro::form(&st.catalog);
-    let mut ar = row![text("Adapter").size(10).color(C_DIM)].spacing(4)
+    let mut ar = row![text("Adapter").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(4)
         .align_y(iced::Alignment::Center);
     for a in &st.catalog {
         ar = ar.push(chip_on(&a.label, a.id == pick, ObsMsg::PickAdapter(a.id.clone())));
     }
     if let Some(a) = st.catalog.iter().find(|a| a.id == pick) {
         ar = ar.push(
-            text(format!("{} · {} 条流", a.transport, a.streams.len())).size(10).color(C_DIM),
+            text(format!("{} · {} 条流", a.transport, a.streams.len())).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         );
     }
     body = body.push(ar);
@@ -307,8 +300,8 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
             let mut fr = row![
                 container(
                     text(format!("{}{}", f.label, if f.required { " *" } else { "" }))
-                        .size(10)
-                        .color(if f.required { C_TXT } else { C_DIM })
+                        .size(crate::ui::text::s_meta())
+                        .color(if f.required { crate::ui::pal::txt() } else { crate::ui::pal::dim() })
                 )
                 .width(Length::Fixed(110.0)),
             ]
@@ -319,12 +312,12 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
             let input = text_input(&f.hint, &v)
                 .on_input(move |t| ObsMsg::FieldEdited(key.clone(), t))
                 .on_submit(ObsMsg::Connect)
-                .size(11)
-                .padding([2, 6])
+                .size(crate::ui::text::s_small())
+                .padding(crate::ui::metrics::pad2(0, 2))
                 .width(Length::Fixed(520.0));
             fr = fr.push(if f.kind == "secret" { input.secure(true) } else { input });
             if !f.hint.is_empty() {
-                fr = fr.push(text(f.hint.clone()).size(10).color(C_DIM));
+                fr = fr.push(text(f.hint.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
             }
             body = body.push(fr);
         }
@@ -336,7 +329,7 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         Err(e) => {
             // 必填项空着就点连接，只会拿到一条难懂的握手错误。早点挡住，
             // 错误信息才说得清「该怎么改」
-            cr = cr.push(text(format!("⚠ {e}")).size(10).color(C_GOLD));
+            cr = cr.push(text(format!("⚠ {e}")).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
         }
     }
     if st.connected || st.session.is_some() {
@@ -349,8 +342,8 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     if !hist.is_empty() {
         body = body.push(
             row![
-                text("连过的").size(10).color(C_DIM),
-                text("点一下直接连；密钥是明文的那条不会存密钥，要先补上").size(10).color(C_DIM),
+                text("连过的").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
+                text("点一下直接连；密钥是明文的那条不会存密钥，要先补上").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -367,13 +360,13 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
             // 地址**完整显示**：定宽格子会把币安那种长 URL 切掉，
             // 而两条只在结尾不同的历史切完长得一模一样。给 Fill 让它换行
             let mut meta = row![
-                cell(label, 130.0, C_DIM, false),
-                cell(e.last.clone(), 84.0, C_DIM, false),
+                cell(label, 130.0, crate::ui::pal::dim(), false),
+                cell(e.last.clone(), 84.0, crate::ui::pal::dim(), false),
             ]
             .spacing(6)
             .align_y(iced::Alignment::Center);
             if e.needs_secret {
-                meta = meta.push(text("🔑 要重填密钥").size(10).color(C_GOLD));
+                meta = meta.push(text("🔑 要重填密钥").size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
             }
             meta = meta.push(chip("×", ObsMsg::HistDelete(i)));
             let r = row![
@@ -384,7 +377,7 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
                 } else {
                     chip("连接", ObsMsg::HistConnect(i))
                 },
-                text(e.label()).size(11).color(C_TXT).width(Length::Fill),
+                text(e.label()).size(crate::ui::text::s_small()).color(crate::ui::pal::txt()).width(Length::Fill),
                 meta,
             ]
             .spacing(6)
@@ -396,8 +389,8 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     let Some(sess) = st.session.as_ref() else {
         body = body.push(
             text("尚未建立会话——在 radar_request 同级的 observatory_request.json 里指定 adapter 与 config")
-                .size(11)
-                .color(C_DIM),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::dim()),
         );
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     };
@@ -408,21 +401,21 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     // 那么「连没连上」就该和它在同一处，而不是让人回头去看顶栏
     let (lamp, lc, detail) = session_lamp(&st);
     let mut cfgline = row![
-        text(lamp.to_string()).size(13).color(lc),
-        text(detail).size(11).color(lc),
+        text(lamp.to_string()).size(crate::ui::text::s_emph()).color(lc),
+        text(detail).size(crate::ui::text::s_small()).color(lc),
     ]
     .spacing(6);
-    cfgline = cfgline.push(text(sess.adapter_label.clone()).size(11).color(C_TXT));
+    cfgline = cfgline.push(text(sess.adapter_label.clone()).size(crate::ui::text::s_small()).color(crate::ui::pal::txt()));
     // 地址之外的字段留在这一行，截短——订阅报文那种能有几百字，
     // 不截会把整行冲掉
     for (k, v) in &sess.config {
         if is_addr_key(k) {
             continue;
         }
-        cfgline = cfgline.push(text(format!("{k}={}", clip(v, 52))).size(10).color(C_DIM));
+        cfgline = cfgline.push(text(format!("{k}={}", clip(v, 52))).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     }
     if sess.reconnects > 0 {
-        cfgline = cfgline.push(text(format!("重连 {} 次", sess.reconnects)).size(10).color(C_GOLD));
+        cfgline = cfgline.push(text(format!("重连 {} 次", sess.reconnects)).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
     }
     body = body.push(cfgline.align_y(iced::Alignment::Center));
 
@@ -437,9 +430,9 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         }
         body = body.push(
             row![
-                container(text(k.to_string()).size(10).color(C_DIM))
+                container(text(k.to_string()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()))
                     .width(Length::Fixed(46.0)),
-                text(v.clone()).size(11).color(C_TXT).width(Length::Fill),
+                text(v.clone()).size(crate::ui::text::s_small()).color(crate::ui::pal::txt()).width(Length::Fill),
             ]
             .spacing(6),
         );
@@ -448,9 +441,9 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     // 链路事实：从数据本身看不出来的那些。deflate 是典型——帧里存的是
     // 解压后的内容，不在这儿说的话，事后没人知道这条连接压没压
     if !sess.transport.is_empty() {
-        let mut tl = row![text("链路 ").size(10).color(C_DIM)].spacing(8);
+        let mut tl = row![text("链路 ").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(8);
         for (k, v) in &sess.transport {
-            tl = tl.push(text(format!("{k}={}", clip(v, 40))).size(10).color(C_DIM));
+            tl = tl.push(text(format!("{k}={}", clip(v, 40))).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
         }
         body = body.push(tl.align_y(iced::Alignment::Center));
     }
@@ -479,28 +472,28 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     };
     body = body.push(
         row![
-            cell(format!("可回溯 {cov}"), 260.0, C_OK, false),
+            cell(format!("可回溯 {cov}"), 260.0, crate::ui::pal::ok(), false),
             cell(
                 format!("{}/{} 条", r.slots_used, r.slots_cap),
                 150.0,
-                C_DIM,
+                crate::ui::pal::dim(),
                 false
             ),
             cell(
                 format!("{}/{}", human_bytes(r.bytes_used), human_bytes(r.bytes_cap)),
                 130.0,
-                C_DIM,
+                crate::ui::pal::dim(),
                 false
             ),
             cell(
                 format!("已用 {:.2}%", r.fill_frac * 100.0),
                 100.0,
                 // 高水位标黄：到 75% 就该考虑溢写了
-                if r.fill_frac > 0.75 { C_GOLD } else { C_DIM },
+                if r.fill_frac > 0.75 { crate::ui::pal::warn() } else { crate::ui::pal::dim() },
                 false
             ),
-            cell(format!("淘汰 {}", r.evicted), 110.0, C_DIM, false),
-            cell(format!("seq {}→{}", r.oldest_seq, r.next_seq), 180.0, C_DIM, false),
+            cell(format!("淘汰 {}", r.evicted), 110.0, crate::ui::pal::dim(), false),
+            cell(format!("seq {}→{}", r.oldest_seq, r.next_seq), 180.0, crate::ui::pal::dim(), false),
         ]
         .spacing(3),
     );
@@ -520,8 +513,8 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
                 st.rec.frames,
                 human_bytes(st.rec.bytes)
             ))
-            .size(10)
-            .color(C_OK),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::ok()),
         );
     }
 
@@ -545,7 +538,7 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         ("滞后 p50", 82.0, true),
         ("p99", 82.0, true),
     ] {
-        h = h.push(cell(t.into(), w, C_HEAD, n));
+        h = h.push(cell(t.into(), w, crate::ui::pal::head(), n));
     }
     body = body.push(h);
     for s in &sess.streams {
@@ -553,8 +546,8 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         if !s.spark_msg.is_empty() {
             body = body.push(
                 row![
-                    cell(String::new(), 90.0, C_DIM, false),
-                    text(spark(&s.spark_msg)).size(11).color(C_OK),
+                    cell(String::new(), 90.0, crate::ui::pal::dim(), false),
+                    text(spark(&s.spark_msg)).size(crate::ui::text::s_small()).color(crate::ui::pal::ok()),
                 ]
                 .spacing(3),
             );
@@ -583,28 +576,28 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     // 当前到底在筛什么。
     let shown = if ftext.is_empty() { f.src.clone() } else { ftext.clone() };
     let mut fr = row![
-        text("显示筛选").size(10).color(C_DIM),
+        text("显示筛选").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         text_input("len > 1024 && $.data.s == BTCUSDT", &shown)
             .on_input(ObsMsg::FilterEdited)
             .on_submit(ObsMsg::ApplyFilter)
-            .size(11)
-            .padding([2, 6])
+            .size(crate::ui::text::s_small())
+            .padding(crate::ui::metrics::pad2(0, 2))
             .width(Length::Fixed(440.0)),
         chip("应用", ObsMsg::ApplyFilter),
         // 勾选框反映**已生效**的状态：点下去到生效有半秒往返，
         // 立刻打勾会让人以为已经切了，其实表里还是原文
-        checkbox(sess.parse).on_toggle(ObsMsg::SetParse).size(12),
-        text("解析（Parsed 视图）").size(10).color(C_DIM),
+        checkbox(sess.parse).on_toggle(ObsMsg::SetParse).size(crate::ui::text::s_body()),
+        text("解析（Parsed 视图）").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
     // **只影响你看到什么，不动数据**——这句话要常驻，用户永远会把它和捕获筛选搞混
-    fr = fr.push(text("只影响显示，不影响录制").size(10).color(C_DIM));
+    fr = fr.push(text("只影响显示，不影响录制").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     if !f.err.is_empty() {
         // 写错了照常显示全部并报错，而不是给一张空表让人以为没数据
-        fr = fr.push(text(format!("⚠ {}（当前显示全部）", clip(&f.err, 60))).size(10).color(C_BAD));
+        fr = fr.push(text(format!("⚠ {}（当前显示全部）", clip(&f.err, 60))).size(crate::ui::text::s_meta()).color(crate::ui::pal::bad()));
     } else if f.needs_json {
-        fr = fr.push(text("$. 路径要逐条解析，比较贵").size(10).color(C_GOLD));
+        fr = fr.push(text("$. 路径要逐条解析，比较贵").size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
     }
     body = body.push(fr);
     if sess.tail_lapped > 0 {
@@ -615,16 +608,16 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
                 "⚠ 尾窗游标被环追上，丢了 {} 条——环容量跟不上，调大 ring 或降速",
                 sess.tail_lapped
             ))
-            .size(10)
-            .color(C_BAD),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::bad()),
         );
     }
     if f.exhausted {
         // 悄悄给一张短表，用户会以为这段时间就这么点数据
         body = body.push(
             text(format!("⚠ 往回扫了 {} 条就到上限了，更早的没看——收窄条件或调大 scan_budget", f.scanned))
-                .size(10)
-                .color(C_GOLD),
+                .size(crate::ui::text::s_meta())
+                .color(crate::ui::pal::warn()),
         );
     }
 
@@ -641,12 +634,12 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         version: ver,
         cache: canvas::Cache::new(),
         pal: Palette {
-            head: C_HEAD,
-            dim: C_DIM,
-            txt: C_TXT,
-            gold: C_GOLD,
-            bad: C_BAD,
-            stripe: Color::from_rgba(1.0, 1.0, 1.0, 0.025),
+            head: crate::ui::pal::head(),
+            dim: crate::ui::pal::dim(),
+            txt: crate::ui::pal::txt(),
+            gold: crate::ui::pal::warn(),
+            bad: crate::ui::pal::bad(),
+            stripe: crate::ui::pal::alpha(crate::ui::pal::txt(), 0.025),
         },
         // 跟**守护实际给了什么**：它说这批行带解析结果，才按解析显示
         parsed_view: sess.parse,
@@ -671,8 +664,8 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     let ms = frame_ms(t0);
     body = body.push(
         row![
-            text(format!("快照 {} · 读于 {}", st.stamp, st.refreshed)).size(10).color(C_DIM),
-            text(format!("· 本帧 {ms:.1}ms")).size(10).color(if ms > 16.0 { C_GOLD } else { C_DIM }),
+            text(format!("快照 {} · 读于 {}", st.stamp, st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
+            text(format!("· 本帧 {ms:.1}ms")).size(crate::ui::text::s_meta()).color(if ms > 16.0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
         ]
         .spacing(6),
     );
@@ -736,8 +729,8 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
             && !e.adapter.is_empty() && e.adapter != sess.adapter {
                 col = col.push(
                     text(format!("「{}」是在 {} 上存的，当前是 {}", e.name, e.adapter, sess.adapter))
-                        .size(10)
-                        .color(C_DIM),
+                        .size(crate::ui::text::s_meta())
+                        .color(crate::ui::pal::dim()),
                 );
             }
     }
@@ -749,8 +742,8 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
                 text_input("请求体（WS 是订阅报文；REST 是 POST body；FIX 用 | 代替 SOH；{{名字}} 是参数）", &ro::send_body())
                     .on_input(ObsMsg::SendEdited)
                     .on_submit(ObsMsg::SendNow)
-                    .size(11)
-                    .padding([2, 6])
+                    .size(crate::ui::text::s_small())
+                    .padding(crate::ui::metrics::pad2(0, 2))
                     .width(Length::Fixed(700.0)),
                 chip("发送", ObsMsg::SendNow),
             ]
@@ -761,16 +754,16 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
         // ── 参数 ──
         let params = ro::lib_params();
         if !params.is_empty() {
-            let mut r = row![text("参数").size(10).color(C_DIM)].spacing(6)
+            let mut r = row![text("参数").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(6)
                 .align_y(iced::Alignment::Center);
             for (k, v) in &params {
                 let key = k.clone();
-                r = r.push(text(format!("{k} =")).size(10).color(C_DIM));
+                r = r.push(text(format!("{k} =")).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
                 r = r.push(
                     text_input("", v)
                         .on_input(move |t| ObsMsg::LibParamEdited(key.clone(), t))
-                        .size(11)
-                        .padding([2, 6])
+                        .size(crate::ui::text::s_small())
+                        .padding(crate::ui::metrics::pad2(0, 2))
                         .width(Length::Fixed(140.0)),
                 );
             }
@@ -782,8 +775,8 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
             if !empty.is_empty() {
                 col = col.push(
                     text(format!("⚠ {} 还没填——直接发的话对端收到的是字面量", empty.join("、")))
-                        .size(10)
-                        .color(C_GOLD),
+                        .size(crate::ui::text::s_meta())
+                        .color(crate::ui::pal::warn()),
                 );
             }
         }
@@ -793,8 +786,8 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
             text_input("存成…", &ro::lib_name())
                 .on_input(ObsMsg::LibNameEdited)
                 .on_submit(ObsMsg::LibSave)
-                .size(11)
-                .padding([2, 6])
+                .size(crate::ui::text::s_small())
+                .padding(crate::ui::metrics::pad2(0, 2))
                 .width(Length::Fixed(200.0)),
             chip(
                 if saved.iter().any(|e| e.name == ro::lib_name().trim()) { "覆盖" } else { "保存" },
@@ -807,14 +800,14 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
         // 存之前说，别等它躺在那儿
         if lib::looks_like_a_secret(&ro::send_body()) {
             sr = sr.push(
-                text("🔑 请求体里像有明文密钥——改成 ${环境变量名}").size(10).color(C_GOLD),
+                text("🔑 请求体里像有明文密钥——改成 ${环境变量名}").size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()),
             );
         }
         col = col.push(sr);
     } else {
         // 说清是**这个 Adapter 不支持**，而不是让按钮点了没反应
         col = col.push(
-            text("当前 Adapter 不接受出站请求（回放就是这样）").size(10).color(C_DIM),
+            text("当前 Adapter 不接受出站请求（回放就是这样）").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         );
     }
 
@@ -831,8 +824,8 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
                 } else {
                     format!("还只有 {n} 条应答，至少要两条")
                 })
-                .size(10)
-                .color(C_DIM),
+                .size(crate::ui::text::s_meta())
+                .color(crate::ui::pal::dim()),
             );
         }
         Some((d, a, b)) => {
@@ -842,16 +835,16 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
                     d.total_changes(),
                     d.same
                 ))
-                .size(11)
-                .color(if d.is_empty() { C_DIM } else { C_TXT }),
+                .size(crate::ui::text::s_small())
+                .color(if d.is_empty() { crate::ui::pal::dim() } else { crate::ui::pal::txt() }),
             );
             for (k, o, n) in d.changed.iter().take(24) {
                 col = col.push(
                     row![
-                        cell(clip(k, 34), 250.0, C_TXT, false),
-                        cell(clip(o, 26), 190.0, C_DIM, false),
-                        text("→").size(10).color(C_DIM),
-                        cell(clip(n, 26), 190.0, C_OK, false),
+                        cell(clip(k, 34), 250.0, crate::ui::pal::txt(), false),
+                        cell(clip(o, 26), 190.0, crate::ui::pal::dim(), false),
+                        text("→").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
+                        cell(clip(n, 26), 190.0, crate::ui::pal::ok(), false),
                     ]
                     .spacing(6),
                 );
@@ -859,8 +852,8 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
             for (k, v) in d.added.iter().take(12) {
                 col = col.push(
                     row![
-                        cell(format!("+ {}", clip(k, 32)), 250.0, C_OK, false),
-                        cell(clip(v, 26), 190.0, C_OK, false),
+                        cell(format!("+ {}", clip(k, 32)), 250.0, crate::ui::pal::ok(), false),
+                        cell(clip(v, 26), 190.0, crate::ui::pal::ok(), false),
                     ]
                     .spacing(6),
                 );
@@ -870,8 +863,8 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
             for (k, v) in d.removed.iter().take(12) {
                 col = col.push(
                     row![
-                        cell(format!("− {}", clip(k, 32)), 250.0, C_BAD, false),
-                        cell(clip(v, 26), 190.0, C_DIM, false),
+                        cell(format!("− {}", clip(k, 32)), 250.0, crate::ui::pal::bad(), false),
+                        cell(clip(v, 26), 190.0, crate::ui::pal::dim(), false),
                     ]
                     .spacing(6),
                 );
@@ -879,8 +872,8 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
             if d.total_changes() > 48 {
                 col = col.push(
                     text(format!("…共 {} 处，只列了前面几条", d.total_changes()))
-                        .size(10)
-                        .color(C_DIM),
+                        .size(crate::ui::text::s_meta())
+                        .color(crate::ui::pal::dim()),
                 );
             }
         }
@@ -913,43 +906,43 @@ fn trigger_block<'a>(sess: &ro::SessionView) -> Element<'a, ObsMsg> {
             ("状态", 240.0, false),
             ("", 44.0, false),
         ] {
-            h = h.push(cell(t.into(), w, C_HEAD, n));
+            h = h.push(cell(t.into(), w, crate::ui::pal::head(), n));
         }
         col = col.push(h);
         for (i, t) in sess.triggers.iter().enumerate() {
             let at_cap = t.cap_per_hour > 0 && t.used_this_hour >= t.cap_per_hour;
             let status = if t.capturing {
-                ("● 正在录后半段".to_string(), C_OK)
+                ("● 正在录后半段".to_string(), crate::ui::pal::ok())
             } else if !t.blocked_why.is_empty() {
                 // **必须显示为什么被挡**：用户看着条件明明命中却没录，
                 // 会以为是条件写错了，其实只是在冷却
-                (t.blocked_why.clone(), if at_cap { C_GOLD } else { C_DIM })
+                (t.blocked_why.clone(), if at_cap { crate::ui::pal::warn() } else { crate::ui::pal::dim() })
             } else {
-                ("等待命中".to_string(), C_DIM)
+                ("等待命中".to_string(), crate::ui::pal::dim())
             };
             col = col.push(
                 row![
-                    cell(clip(&t.name, 10), 96.0, C_TXT, false),
-                    cell(clip(&t.cond, 30), 240.0, C_DIM, false),
+                    cell(clip(&t.name, 10), 96.0, crate::ui::pal::txt(), false),
+                    cell(clip(&t.cond, 30), 240.0, crate::ui::pal::dim(), false),
                     cell(
                         format!("{}s/{}s", t.pre_roll_ms / 1000, t.post_roll_ms / 1000),
                         92.0,
-                        C_DIM,
+                        crate::ui::pal::dim(),
                         false
                     ),
-                    cell(format!("{}s", t.cooldown_ms / 1000), 62.0, C_DIM, true),
-                    cell(t.fired.to_string(), 62.0, C_OK, true),
+                    cell(format!("{}s", t.cooldown_ms / 1000), 62.0, crate::ui::pal::dim(), true),
+                    cell(t.fired.to_string(), 62.0, crate::ui::pal::ok(), true),
                     cell(
                         format!("{}/{}", t.used_this_hour, t.cap_per_hour),
                         74.0,
-                        if at_cap { C_GOLD } else { C_DIM },
+                        if at_cap { crate::ui::pal::warn() } else { crate::ui::pal::dim() },
                         true
                     ),
                     // 被挡次数本身就是信息：它说明条件写得太宽
                     cell(
                         t.blocked.to_string(),
                         84.0,
-                        if t.blocked > t.fired * 1000 { C_GOLD } else { C_DIM },
+                        if t.blocked > t.fired * 1000 { crate::ui::pal::warn() } else { crate::ui::pal::dim() },
                         true
                     ),
                     cell(status.0, 240.0, status.1, false),
@@ -965,22 +958,22 @@ fn trigger_block<'a>(sess: &ro::SessionView) -> Element<'a, ObsMsg> {
     let fld = |ph: &str, v: &str, key: &'static str, w: f32| {
         text_input(ph, v)
             .on_input(move |t| ObsMsg::TrigEdited(key, t))
-            .size(11)
-            .padding([2, 6])
+            .size(crate::ui::text::s_small())
+            .padding(crate::ui::metrics::pad2(0, 2))
             .width(Length::Fixed(w))
     };
     col = col.push(
         row![
-            text("新增").size(10).color(C_DIM),
+            text("新增").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
             fld("名称", &f.name, "name", 96.0),
             fld("条件，如 $.data.q > 10", &f.cond, "cond", 300.0),
-            text("前").size(10).color(C_DIM),
+            text("前").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
             fld("10000", &f.pre_roll_ms, "pre", 66.0),
-            text("后").size(10).color(C_DIM),
+            text("后").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
             fld("5000", &f.post_roll_ms, "post", 66.0),
-            text("冷却").size(10).color(C_DIM),
+            text("冷却").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
             fld("30000", &f.cooldown_ms, "cool", 66.0),
-            text("次/时").size(10).color(C_DIM),
+            text("次/时").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
             fld("10", &f.max_per_hour, "cap", 50.0),
             chip("添加", ObsMsg::AddTrigger),
         ]
@@ -989,8 +982,8 @@ fn trigger_block<'a>(sess: &ro::SessionView) -> Element<'a, ObsMsg> {
     );
     col = col.push(
         text("毫秒。冷却与「次/时」有下限——配 0 不是「不限」：一个每帧都命中的条件在两万条/秒下会一秒生成两万个录制目录")
-            .size(10)
-            .color(C_DIM),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()),
     );
 
     // ── 捕获筛选：**与显示筛选长得明显不同** ──
@@ -999,16 +992,16 @@ fn trigger_block<'a>(sess: &ro::SessionView) -> Element<'a, ObsMsg> {
     let shown = if ctext.is_empty() { sess.capture.src.clone() } else { ctext };
     col = col.push(
         row![
-            text("⚠ 入环之前就筛").size(10).color(C_BAD),
+            text("⚠ 入环之前就筛").size(crate::ui::text::s_meta()).color(crate::ui::pal::bad()),
             text_input("$.data.s == BTCUSDT", &shown)
                 .on_input(ObsMsg::CaptureEdited)
                 .on_submit(ObsMsg::ApplyCapture)
-                .size(11)
-                .padding([2, 6])
+                .size(crate::ui::text::s_small())
+                .padding(crate::ui::metrics::pad2(0, 2))
                 .width(Length::Fixed(400.0)),
             chip("应用", ObsMsg::ApplyCapture),
             // 这句话要**常驻**：用户永远会把它和上面那个显示筛选搞混
-            text("筛掉的数据不会被录下来，也不会进环——永远没有了").size(10).color(C_BAD),
+            text("筛掉的数据不会被录下来，也不会进环——永远没有了").size(crate::ui::text::s_meta()).color(crate::ui::pal::bad()),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
@@ -1020,8 +1013,8 @@ fn trigger_block<'a>(sess: &ro::SessionView) -> Element<'a, ObsMsg> {
                 "已筛掉 {} 条（这不是丢包，是你自己筛的）",
                 sess.capture.dropped
             ))
-            .size(10)
-            .color(C_GOLD),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::warn()),
         );
     }
     col.into()
@@ -1056,31 +1049,31 @@ fn record_block<'a>(
                 human_bytes(rec.bytes),
                 rec.budget_frac * 100.0
             ))
-            .size(11)
-            .color(C_OK),
+            .size(crate::ui::text::s_small())
+            .color(crate::ui::pal::ok()),
         );
         if rec.gaps > 0 {
-            r1 = r1.push(text(format!("断点 {}", rec.gaps)).size(10).color(C_GOLD));
+            r1 = r1.push(text(format!("断点 {}", rec.gaps)).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
         }
         if rec.drop_sink > 0 {
             // 与「gap」不同：这是录制**自己**跟不上环而丢的，该调容量或降速
             r1 = r1.push(
-                text(format!("⚠ 录制跟不上，丢了 {} 条", rec.drop_sink)).size(10).color(C_BAD),
+                text(format!("⚠ 录制跟不上，丢了 {} 条", rec.drop_sink)).size(crate::ui::text::s_meta()).color(crate::ui::pal::bad()),
             );
         }
     } else {
         r1 = r1.push(chip("● 开始录制", ObsMsg::SetRecord(true)));
-        r1 = r1.push(text("未在录制").size(11).color(C_DIM));
+        r1 = r1.push(text("未在录制").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
     }
     col = col.push(r1);
 
     if rec.halted {
         // **被闸门停了**与「用户点了停止」是两回事
-        col = col.push(text(format!("⚠ {}", rec.halt)).size(10).color(C_BAD));
+        col = col.push(text(format!("⚠ {}", rec.halt)).size(crate::ui::text::s_meta()).color(crate::ui::pal::bad()));
     }
 
     // 回捞：按钮上写实际能捞多少
-    let mut r2 = row![text("回捞最近").size(10).color(C_DIM)].spacing(4)
+    let mut r2 = row![text("回捞最近").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(4)
         .align_y(iced::Alignment::Center);
     for secs in [10u32, 30, 60, 300] {
         let enough = cov >= secs as f64;
@@ -1094,7 +1087,7 @@ fn record_block<'a>(
         r2 = r2.push(chip(&label, ObsMsg::SaveLast(secs)));
     }
     r2 = r2.push(
-        text(format!("环里现有 {cov:.1}s（{} 起）", cov_from(ring))).size(10).color(C_DIM),
+        text(format!("环里现有 {cov:.1}s（{} 起）", cov_from(ring))).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
     );
     col = col.push(r2);
 
@@ -1103,8 +1096,8 @@ fn record_block<'a>(
         let bad = st.last_save.contains("失败") || st.last_save.contains("停止");
         col = col.push(
             text(format!("↳ {}", clip(&st.last_save, 140)))
-                .size(10)
-                .color(if bad { C_BAD } else { C_OK }),
+                .size(crate::ui::text::s_meta())
+                .color(if bad { crate::ui::pal::bad() } else { crate::ui::pal::ok() }),
         );
     }
     let _ = sess;
@@ -1119,31 +1112,31 @@ fn cov_from(r: &ro::RingStat) -> String {
 }
 
 fn stream_row<'a>(s: &StreamStat) -> Element<'a, ObsMsg> {
-    let d = |n: i64| if n > 0 { C_BAD } else { C_DIM };
+    let d = |n: i64| if n > 0 { crate::ui::pal::bad() } else { crate::ui::pal::dim() };
     row![
-        cell(s.label.clone(), 90.0, C_TXT, false),
-        cell(s.received.to_string(), 84.0, C_TXT, true),
-        cell(format!("{}/s", s.rate_msg), 74.0, C_OK, true),
-        cell(format!("{}/s", human_bytes(s.rate_bytes)), 84.0, C_DIM, true),
+        cell(s.label.clone(), 90.0, crate::ui::pal::txt(), false),
+        cell(s.received.to_string(), 84.0, crate::ui::pal::txt(), true),
+        cell(format!("{}/s", s.rate_msg), 74.0, crate::ui::pal::ok(), true),
+        cell(format!("{}/s", human_bytes(s.rate_bytes)), 84.0, crate::ui::pal::dim(), true),
         cell(s.drop_frame.to_string(), 60.0, d(s.drop_frame), true),
         cell(s.drop_ring.to_string(), 60.0, d(s.drop_ring), true),
         cell(s.drop_sink.to_string(), 60.0, d(s.drop_sink), true),
-        cell(s.gap.to_string(), 50.0, if s.gap > 0 { C_GOLD } else { C_DIM }, true),
+        cell(s.gap.to_string(), 50.0, if s.gap > 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }, true),
         // **不是故障色**：UI 跟不上是正常的
-        cell(s.skipped_ui.to_string(), 74.0, C_DIM, true),
-        cell(ns(s.lag_p50_ns), 82.0, C_TXT, true),
-        cell(ns(s.lag_p99_ns), 82.0, C_DIM, true),
+        cell(s.skipped_ui.to_string(), 74.0, crate::ui::pal::dim(), true),
+        cell(ns(s.lag_p50_ns), 82.0, crate::ui::pal::txt(), true),
+        cell(ns(s.lag_p99_ns), 82.0, crate::ui::pal::dim(), true),
     ]
     .spacing(3)
     .into()
 }
 
 fn section<'a>(title: &str, note: &str) -> Element<'a, ObsMsg> {
-    let mut r = row![text(format!("▍{title}")).size(12).color(C_HEAD)].spacing(8);
+    let mut r = row![text(format!("▍{title}")).size(crate::ui::text::s_body()).color(crate::ui::pal::head())].spacing(8);
     if !note.is_empty() {
-        r = r.push(text(note.to_string()).size(10).color(C_DIM));
+        r = r.push(text(note.to_string()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     }
-    container(r).padding([6, 0]).into()
+    container(r).padding(crate::ui::metrics::pad2(2, 0)).into()
 }
 
 /// 按**字符数**截断。中文标题按字节切会切出半个字。
@@ -1203,8 +1196,8 @@ mod tests {
         assert_eq!(health_badge("connecting", false).0, "◐ 连接中");
         assert_eq!(health_badge("live", true).0, "● 在收");
         // 「已连接但对端安静」不能显示成故障
-        assert_eq!(health_badge("idle", true).1, C_HEAD);
-        assert_eq!(health_badge("lost", false).1, C_BAD);
+        assert_eq!(health_badge("idle", true).1, crate::ui::pal::head());
+        assert_eq!(health_badge("lost", false).1, crate::ui::pal::bad());
     }
 
     #[test]

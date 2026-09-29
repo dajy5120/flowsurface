@@ -51,7 +51,10 @@ impl State {
     }
 }
 
-static STATE: LazyLock<RwLock<State>> = LazyLock::new(|| RwLock::new(State::new(Prefs::load())));
+/// 测试里固定用缺省偏好：否则测试结果会随用户本机 `ui.json`（主题、涨跌约定）变化。
+static STATE: LazyLock<RwLock<State>> = LazyLock::new(|| {
+    RwLock::new(State::new(if cfg!(test) { Prefs::default() } else { Prefs::load() }))
+});
 
 fn read<T>(f: impl FnOnce(&State) -> T) -> T {
     match STATE.read() {

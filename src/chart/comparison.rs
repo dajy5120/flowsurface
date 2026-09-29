@@ -131,7 +131,7 @@ impl ComparisonChart {
             .into();
 
         iced::widget::container(chart.map(Message::Chart))
-            .padding(1)
+            .padding(crate::ui::metrics::space(0))
             .into()
     }
 
@@ -661,7 +661,7 @@ pub mod series_editor {
                 .style(move |theme, status| style::button::transparent(theme, status, is_open))
                 .width(Length::Fill);
 
-                let mut col = column![header].padding(4);
+                let mut col = column![header].padding(crate::ui::metrics::space(1));
                 let mut inner_col = column![];
 
                 if is_open {
@@ -678,11 +678,11 @@ pub mod series_editor {
                         iced::widget::text_input("Set a custom label name", &label_name)
                             .on_input(Message::NameChanged)
                             .size(crate::style::text_size::SECTION)
-                            .padding(4)
+                            .padding(crate::ui::metrics::space(1))
                             .width(Length::Fill),
                     );
 
-                    col = col.push(inner_col.spacing(12).padding(4)).spacing(4);
+                    col = col.push(inner_col.spacing(12).padding(crate::ui::metrics::space(1))).spacing(4);
                 }
 
                 content = content.push(container(col).style(style::modal_container));

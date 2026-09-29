@@ -393,7 +393,7 @@ impl NetworkManager {
                 .align_y(iced::Alignment::Center),
                 container(applied_proxy)
                     .style(style::modal_container)
-                    .padding(8),
+                    .padding(crate::ui::metrics::space(3)),
                 column![scheme, column![host, port, username, password].spacing(6),].spacing(8),
             ]
             .spacing(12);
@@ -422,7 +422,7 @@ impl NetworkManager {
 
         container(column![modal_header, proxy_settings].spacing(12))
             .max_width(320)
-            .padding(24)
+            .padding(crate::ui::metrics::space(6))
             .style(style::dashboard_modal)
             .into()
     }

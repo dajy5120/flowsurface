@@ -14,7 +14,7 @@ use std::time::SystemTime;
 
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::{canvas as canvas_widget, center, column, container, text};
-use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
+use iced::{Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 use crate::style;
 
@@ -22,20 +22,7 @@ const ML: f32 = 52.0; // 左边距（Y 轴标签）
 const MR: f32 = 12.0;
 const MT: f32 = 12.0;
 const MB: f32 = 22.0; // 底边距（X 轴标签）
-const C_AXIS: Color = Color { r: 0.5, g: 0.5, b: 0.55, a: 1.0 };
-const C_GRID: Color = Color { r: 0.3, g: 0.3, b: 0.34, a: 0.5 };
 
-/// 多列序列调色板。
-const PALETTE: [Color; 8] = [
-    Color { r: 0.30, g: 0.72, b: 0.47, a: 1.0 },
-    Color { r: 0.36, g: 0.62, b: 0.95, a: 1.0 },
-    Color { r: 0.92, g: 0.62, b: 0.28, a: 1.0 },
-    Color { r: 0.86, g: 0.40, b: 0.45, a: 1.0 },
-    Color { r: 0.66, g: 0.50, b: 0.92, a: 1.0 },
-    Color { r: 0.30, g: 0.78, b: 0.78, a: 1.0 },
-    Color { r: 0.85, g: 0.80, b: 0.35, a: 1.0 },
-    Color { r: 0.70, g: 0.70, b: 0.74, a: 1.0 },
-];
 
 #[derive(Clone, Default)]
 pub struct ChartData {
@@ -232,7 +219,7 @@ impl<M> canvas::Program<M> for Chart {
                 frame.fill_text(Text {
                     content: msg,
                     position: Point::new(10.0, h / 2.0),
-                    color: C_AXIS,
+                    color: crate::ui::pal::axis(),
                     size: iced::Pixels(11.0),
                     ..Default::default()
                 });
@@ -279,13 +266,13 @@ impl<M> canvas::Program<M> for Chart {
                 let y = MT + ph * k as f32 / 5.0;
                 frame.stroke(
                     &Path::line(Point::new(ML, y), Point::new(ML + pw, y)),
-                    Stroke::default().with_width(1.0).with_color(C_GRID),
+                    Stroke::default().with_width(1.0).with_color(crate::ui::pal::grid()),
                 );
                 let val = yhi - (yhi - ylo) * k as f64 / 5.0;
                 frame.fill_text(Text {
                     content: if val.abs() >= 1000.0 { format!("{val:.0}") } else { format!("{val:.3}") },
                     position: Point::new(2.0, y - 5.0),
-                    color: C_AXIS,
+                    color: crate::ui::pal::axis(),
                     size: iced::Pixels(9.0),
                     ..Default::default()
                 });
@@ -296,7 +283,7 @@ impl<M> canvas::Program<M> for Chart {
                 frame.fill_text(Text {
                     content: fmt_x(d.x[i], d.x_is_time),
                     position: Point::new((x - 20.0).max(0.0), h - MB + 4.0),
-                    color: C_AXIS,
+                    color: crate::ui::pal::axis(),
                     size: iced::Pixels(9.0),
                     ..Default::default()
                 });
@@ -304,7 +291,7 @@ impl<M> canvas::Program<M> for Chart {
 
             // 每条序列：折线 + 散点。
             for (si, s) in d.series.iter().enumerate() {
-                let color = PALETTE[si % PALETTE.len()];
+                let color = crate::ui::pal::series(si);
                 let m = s.1.len().min(n);
                 let mut started = false;
                 let line = Path::new(|p| {
@@ -385,7 +372,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         ]
         .spacing(6),
     )
-    .padding(8)
+    .padding(crate::ui::metrics::space(3))
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
