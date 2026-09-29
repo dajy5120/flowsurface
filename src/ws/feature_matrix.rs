@@ -9,30 +9,31 @@
 
 use std::sync::{Mutex, OnceLock};
 
-/// 三个视图（docs/31 §8.1）。
+/// 两个视图。
+///
+/// docs/31 §8.1 原设计还有一个「② 实时向量」（按阶段折叠、异常高亮）。做下来它与特征矩阵的
+/// 列、行、筛选都一样，只差折叠与异常标黄——同一张表放两遍，徒增困惑。2026-09-29 合并：
+/// 折叠与异常高亮并进特征矩阵，视图只剩两个。
 ///
 /// 「研究纪律」不在这里：它是**另一个面板**（`ContentKind::FeatureLab`，docs/30）。
 /// §8.1 要求它与 ①② 分开，而 docs/30 已经把它做完了——
 /// 在这里再做一份会立刻产生第二套多重比较口径。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
-    /// ① 特征矩阵：七阶段纵向分节的主视图。
+    /// 特征矩阵：七阶段纵向分节，阶段可折叠，有异常窗口的阶段标黄。
     #[default]
     Matrix,
-    /// ② 实时向量：按阶段折叠，异常质量高亮。
-    Vector,
     /// 引擎自身的健康（簿同步、缓冲容量、刷新率）。
     Engine,
 }
 
 impl View {
-    pub const ALL: [Self; 3] = [Self::Matrix, Self::Vector, Self::Engine];
+    pub const ALL: [Self; 2] = [Self::Matrix, Self::Engine];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Matrix => "特征矩阵",
-            Self::Vector => "实时向量",
             Self::Engine => "引擎健康",
         }
     }
@@ -199,7 +200,7 @@ pub struct ViewState {
     pub family: Option<String>,
     /// 市场筛选。`None` = 全部。
     pub market: Option<String>,
-    /// 实时向量视图里被折叠起来的阶段。
+    /// 被折叠起来的阶段（点阶段标题切换）。
     pub collapsed: Vec<String>,
     /// 显示本部署没启用的特征（默认藏起来：默认集下三百多行「未启用」会淹没有值的行）。
     pub show_disabled: bool,
@@ -1363,8 +1364,8 @@ mod tests {
     fn 视图切换不影响筛选() {
         let mut st = ViewState::default();
         apply(&mut st, FeatureMatrixMsg::SetStage(Some("S7_execution")));
-        apply(&mut st, FeatureMatrixMsg::SetView(View::Vector));
-        assert_eq!(st.view, View::Vector);
+        apply(&mut st, FeatureMatrixMsg::SetView(View::Engine));
+        assert_eq!(st.view, View::Engine);
         assert_eq!(st.stage, Some("S7_execution"), "换视图把筛选也丢了");
     }
 

@@ -1,6 +1,6 @@
 //! 特征矩阵面板 — 视图（docs/31 §8.1）。
 //!
-//! 三个视图：① 特征矩阵（七阶段纵向分节）② 实时向量（按阶段折叠）③ 引擎健康。
+//! 两个视图：特征矩阵（七阶段纵向分节，阶段可折叠、异常标黄）与引擎健康。
 //! 「研究纪律」在**另一个面板**（特征库 / docs/30）——§8.1 要求它与 ①② 分开。
 //!
 //! ## 这一页有两条刻意的排版规则
@@ -1008,7 +1008,10 @@ fn top_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
     b.into()
 }
 
-/// ① 特征矩阵（表体）：七阶段纵向分节，一行一个特征，窗口横向成组。表头在滚动区外。
+/// 特征矩阵（表体）：七阶段纵向分节。
+///
+/// 阶段标题可以点击折叠 / 展开；阶段里有异常窗口（质量不是 GOOD，且已实现、已启用）时标题变黄、
+/// 写出个数——原「实时向量」视图的两个功能，2026-09-29 合并进来（两个视图列、行、筛选都一样）。
 fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths, tr: &Trend) -> Element<'a, Msg> {
     let total = w.total(v.table, wins.len());
     let mut b = column![].spacing(0).width(Length::Fixed(total));
@@ -1022,13 +1025,27 @@ fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths, tr: &Tre
             .iter()
             .filter(|r| r.slots.iter().all(|s| s.quality == "GOOD"))
             .count();
-        b = b.push(stage_band(
-            format!("{label} · {} 条特征（全部窗口良好 {good}）", rows.len()),
-            C_HEAD,
-            total,
-            &rows,
-            tr,
-        ));
+        let bad = rows
+            .iter()
+            .filter(|r| r.enabled() && r.slots.iter().any(|s| s.abnormal() && !s.not_implemented()))
+            .count();
+        let collapsed = v.is_collapsed(key);
+        let head = format!(
+            "{} {label} · {} 条特征（全部窗口良好 {good}）{}",
+            if collapsed { "▸" } else { "▾" },
+            rows.len(),
+            if bad > 0 { format!("　有异常窗口 {bad}") } else { String::new() },
+        );
+        b = b.push(
+            button(stage_band(head, if bad > 0 { C_WARN } else { C_HEAD }, total, &rows, tr))
+                .padding(0)
+                .style(|t, st| crate::style::button::modifier(t, st, false))
+                .on_press(Msg::ToggleStage(key.to_string())),
+        );
+        if collapsed {
+            shown += rows.len();
+            continue;
+        }
         for (i, r) in rows.iter().enumerate() {
             shown += 1;
             let hov = v.hover.as_deref() == Some(r.head().key.as_str());
@@ -1059,47 +1076,7 @@ fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths, tr: &Tre
     b.into()
 }
 
-/// ② 实时向量（表体）：按阶段折叠，异常高亮。
-///
-/// 与 ① 的区别不是排版而是**用途**：① 是「这个引擎有哪些特征、各自什么状态」，
-/// ② 是「此刻这个向量长什么样」。列与 ① 相同（参数一个不少），阶段可折叠。
-fn vector_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths, tr: &Trend) -> Element<'a, Msg> {
-    let total = w.total(v.table, wins.len());
-    let mut b = column![].spacing(0).width(Length::Fixed(total));
-    for (key, label) in Matrix::STAGES {
-        let rows = visible(m, v, key);
-        if rows.is_empty() {
-            continue;
-        }
-        let bad = rows
-            .iter()
-            .filter(|r| r.enabled() && r.slots.iter().any(|s| s.abnormal() && !s.not_implemented()))
-            .count();
-        let collapsed = v.is_collapsed(key);
-        let head = format!(
-            "{} {label} · {} 条特征{}",
-            if collapsed { "▸" } else { "▾" },
-            rows.len(),
-            if bad > 0 { format!("　有异常窗口 {bad}") } else { String::new() },
-        );
-        b = b.push(
-            button(stage_band(head, if bad > 0 { C_WARN } else { C_HEAD }, total, &rows, tr))
-                .padding(0)
-                .style(|t, st| crate::style::button::modifier(t, st, false))
-                .on_press(Msg::ToggleStage(key.to_string())),
-        );
-        if collapsed {
-            continue;
-        }
-        for (i, r) in rows.iter().enumerate() {
-            let hov = v.hover.as_deref() == Some(r.head().key.as_str());
-            b = b.push(feature_line(r, wins, v.table, v.metric, w, tr, i, hov));
-        }
-    }
-    b.into()
-}
-
-/// ③ 引擎健康：簿、检出、缓冲容量、刷新率。
+/// 引擎健康：簿、检出、缓冲容量、刷新率。
 fn engine_view<'a>(m: &Matrix) -> Element<'a, Msg> {
     let mut b = column![].spacing(4);
 
@@ -1717,10 +1694,7 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
     let wins = table_windows(&all_rows);
     let w = widths(&all_rows, &wins, &v);
     let tr = Trend::new(&m, &v);
-    let body = match v.view {
-        View::Vector => vector_view(&m, &v, &wins, &w, &tr),
-        _ => matrix_view(&m, &v, &wins, &w, &tr),
-    };
+    let body = matrix_view(&m, &v, &wins, &w, &tr);
     let head = scrollable(table_header(&wins, v.table, v.metric, &w))
         .direction(scrollable::Direction::Horizontal(
             scrollable::Scrollbar::new().width(0).scroller_width(0),

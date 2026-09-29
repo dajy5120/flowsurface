@@ -69,7 +69,7 @@ impl Slot {
         self.status == "spec"
     }
 
-    /// 质量是否异常（非 `GOOD`）。实时向量视图按它高亮。
+    /// 质量是否异常（非 `GOOD`）。特征矩阵的阶段标题按它标黄。
     #[must_use]
     pub fn abnormal(&self) -> bool {
         !self.quality.is_empty() && self.quality != "GOOD"
