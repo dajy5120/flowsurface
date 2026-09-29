@@ -37,7 +37,7 @@ impl Gallery {
             Column::num("最新价", Some("USD"), 110.0),
             Column::num("24h 涨跌", Some("%"), 90.0),
             Column::num("成交额", Some("USD"), 110.0),
-            Column::text("状态", 90.0),
+            Column::text("状态", 90.0).groupable(),
         ];
         let d = super::domain();
         let rows: Vec<Vec<Cell>> = (0..n)
@@ -62,13 +62,20 @@ impl Gallery {
             })
             .collect();
         let mut grid = GridState::new(&cols);
+        // WS_UI_SPECIMEN_GROUP=1：样张按「状态」分组并折叠「良好」，证明分组 + 折叠 + 虚拟滚动一起工作
+        if std::env::var_os("WS_UI_SPECIMEN_GROUP").is_some() {
+            grid.group_by = Some(4);
+            grid.collapsed.insert("良好".into());
+        }
         grid.resort(&cols, &rows);
         Some(Self { cols, rows, grid, tab: 0, seg: 1 })
     }
 
     /// 启动时滚到中部：证明虚拟滚动在深处也只渲染可见行。
     pub fn initial_scroll<M: 'static + Send>(&self) -> iced::Task<M> {
-        self.grid.scroll_to_row(self.rows.len() / 2)
+        let n = self.grid.len(self.rows.len());
+        // 分组样张：滚到末尾附近，同时看到上一组的尾巴和折叠着的组头
+        self.grid.scroll_to_row(if self.grid.group_by.is_some() { n.saturating_sub(12) } else { n / 2 })
     }
 
     pub fn update(&mut self, m: GalleryMsg) {
@@ -168,7 +175,7 @@ impl Gallery {
         ]
         .spacing(metrics::space(5));
 
-        column![scrollable(top.padding(metrics::space(5))).height(Length::Shrink), container(grid_view).height(Length::Fill)]
+        column![scrollable(top.padding(metrics::space(5))).height(Length::Shrink), container(grid_view).width(Length::Fill).height(Length::Fill)]
             .spacing(0)
             .into()
     }

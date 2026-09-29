@@ -123,6 +123,8 @@ pub enum Event {
     ObsInteraction(crate::ws::observatory_view::ObsMsg),
     /// 网络出口总闸：启停各路出口。
     EgressInteraction(crate::ws::egress_view::EgressMsg),
+    /// 订单面板：两张网格的排序 / 分组 / 调宽 / 选中 / 滚动（状态在 ws::orders_view 的静态里）。
+    OrdersInteraction(crate::ws::orders_view::OrdersMsg),
     /// 进程页：常驻单元启停（docs/26 S4）。
     ProcsInteraction(crate::ws::procs_view::ProcsMsg),
     /// 新闻资讯：守护启停 + 打开原文。
@@ -998,8 +1000,8 @@ impl State {
                 )
             }
             Content::Orders => {
-                // 只渲染、不发消息——数据走 ws::readout 旁路快照。
-                crate::ws::orders_view::pane_body()
+                // 数据走 ws::readout 旁路快照；表格交互（排序、分组、调宽）包成 pane 事件。
+                crate::ws::orders_view::pane_body().map(move |m| Message::PaneEvent(id, Event::OrdersInteraction(m)))
             }
             Content::BacktestResult => {
                 // 回测结果（docs/08 F6-P7）：渲染走 ws::backtest_readout 旁路快照。
@@ -1599,6 +1601,7 @@ impl State {
                 crate::ws::prediction::handle(m);
             }
             Event::BacktestLaunchInteraction(m) => crate::ws::backtest_launch::handle(m),
+            Event::OrdersInteraction(m) => crate::ws::orders_view::handle(m),
             Event::LinkBadgeClicked => crate::ws::provenance::on_link_click(),
             Event::FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg::Source(m)) => {
                 // 特征数据源：选择 / 开始 / 停止回放。换了图表流就请上层清图。

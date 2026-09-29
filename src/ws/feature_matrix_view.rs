@@ -740,13 +740,8 @@ fn feature_line<'a>(
         .push(sep(false))
         .push(fcell(nowrap(st, 10.0, sc), w.status, false))
         .push(sep(false));
-    let bg = if hovered {
-        Some(crate::ui::pal::band())
-    } else if !idx.is_multiple_of(2) {
-        Some(crate::ui::pal::alpha(crate::ui::pal::txt(), 0.035))
-    } else {
-        None
-    };
+    // 悬停整行高亮用分节色（比网格的选中色轻）；斑马纹与 ui::grid 同一处定义
+    let bg = if hovered { Some(crate::ui::pal::band()) } else { crate::ui::grid::row_tint(idx, false) };
     let key = h.key.clone();
     iced::widget::mouse_area(tinted(line, bg).width(Length::Fixed(w.total(mode, wins.len()))))
         .on_enter(Msg::HoverIn(key.clone()))
@@ -771,9 +766,8 @@ fn stage_band<'a>(t: String, c: Color, width: f32, rows: &[FeatureRow<'_>], tr: 
             .push(nowrap(format!("▲ {up}"), 11.0, crate::ui::pal::up()))
             .push(nowrap(format!("▼ {down}"), 11.0, crate::ui::pal::down()));
     }
-    tinted(r, Some(crate::ui::pal::band()))
-        .width(Length::Fixed(width))
-        .padding(crate::ui::metrics::pad2(0, 2))
+    // 与 ui::grid 的组头同一套底色 / 高度 / 内边距（docs/35 §16.5 第 2 项）
+    crate::ui::grid::group_band(r, width)
 }
 
 /// 通过当前筛选的特征：任一窗口通过筛选即显示整行；未启用的按开关藏起来。
