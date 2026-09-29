@@ -24,7 +24,8 @@ impl std::fmt::Display for Strat {
     }
 }
 
-pub fn view<'a>() -> Element<'a, LaunchMsg> {
+/// `hosted` = 数据选择正显示在检查器里（见 `ws::inspector_props`），这里只留一行提示。
+pub fn view<'a>(hosted: bool) -> Element<'a, LaunchMsg> {
     let v = bl::view();
     let mut head = row![
         text("发起回测").size(crate::ui::text::s_body()).color(crate::ui::pal::head()),
@@ -54,7 +55,11 @@ pub fn view<'a>() -> Element<'a, LaunchMsg> {
         if let Some(s) = &v.strategy {
             b = b.push(text(s.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
         }
-        b = b.push(super::data_picker_view::view(&v.pick, &bl::pick_opts()).map(LaunchMsg::Data));
+        b = b.push(if hosted {
+            super::inspector_props::hint("数据选择")
+        } else {
+            super::data_picker_view::view(&v.pick, &bl::pick_opts()).map(LaunchMsg::Data)
+        });
         b = b.push(
             row![
                 btn(

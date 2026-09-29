@@ -638,7 +638,8 @@ fn label<'a>(s: &str) -> Element<'a, TardisBoardMsg> {
     text(s.to_string()).size(crate::ui::text::s_body()).into()
 }
 
-pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
+/// `hosted` = 数据选择正显示在检查器里（见 `ws::inspector_props`）。
+pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoardMsg> {
     // 每帧轮询后台加载（顺带收割已结束的子进程并刷新面板缓存）。
     let loading = poll_load();
     // catalog 每帧只取一次（只用它的类型中文名）：每次调用都要 stat + 深拷贝整份清单。
@@ -679,7 +680,11 @@ pub fn pane_body(app: &TardisBoardState) -> Element<'_, TardisBoardMsg> {
     // ① 数据：共用数据选择组件（管线 → 来源 → 根目录扫描 → 市场 → 标的 → 时间）
     let mut src_col = column![
         label("① 数据"),
-        super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisBoardMsg::Data),
+        if hosted {
+            super::inspector_props::hint("数据选择")
+        } else {
+            super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisBoardMsg::Data)
+        },
     ]
     .spacing(4);
     if app.pick.local_key() == Some("tardis") {

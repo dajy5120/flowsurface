@@ -28,7 +28,8 @@ fn label<'a>(s: &str) -> Element<'a, TardisReplayMsg> {
 }
 
 /// 渲染回放控制 + 进度。
-pub fn pane_body(app: &TardisReplayState) -> Element<'_, TardisReplayMsg> {
+/// `hosted` = 数据选择正显示在检查器里（见 `ws::inspector_props`）。
+pub fn pane_body(app: &TardisReplayState, hosted: bool) -> Element<'_, TardisReplayMsg> {
     let st = super::tardis_replay_readout::snapshot();
     let running = is_running();
 
@@ -44,7 +45,11 @@ pub fn pane_body(app: &TardisReplayState) -> Element<'_, TardisReplayMsg> {
 
     // 数据管线 / 市场 / 标的 / 日期：共用数据选择组件（只列 Tardis）；时段 / 时长 / 倍速另起一行。
     let picks = column![
-        super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisReplayMsg::Data),
+        if hosted {
+            super::inspector_props::hint("数据选择")
+        } else {
+            super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisReplayMsg::Data)
+        },
         row![
             label("起始(UTC)"),
             pick_list(hours(), Some(app.start_hm.clone()), TardisReplayMsg::StartPick)

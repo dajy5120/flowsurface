@@ -422,8 +422,18 @@ fn editor<'a>(m: &Matrix, d: &cp::Draft) -> Element<'a, Msg> {
         .into()
 }
 
+/// 口径设置块：正在编辑 → 编辑器；否则一个「✎ 口径设置」按钮。面板内联与检查器共用。
+pub fn edit_block<'a>(m: &Matrix) -> Element<'a, Msg> {
+    match cp::draft() {
+        Some(d) => editor(m, &d),
+        None => btn("✎ 口径设置", edit_msg(ChartEditMsg::Open), false),
+    }
+}
+
 /// 视图本体（放在特征面板的 scrollable 里）。
-pub fn view<'a>(m: &Matrix) -> Element<'a, Msg> {
+///
+/// `hosted` = 口径设置正显示在检查器里（docs/35 §16.5 第 3 项），这里只留一行提示。
+pub fn view<'a>(m: &Matrix, hosted: bool) -> Element<'a, Msg> {
     let c = &m.chart;
     if !c.present {
         return text("这份快照没有图表参数段：常驻引擎 / 回放程序还是旧版本，重新编译并重启 ws-features（或重新开始回放）")
@@ -469,10 +479,8 @@ pub fn view<'a>(m: &Matrix) -> Element<'a, Msg> {
         .spacing(10),
     ]
     .spacing(6);
-    match cp::draft() {
-        Some(d) if !c.editable.is_empty() => b = b.push(editor(m, &d)),
-        _ if !c.editable.is_empty() => b = b.push(btn("✎ 口径设置", edit_msg(ChartEditMsg::Open), false)),
-        _ => {}
+    if !c.editable.is_empty() {
+        b = b.push(if hosted { super::inspector_props::hint("口径设置") } else { edit_block(m) });
     }
 
     // 卡片网格：按宽度自动定列数（最多 6 列），卡片固定高度、内容在卡片里滚动（docs/33 排版 A 方案）

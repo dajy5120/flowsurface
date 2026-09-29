@@ -565,7 +565,21 @@ impl Flowsurface {
                     ws::specimen::Step::Load(uid) => {
                         // 组件样张页：网格此时已渲染过，滚动指令才有对象可滚
                         let scroll = self.gallery.as_ref().map(|g| g.initial_scroll()).unwrap_or_else(Task::none);
-                        return self.load_layout(uid, main).chain(scroll);
+                        let task = self.load_layout(uid, main);
+                        // WS_UI_SPECIMEN_INSPECT：打开检查器并聚焦第一个有可编辑属性的面板（docs/35 §16.5 第 3 项）
+                        if std::env::var_os("WS_UI_SPECIMEN_INSPECT").is_some() {
+                            self.shell.inspector = true;
+                            let d = self.active_dashboard_mut();
+                            let target = d
+                                .panes
+                                .iter()
+                                .find(|(_, st)| ws::inspector_props::view(&st.content).is_some())
+                                .map(|(p, _)| *p);
+                            if let Some(p) = target {
+                                d.focus = Some((main, p));
+                            }
+                        }
+                        return task.chain(scroll);
                     }
                     ws::specimen::Step::Shoot => {
                         return iced::window::screenshot(main).map(Message::SpecimenShot);
@@ -1049,6 +1063,16 @@ impl Flowsurface {
 
         let tickers_table = &self.sidebar.tickers_table;
 
+        // 检查器托管聚焦面板的可编辑属性（docs/35 §16.5 第 3 项）：先登记托管的是哪个 pane，
+        // 面板视图据此把原处的数据选择器 / 口径设置收成一行提示。
+        let main_id = self.main_window.id;
+        let host = if self.shell.inspector {
+            dashboard.focus.filter(|(w, _)| *w == main_id).map(|(_, p)| p)
+        } else {
+            None
+        };
+        ws::inspector_props::set_host(host);
+
         let content = if id == self.main_window.id {
             // WealthSpring 工作区（docs/08 F6 — P1）：按固定顺序取 5 个工作区的 (uuid, 名, 是否活动)，
             // 合并进 FS 原生侧边栏顶部（单一侧边栏，图标切换不同窗口）。
@@ -1115,7 +1139,16 @@ impl Flowsurface {
                 dashboard_view
             };
             let work: Element<'_, Message> = if self.shell.inspector {
-                row![work, ui::shell::inspector(&info).map(Message::Shell)]
+                // 检查器里的控件发的是聚焦 pane 自己的事件，原样送回那个 pane 的处理函数
+                let props = host.and_then(|p| {
+                    let st = dashboard.panes.get(p)?;
+                    let el = ws::inspector_props::view(&st.content)?;
+                    Some(el.map(move |ev| Message::Dashboard {
+                        layout_id: None,
+                        event: dashboard::Message::Pane(main_id, dashboard::pane::Message::PaneEvent(p, ev)),
+                    }))
+                });
+                row![work, ui::shell::inspector(&info, props, Message::Shell)]
                     .spacing(4)
                     .into()
             } else {

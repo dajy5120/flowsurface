@@ -888,7 +888,7 @@ impl State {
                 // 特征矩阵（docs/31 §8.1）：只读 ~/ws-data/cockpit/feature_matrix.json，
                 // 由 wealthspring-features 的引擎周期性写出。**零交易所流、零计算**。
                 // 筛选/视图切换发 FeatureMatrixMsg → 包成 pane 事件。
-                let base = crate::ws::feature_matrix_view::pane_body()
+                let base = crate::ws::feature_matrix_view::pane_body(crate::ws::inspector_props::hosted(id))
                     .map(move |m| Message::PaneEvent(id, Event::FeatureMatrixInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -959,7 +959,7 @@ impl State {
             }
             Content::TardisBoard(tb) => {
                 // Tardis 历史面板（docs/20 §9）：源→类型→图，全自绘、零交易所流。
-                let base = crate::ws::tardis_board_view::pane_body(tb)
+                let base = crate::ws::tardis_board_view::pane_body(tb, crate::ws::inspector_props::hosted(id))
                     .map(move |m| Message::PaneEvent(id, Event::TardisBoardInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -973,7 +973,7 @@ impl State {
             }
             Content::TardisReplay(tr) => {
                 // Tardis 历史回放（docs/20 Phase 5）：交互视图发 TardisReplayMsg → 包成 pane 事件。
-                let base = crate::ws::tardis_replay_view::pane_body(tr)
+                let base = crate::ws::tardis_replay_view::pane_body(tr, crate::ws::inspector_props::hosted(id))
                     .map(move |m| Message::PaneEvent(id, Event::TardisReplayInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -1006,7 +1006,7 @@ impl State {
             Content::BacktestResult => {
                 // 回测结果（docs/08 F6-P7）：渲染走 ws::backtest_readout 旁路快照。
                 // 顶上是「发起回测」（选策略 + 共用数据选择组件 → 起 runner）。
-                let launch = crate::ws::backtest_launch_view::view()
+                let launch = crate::ws::backtest_launch_view::view(crate::ws::inspector_props::hosted(id))
                     .map(move |m| Message::PaneEvent(id, Event::BacktestLaunchInteraction(m)));
                 let base = column![launch, crate::ws::backtest_view::pane_body()].into();
                 self.compose_stack_view(

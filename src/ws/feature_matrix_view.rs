@@ -1485,7 +1485,7 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
 /// 看特征的人要在看特征的地方启停，而不是切到进程页去找。
 /// 停掉**没有数据缺口**（录制器照常落盘，事后可回放重算），所以不需要二次确认。
 /// 数据源栏：收起时一行（现在读的是什么 + 回放状态），展开是共用数据选择组件 + 回放控制。
-fn source_bar<'a>(s: &super::feature_source::View) -> Element<'a, Msg> {
+fn source_bar<'a>(s: &super::feature_source::View, hosted: bool) -> Element<'a, Msg> {
     use super::feature_source::{Pace, SourceMsg};
     let mut head = row![
         text("数据源").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
@@ -1515,9 +1515,11 @@ fn source_bar<'a>(s: &super::feature_source::View) -> Element<'a, Msg> {
     }
     if s.open {
         let opts = super::feature_source::pick_opts();
-        b = b.push(
-            super::data_picker_view::view(&s.pick, &opts).map(|m| Msg::Source(SourceMsg::Data(m))),
-        );
+        b = b.push(if hosted {
+            super::inspector_props::hint("数据选择")
+        } else {
+            super::data_picker_view::view(&s.pick, &opts).map(|m| Msg::Source(SourceMsg::Data(m)))
+        });
         if s.pick.local_key().is_some() {
             let mut pr = row![text("回放速度").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(4).align_y(iced::Alignment::Center);
             for p in Pace::ALL {
@@ -1584,7 +1586,9 @@ fn engine_bar<'a>() -> Element<'a, Msg> {
     r.into()
 }
 
-pub fn pane_body<'a>() -> Element<'a, Msg> {
+///
+/// `hosted` = 这个面板的可编辑属性正显示在检查器里（见 `ws::inspector_props`）。
+pub fn pane_body<'a>(hosted: bool) -> Element<'a, Msg> {
     let m: Matrix = ro::snapshot();
     let v = super::feature_matrix::state();
     let mut b = column![sec(
@@ -1607,7 +1611,7 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
     }
     b = b.push(vr.align_y(iced::Alignment::Center));
     let src = super::feature_source::view();
-    b = b.push(source_bar(&src));
+    b = b.push(source_bar(&src, hosted));
     let fold = v.fold_controls && v.view != View::Engine && v.picker.is_none();
     if !fold {
         b = b.push(engine_bar());
@@ -1654,7 +1658,7 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
     }
     if v.view == View::Chart {
         // 不套外层滚动：卡片网格要拿到面板的真实高度（两行排满一屏、卡片内各自滚动）
-        b = b.push(top_bar(&m)).push(super::chart_params_view::view(&m));
+        b = b.push(top_bar(&m)).push(super::chart_params_view::view(&m, hosted));
         return container(b.width(Length::Fill).height(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)

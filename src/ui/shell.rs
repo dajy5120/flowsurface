@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use iced::widget::{
-    button, column, container, mouse_area, opaque, row, scrollable, space, stack, text, text_input,
+    button, column, container, mouse_area, opaque, row, rule, scrollable, space, stack, text, text_input,
 };
 use iced::{Alignment, Background, Border, Element, Length, Padding};
 
@@ -475,14 +475,22 @@ pub fn empty<'a, M: 'a>(title: &'a str, hint: &'a str) -> Element<'a, M> {
 
 /// 检查器（UPDS V2 §9）：当前选中对象的属性。批 3 先放聚焦面板与数据环境，
 /// 面板里的「编辑口径」「数据源选择」等可编辑属性在批 5–7 迁进来。
-pub fn inspector<'a>(info: &Info) -> Element<'a, ShellEvent> {
+///
+/// `props` = 聚焦面板的可编辑属性（数据选择器、口径设置……，docs/35 §16.5 第 3 项），由调用方
+/// 按面板类型拼好、消息已包成调用方自己的类型；`on` 把外壳事件包成同一类型。
+pub fn inspector<'a, M: Clone + 'a>(
+    info: &Info,
+    props: Option<Element<'a, M>>,
+    on: impl Fn(ShellEvent) -> M,
+) -> Element<'a, M> {
     let c = core();
     let section = |title: &'a str| t::metadata(title);
-    let kv = |k: &'a str, v: String| -> Element<'a, ShellEvent> {
+    let kv = |k: &'a str, v: String| -> Element<'a, M> {
         row![container(t::caption(k)).width(Length::Fixed(72.0)), t::body(v)].spacing(8).into()
     };
+    let wide = props.is_some();
     let mut col = column![
-        row![t::section("检查器"), space::horizontal(), button(t::label("✕")).padding([2, 8]).on_press(ShellEvent::Run(Cmd::ToggleInspector)).style(|th, st| crate::style::button::transparent(th, st, false))].align_y(Alignment::Center),
+        row![t::section("检查器"), space::horizontal(), button(t::label("✕")).padding([2, 8]).on_press(on(ShellEvent::Run(Cmd::ToggleInspector))).style(|th, st| crate::style::button::transparent(th, st, false))].align_y(Alignment::Center),
         section("当前面板"),
     ]
     .spacing(metrics::space(3));
@@ -498,8 +506,12 @@ pub fn inspector<'a>(info: &Info) -> Element<'a, ShellEvent> {
     if !info.run.is_empty() {
         col = col.push(kv("运行", info.run.clone()));
     }
+    if let Some(p) = props {
+        col = col.push(rule::horizontal(1)).push(t::section("可编辑属性")).push(p);
+    }
+    // 有可编辑属性时加宽：数据选择器的一行控件在 300 宽里会挤成竖排
     container(scrollable(col.padding(Padding::from([metrics::space(4), metrics::space(4)]))))
-        .width(Length::Fixed(300.0))
+        .width(Length::Fixed(if wide { 380.0 } else { 300.0 }))
         .height(Length::Fill)
         .style(move |_| container::Style {
             background: Some(Background::Color(color(c.surface_primary))),
