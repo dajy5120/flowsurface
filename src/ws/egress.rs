@@ -100,6 +100,19 @@ pub enum Kind {
     Foreign,
 }
 
+/// 这一路**耗不耗外网流量**。和 [`Kind`] 是两个维度：Kind 说怎么停，Scope 说停不停得出意义。
+///
+/// 界面按它分成两块——混在一张表里时，「Redis 总线 ● 在跑」和「录制器 ● 在跑」
+/// 长得一模一样，而前者一个字节都不出网。「对外全部停止」「启动时关闭对外连接」
+/// 也只动 `External` 那一块：把 Redis 停了，本机的面板全断，外网流量却一点没省。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scope {
+    /// 连外网（直连，或经本机代理）——**在耗流量**。
+    External,
+    /// 只连本机（回环上的本机服务 / 读本地文件）——不耗外网流量。
+    Internal,
+}
+
 /// 一路出口的静态描述。
 pub struct Source {
     pub key: &'static str,
@@ -107,6 +120,7 @@ pub struct Source {
     /// 连谁。写清楚才能让人判断该不该停。
     pub what: &'static str,
     pub kind: Kind,
+    pub scope: Scope,
     /// systemd 单元名（`InProcess` 为空）。
     pub unit: &'static str,
 }
@@ -141,6 +155,7 @@ pub static ALL: &[Source] = &[
         label: "本机代理 xray",
         what: "不是本项目的东西——只列出来让总数对得上，这一页不动它",
         kind: Kind::Foreign,
+        scope: Scope::External,
         unit: "xray",
     },
     Source {
@@ -148,6 +163,7 @@ pub static ALL: &[Source] = &[
         label: "Cockpit 行情图",
         what: "各交易所行情 WS（币安 / Bybit / OKX / MEXC / Hyperliquid）",
         kind: Kind::InProcess,
+        scope: Scope::External,
         unit: "",
     },
     Source {
@@ -155,6 +171,7 @@ pub static ALL: &[Source] = &[
         label: "依赖版本检查",
         what: "PyPI / crates.io / GitHub API——**只在「进程」页点「检查更新」时发一次**，无后台轮询",
         kind: Kind::InProcess,
+        scope: Scope::External,
         unit: "",
     },
     Source {
@@ -162,6 +179,7 @@ pub static ALL: &[Source] = &[
         label: "L2 增量 feed",
         what: "Binance USDS-M @depth WS（喂通道② → ws-signals → 分流给特征引擎）；需 VPN",
         kind: Kind::Service,
+        scope: Scope::External,
         unit: "ws-l2-feed",
     },
     Source {
@@ -169,6 +187,7 @@ pub static ALL: &[Source] = &[
         label: "成交 feed",
         what: "Binance USDS-M @trade WS（喂通道② → ws-signals → 分流给特征引擎）；需 VPN",
         kind: Kind::Service,
+        scope: Scope::External,
         unit: "ws-trades-feed",
     },
     Source {
@@ -176,6 +195,7 @@ pub static ALL: &[Source] = &[
         label: "全市场雷达",
         what: "各交易所公开 REST（全symbol 扫描）",
         kind: Kind::Service,
+        scope: Scope::External,
         unit: "ws-radar",
     },
     Source {
@@ -183,6 +203,7 @@ pub static ALL: &[Source] = &[
         label: "接口观察终端",
         what: "你在面板里指定的那一个接口",
         kind: Kind::Service,
+        scope: Scope::External,
         unit: "ws-observatory",
     },
     Source {
@@ -193,6 +214,7 @@ pub static ALL: &[Source] = &[
         // 不被读成「没通」（docs/26 §S1）
         what: "本机总线，不出网（通道① Nautilus 事件 + 面板状态）",
         kind: Kind::Service,
+        scope: Scope::Internal,
         unit: "ws-redis",
     },
     Source {
@@ -200,6 +222,7 @@ pub static ALL: &[Source] = &[
         label: "新闻资讯",
         what: "监管/交易所/媒体的 RSS·Atom·JSON 源（docs/25）",
         kind: Kind::Service,
+        scope: Scope::External,
         unit: "ws-news",
     },
     Source {
@@ -210,6 +233,7 @@ pub static ALL: &[Source] = &[
         // 盘口永久丢失**（5 分钟市场结束即消失，没有第三方历史源可补）。
         what: "币安钱包预测市场 WS(盘口推送) + REST(另一本簿/轮次)，api.binance.com",
         kind: Kind::Service,
+        scope: Scope::External,
         unit: "ws-pm-recorder",
     },
     Source {
@@ -217,6 +241,7 @@ pub static ALL: &[Source] = &[
         label: "录制器",
         what: "交易所行情 WS（落盘）",
         kind: Kind::Service,
+        scope: Scope::External,
         unit: "wealthspring-recorder",
     },
     Source {
@@ -224,6 +249,7 @@ pub static ALL: &[Source] = &[
         label: "做市影子",
         what: "交易所 WS + REST（SOLUSDT）",
         kind: Kind::Service,
+        scope: Scope::External,
         unit: "wealthspring-maker-shadow",
     },
     Source {
@@ -231,6 +257,7 @@ pub static ALL: &[Source] = &[
         label: "Alpha 工厂夜间流水线",
         what: "跑数据管线（是否出网看当日任务）",
         kind: Kind::Timer,
+        scope: Scope::External,
         unit: "ws-factory-nightly.timer",
     },
     Source {
@@ -238,6 +265,7 @@ pub static ALL: &[Source] = &[
         label: "预测市场夜间任务",
         what: "Polymarket Gamma API",
         kind: Kind::Timer,
+        scope: Scope::External,
         unit: "ws-prediction-nightly.timer",
     },
     Source {
@@ -245,6 +273,7 @@ pub static ALL: &[Source] = &[
         label: "F0 验收检查",
         what: "读本地录制（一般不出网）",
         kind: Kind::Timer,
+        scope: Scope::Internal,
         unit: "ws-f0-accept.timer",
     },
     Source {
@@ -252,6 +281,7 @@ pub static ALL: &[Source] = &[
         label: "录制日检",
         what: "只读本地文件，不出网",
         kind: Kind::Timer,
+        scope: Scope::Internal,
         unit: "ws-observatory-check.timer",
     },
 ];
@@ -345,9 +375,13 @@ pub struct Conns {
     pub direct: u32,
     /// 对端是回环、且不是已知本机服务。**多半是走本机代理出网，一样在耗流量。**
     pub via_local: u32,
+    /// 对端是已知本机服务（[`LOCAL_SERVICE_PORTS`]）——**不耗外网流量**。
+    /// 不算进 [`Self::total`]：那个数回答的是「有几条在出网」。
+    pub internal: u32,
 }
 
 impl Conns {
+    /// 出网的条数（直连 + 经本机）。**不含内部连接**。
     pub fn total(self) -> u32 {
         self.direct + self.via_local
     }
@@ -388,7 +422,12 @@ struct UnitInfo {
 /// 200ms 里的一百四。`systemctl show` 本来就收多个单元，块之间空行分隔、
 /// 每块带 `Id=` 可以定位。
 fn query_all() -> std::collections::HashMap<String, UnitInfo> {
-    let units: Vec<&str> = ALL.iter().map(|s| s.unit).filter(|u| !u.is_empty()).collect();
+    let units: Vec<&str> = ALL
+        .iter()
+        .map(|s| s.unit)
+        .chain(NO_EGRESS.iter().map(|(u, _)| *u))
+        .filter(|u| !u.is_empty())
+        .collect();
     let mut out = std::collections::HashMap::new();
     if units.is_empty() {
         return out;
@@ -515,17 +554,28 @@ fn verb(act: &str) -> &'static str {
     }
 }
 
-/// 全部停止。**不动开机自启**——那是另一件事，要用户自己点。
+/// 对外出口全部停止。**只动 [`Scope::External`]，不动开机自启**。
+///
+/// 内部那一块（Redis 总线、只读本地文件的日检）不停：停了它们外网流量一点没省，
+/// 本机面板和信号链却全断了。
 ///
 /// 返回 `(停了几路, 回执)`。
 pub fn stop_all() -> (usize, String) {
+    let n = stop_external();
+    waker().request();
+    (n, format!("已停 {n} 路对外连接（内部连接没动）。开机自启没动——那是另一件事，要单独关"))
+}
+
+fn stop_external() -> usize {
     let mut n = 0;
-    for s in ALL {
+    for s in ALL.iter().filter(|s| s.scope == Scope::External) {
         match s.kind {
             // 本项目之外的东西不碰
             Kind::Foreign => {}
             Kind::InProcess => {
-                if streams_enabled() {
+                // 「依赖版本检查」只在点按钮时发一次，没有可停的；
+                // 行情订阅那一路才是常开的
+                if s.key == "cockpit" && streams_enabled() {
                     set_streams_enabled(false);
                     n += 1;
                 }
@@ -539,8 +589,118 @@ pub fn stop_all() -> (usize, String) {
             }
         }
     }
+    n
+}
+
+/// 对外出口全部开启。
+///
+/// 定时任务**只开设了开机自启的那几个**：没设自启的是用户有意不让它跑，
+/// 这里一并拉起来就等于替用户改了主意。
+pub fn start_all() -> (usize, String) {
+    let n = start_external();
     waker().request();
-    (n, format!("已停 {n} 路。开机自启没动——那是另一件事，要单独关"))
+    (n, format!("已开 {n} 路对外连接（定时任务只开设了自启的）"))
+}
+
+fn start_external() -> usize {
+    let units = query_all();
+    let mut n = 0;
+    for s in ALL.iter().filter(|s| s.scope == Scope::External) {
+        match s.kind {
+            Kind::Foreign => {}
+            Kind::InProcess => {
+                if s.key == "cockpit" && !streams_enabled() {
+                    set_streams_enabled(true);
+                    n += 1;
+                }
+            }
+            _ => {
+                let u = units.get(s.unit.trim_end_matches(".service")).cloned().unwrap_or_default();
+                if u.active || (s.kind == Kind::Timer && !u.enabled) {
+                    continue;
+                }
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "start", "--no-block", s.unit])
+                    .status();
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+// ── 启动时的默认：对外连接开还是关 ─────────────────────────────
+
+/// 「启动 Cockpit 时对外连接开不开」。存在 `egress_prefs.json`。
+///
+/// **缺省是开**：这是加这个开关之前的行为，没设过的人不该被悄悄改掉。
+pub fn startup_external_on() -> bool {
+    std::fs::read_to_string(prefs_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("startup_external")?.as_str().map(|s| s != "off"))
+        .unwrap_or(true)
+}
+
+pub fn set_startup_external(on: bool) -> String {
+    let p = prefs_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let v = serde_json::json!({ "startup_external": if on { "on" } else { "off" } });
+    match std::fs::write(&p, v.to_string()) {
+        Ok(()) if on => "✔ 以后启动 Cockpit 时：对外连接照常开启（只改设置，现在的连接没动）".into(),
+        Ok(()) => "✔ 以后启动 Cockpit 时：关闭全部对外连接（只改设置，现在的连接没动）".into(),
+        Err(e) => format!("✗ 写 {} 失败：{e}", p.display()),
+    }
+}
+
+fn prefs_path() -> std::path::PathBuf {
+    super::observatory_lib::lib_path().with_file_name("egress_prefs.json")
+}
+
+/// **在程序启动时、iced 起来之前调**（`main.rs`，紧跟 `lifecycle::start_all`）。
+///
+/// 设成「关」时：先同步关掉行情订阅——订阅在 iced 起来后第一帧就会建连，
+/// 放到后台线程里做就会先连上再断开，那几秒的流量正是用户不想要的。
+/// 各服务的 `systemctl stop` 放后台线程：`--no-block` 虽快，十几次 fork
+/// 也不该压在启动画面上。target 刚发出的 start 任务会被随后的 stop 替换掉。
+///
+/// 设成「开」时：服务已由 target 拉起，这里只补上被上次「关」停掉的定时任务
+/// （它们不在 target 里，停了就一直停着）。
+pub fn apply_startup() {
+    let on = startup_external_on();
+    if !on {
+        set_streams_enabled(false);
+    }
+    std::thread::spawn(move || {
+        let n = if on { start_external() } else { stop_external() };
+        set_note(&if on {
+            if n > 0 { format!("启动设置「对外连接开启」：补开了 {n} 路") } else { String::new() }
+        } else {
+            format!("启动设置「对外连接关闭」：已关 {n} 路对外连接（内部连接照常）。要用时点「对外全部开启」或逐路启动")
+        });
+        waker().request();
+    });
+}
+
+// ── 内部连接：确认过不出网的单元 ───────────────────────────────
+
+/// [`NO_EGRESS`] 里一个单元的当前状态。它们只连本机，在「内部连接」那一块只读展示——
+/// 启停在「进程」页，这里放按钮就把两页的职责搅在一起了。
+#[derive(Clone, Default)]
+pub struct InnerRow {
+    pub unit: &'static str,
+    pub why: &'static str,
+    pub on: bool,
+    /// `None` = 没在跑。
+    pub conns: Option<Conns>,
+}
+
+static INNER: Mutex<Vec<InnerRow>> = Mutex::new(Vec::new());
+
+pub fn inner_rows() -> Vec<InnerRow> {
+    INNER.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
 /// 最近一次操作的回执。**每个按钮都要给回执**：`systemctl --no-block`
@@ -858,6 +1018,23 @@ fn collect(prev: &mut Prev) -> Vec<Row> {
             }
         })
         .collect();
+    // 内部那一块：只数连接（多半是 Redis），不采速度——它们不出网
+    let inner = NO_EGRESS
+        .iter()
+        .map(|(unit, why)| {
+            // 面板自己就是这个进程；直接跑二进制时 unit 不 active，但它显然在跑
+            let (on, pid) = if *unit == "ws-cockpit" {
+                (true, std::process::id())
+            } else {
+                let u = units.get(*unit).cloned().unwrap_or_default();
+                (u.active, if u.active { u.main_pid } else { 0 })
+            };
+            InnerRow { unit, why, on, conns: on.then(|| stats_with(pid, &peers).0) }
+        })
+        .collect();
+    if let Ok(mut g) = INNER.lock() {
+        *g = inner;
+    }
     prev.per_inode = b;
     prev.at = Some(now);
     out
@@ -917,6 +1094,8 @@ enum Peer {
     Direct,
     /// 对端是回环、且不是已知本机服务。多半是走本机代理出网。
     ViaLocal,
+    /// 对端是已知本机服务（Redis）。不出网。
+    Internal,
 }
 
 fn sample_peers() -> Peers {
@@ -938,7 +1117,9 @@ fn sample_peers() -> Peers {
             let port = u16::from_str_radix(port, 16).unwrap_or(0);
             if !is_loopback(addr) {
                 out.insert(ino, Peer::Direct);
-            } else if !LOCAL_SERVICE_PORTS.contains(&port) {
+            } else if LOCAL_SERVICE_PORTS.contains(&port) {
+                out.insert(ino, Peer::Internal);
+            } else {
                 out.insert(ino, Peer::ViaLocal);
             }
         }
@@ -963,6 +1144,8 @@ fn stats_with(pid: u32, peers: &Peers) -> (Conns, Sockets) {
                 c.via_local += 1;
                 sk.via_local.insert(i);
             }
+            // 只计数，不采字节：它不耗外网流量，速度一栏不该被它抬高
+            Some(Peer::Internal) => c.internal += 1,
             None => {}
         }
     }
@@ -1117,6 +1300,7 @@ pub fn total_conns(rows: &[Row]) -> Conns {
     rows.iter().filter_map(|r| r.conns).fold(Conns::default(), |a, c| Conns {
         direct: a.direct + c.direct,
         via_local: a.via_local + c.via_local,
+        internal: a.internal + c.internal,
     })
 }
 
@@ -1129,14 +1313,41 @@ mod tests {
         // 这台机器上跑着 xray（127.0.0.1:10808）。走代理出网的话，
         // 进程这一侧的对端就是 127.0.0.1——按「非回环」数，一个正在
         // 狂拉行情的进程会显示成 0
-        assert_eq!(Conns { direct: 0, via_local: 30 }.label(), "30（经本机）");
-        assert_eq!(Conns { direct: 7, via_local: 0 }.label(), "7");
-        assert_eq!(Conns { direct: 2, via_local: 5 }.label(), "2 + 5 经本机");
+        assert_eq!(Conns { direct: 0, via_local: 30, internal: 0 }.label(), "30（经本机）");
+        assert_eq!(Conns { direct: 7, via_local: 0, internal: 0 }.label(), "7");
+        assert_eq!(Conns { direct: 2, via_local: 5, internal: 3 }.label(), "2 + 5 经本机");
         assert_eq!(Conns::default().label(), "0");
-        assert_eq!(Conns { direct: 2, via_local: 5 }.total(), 7);
+        assert_eq!(Conns { direct: 2, via_local: 5, internal: 3 }.total(), 7);
         // Redis 是本机数据总线，不是出网
         assert!(LOCAL_SERVICE_PORTS.contains(&6379));
         assert_eq!(LOCAL_SERVICE_PORTS.len(), 1, "这份名单要短：多写一个就可能把真的出网算成自己人");
+    }
+
+    #[test]
+    fn internal_scope_is_only_for_things_that_never_leave_the_machine() {
+        // 分错一行的代价不对称：把出网的标成内部，「对外全部停止」就漏了它，
+        // 用户看着一张「对外全停」的表，机器还在往外发包
+        let internal: Vec<&str> =
+            ALL.iter().filter(|s| s.scope == Scope::Internal).map(|s| s.key).collect();
+        assert_eq!(internal, ["redis", "f0-accept", "observatory-check"]);
+        for s in ALL.iter().filter(|s| s.scope == Scope::Internal) {
+            assert!(
+                s.what.contains("不出网"),
+                "{} 标成内部，说明里就得写明「不出网」：{}",
+                s.key,
+                s.what
+            );
+            assert!(matches!(s.kind, Kind::Service | Kind::Timer));
+        }
+        // 本机代理本身不是本项目的，但它**就是**出网的那一跳
+        assert_eq!(ALL.iter().find(|s| s.key == "proxy").unwrap().scope, Scope::External);
+    }
+
+    #[test]
+    fn internal_connections_are_not_counted_as_egress() {
+        let c = Conns { direct: 0, via_local: 0, internal: 4 };
+        assert_eq!(c.total(), 0, "Redis 连接不是出网");
+        assert_eq!(c.label(), "0");
     }
 
     #[test]

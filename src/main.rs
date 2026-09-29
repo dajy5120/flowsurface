@@ -63,6 +63,9 @@ fn main() {
     // 「今日用量」要连续才有意义——挂在渲染上的话，那个数的真实含义
     // 会变成「你盯着那一页看的时候我看到了多少」。没人看时 20 秒一轮
     ws::egress::start();
+    // 「启动时对外连接开/关」（网络出口页上的设置）。**必须在 iced 起来之前**：
+    // 设成关时行情订阅要在第一帧建连前就关掉，否则是先连上再断开
+    ws::egress::apply_startup();
 
     let daemon = iced::daemon(Flowsurface::new, Flowsurface::update, Flowsurface::view)
         .settings(iced::Settings {
