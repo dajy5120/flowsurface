@@ -989,8 +989,8 @@ impl TickersTable {
                             let palette = theme.extended_palette();
                             iced::widget::text::Style {
                                 color: Some(match display_data.price_change.as_ref() {
-                                    Some(PriceChange::Increased) => palette.success.base.color,
-                                    Some(PriceChange::Decreased) => palette.danger.base.color,
+                                    Some(PriceChange::Increased) => crate::ui::chart::up(),
+                                    Some(PriceChange::Decreased) => crate::ui::chart::down(),
                                     _ => palette.background.base.text,
                                 }),
                             }

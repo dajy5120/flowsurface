@@ -237,8 +237,8 @@ impl canvas::Program<Message> for Ladder {
         let palette = theme.extended_palette();
 
         let text_color = palette.background.base.text;
-        let bid_color = palette.success.base.color;
-        let ask_color = palette.danger.base.color;
+        let bid_color = crate::ui::chart::up();
+        let ask_color = crate::ui::chart::down();
 
         let divider_color = style::split_ruler(theme).color;
 
@@ -352,7 +352,7 @@ impl canvas::Program<Message> for Ladder {
                         self.chase_tracker(Side::Bid),
                         right_gap_mid_x,
                         best_ask_y.map(|y| y + ROW_HEIGHT / 2.0),
-                        palette.success.weak.color,
+                        crate::ui::chart::up_weak(),
                         true, // is_bid
                     );
                     self.draw_chase_trail(
@@ -362,7 +362,7 @@ impl canvas::Program<Message> for Ladder {
                         self.chase_tracker(Side::Ask),
                         left_gap_mid_x,
                         best_bid_y.map(|y| y + ROW_HEIGHT / 2.0),
-                        palette.danger.weak.color,
+                        crate::ui::chart::down_weak(),
                         false,
                     );
                 }

@@ -938,15 +938,15 @@ impl HeatmapPalette {
     pub fn from_theme(theme: &iced_core::Theme) -> Self {
         let palette = theme.extended_palette();
 
-        let bid = palette.success.strong.color;
+        let bid = crate::ui::chart::up_strong();
         let bid_linear = Self::srgb_to_linear([bid.r, bid.g, bid.b]);
 
-        let ask = palette.danger.strong.color;
+        let ask = crate::ui::chart::down_strong();
         let ask_linear = Self::srgb_to_linear([ask.r, ask.g, ask.b]);
 
-        let buy = palette.success.base.color;
+        let buy = crate::ui::chart::up();
         let buy_linear = Self::srgb_to_linear([buy.r, buy.g, buy.b]);
-        let sell = palette.danger.base.color;
+        let sell = crate::ui::chart::down();
         let sell_linear = Self::srgb_to_linear([sell.r, sell.g, sell.b]);
 
         let secondary = palette.secondary.base.color;

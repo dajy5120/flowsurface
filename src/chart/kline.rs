@@ -1177,7 +1177,7 @@ fn draw_footprint_kline(
     x_position: f32,
     candle_width: f32,
     kline: &Kline,
-    palette: &Extended,
+    _palette: &Extended,
 ) {
     let y_open = price_to_y(kline.open);
     let y_high = price_to_y(kline.high);
@@ -1185,9 +1185,9 @@ fn draw_footprint_kline(
     let y_close = price_to_y(kline.close);
 
     let body_color = if kline.close >= kline.open {
-        palette.success.weak.color
+        crate::ui::chart::up_weak()
     } else {
-        palette.danger.weak.color
+        crate::ui::chart::down_weak()
     };
     frame.fill_rectangle(
         Point::new(x_position - (candle_width / 8.0), y_open.min(y_close)),
@@ -1196,9 +1196,9 @@ fn draw_footprint_kline(
     );
 
     let wick_color = if kline.close >= kline.open {
-        palette.success.weak.color
+        crate::ui::chart::up_weak()
     } else {
-        palette.danger.weak.color
+        crate::ui::chart::down_weak()
     };
     let marker_line = Stroke::with_color(
         Stroke {
@@ -1220,7 +1220,7 @@ fn draw_candle_dp(
     frame: &mut canvas::Frame,
     price_to_y: impl Fn(Price) -> f32,
     candle_width: f32,
-    palette: &Extended,
+    _palette: &Extended,
     x_position: f32,
     kline: &Kline,
 ) {
@@ -1230,9 +1230,9 @@ fn draw_candle_dp(
     let y_close = price_to_y(kline.close);
 
     let body_color = if kline.close >= kline.open {
-        palette.success.base.color
+        crate::ui::chart::up()
     } else {
-        palette.danger.base.color
+        crate::ui::chart::down()
     };
     frame.fill_rectangle(
         Point::new(x_position - (candle_width / 2.0), y_open.min(y_close)),
@@ -1241,9 +1241,9 @@ fn draw_candle_dp(
     );
 
     let wick_color = if kline.close >= kline.open {
-        palette.success.base.color
+        crate::ui::chart::up()
     } else {
-        palette.danger.base.color
+        crate::ui::chart::down()
     };
     frame.fill_rectangle(
         Point::new(x_position - (candle_width / 8.0), y_high),
@@ -1292,14 +1292,14 @@ fn draw_ws_fill_markers(
         let y = price_to_y(Price::from_f32(f.px as f32));
         let (color, p0, p1, p2) = if f.side == 1 {
             (
-                palette.success.strong.color,
+                crate::ui::chart::up_strong(),
                 Point::new(x, y + gap),
                 Point::new(x - hw, y + gap + h),
                 Point::new(x + hw, y + gap + h),
             )
         } else {
             (
-                palette.danger.strong.color,
+                crate::ui::chart::down_strong(),
                 Point::new(x, y - gap),
                 Point::new(x - hw, y - gap - h),
                 Point::new(x + hw, y - gap - h),
@@ -1397,9 +1397,9 @@ fn draw_ws_combo_overlay(
     // 末点 + 当前值标签（按符号着色）
     let (lt, lv) = *vis.last().unwrap();
     let lc = if lv >= 0.0 {
-        palette.success.strong.color
+        crate::ui::chart::up_strong()
     } else {
-        palette.danger.strong.color
+        crate::ui::chart::down_strong()
     };
     frame.fill(
         &Path::circle(Point::new(interval_to_x(lt), y_of(lv)), 2.5 / scaling),
@@ -1423,7 +1423,7 @@ fn draw_ws_position_line(
     price_to_y: impl Fn(Price) -> f32,
     region: Rectangle,
     scaling: f32,
-    palette: &Extended,
+    _palette: &Extended,
 ) {
     if scaling <= f32::EPSILON {
         return;
@@ -1434,9 +1434,9 @@ fn draw_ws_position_line(
     }
     let long = pos.net_qty > 0.0;
     let col = if long {
-        palette.success.strong.color
+        crate::ui::chart::up_strong()
     } else {
-        palette.danger.strong.color
+        crate::ui::chart::down_strong()
     };
     let y = price_to_y(Price::from_f32(pos.avg_px as f32));
     // 持仓线（avg_px 处，整宽）
@@ -1463,9 +1463,9 @@ fn draw_ws_position_line(
     let upnl = pos.unrealized.unwrap_or(0.0);
     let total = upnl + pos.realized;
     let pcol = if total >= 0.0 {
-        palette.success.strong.color
+        crate::ui::chart::up_strong()
     } else {
-        palette.danger.strong.color
+        crate::ui::chart::down_strong()
     };
     let utxt = match pos.unrealized {
         Some(v) => format!("u{v:+.2}"),
@@ -1489,7 +1489,7 @@ fn draw_ws_working_orders(
     price_to_y: impl Fn(Price) -> f32,
     region: Rectangle,
     scaling: f32,
-    palette: &Extended,
+    _palette: &Extended,
 ) {
     if scaling <= f32::EPSILON {
         return;
@@ -1502,9 +1502,9 @@ fn draw_ws_working_orders(
         let y = price_to_y(Price::from_f32(o.price as f32));
         let buy = o.side == 1;
         let col = if buy {
-            palette.success.base.color
+            crate::ui::chart::up()
         } else {
-            palette.danger.base.color
+            crate::ui::chart::down()
         };
         let dashed = Stroke::with_color(
             Stroke {
@@ -1825,8 +1825,8 @@ fn draw_clusters(
                             max_cluster_qty,
                             area.bars_width,
                             cell_height,
-                            palette.success.base.color,
-                            palette.danger.base.color,
+                            crate::ui::chart::up(),
+                            crate::ui::chart::down(),
                             bar_alpha,
                             true,
                         );
@@ -1860,9 +1860,9 @@ fn draw_clusters(
                         let bar_width = (delta.abs() / max_cluster_qty) * area.bars_width;
                         if bar_width > 0.0 {
                             let color = if delta >= 0.0 {
-                                palette.success.base.color.scale_alpha(bar_alpha)
+                                crate::ui::chart::up().scale_alpha(bar_alpha)
                             } else {
-                                palette.danger.base.color.scale_alpha(bar_alpha)
+                                crate::ui::chart::down().scale_alpha(bar_alpha)
                             };
                             frame.fill_rectangle(
                                 Point::new(area.bars_left, y - (cell_height / 2.0)),
@@ -1959,7 +1959,7 @@ fn draw_clusters(
                         frame.fill_rectangle(
                             Point::new(area.bid_area_left, y - (cell_height / 2.0)),
                             Size::new(bar_width, cell_height),
-                            palette.success.base.color.scale_alpha(bar_alpha),
+                            crate::ui::chart::up().scale_alpha(bar_alpha),
                         );
                     }
                 }
@@ -1981,7 +1981,7 @@ fn draw_clusters(
                         frame.fill_rectangle(
                             Point::new(area.ask_area_right, y - (cell_height / 2.0)),
                             Size::new(-bar_width, cell_height),
-                            palette.danger.base.color.scale_alpha(bar_alpha),
+                            crate::ui::chart::down().scale_alpha(bar_alpha),
                         );
                     }
                 }
@@ -2054,9 +2054,9 @@ fn draw_clusters(
         );
 
         let delta_color = if total_delta >= Qty::zero() {
-            palette.success.base.color
+            crate::ui::chart::up()
         } else {
-            palette.danger.base.color
+            crate::ui::chart::down()
         };
 
         draw_cluster_text(
@@ -2082,7 +2082,7 @@ fn draw_imbalance_markers(
     color_scale: Option<usize>,
     ignore_zeros: bool,
     cell_height: f32,
-    palette: &Extended,
+    _palette: &Extended,
     buyside_x: f32,
     sellside_x: f32,
     rect_width: f32,
@@ -2119,7 +2119,7 @@ fn draw_imbalance_markers(
                 frame.fill_rectangle(
                     Point::new(buyside_x, y - (rect_height / 2.0)),
                     Size::new(rect_width, rect_height),
-                    palette.success.weak.color.scale_alpha(alpha),
+                    crate::ui::chart::up_weak().scale_alpha(alpha),
                 );
             }
         } else {
@@ -2132,7 +2132,7 @@ fn draw_imbalance_markers(
                 frame.fill_rectangle(
                     Point::new(sellside_x, y - (rect_height / 2.0)),
                     Size::new(rect_width, rect_height),
-                    palette.danger.weak.color.scale_alpha(alpha),
+                    crate::ui::chart::down_weak().scale_alpha(alpha),
                 );
             }
         }
@@ -2266,9 +2266,9 @@ fn draw_crosshair_tooltip(
     if let Some(kline) = kline_opt {
         let change_pct = ((kline.close - kline.open).to_f32() / kline.open.to_f32()) * 100.0;
         let change_color = if change_pct >= 0.0 {
-            palette.success.base.color
+            crate::ui::chart::up()
         } else {
-            palette.danger.base.color
+            crate::ui::chart::down()
         };
 
         let base_color = palette.background.base.text;

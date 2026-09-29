@@ -1462,7 +1462,7 @@ impl State {
                 }),
             )
             .align_y(Alignment::Center)
-            .padding(4);
+            .padding(crate::ui::metrics::space(1));
 
             if self.modal == Some(Modal::Controls) {
                 pane_grid::Controls::new(compact_control)
@@ -2124,7 +2124,7 @@ impl State {
 
                 let content: Element<_> = container(mini_list)
                     .max_width(260)
-                    .padding(16)
+                    .padding(crate::ui::metrics::space(5))
                     .style(style::chart_modal)
                     .into();
 
@@ -2958,9 +2958,9 @@ fn provenance_badge<'a>() -> Element<'a, Message> {
 
     let b = provenance::badge(crate::ws::workspace::replay_mode());
     let color = match b.tone {
-        Tone::Live => iced::Color::from_rgb(0.45, 0.72, 0.55),
-        Tone::Replay => iced::Color::from_rgb(0.55, 0.65, 0.95),
-        Tone::Warn => iced::Color::from_rgb(0.90, 0.72, 0.35),
+        Tone::Live => crate::ui::pal::ok(),
+        Tone::Replay => crate::ui::color(crate::ui::domain().env_backtest),
+        Tone::Warn => crate::ui::pal::warn(),
     };
     let chip = container(
         text(b.label).size(style::text_size::BODY).color(color).align_y(Alignment::Center),
@@ -2971,7 +2971,7 @@ fn provenance_badge<'a>() -> Element<'a, Message> {
 
     iced::widget::tooltip(
         chip,
-        container(text(b.detail).size(style::text_size::BODY)).style(style::tooltip).padding(8),
+        container(text(b.detail).size(style::text_size::BODY)).style(style::tooltip).padding(crate::ui::metrics::space(3)),
         tooltip::Position::Bottom,
     )
     .into()
@@ -2985,11 +2985,11 @@ fn link_badge<'a>(pane_id: pane_grid::Pane, venue: &str, symbol: &str) -> Elemen
 
     let l = provenance::link(crate::ws::workspace::replay_mode(), venue, symbol);
     let color = match l.tone {
-        LinkTone::Ok => iced::Color::from_rgb(0.45, 0.78, 0.55),
-        LinkTone::Running => iced::Color::from_rgb(0.55, 0.70, 1.0),
-        LinkTone::Warn => iced::Color::from_rgb(0.92, 0.74, 0.35),
-        LinkTone::Bad => iced::Color::from_rgb(0.92, 0.42, 0.40),
-        LinkTone::Idle => iced::Color::from_rgb(0.60, 0.63, 0.68),
+        LinkTone::Ok => crate::ui::pal::ok(),
+        LinkTone::Running => crate::ui::pal::info(),
+        LinkTone::Warn => crate::ui::pal::warn(),
+        LinkTone::Bad => crate::ui::pal::bad(),
+        LinkTone::Idle => crate::ui::pal::pend(),
     };
     // 始终显示完整标签（约 180px）。不用 `responsive` 按宽度收起：它恒占满剩余宽度，
     // 描边会被拉成一整条、把标题栏右侧的按钮挤走。
@@ -3004,7 +3004,7 @@ fn link_badge<'a>(pane_id: pane_grid::Pane, venue: &str, symbol: &str) -> Elemen
         });
     let el: Element<'a, Message> = if l.clickable {
         button(chip)
-            .padding(0)
+            .padding(iced::Padding::ZERO)
             .style(|_theme, _status| button::Style::default())
             .on_press(Message::PaneEvent(pane_id, Event::LinkBadgeClicked))
             .into()
@@ -3013,7 +3013,7 @@ fn link_badge<'a>(pane_id: pane_grid::Pane, venue: &str, symbol: &str) -> Elemen
     };
     iced::widget::tooltip(
         el,
-        container(text(l.detail).size(style::text_size::BODY)).style(style::tooltip).padding(8),
+        container(text(l.detail).size(style::text_size::BODY)).style(style::tooltip).padding(crate::ui::metrics::space(3)),
         tooltip::Position::Bottom,
     )
     .into()
@@ -3056,7 +3056,7 @@ fn link_group_modal<'a>(
 
     container(grid)
         .max_width(240)
-        .padding(16)
+        .padding(crate::ui::metrics::space(5))
         .style(style::chart_modal)
         .into()
 }

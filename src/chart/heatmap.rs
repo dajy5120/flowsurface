@@ -639,9 +639,9 @@ impl canvas::Program<Message> for HeatmapChart {
 
                         if trade_size > self.visual_config.trade_size_filter {
                             let color = if trade.is_sell {
-                                palette.danger.base.color
+                                crate::ui::chart::down()
                             } else {
-                                palette.success.base.color
+                                crate::ui::chart::up()
                             };
 
                             let radius = {
@@ -678,8 +678,8 @@ impl canvas::Program<Message> for HeatmapChart {
                             max_aggr_volume,
                             area_height,
                             bar_width,
-                            palette.success.base.color,
-                            palette.danger.base.color,
+                            crate::ui::chart::up(),
+                            crate::ui::chart::down(),
                             1.0,
                             false,
                         );
@@ -856,7 +856,7 @@ impl canvas::Program<Message> for HeatmapChart {
                         (TOOLTIP_WIDTH - ((col_count - 1.0) * TOOLTIP_COL_GAP_PX)) / col_count;
                     let cell_height_overlay = TOOLTIP_HEIGHT / 3.0;
 
-                    let palette = theme.extended_palette();
+                    let _palette = theme.extended_palette();
                     for (display_row_idx, &data_price_key) in
                         prices_for_display_lookup.iter().enumerate()
                     {
@@ -868,9 +868,9 @@ impl canvas::Program<Message> for HeatmapChart {
                             {
                                 let text_content = abbr_large_numbers(qty.to_f32_lossy());
                                 let color = if *is_bid {
-                                    palette.success.strong.color
+                                    crate::ui::chart::up_strong()
                                 } else {
-                                    palette.danger.strong.color
+                                    crate::ui::chart::down_strong()
                                 };
 
                                 let text_pos_x = overlay_top_left_x
@@ -922,11 +922,11 @@ impl canvas::Program<Message> for HeatmapChart {
     }
 }
 
-fn depth_color(palette: &Extended, is_bid: bool, alpha: f32) -> Color {
+fn depth_color(_palette: &Extended, is_bid: bool, alpha: f32) -> Color {
     if is_bid {
-        palette.success.strong.color.scale_alpha(alpha)
+        crate::ui::chart::up_strong().scale_alpha(alpha)
     } else {
-        palette.danger.strong.color.scale_alpha(alpha)
+        crate::ui::chart::down_strong().scale_alpha(alpha)
     }
 }
 
@@ -1030,8 +1030,8 @@ fn draw_volume_profile(
                     max_aggr_volume,
                     area_width,
                     bar_height,
-                    palette.success.weak.color,
-                    palette.danger.weak.color,
+                    crate::ui::chart::up_weak(),
+                    crate::ui::chart::down_weak(),
                     1.0,
                     true,
                 );

@@ -122,8 +122,8 @@ impl PriceInfoLabel {
 
     pub fn get_with_color(self, palette: &iced::theme::palette::Extended) -> (Price, iced::Color) {
         match self {
-            PriceInfoLabel::Up(p) => (p, palette.success.base.color),
-            PriceInfoLabel::Down(p) => (p, palette.danger.base.color),
+            PriceInfoLabel::Up(p) => (p, crate::ui::chart::up()),
+            PriceInfoLabel::Down(p) => (p, crate::ui::chart::down()),
             PriceInfoLabel::Neutral(p) => (p, palette.secondary.strong.color),
         }
     }

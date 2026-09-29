@@ -51,7 +51,7 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
             .spacing(8)
             .align_x(Alignment::Center),
         ))
-        .padding(12)
+        .padding(crate::ui::metrics::space(4))
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
@@ -69,7 +69,7 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
     .size(style::text_size::SECTION)
     .font(style::AZERET_MONO);
 
-    let mut body = column![header].spacing(10).padding(4);
+    let mut body = column![header].spacing(10).padding(crate::ui::metrics::space(1));
 
     // ── 持仓 / PnL（F3a，含本金/权益/收益率）──
     {
@@ -233,7 +233,7 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
     }
 
     container(scrollable(body))
-        .padding(12)
+        .padding(crate::ui::metrics::space(4))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -250,7 +250,7 @@ fn section<'a, M: 'a>(title: &'a str, body: impl Into<Element<'a, M>>) -> Elemen
         ]
         .spacing(6),
     )
-    .padding(10)
+    .padding(crate::ui::metrics::space(3))
     .width(Length::Fill)
     .style(style::dashboard_modal)
     .into()
@@ -274,14 +274,14 @@ fn cell<'a, M: 'a>(content: impl Into<Element<'a, M>>, width: Length) -> Element
     container(content).width(width).into()
 }
 
-/// 盈亏配色：正绿、负红、零灰。
+/// 盈亏配色：盈利 = 涨色、亏损 = 跌色、零 = 次要文字（随涨跌约定：「红涨绿跌」下盈利是红色）。
 fn pnl_color(v: f64) -> Color {
     if v > 0.0 {
-        Color::from_rgb(0.30, 0.72, 0.47)
+        crate::ui::pal::up()
     } else if v < 0.0 {
-        Color::from_rgb(0.86, 0.32, 0.34)
+        crate::ui::pal::down()
     } else {
-        Color::from_rgb(0.6, 0.6, 0.6)
+        crate::ui::pal::dim()
     }
 }
 

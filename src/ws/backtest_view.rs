@@ -10,24 +10,7 @@ use iced::widget::{column, container, row, scrollable, text};
 use iced::{Alignment, Background, Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
 
 use super::backtest_readout::BacktestResult;
-
-const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
-const C_EQUITY: Color = Color::from_rgb(0.45, 0.85, 0.5);
-const C_DD: Color = Color::from_rgb(0.9, 0.45, 0.4);
-const C_DIM: Color = Color::from_rgb(0.55, 0.55, 0.6);
-const C_GRID: Color = Color::from_rgba(0.6, 0.6, 0.65, 0.22);
-const C_AXIS: Color = Color::from_rgb(0.5, 0.5, 0.55);
-const C_POS: Color = Color::from_rgb(0.35, 0.78, 0.45);
-const C_NEG: Color = Color::from_rgb(0.88, 0.42, 0.4);
-const C_BUY: Color = Color::from_rgb(0.3, 0.85, 0.45);
-const C_SELL: Color = Color::from_rgb(0.92, 0.45, 0.42);
-const C_BLUE: Color = Color::from_rgb(0.5, 0.7, 0.95);
-const C_SECT: Color = Color::from_rgba(0.45, 0.6, 0.9, 0.16);
 // 溯源横幅：高可信（Tardis + 体检过 + 队列位置撮合）绿底，其余琥珀。
-const C_PROV_OK: Color = Color::from_rgba(0.30, 0.70, 0.45, 0.18);
-const C_PROV_WARN: Color = Color::from_rgba(0.95, 0.65, 0.20, 0.20);
-const C_PROV_OK_FG: Color = Color::from_rgb(0.45, 0.85, 0.55);
-const C_PROV_WARN_FG: Color = Color::from_rgb(0.95, 0.72, 0.35);
 
 const ML: f32 = 46.0; // 左边距（y 轴标签）
 const MB: f32 = 16.0; // 下边距（x 轴标签）
@@ -59,12 +42,12 @@ fn draw_grid(frame: &mut Frame, w: f32, h: f32, lo: f64, hi: f64) {
         let y = MT + ((hi - v) / (hi - lo)) as f32 * (h - MT - MB).max(1.0);
         frame.stroke(
             &Path::line(Point::new(ML, y), Point::new(ML + pw, y)),
-            Stroke::default().with_width(1.0).with_color(C_GRID),
+            Stroke::default().with_width(1.0).with_color(crate::ui::pal::grid()),
         );
         frame.fill_text(Text {
             content: fmt_num(v),
             position: Point::new(2.0, y - 5.0),
-            color: C_AXIS,
+            color: crate::ui::pal::axis(),
             size: iced::Pixels(9.0),
             ..Default::default()
         });
@@ -75,7 +58,7 @@ fn empty_note(frame: &mut Frame, h: f32) {
     frame.fill_text(Text {
         content: "数据不足".to_string(),
         position: Point::new(ML + 4.0, h / 2.0 - 6.0),
-        color: C_DIM,
+        color: crate::ui::pal::dim(),
         size: iced::Pixels(11.0),
         ..Default::default()
     });
@@ -121,7 +104,7 @@ impl<M> canvas::Program<M> for LineChart {
                 let by = my(bl);
                 frame.stroke(
                     &Path::line(Point::new(ML, by), Point::new(ML + pw, by)),
-                    Stroke::default().with_width(1.0).with_color(C_AXIS),
+                    Stroke::default().with_width(1.0).with_color(crate::ui::pal::axis()),
                 );
             }
             if self.fill {
@@ -151,7 +134,7 @@ impl<M> canvas::Program<M> for LineChart {
                     frame.fill_text(Text {
                         content: fmt_date(self.xt[i]),
                         position: Point::new((mx(i) - 22.0).max(0.0), h - MB + 2.0),
-                        color: C_AXIS,
+                        color: crate::ui::pal::axis(),
                         size: iced::Pixels(9.0),
                         ..Default::default()
                     });
@@ -195,13 +178,13 @@ impl<M> canvas::Program<M> for BarChart {
             let zero_y = my(0.0);
             frame.stroke(
                 &Path::line(Point::new(ML, zero_y), Point::new(ML + pw, zero_y)),
-                Stroke::default().with_width(1.0).with_color(C_AXIS),
+                Stroke::default().with_width(1.0).with_color(crate::ui::pal::axis()),
             );
             for (i, v) in self.vals.iter().enumerate() {
                 let x = ML + i as f32 * slot + (slot - bw) / 2.0;
                 let y = my(*v);
                 let (top, hh) = if y < zero_y { (y, zero_y - y) } else { (zero_y, y - zero_y) };
-                let c = self.color.unwrap_or(if *v >= 0.0 { C_POS } else { C_NEG });
+                let c = self.color.unwrap_or(if *v >= 0.0 { crate::ui::pal::up() } else { crate::ui::pal::down() });
                 frame.fill_rectangle(Point::new(x, top), iced::Size::new(bw, hh.max(1.0)), c);
             }
             // x 轴类别标签：≤12 个时逐个标，否则等距标 4 个
@@ -212,7 +195,7 @@ impl<M> canvas::Program<M> for BarChart {
                     frame.fill_text(Text {
                         content: self.labels[i].clone(),
                         position: Point::new(x, h - MB + 2.0),
-                        color: C_AXIS,
+                        color: crate::ui::pal::axis(),
                         size: iced::Pixels(8.5),
                         ..Default::default()
                     });
@@ -259,19 +242,19 @@ impl<M> canvas::Program<M> for PriceChart {
                     p.line_to(Point::new(mx(self.t[i]), my(self.v[i])));
                 }
             });
-            frame.stroke(&line, Stroke::default().with_width(1.3).with_color(C_BLUE));
+            frame.stroke(&line, Stroke::default().with_width(1.3).with_color(crate::ui::pal::info()));
             for f in &self.fills {
                 let (ts, side, px) = (f[0], f[1], f[2]);
                 let (x, y, s) = (mx(ts), my(px), 3.5_f32);
                 let (c, tri) = if side < 1.5 {
-                    (C_BUY, Path::new(|p| {
+                    (crate::ui::pal::up(), Path::new(|p| {
                         p.move_to(Point::new(x, y - s));
                         p.line_to(Point::new(x - s, y + s));
                         p.line_to(Point::new(x + s, y + s));
                         p.close();
                     }))
                 } else {
-                    (C_SELL, Path::new(|p| {
+                    (crate::ui::pal::down(), Path::new(|p| {
                         p.move_to(Point::new(x, y + s));
                         p.line_to(Point::new(x - s, y - s));
                         p.line_to(Point::new(x + s, y - s));
@@ -285,7 +268,7 @@ impl<M> canvas::Program<M> for PriceChart {
                 frame.fill_text(Text {
                     content: fmt_date(self.t[i] as i64),
                     position: Point::new((mx(self.t[i]) - 22.0).max(0.0), h - MB + 2.0),
-                    color: C_AXIS,
+                    color: crate::ui::pal::axis(),
                     size: iced::Pixels(9.0),
                     ..Default::default()
                 });
@@ -313,7 +296,7 @@ fn bar_chart<'a, M: 'a>(vals: Vec<f64>, labels: Vec<String>, color: Option<Color
 
 fn section<'a, M: 'a>(title: &str, c: Color, body: impl Into<Element<'a, M>>) -> Element<'a, M> {
     column![
-        text(title.to_string()).size(13).color(c),
+        text(title.to_string()).size(crate::ui::text::s_emph()).color(c),
         container(body).width(Length::Fill).style(crate::style::dashboard_modal),
     ]
     .spacing(3)
@@ -322,11 +305,11 @@ fn section<'a, M: 'a>(title: &str, c: Color, body: impl Into<Element<'a, M>>) ->
 
 /// 表里的子节标题（分层：浅蓝底 + 粗体感）。
 fn subheader<'a, M: 'a>(s: &str) -> Element<'a, M> {
-    container(text(s.to_string()).size(11).color(C_HEAD))
+    container(text(s.to_string()).size(crate::ui::text::s_small()).color(crate::ui::pal::head()))
         .width(Length::Fill)
-        .padding([2, 6])
+        .padding(crate::ui::metrics::pad2(0, 2))
         .style(|_t: &Theme| container::Style {
-            background: Some(Background::Color(C_SECT)),
+            background: Some(Background::Color(crate::ui::pal::band())),
             ..Default::default()
         })
         .into()
@@ -334,11 +317,11 @@ fn subheader<'a, M: 'a>(s: &str) -> Element<'a, M> {
 
 fn kv<'a, M: 'a>(k: &str, v: &str) -> Element<'a, M> {
     row![
-        container(text(k.to_string()).size(10).color(C_DIM)).width(Length::FillPortion(5)),
-        text(v.to_string()).size(10).font(crate::style::AZERET_MONO),
+        container(text(k.to_string()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())).width(Length::FillPortion(5)),
+        text(v.to_string()).size(crate::ui::text::s_meta()).font(crate::style::AZERET_MONO),
     ]
     .spacing(8)
-    .padding([0, 6])
+    .padding(crate::ui::metrics::pad2(0, 2))
     .into()
 }
 
@@ -357,13 +340,13 @@ fn table_card<'a, M: 'a>(title: &str, sections: Vec<(String, &Vec<Vec<String>>)>
             ));
         }
     }
-    section(title, C_HEAD, col)
+    section(title, crate::ui::pal::head(), col)
 }
 
 /// 月度收益热力图：年×月 网格，红负绿正、强度按幅值，格内显 %。
 fn heatmap<'a, M: 'a>(m: &super::backtest_readout::Monthly) -> Element<'a, M> {
     if m.z.is_empty() || m.months.is_empty() {
-        return container(text("数据不足").size(11).color(C_DIM)).padding(8).into();
+        return container(text("数据不足").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())).padding(crate::ui::metrics::space(3)).into();
     }
     let maxabs = m
         .z
@@ -375,12 +358,12 @@ fn heatmap<'a, M: 'a>(m: &super::backtest_readout::Monthly) -> Element<'a, M> {
     let mut head = row![container(text("")).width(Length::Fixed(40.0))].spacing(2);
     for mon in &m.months {
         head = head.push(
-            container(text(mon.clone()).size(9).color(C_DIM)).width(cell_w).align_x(Alignment::Center),
+            container(text(mon.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())).width(cell_w).align_x(Alignment::Center),
         );
     }
     let mut grid = column![head].spacing(2);
     for (yi, year) in m.years.iter().enumerate() {
-        let mut r = row![container(text(year.clone()).size(10).color(C_DIM))
+        let mut r = row![container(text(year.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()))
             .width(Length::Fixed(40.0))
             .align_y(Alignment::Center)]
         .spacing(2);
@@ -391,16 +374,16 @@ fn heatmap<'a, M: 'a>(m: &super::backtest_readout::Monthly) -> Element<'a, M> {
                 Some(v) => {
                     let inten = (v.abs() / maxabs).clamp(0.0, 1.0) as f32;
                     let c = if v >= 0.0 {
-                        Color::from_rgba(0.3, 0.75, 0.45, 0.18 + 0.6 * inten)
+                        crate::ui::pal::alpha(crate::ui::pal::up(), 0.18 + 0.6 * inten)
                     } else {
-                        Color::from_rgba(0.85, 0.4, 0.4, 0.18 + 0.6 * inten)
+                        crate::ui::pal::alpha(crate::ui::pal::down(), 0.18 + 0.6 * inten)
                     };
                     (Some(c), format!("{v:.2}"))
                 }
                 None => (None, String::new()),
             };
             r = r.push(
-                container(text(label).size(9))
+                container(text(label).size(crate::ui::text::s_meta()))
                     .width(cell_w)
                     .height(Length::Fixed(20.0))
                     .align_x(Alignment::Center)
@@ -413,7 +396,7 @@ fn heatmap<'a, M: 'a>(m: &super::backtest_readout::Monthly) -> Element<'a, M> {
         }
         grid = grid.push(r);
     }
-    container(scrollable(grid)).padding(6).into()
+    container(scrollable(grid)).padding(crate::ui::metrics::space(2)).into()
 }
 
 /// 渲染回测结果：仿官方 tearsheet 版式（表在上、图按序在下）。
@@ -431,7 +414,7 @@ fn progress_bar<'a, M: 'a>(pct: f32) -> Element<'a, M> {
             .width(Length::Fixed((W * frac).max(1.0)))
             .height(Length::Fixed(10.0))
             .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(C_EQUITY)),
+                background: Some(Background::Color(crate::ui::pal::up())),
                 border: iced::border::rounded(3),
                 ..Default::default()
             }),
@@ -439,7 +422,7 @@ fn progress_bar<'a, M: 'a>(pct: f32) -> Element<'a, M> {
     .width(Length::Fixed(W))
     .height(Length::Fixed(10.0))
     .style(|_: &Theme| container::Style {
-        background: Some(Background::Color(C_SECT)),
+        background: Some(Background::Color(crate::ui::pal::band())),
         border: iced::border::rounded(3),
         ..Default::default()
     })
@@ -462,22 +445,26 @@ fn provenance_banner<'a, M: 'a>(r: &BacktestResult) -> Element<'a, M> {
             true,
         ),
     };
-    let (bg, fg) = if low { (C_PROV_WARN, C_PROV_WARN_FG) } else { (C_PROV_OK, C_PROV_OK_FG) };
+    let (bg, fg) = if low {
+        (crate::ui::pal::alpha(crate::ui::pal::warn(), 0.20), crate::ui::pal::warn())
+    } else {
+        (crate::ui::pal::alpha(crate::ui::pal::ok(), 0.18), crate::ui::pal::ok())
+    };
     let flags = r
         .data_provenance
         .as_ref()
         .map(|p| p.quality_flags.clone())
         .unwrap_or_default();
     let mut col = column![
-        text(format!("{} {line1}", if low { "⚠" } else { "✓" })).size(12).color(fg),
-        text(line2).size(10).color(C_DIM),
+        text(format!("{} {line1}", if low { "⚠" } else { "✓" })).size(crate::ui::text::s_body()).color(fg),
+        text(line2).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
     ]
     .spacing(2);
     if !flags.is_empty() {
-        col = col.push(text(format!("体检标记：{}", flags.join("  "))).size(10).color(fg));
+        col = col.push(text(format!("体检标记：{}", flags.join("  "))).size(crate::ui::text::s_meta()).color(fg));
     }
     container(col)
-        .padding(8)
+        .padding(crate::ui::metrics::space(3))
         .width(Length::Fill)
         .style(move |_: &Theme| container::Style {
             background: Some(Background::Color(bg)),
@@ -500,7 +487,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         let run = super::active_run::current().map(|a| a.run_id).unwrap_or_default();
         let p = super::backtest_readout::progress_snapshot();
         // 进度属于**本次** run 才画——上一次残留的百分比比不画更误导。
-        let bar: Element<'a, M> = if p.run_id == run && run != "" {
+        let bar: Element<'a, M> = if p.run_id == run && !run.is_empty() {
             let clock = chrono::DateTime::from_timestamp((p.clock_ms / 1000) as i64, 0)
                 .map(|d| d.format("%m-%d %H:%M:%S").to_string())
                 .unwrap_or_else(|| "—".into());
@@ -510,27 +497,27 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
                     "{:.1}%   回测时钟 {clock}   已处理 {} 笔成交",
                     p.pct, p.ticks
                 ))
-                .size(11)
-                .color(C_DIM),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::dim()),
             ]
             .spacing(6)
             .align_x(Alignment::Center)
             .into()
         } else {
-            text("正在装载数据…（进度在引擎开跑后出现）").size(11).color(C_DIM).into()
+            text("正在装载数据…（进度在引擎开跑后出现）").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()).into()
         };
         return container(iced::widget::center(
             column![
-                text("回测进行中…").size(16).color(C_HEAD),
-                text(format!("run {run}")).size(12).color(C_DIM),
+                text("回测进行中…").size(crate::ui::text::s_section()).color(crate::ui::pal::head()),
+                text(format!("run {run}")).size(crate::ui::text::s_body()).color(crate::ui::pal::dim()),
                 bar,
-                text("结果在回测跑完后写入 result.json，这里随即刷新").size(11).color(C_DIM),
-                text("过程中的持仓与收益看「订单」面板，行情看 K 线图").size(11).color(C_DIM),
+                text("结果在回测跑完后写入 result.json，这里随即刷新").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
+                text("过程中的持仓与收益看「订单」面板，行情看 K 线图").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
             ]
             .spacing(8)
             .align_x(Alignment::Center),
         ))
-        .padding(12)
+        .padding(crate::ui::metrics::space(4))
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
@@ -539,17 +526,17 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     if !r.loaded {
         return container(iced::widget::center(
             column![
-                text("回测结果").size(16).color(C_HEAD),
-                text("暂无回测结果").size(13),
-                text("先跑一次回测：python strategies/quickstart.py").size(11).color(C_DIM),
+                text("回测结果").size(crate::ui::text::s_section()).color(crate::ui::pal::head()),
+                text("暂无回测结果").size(crate::ui::text::s_emph()),
+                text("先跑一次回测：python strategies/quickstart.py").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
                 text(format!("读取目录：{}", super::backtest_readout::out_dir_display()))
-                    .size(11)
-                    .color(C_DIM),
+                    .size(crate::ui::text::s_small())
+                    .color(crate::ui::pal::dim()),
             ]
             .spacing(8)
             .align_x(Alignment::Center),
         ))
-        .padding(12)
+        .padding(crate::ui::metrics::space(4))
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
@@ -557,7 +544,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
 
     let m = &r.meta;
     let header = column![
-        text(format!("回测结果 · {} · {}", m.strategy, m.symbol)).size(16).color(C_HEAD),
+        text(format!("回测结果 · {} · {}", m.strategy, m.symbol)).size(crate::ui::text::s_section()).color(crate::ui::pal::head()),
         {
             // run id 里编着日期，据此补「距今多久」——只印 run id 时，
             // 6 周前的结果和刚跑完的看起来一模一样（docs/20 §27）
@@ -568,8 +555,8 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
                 m.run,
                 super::staleness::suffix(&m.run)
             ))
-            .size(10)
-            .color(if stale { super::staleness::C_STALE } else { C_DIM })
+            .size(crate::ui::text::s_meta())
+            .color(if stale { super::staleness::C_STALE } else { crate::ui::pal::dim() })
         },
     ]
     .spacing(2);
@@ -595,16 +582,16 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
 
     let charts = column![
         // 报告顺序：equity → drawdown → monthly → distribution → rolling_sharpe → yearly
-        section("收益曲线 Equity（资金）", C_EQUITY, line_chart(r.equity.v.clone(), r.equity.t.clone(), C_EQUITY, equity_base, false, 200.0)),
-        section("回撤 Drawdown %", C_DD, line_chart(r.drawdown.v.clone(), r.drawdown.t.clone(), C_DD, Some(0.0), true, 130.0)),
-        section("月度收益 Monthly Returns %（年×月）", C_HEAD, heatmap(&r.monthly)),
-        section("收益分布 Distribution", C_HEAD, bar_chart(r.distribution.counts.iter().map(|c| *c as f64).collect(), dist_labels, Some(C_BLUE), 120.0)),
-        section("滚动夏普 Rolling Sharpe（60 期）", C_BLUE, line_chart(r.rolling_sharpe.v.clone(), r.rolling_sharpe.t.clone(), C_BLUE, Some(0.0), false, 120.0)),
-        section("年度收益 Yearly Returns %", C_POS, bar_chart(r.yearly.v.iter().map(|o| o.unwrap_or(0.0)).collect(), yearly_labels, None, 120.0)),
+        section("收益曲线 Equity（资金）", crate::ui::pal::up(), line_chart(r.equity.v.clone(), r.equity.t.clone(), crate::ui::pal::up(), equity_base, false, 200.0)),
+        section("回撤 Drawdown %", crate::ui::pal::down(), line_chart(r.drawdown.v.clone(), r.drawdown.t.clone(), crate::ui::pal::down(), Some(0.0), true, 130.0)),
+        section("月度收益 Monthly Returns %（年×月）", crate::ui::pal::head(), heatmap(&r.monthly)),
+        section("收益分布 Distribution", crate::ui::pal::head(), bar_chart(r.distribution.counts.iter().map(|c| *c as f64).collect(), dist_labels, Some(crate::ui::pal::info()), 120.0)),
+        section("滚动夏普 Rolling Sharpe（60 期）", crate::ui::pal::info(), line_chart(r.rolling_sharpe.v.clone(), r.rolling_sharpe.t.clone(), crate::ui::pal::info(), Some(0.0), false, 120.0)),
+        section("年度收益 Yearly Returns %", crate::ui::pal::up(), bar_chart(r.yearly.v.iter().map(|o| o.unwrap_or(0.0)).collect(), yearly_labels, None, 120.0)),
         // 附加（官方默认报告无此图，cockpit 额外提供）
         section(
             &format!("价格 & 成交 Price & Fills（{n_fills} 笔，附加）"),
-            C_BLUE,
+            crate::ui::pal::info(),
             Canvas::new(PriceChart {
                 t: r.price.t.iter().map(|x| *x as f64).collect(),
                 v: r.price.v.clone(),
@@ -617,8 +604,8 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     ]
     .spacing(10);
 
-    let body = column![header, run_table, stats_table, charts].spacing(12).padding(4);
-    container(scrollable(body)).padding(12).width(Length::Fill).height(Length::Fill).into()
+    let body = column![header, run_table, stats_table, charts].spacing(12).padding(crate::ui::metrics::space(1));
+    container(scrollable(body)).padding(crate::ui::metrics::space(4)).width(Length::Fill).height(Length::Fill).into()
 }
 
 #[cfg(test)]

@@ -166,9 +166,9 @@ where
                 }
                 BarClass::Overlay { overlay } => {
                     let base_color = if overlay >= 0.0 {
-                        palette.success.base.color
+                        crate::ui::chart::up()
                     } else {
-                        palette.danger.base.color
+                        crate::ui::chart::down()
                     };
 
                     frame.fill_rectangle(

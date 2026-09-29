@@ -461,9 +461,9 @@ impl<'a> canvas::Program<Message> for OverlayCanvas<'a> {
 
                     let qty: f32 = (qty_u32 as f32) / self.qty_scale;
                     let color = if is_bid {
-                        palette.success.strong.color
+                        crate::ui::chart::up_strong()
                     } else {
-                        palette.danger.strong.color
+                        crate::ui::chart::down_strong()
                     };
 
                     frame.fill_text(canvas::Text {

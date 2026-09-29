@@ -391,7 +391,7 @@ impl canvas::Program<Message> for TimeAndSales {
                                     width: buy_bar_width,
                                     height: stacked_bar_h,
                                 },
-                                palette.success.weak.color,
+                                crate::ui::chart::up_weak(),
                             );
 
                             frame.fill_rectangle(
@@ -403,7 +403,7 @@ impl canvas::Program<Message> for TimeAndSales {
                                     width: sell_bar_width,
                                     height: stacked_bar_h,
                                 },
-                                palette.danger.weak.color,
+                                crate::ui::chart::down_weak(),
                             );
                         };
 
@@ -515,9 +515,9 @@ impl canvas::Program<Message> for TimeAndSales {
                 }
 
                 let bg_color = if trade.is_sell {
-                    palette.danger.weak.color
+                    crate::ui::chart::down_weak()
                 } else {
-                    palette.success.weak.color
+                    crate::ui::chart::up_weak()
                 };
 
                 let bg_color_alpha = if max_filtered_qty_f32 > 0.0 {

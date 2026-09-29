@@ -12,11 +12,13 @@
 //! 取值函数（[`core`]、[`domain`]、[`density`]）都是读全局缓存，渲染线程里随便调，
 //! 不做 IO。
 
+pub mod chart;
 pub mod command;
 pub mod fmt;
 pub mod gallery;
 pub mod grid;
 pub mod metrics;
+pub mod pal;
 pub mod shell;
 pub mod text;
 pub mod theme;

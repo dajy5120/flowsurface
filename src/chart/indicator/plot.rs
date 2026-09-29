@@ -678,7 +678,7 @@ impl PlotTooltip {
 
         for (text, is_danger) in self.kind.segments() {
             let color = if is_danger {
-                palette.danger.base.color
+                crate::ui::chart::down()
             } else {
                 palette.background.base.text
             };
@@ -709,7 +709,7 @@ impl PlotTooltip {
 
         for (text, is_danger) in self.kind.segments() {
             let color = if is_danger {
-                palette.danger.base.color
+                crate::ui::chart::down()
             } else {
                 palette.background.base.text
             };

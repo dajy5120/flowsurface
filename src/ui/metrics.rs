@@ -85,3 +85,9 @@ pub fn shadow(e: Elevation) -> Shadow {
     let a = if super::theme_id().is_dark() { a * 2.5 } else { a };
     Shadow { color: Color { a, ..Color::BLACK }, offset: Vector::new(0.0, y), blur_radius: blur }
 }
+
+/// 两值内边距（纵, 横），参数是间距阶梯的下标（space.0..space.8 = 2 4 6 8 12 16 24 32 48）。
+/// 旧代码 `.padding([2, 6])` 迁移为 `pad2(0, 2)`。
+pub fn pad2(v: usize, h: usize) -> iced::Padding {
+    iced::Padding::from([space(v), space(h)])
+}

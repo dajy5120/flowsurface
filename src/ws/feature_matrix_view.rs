@@ -27,38 +27,29 @@ use super::feature_matrix::{
 };
 use super::feature_matrix_readout::{self as ro, FeatureRow, Matrix, Slot};
 
-const C_HEAD: Color = Color::from_rgb(0.70, 0.80, 0.95);
-const C_DIM: Color = Color::from_rgb(0.50, 0.54, 0.60);
-const C_TXT: Color = Color::from_rgb(0.84, 0.87, 0.92);
-const C_OK: Color = Color::from_rgb(0.30, 0.80, 0.48);
-const C_BAD: Color = Color::from_rgb(0.90, 0.38, 0.38);
-const C_WARN: Color = Color::from_rgb(0.90, 0.72, 0.32);
-/// 待实现：比 `C_DIM` 更暗。它既不是好也不是坏，是「还没做」。
-const C_PEND: Color = Color::from_rgb(0.42, 0.44, 0.50);
-
 fn cell<'a>(t: String, w: f32, c: Color) -> Element<'a, Msg> {
-    container(text(t).size(11).color(c)).width(Length::Fixed(w)).into()
+    container(text(t).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
 }
 
 /// 数值单元右对齐——右对齐后小数点纵向成列，一眼能比大小。
 fn numc<'a>(t: String, w: f32, c: Color) -> Element<'a, Msg> {
-    container(text(t).size(11).color(c))
+    container(text(t).size(crate::ui::text::s_small()).color(c))
         .width(Length::Fixed(w))
         .align_x(iced::Alignment::End)
         .into()
 }
 
 fn dim<'a>(t: String) -> Element<'a, Msg> {
-    text(t).size(10).color(C_DIM).into()
+    text(t).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()).into()
 }
 
 fn sec<'a>(t: String) -> Element<'a, Msg> {
-    text(t).size(13).color(C_HEAD).into()
+    text(t).size(crate::ui::text::s_emph()).color(crate::ui::pal::head()).into()
 }
 
 fn chip<'a>(label: String, active: bool, msg: Msg) -> Element<'a, Msg> {
-    button(text(label).size(11))
-        .padding([2, 7])
+    button(text(label).size(crate::ui::text::s_small()))
+        .padding(crate::ui::metrics::pad2(0, 2))
         .style(move |t, st| crate::style::button::modifier(t, st, active))
         .on_press(msg)
         .into()
@@ -85,12 +76,12 @@ fn num(v: Option<f64>) -> String {
 /// 前者是「等一会儿就有」，后者是「这个市场永远没有」。
 fn qcolor(q: &str) -> Color {
     match q {
-        "GOOD" => C_OK,
-        "DEGRADED" => C_WARN,
-        "STALE" => Color::from_rgb(0.80, 0.55, 0.30),
-        "INVALID" => C_BAD,
-        "UNAVAILABLE" => C_PEND,
-        _ => C_TXT,
+        "GOOD" => crate::ui::pal::ok(),
+        "DEGRADED" => crate::ui::pal::warn(),
+        "STALE" => crate::ui::pal::stale(),
+        "INVALID" => crate::ui::pal::bad(),
+        "UNAVAILABLE" => crate::ui::pal::pend(),
+        _ => crate::ui::pal::txt(),
     }
 }
 
@@ -99,19 +90,20 @@ fn qcolor(q: &str) -> Color {
 /// 串必须与引擎的 `DataLayer::as_str()` **逐字一致**。第一版我按直觉写成了
 /// `trades` / `derivative` / `own_orders`（小写蛇形），而引擎写的是
 /// `Trades` / `Derivative` / `OwnOrders`——后果是真实快照里 57 个 slot 的徽标
-/// 全落到兜底的 `C_DIM` 上，面板看起来完全正常，只是那一列不再区分数据层。
+/// 全落到兜底的 `crate::ui::pal::dim()` 上，面板看起来完全正常，只是那一列不再区分数据层。
 /// 主仓 `tests/panel_contract.rs` 把这份列表与引擎词表对拍，
 /// 本文件的 `数据层徽标覆盖引擎的全部词表` 从另一侧守同一件事。
 fn layer_color(l: &str) -> Color {
     match l {
-        "BBO" => Color::from_rgb(0.55, 0.75, 0.95),
-        "Trades" => Color::from_rgb(0.40, 0.85, 0.60),
-        "L2" => Color::from_rgb(0.85, 0.72, 0.95),
-        "L3" => Color::from_rgb(0.95, 0.60, 0.70),
-        "Derivative" => Color::from_rgb(0.95, 0.70, 0.45),
-        "OwnOrders" => Color::from_rgb(0.60, 0.90, 0.90),
-        "Derived" => Color::from_rgb(0.72, 0.74, 0.80),
-        _ => C_DIM,
+        // 七个数据层 = 领域包的图表系列色（感知均匀、色弱友好，docs/35 §4.2）
+        "BBO" => crate::ui::pal::series(0),
+        "Trades" => crate::ui::pal::series(6),
+        "L2" => crate::ui::pal::series(5),
+        "L3" => crate::ui::pal::series(7),
+        "Derivative" => crate::ui::pal::series(4),
+        "OwnOrders" => crate::ui::pal::series(3),
+        "Derived" => crate::ui::pal::series(1),
+        _ => crate::ui::pal::dim(),
     }
 }
 
@@ -129,7 +121,7 @@ const ENGINE_LAYERS: [&str; 7] = [
 fn layer_badges<'a>(s: &Slot) -> Element<'a, Msg> {
     let mut r = row![].spacing(3);
     for l in &s.inputs {
-        r = r.push(text(l.clone()).size(9).color(layer_color(l)));
+        r = r.push(text(l.clone()).size(crate::ui::text::s_meta()).color(layer_color(l)));
     }
     r.into()
 }
@@ -198,16 +190,9 @@ fn line_style(c: Color) -> iced::widget::rule::Style {
     }
 }
 
-/// 表体的列间竖线：浅色；`group` = 窗口组边界（稍深，一眼分组）。
-const C_BODY_LINE: Color = Color::from_rgba(0.72, 0.78, 0.88, 0.16);
-const C_BODY_GROUP: Color = Color::from_rgba(0.72, 0.78, 0.88, 0.38);
-/// 表头的竖线 / 横线：明显的亮色；窗口组边界更亮。
-const C_HEAD_LINE: Color = Color::from_rgba(0.78, 0.84, 0.95, 0.62);
-const C_HEAD_GROUP: Color = Color::from_rgba(0.85, 0.90, 1.0, 0.95);
-
 /// 表体里的分隔带：每列之间一条浅色竖线；`group` = 窗口组边界（稍深）。
 fn sep<'a>(group: bool) -> Element<'a, Msg> {
-    let c = if group { C_BODY_GROUP } else { C_BODY_LINE };
+    let c = if group { crate::ui::pal::group_line() } else { crate::ui::pal::line() };
     container(iced::widget::rule::vertical(1.0).style(move |_t: &iced::Theme| line_style(c)))
         .width(Length::Fixed(SEP))
         .height(Length::Fill)
@@ -217,7 +202,7 @@ fn sep<'a>(group: bool) -> Element<'a, Msg> {
 
 /// 表头分隔线的样式：比表体的线明显得多；`strong` = 窗口组边界（更亮）。
 fn head_rule(_t: &iced::Theme, strong: bool) -> iced::widget::rule::Style {
-    line_style(if strong { C_HEAD_GROUP } else { C_HEAD_LINE })
+    line_style(if strong { crate::ui::pal::group_line() } else { crate::ui::pal::head_line() })
 }
 
 /// 表头里的竖线（不可拖，用在上层的窗口标题行）。
@@ -307,8 +292,6 @@ fn quality_word(s: &Slot) -> String {
 }
 
 /// 涨（绿）/ 跌（红）。与质量色条的绿红是两件事：箭头只说「这个数比 N 秒前变大 / 变小」，不说好坏。
-const C_UP: Color = Color::from_rgb(0.30, 0.82, 0.45);
-const C_DOWN: Color = Color::from_rgb(0.93, 0.36, 0.34);
 /// 完整模式里箭头那一小列的宽度：够画「启用的档数」个箭头。
 fn arrow_width(levels: usize) -> f32 {
     10.0 + 7.0 * levels.max(1) as f32
@@ -349,9 +332,9 @@ impl Trend {
 fn arrow(level: i8) -> (String, Color) {
     let n = usize::from(level.unsigned_abs());
     match level.signum() {
-        1 => ("▲".repeat(n), C_UP),
-        -1 => ("▼".repeat(n), C_DOWN),
-        _ => (String::new(), C_DIM),
+        1 => ("▲".repeat(n), crate::ui::pal::up()),
+        -1 => ("▼".repeat(n), crate::ui::pal::down()),
+        _ => (String::new(), crate::ui::pal::dim()),
     }
 }
 
@@ -376,7 +359,7 @@ fn slot_tip(s: &Slot) -> String {
 fn with_tip<'a>(e: impl Into<Element<'a, Msg>>, tip: String) -> Element<'a, Msg> {
     iced::widget::tooltip(
         e,
-        container(text(tip).size(11)).style(crate::style::tooltip).padding(6),
+        container(text(tip).size(crate::ui::text::s_small())).style(crate::style::tooltip).padding(crate::ui::metrics::space(2)),
         iced::widget::tooltip::Position::Top,
     )
     .into()
@@ -390,16 +373,16 @@ fn heat(x: f64) -> Option<Color> {
     }
     let a = (0.10 + 0.50 * x.abs()) as f32;
     Some(if x > 0.0 {
-        Color::from_rgba(0.92, 0.32, 0.30, a)
+        crate::ui::pal::alpha(crate::ui::pal::bad(), a)
     } else {
-        Color::from_rgba(0.30, 0.55, 0.95, a)
+        crate::ui::pal::alpha(crate::ui::pal::accent(), a)
     })
 }
 
 /// 质量色条的颜色（没启用 / 待实现的用最暗的灰）。
 fn bar_color(s: &Slot) -> Color {
     if s.not_implemented() || s.disabled() {
-        C_PEND.scale_alpha(0.5)
+        crate::ui::pal::pend().scale_alpha(0.5)
     } else {
         qcolor(&s.quality)
     }
@@ -408,9 +391,9 @@ fn bar_color(s: &Slot) -> Color {
 /// 值的颜色：良好用正文色，其余按质量；没启用 / 待实现的压暗。
 fn value_color(s: &Slot) -> Color {
     if s.not_implemented() || s.disabled() {
-        C_PEND
+        crate::ui::pal::pend()
     } else if s.quality == "GOOD" {
-        C_TXT
+        crate::ui::pal::txt()
     } else {
         qcolor(&s.quality)
     }
@@ -420,15 +403,15 @@ fn value_color(s: &Slot) -> Color {
 fn row_status(r: &FeatureRow<'_>) -> (String, Color) {
     let h = r.head();
     if h.not_implemented() {
-        return ("已登记·待实现".into(), C_PEND);
+        return ("已登记·待实现".into(), crate::ui::pal::pend());
     }
     if !r.enabled() {
-        return ("未启用".into(), C_PEND);
+        return ("未启用".into(), crate::ui::pal::pend());
     }
     let n = r.slots.len();
     let good = r.slots.iter().filter(|s| s.quality == "GOOD").count();
     if good == n {
-        return ("GOOD".into(), C_OK);
+        return ("GOOD".into(), crate::ui::pal::ok());
     }
     // 最要紧的：INVALID > STALE > DEGRADED > UNAVAILABLE
     let rank = |q: &str| match q {
@@ -591,46 +574,46 @@ fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, w: &Width
                 fcell(nowrap(a, 10.0, c), w.arrow, false)
             },
             sep(false),
-            fcell(nowrap(num(s.z), 11.0, C_DIM), w.z, true),
+            fcell(nowrap(num(s.z), 11.0, crate::ui::pal::dim()), w.z, true),
             sep(false),
-            fcell(nowrap(pct_text(s.percentile), 11.0, C_DIM), w.pct, true),
+            fcell(nowrap(pct_text(s.percentile), 11.0, crate::ui::pal::dim()), w.pct, true),
         ]
         .height(Length::Fill)
         .into(),
         TableMode::Pivot => {
             let (t, bg, c) = match metric {
-                Metric::Z => (z_text(s.z), s.z.and_then(|z| heat(z / 3.0)), C_TXT),
+                Metric::Z => (z_text(s.z), s.z.and_then(|z| heat(z / 3.0)), crate::ui::pal::txt()),
                 Metric::Pct => (
                     pct_text(s.percentile),
                     s.percentile.and_then(|p| heat((p - 0.5) * 2.0)),
-                    C_TXT,
+                    crate::ui::pal::txt(),
                 ),
                 Metric::Value => (num(s.value), None, value_color(s)),
-                Metric::Quality => (quality_word(s), Some(bar_color(s).scale_alpha(0.28)), C_TXT),
+                Metric::Quality => (quality_word(s), Some(bar_color(s).scale_alpha(0.28)), crate::ui::pal::txt()),
                 Metric::Change => {
                     let (a, c) = arrow(level);
                     // 档位越高底色越深
                     let depth = f32::from(level.unsigned_abs()) / tr.ths.len().max(1) as f32;
                     let bg = match level.signum() {
-                        1 => Some(C_UP.scale_alpha(0.08 + 0.32 * depth)),
-                        -1 => Some(C_DOWN.scale_alpha(0.08 + 0.32 * depth)),
+                        1 => Some(crate::ui::pal::up().scale_alpha(0.08 + 0.32 * depth)),
+                        -1 => Some(crate::ui::pal::down().scale_alpha(0.08 + 0.32 * depth)),
                         _ => None,
                     };
                     (
                         dz.map_or_else(|| "—".into(), |d| format!("{a} {d:+.2}").trim().to_string()),
                         bg,
-                        if level == 0 { C_DIM } else { c },
+                        if level == 0 { crate::ui::pal::dim() } else { c },
                     )
                 }
             };
             let muted = s.not_implemented() || s.disabled();
             tinted(
-                container(nowrap(t, 11.0, if muted { C_PEND } else { c }))
+                container(nowrap(t, 11.0, if muted { crate::ui::pal::pend() } else { c }))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .align_x(iced::Alignment::End)
                     .align_y(iced::Alignment::Center)
-                    .padding([0, 6])
+                    .padding(crate::ui::metrics::pad2(0, 2))
                     .clip(true),
                 bg,
             )
@@ -648,7 +631,7 @@ fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, w: &Width
 
 /// 固定表头（可拖分隔线调列宽）。完整模式两层：上层窗口标签横跨一组，下层 值 / z / 分位。
 fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric, w: &Widths) -> Element<'a, Msg> {
-    let h = |t: &str| nowrap(t.to_string(), 10.0, C_DIM);
+    let h = |t: &str| nowrap(t.to_string(), 10.0, crate::ui::pal::dim());
     let gw = w.group(mode);
     let mut b = column![];
     if mode == TableMode::Full {
@@ -662,7 +645,7 @@ fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric, w: &Widths) -
         for win in wins {
             top = top
                 .push(
-                    container(nowrap(format!("窗口 {}", window_label(*win)), 10.0, C_HEAD))
+                    container(nowrap(format!("窗口 {}", window_label(*win)), 10.0, crate::ui::pal::head()))
                         .width(Length::Fixed(gw))
                         .height(Length::Fill)
                         .align_x(iced::Alignment::Center)
@@ -696,12 +679,12 @@ fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric, w: &Widths) -
             TableMode::Pivot => {
                 r = r
                     .push(
-                        container(nowrap(format!("{} · {}", window_label(*win), metric.label()), 10.0, C_HEAD))
+                        container(nowrap(format!("{} · {}", window_label(*win), metric.label()), 10.0, crate::ui::pal::head()))
                             .width(Length::Fixed(gw))
                             .height(Length::Fill)
                             .align_x(iced::Alignment::End)
                             .align_y(iced::Alignment::Center)
-                            .padding([0, 6])
+                            .padding(crate::ui::metrics::pad2(0, 2))
                             .clip(true),
                     )
                     .push(grip(true, Col::Cell, w.cell));
@@ -718,7 +701,7 @@ fn table_header<'a>(wins: &[u32], mode: TableMode, metric: Metric, w: &Widths) -
     let total = w.total(mode, wins.len());
     b = b.push(r).push(head_hline(total));
     iced::widget::mouse_area(
-        tinted(b, Some(Color::from_rgba(0.55, 0.65, 0.85, 0.10))).width(Length::Fixed(total)),
+        tinted(b, Some(crate::ui::pal::card_bg())).width(Length::Fixed(total)),
     )
     .on_move(|p| Msg::HeaderMove(p.x))
     .on_release(Msg::DragEnd)
@@ -740,9 +723,9 @@ fn feature_line<'a>(
     let h = r.head();
     let muted = h.not_implemented() || !r.enabled();
     let mut line = row![
-        fcell(nowrap(h.name_cn.clone(), 11.0, if muted { C_PEND } else { C_TXT }), w.name, false),
+        fcell(nowrap(h.name_cn.clone(), 11.0, if muted { crate::ui::pal::pend() } else { crate::ui::pal::txt() }), w.name, false),
         sep(false),
-        fcell(nowrap(h.key.clone(), 10.0, C_DIM), w.key, false),
+        fcell(nowrap(h.key.clone(), 10.0, crate::ui::pal::dim()), w.key, false),
         sep(true),
     ]
     .height(Length::Fixed(ROW_H));
@@ -751,16 +734,16 @@ fn feature_line<'a>(
     }
     let (st, sc) = row_status(r);
     line = line
-        .push(fcell(nowrap(h.unit.clone(), 10.0, C_DIM), w.unit, false))
+        .push(fcell(nowrap(h.unit.clone(), 10.0, crate::ui::pal::dim()), w.unit, false))
         .push(sep(false))
         .push(fcell(layer_badges(h), w.layer, false))
         .push(sep(false))
         .push(fcell(nowrap(st, 10.0, sc), w.status, false))
         .push(sep(false));
     let bg = if hovered {
-        Some(Color::from_rgba(0.55, 0.75, 1.0, 0.16))
+        Some(crate::ui::pal::band())
     } else if !idx.is_multiple_of(2) {
-        Some(Color::from_rgba(1.0, 1.0, 1.0, 0.035))
+        Some(crate::ui::pal::alpha(crate::ui::pal::txt(), 0.035))
     } else {
         None
     };
@@ -784,13 +767,13 @@ fn stage_band<'a>(t: String, c: Color, width: f32, rows: &[FeatureRow<'_>], tr: 
             }
         }
         r = r
-            .push(nowrap(format!("{}：", tr.label), 10.0, C_DIM))
-            .push(nowrap(format!("▲ {up}"), 11.0, C_UP))
-            .push(nowrap(format!("▼ {down}"), 11.0, C_DOWN));
+            .push(nowrap(format!("{}：", tr.label), 10.0, crate::ui::pal::dim()))
+            .push(nowrap(format!("▲ {up}"), 11.0, crate::ui::pal::up()))
+            .push(nowrap(format!("▼ {down}"), 11.0, crate::ui::pal::down()));
     }
-    tinted(r, Some(Color::from_rgba(0.55, 0.65, 0.85, 0.16)))
+    tinted(r, Some(crate::ui::pal::band()))
         .width(Length::Fixed(width))
-        .padding([3, 6])
+        .padding(crate::ui::metrics::pad2(0, 2))
 }
 
 /// 通过当前筛选的特征：任一窗口通过筛选即显示整行；未启用的按开关藏起来。
@@ -811,22 +794,22 @@ fn table_windows(rows: &[FeatureRow<'_>]) -> Vec<u32> {
 
 /// 表格上方一行：完整 / 透视、透视的指标、图例、列宽。
 fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
-    let mut r = row![text("展示 ").size(11).color(C_DIM)]
+    let mut r = row![text("展示 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())]
         .spacing(4)
         .align_y(iced::Alignment::Center);
     for t in TableMode::ALL {
         r = r.push(chip(t.label().into(), v.table == t, Msg::SetTable(t)));
     }
     if v.table == TableMode::Pivot {
-        r = r.push(text("　指标 ").size(11).color(C_DIM));
+        r = r.push(text("　指标 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
         for mt in Metric::ALL {
             r = r.push(chip(mt.label().into(), v.metric == mt, Msg::SetMetric(mt)));
         }
     }
-    r = r.push(text("　").size(11));
+    r = r.push(text("　").size(crate::ui::text::s_small()));
     let legend: Element<'a, Msg> = match (v.table, v.metric) {
         (TableMode::Full, _) | (TableMode::Pivot, Metric::Value) => {
-            let mut l = row![text("色条 = 质量：").size(10).color(C_DIM)].spacing(4);
+            let mut l = row![text("色条 = 质量：").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(4);
             for (q, name) in [
                 ("GOOD", "良好"),
                 ("DEGRADED", "降级"),
@@ -834,9 +817,9 @@ fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
                 ("INVALID", "无效"),
                 ("UNAVAILABLE", "不可用"),
             ] {
-                l = l.push(text(format!("■{name}")).size(10).color(qcolor(q)));
+                l = l.push(text(format!("■{name}")).size(crate::ui::text::s_meta()).color(qcolor(q)));
             }
-            l.push(text("　悬停看原因").size(10).color(C_DIM)).into()
+            l.push(text("　悬停看原因").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())).into()
         }
         (TableMode::Pivot, Metric::Z) => dim("蓝 = 低于常态，红 = 高于常态，颜色越深偏离越大（|z| ≥ 3 封顶）".into()),
         (TableMode::Pivot, Metric::Pct) => dim("蓝 = 处在历史低位，红 = 处在历史高位，50% 附近不着色".into()),
@@ -844,16 +827,16 @@ fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
         (TableMode::Pivot, Metric::Change) => dim("与 N 秒前相比 z 的变化：绿 ▲ 变大，红 ▼ 变小；箭头个数 = 达到的档位，底色越深档位越高".into()),
     };
     r = r.push(legend);
-    r = r.push(text("　列宽：拖表头分隔线调整，双击某条分隔线 = 这一列按当前内容重新自适应").size(10).color(C_DIM));
+    r = r.push(text("　列宽：拖表头分隔线调整，双击某条分隔线 = 这一列按当前内容重新自适应").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     r = r.push(chip("全部重新自适应".into(), false, Msg::ResetWidths));
     let trend = row![
-        text("涨跌 ").size(11).color(C_DIM),
-        text("与").size(10).color(C_DIM),
+        text("涨跌 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
+        text("与").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         iced::widget::text_input("5s", &v.trend_text)
             .on_input(Msg::TrendLookback)
-            .size(11)
+            .size(crate::ui::text::s_small())
             .width(Length::Fixed(56.0)),
-        text("前相比 z 的变化，|Δz| 达到").size(10).color(C_DIM),
+        text("前相比 z 的变化，|Δz| 达到").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
     ]
     .spacing(4)
     .align_y(iced::Alignment::Center);
@@ -862,22 +845,22 @@ fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
     for i in 0..super::feature_matrix::TREND_LEVELS {
         let on = i < v.ths.len();
         levels = levels
-            .push(nowrap("▲".repeat(i + 1), 10.0, if on { C_UP } else { C_PEND }))
+            .push(nowrap("▲".repeat(i + 1), 10.0, if on { crate::ui::pal::up() } else { crate::ui::pal::pend() }))
             .push(
                 iced::widget::text_input("不用", &v.th_text[i])
                     .on_input(move |t| Msg::TrendTh(i, t))
-                    .size(11)
+                    .size(crate::ui::text::s_small())
                     .width(Length::Fixed(46.0)),
             );
     }
     let trend = trend.push(levels).push(
         text("（第 N 档达到画 N 个箭头，空着的档不用；绿涨红跌，只说变大变小、不说好坏；没有 z 的特征不画）")
-            .size(10)
-            .color(C_DIM),
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()),
     );
     let mut col = column![r.wrap(), trend.wrap()].spacing(4);
     if !v.trend_err.is_empty() {
-        col = col.push(text(v.trend_err.clone()).size(10).color(C_BAD));
+        col = col.push(text(v.trend_err.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::bad()));
     }
     col.into()
 }
@@ -886,17 +869,17 @@ fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
 fn filter_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
     let mut b = column![].spacing(3);
 
-    let mut r1 = row![text("质量 ").size(11).color(C_DIM)].spacing(4);
+    let mut r1 = row![text("质量 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(4);
     for q in QualityFilter::ALL {
         r1 = r1.push(chip(q.label().into(), v.quality == q, Msg::SetQuality(q)));
     }
-    r1 = r1.push(text("　进度 ").size(11).color(C_DIM));
+    r1 = r1.push(text("　进度 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
     for s in StatusFilter::ALL {
         r1 = r1.push(chip(s.label().into(), v.status == s, Msg::SetStatus(s)));
     }
     let hidden = m.features().iter().filter(|r| !r.enabled()).count();
     if hidden > 0 {
-        r1 = r1.push(text("　").size(11));
+        r1 = r1.push(text("　").size(crate::ui::text::s_small()));
         r1 = r1.push(chip(
             format!("显示未启用（{hidden}）"),
             v.show_disabled,
@@ -904,12 +887,12 @@ fn filter_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
         ));
     }
     if v.any_filter() {
-        r1 = r1.push(text("　").size(11));
+        r1 = r1.push(text("　").size(crate::ui::text::s_small()));
         r1 = r1.push(chip("✕ 清筛选".into(), false, Msg::ClearFilters));
     }
     b = b.push(r1.align_y(iced::Alignment::Center));
 
-    let mut r2 = row![text("阶段 ").size(11).color(C_DIM)].spacing(4);
+    let mut r2 = row![text("阶段 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(4);
     r2 = r2.push(chip("全部".into(), v.stage.is_none(), Msg::SetStage(None)));
     for (k, label) in Matrix::STAGES {
         r2 = r2.push(chip(
@@ -921,7 +904,7 @@ fn filter_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
     b = b.push(r2.align_y(iced::Alignment::Center));
 
     // 市场筛选的取值**来自快照**而不是写死：加一个市场 profile 就该自动出现。
-    let mut r3 = row![text("市场 ").size(11).color(C_DIM)].spacing(4);
+    let mut r3 = row![text("市场 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(4);
     r3 = r3.push(chip("全部".into(), v.market.is_none(), Msg::SetMarket(None)));
     for mk in m.markets() {
         r3 = r3.push(chip(
@@ -942,7 +925,7 @@ fn filter_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
             .collect();
         fams.sort();
         fams.dedup();
-        let mut r4 = row![text("类别 ").size(11).color(C_DIM)].spacing(4);
+        let mut r4 = row![text("类别 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(4);
         r4 = r4.push(chip("全部".into(), v.family.is_none(), Msg::SetFamily(None)));
         for f in fams {
             r4 = r4.push(chip(
@@ -964,34 +947,34 @@ fn top_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
     let total = m.total_slots.max(1);
     let frac = usable as f64 / total as f64;
     let c = if frac >= 0.8 {
-        C_OK
+        crate::ui::pal::ok()
     } else if frac >= 0.5 {
-        C_WARN
+        crate::ui::pal::warn()
     } else {
-        C_BAD
+        crate::ui::pal::bad()
     };
     let mut b = column![].spacing(3);
     b = b.push(row![
-        text(if frac >= 0.8 { "● " } else { "○ " }).size(15).color(c),
+        text(if frac >= 0.8 { "● " } else { "○ " }).size(crate::ui::text::s_section()).color(c),
         text(format!(
             "{usable}/{} 个 slot 处于可下单质量（{:.0}%）",
             m.total_slots,
             frac * 100.0
         ))
-        .size(12)
+        .size(crate::ui::text::s_body())
         .color(c),
         text(format!(
             "　已登记·待实现 {}　市场状态 {}",
             m.not_implemented(),
             m.regime
         ))
-        .size(11)
-        .color(C_DIM),
+        .size(crate::ui::text::s_small())
+        .color(crate::ui::pal::dim()),
     ]);
     // 质量分布：一行里写清「降级的是多数还是少数」。
-    let mut qr = row![text("质量分布 ").size(10).color(C_DIM)].spacing(6);
+    let mut qr = row![text("质量分布 ").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(6);
     for (q, n) in m.quality_counts() {
-        qr = qr.push(text(format!("{q}×{n}")).size(10).color(qcolor(&q)));
+        qr = qr.push(text(format!("{q}×{n}")).size(crate::ui::text::s_meta()).color(qcolor(&q)));
     }
     b = b.push(qr);
     b = b.push(dim(format!(
@@ -1037,8 +1020,8 @@ fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths, tr: &Tre
             if bad > 0 { format!("　有异常窗口 {bad}") } else { String::new() },
         );
         b = b.push(
-            button(stage_band(head, if bad > 0 { C_WARN } else { C_HEAD }, total, &rows, tr))
-                .padding(0)
+            button(stage_band(head, if bad > 0 { crate::ui::pal::warn() } else { crate::ui::pal::head() }, total, &rows, tr))
+                .padding(iced::Padding::ZERO)
                 .style(|t, st| crate::style::button::modifier(t, st, false))
                 .on_press(Msg::ToggleStage(key.to_string())),
         );
@@ -1058,9 +1041,9 @@ fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths, tr: &Tre
             container(nowrap(
                 "当前筛选下没有任何特征——点「✕ 清筛选」或「显示未启用」".into(),
                 11.0,
-                C_WARN,
+                crate::ui::pal::warn(),
             ))
-            .padding([6, 6]),
+            .padding(crate::ui::metrics::pad2(2, 2)),
         );
     } else if shown < n {
         // 筛过之后忘了筛，会把「矩阵里只有 3 条」当成引擎的问题。
@@ -1068,9 +1051,9 @@ fn matrix_view<'a>(m: &Matrix, v: &ViewState, wins: &[u32], w: &Widths, tr: &Tre
             container(nowrap(
                 format!("当前显示 {shown} 条特征，共 {n} 条（其余被筛选或未启用）"),
                 10.0,
-                C_DIM,
+                crate::ui::pal::dim(),
             ))
-            .padding([6, 6]),
+            .padding(crate::ui::metrics::pad2(2, 2)),
         );
     }
     b.into()
@@ -1111,7 +1094,7 @@ fn engine_view<'a>(m: &Matrix) -> Element<'a, Msg> {
         "{} 条缓冲承载 {} 个 slot；每事件平均刷 {:.1} 个 slot",
         m.pool_windows, m.total_slots, m.refreshes_per_event
     )));
-    let dc = if m.saturated_windows > 0 { C_WARN } else { C_DIM };
+    let dc = if m.saturated_windows > 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() };
     b = b.push(
         text(format!(
             "累计拒收样本 {}（{:.2}/事件）　当前饱和 {} 条",
@@ -1123,7 +1106,7 @@ fn engine_view<'a>(m: &Matrix) -> Element<'a, Msg> {
             },
             m.saturated_windows
         ))
-        .size(11)
+        .size(crate::ui::text::s_small())
         .color(dc),
     );
     b = b.push(dim(
@@ -1135,29 +1118,29 @@ fn engine_view<'a>(m: &Matrix) -> Element<'a, Msg> {
     let mut rows: Vec<&ro::PoolWindow> = m.pool_detail.iter().filter(|w| w.drops > 0).collect();
     rows.sort_by_key(|w| std::cmp::Reverse(w.drops));
     if rows.is_empty() {
-        b = b.push(text("没有任何缓冲拒收过样本").size(11).color(C_OK));
+        b = b.push(text("没有任何缓冲拒收过样本").size(crate::ui::text::s_small()).color(crate::ui::pal::ok()));
     } else {
         b = b.push(row![
-            cell("可观测量".into(), 150.0, C_DIM),
-            cell("窗口".into(), 60.0, C_DIM),
-            numc("占用".into(), 130.0, C_DIM),
-            numc("累计拒收".into(), 100.0, C_DIM),
-            cell("".into(), 70.0, C_DIM),
+            cell("可观测量".into(), 150.0, crate::ui::pal::dim()),
+            cell("窗口".into(), 60.0, crate::ui::pal::dim()),
+            numc("占用".into(), 130.0, crate::ui::pal::dim()),
+            numc("累计拒收".into(), 100.0, crate::ui::pal::dim()),
+            cell("".into(), 70.0, crate::ui::pal::dim()),
         ].spacing(4));
         for w in rows.iter().take(12) {
             b = b.push(row![
-                cell(w.observable.clone(), 150.0, C_TXT),
+                cell(w.observable.clone(), 150.0, crate::ui::pal::txt()),
                 cell(
                     if w.window_ms == 0 { "瞬时".into() } else { format!("{}s", w.window_ms / 1000) },
                     60.0,
-                    C_DIM
+                    crate::ui::pal::dim()
                 ),
-                numc(format!("{}/{}", w.len, w.capacity), 130.0, C_DIM),
-                numc(w.drops.to_string(), 100.0, if w.saturated { C_WARN } else { C_DIM }),
+                numc(format!("{}/{}", w.len, w.capacity), 130.0, crate::ui::pal::dim()),
+                numc(w.drops.to_string(), 100.0, if w.saturated { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
                 cell(
                     if w.saturated { "⚠ 当前饱和".into() } else { String::new() },
                     70.0,
-                    C_WARN
+                    crate::ui::pal::warn()
                 ),
             ].spacing(4));
         }
@@ -1184,7 +1167,7 @@ fn window_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
         0
     };
     let mut b = column![].spacing(4);
-    let mut r = row![text("时间窗口 ").size(12).color(C_HEAD)]
+    let mut r = row![text("时间窗口 ").size(crate::ui::text::s_body()).color(crate::ui::pal::head())]
         .spacing(6)
         .align_y(iced::Alignment::Center);
     match &v.win_edit {
@@ -1193,24 +1176,24 @@ fn window_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
                 || "默认（各特征用字典窗口）".to_string(),
                 super::feature_matrix_readout::format_windows,
             );
-            r = r.push(text(format!("全局：{g}")).size(11).color(C_TXT));
+            r = r.push(text(format!("全局：{g}")).size(crate::ui::text::s_small()).color(crate::ui::pal::txt()));
             if !cw.overrides.is_empty() {
-                r = r.push(text(format!("单条覆盖 {} 条", cw.overrides.len())).size(10).color(C_DIM));
+                r = r.push(text(format!("单条覆盖 {} 条", cw.overrides.len())).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
             }
             r = r.push(chip("修改…".into(), false, Msg::WinOpen));
             if fixed > 0 {
                 r = r.push(
                     text(format!("瞬时量与窗口固定的 {fixed} 条不受影响；单条覆盖在「自定义…」里逐条设"))
-                        .size(10)
-                        .color(C_DIM),
+                        .size(crate::ui::text::s_meta())
+                        .color(crate::ui::pal::dim()),
                 );
             }
             b = b.push(r);
         }
         Some(w) => {
-            r = r.push(text("全局：").size(11).color(C_DIM));
+            r = r.push(text("全局：").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
             if w.list.is_empty() {
-                r = r.push(text("默认（各特征用字典窗口）").size(11).color(C_TXT));
+                r = r.push(text("默认（各特征用字典窗口）").size(crate::ui::text::s_small()).color(crate::ui::pal::txt()));
             }
             for x in &w.list {
                 r = r.push(chip(format!("{} ✕", format_window(*x)), true, Msg::WinRemove(*x)));
@@ -1220,12 +1203,12 @@ fn window_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
                     iced::widget::text_input("加窗口，如 10s 或 1m, 15m", &w.input)
                         .on_input(Msg::WinInput)
                         .on_submit(Msg::WinAdd)
-                        .size(11)
+                        .size(crate::ui::text::s_small())
                         .width(Length::Fixed(200.0)),
                 )
                 .push(chip("添加".into(), false, Msg::WinAdd));
             b = b.push(r.wrap());
-            let mut r2 = row![text("常用 ").size(10).color(C_DIM)]
+            let mut r2 = row![text("常用 ").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())]
                 .spacing(6)
                 .align_y(iced::Alignment::Center);
             for (i, (name, ws)) in super::feature_matrix::WINDOW_PRESETS.iter().enumerate() {
@@ -1237,12 +1220,12 @@ fn window_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
             }
             r2 = r2
                 .push(chip("恢复默认".into(), false, Msg::WinDefault))
-                .push(text("　").size(10))
+                .push(text("　").size(crate::ui::text::s_meta()))
                 .push(chip("✔ 应用并重启引擎".into(), true, Msg::WinApply))
                 .push(chip("取消".into(), false, Msg::WinClose));
             b = b.push(r2.wrap());
             if !w.err.is_empty() {
-                b = b.push(text(w.err.clone()).size(10).color(C_BAD));
+                b = b.push(text(w.err.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::bad()));
             }
             b = b.push(dim(format!(
                 "范围 100ms ~ 1d，至多 8 个。替换每条可自定义特征的默认窗口（字典窗口里带「瞬时」的保留瞬时）；                 瞬时量与窗口固定的 {fixed} 条不受影响。窗口越多、越长，延迟与内存越高；                 2 秒这类很短的窗口里，多数统计量会因样本不足而没有值。"
@@ -1255,7 +1238,7 @@ fn window_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
 /// 启用集：默认 / 全开 / 自定义。点下去写配置并重启引擎（窗口从头累计）。
 fn mode_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
     let (mode, keys) = super::feature_matrix::read_config();
-    let mut r = row![text("启用集 ").size(12).color(C_HEAD)]
+    let mut r = row![text("启用集 ").size(crate::ui::text::s_body()).color(crate::ui::pal::head())]
         .spacing(6)
         .align_y(iced::Alignment::Center);
     r = r.push(chip("默认".into(), mode == "default", Msg::SetMode("default")));
@@ -1273,31 +1256,31 @@ fn mode_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
     // 已存的选择集：选中即应用并重启引擎
     let names: Vec<String> = super::feature_presets::list().into_iter().map(|p| p.name).collect();
     if !names.is_empty() {
-        r = r.push(text("　选择集").size(11).color(C_DIM));
+        r = r.push(text("　选择集").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
         r = r.push(
             iced::widget::pick_list(names, active_preset.clone(), Msg::PresetApply)
                 .placeholder("选一个直接应用…")
                 .text_size(11)
-                .padding([2, 6]),
+                .padding(crate::ui::metrics::pad2(0, 2)),
         );
     }
     if m.present {
         let f = m.features();
         let on = f.iter().filter(|r| r.enabled()).count();
-        r = r.push(text(format!("引擎当前启用 {on}/{} 条特征", f.len())).size(10).color(C_DIM));
+        r = r.push(text(format!("引擎当前启用 {on}/{} 条特征", f.len())).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     }
     if mode == "all" {
-        r = r.push(text("全开超出常驻延迟 / 内存预算，适合临时观察").size(10).color(C_WARN));
+        r = r.push(text("全开超出常驻延迟 / 内存预算，适合临时观察").size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
     }
     r.into()
 }
 
 fn prior_tag(p: &str) -> (&'static str, Color) {
     match p {
-        "gross" => ("毛", C_OK),
-        "falsified" => ("证伪", C_BAD),
-        "untested" => ("未检验", C_DIM),
-        _ => ("", C_DIM),
+        "gross" => ("毛", crate::ui::pal::ok()),
+        "falsified" => ("证伪", crate::ui::pal::bad()),
+        "untested" => ("未检验", crate::ui::pal::dim()),
+        _ => ("", crate::ui::pal::dim()),
     }
 }
 
@@ -1306,37 +1289,37 @@ fn preset_bar<'a>(p: &super::feature_matrix::Picker) -> Element<'a, Msg> {
     let presets = super::feature_presets::list();
     let mut b = column![].spacing(5);
 
-    let mut lr = row![text("选择集 ").size(12).color(C_HEAD)]
+    let mut lr = row![text("选择集 ").size(crate::ui::text::s_body()).color(crate::ui::pal::head())]
         .spacing(5)
         .align_y(iced::Alignment::Center);
     if presets.is_empty() {
-        lr = lr.push(text("还没有保存过选择集——勾选好后在下面起个名字「另存为新选择集」").size(10).color(C_DIM));
+        lr = lr.push(text("还没有保存过选择集——勾选好后在下面起个名字「另存为新选择集」").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     }
     for pr in &presets {
         let editing = p.editing.as_deref() == Some(pr.name.as_str());
         let label = format!("{}（{}）", pr.name, pr.keys.len());
         lr = lr.push(chip(label, editing, Msg::PresetLoad(pr.name.clone())));
     }
-    lr = lr.push(text("　").size(11));
+    lr = lr.push(text("　").size(crate::ui::text::s_small()));
     lr = lr.push(chip("＋ 新建".into(), p.editing.is_none(), Msg::PresetNew));
     lr = lr.push(chip("导入…".into(), false, Msg::PresetImport));
     // 选择集多了会超出一行：换行排，不横向溢出
     b = b.push(lr.wrap());
 
     let status = match &p.editing {
-        Some(n) if p.dirty() => (format!("正在编辑「{n}」· 有未保存的修改"), C_WARN),
-        Some(n) => (format!("正在编辑「{n}」· 已保存"), C_OK),
-        None => ("新选择集（未保存）".to_string(), C_DIM),
+        Some(n) if p.dirty() => (format!("正在编辑「{n}」· 有未保存的修改"), crate::ui::pal::warn()),
+        Some(n) => (format!("正在编辑「{n}」· 已保存"), crate::ui::pal::ok()),
+        None => ("新选择集（未保存）".to_string(), crate::ui::pal::dim()),
     };
     let mut er = row![
-        text(status.0).size(11).color(status.1),
+        text(status.0).size(crate::ui::text::s_small()).color(status.1),
         iced::widget::text_input("名称", &p.name)
             .on_input(Msg::PresetName)
-            .size(11)
+            .size(crate::ui::text::s_small())
             .width(Length::Fixed(180.0)),
         iced::widget::text_input("备注（可选）", &p.note)
             .on_input(Msg::PresetNote)
-            .size(11)
+            .size(crate::ui::text::s_small())
             .width(Length::Fixed(260.0)),
     ]
     .spacing(6)
@@ -1362,8 +1345,8 @@ fn preset_bar<'a>(p: &super::feature_matrix::Picker) -> Element<'a, Msg> {
     b = b.push(er);
     let note = super::feature_matrix::preset_note();
     if !note.is_empty() {
-        let c = if note.starts_with('✗') { C_BAD } else { C_DIM };
-        b = b.push(text(note).size(10).color(c));
+        let c = if note.starts_with('✗') { crate::ui::pal::bad() } else { crate::ui::pal::dim() };
+        b = b.push(text(note).size(crate::ui::text::s_meta()).color(c));
     }
     b.into()
 }
@@ -1381,8 +1364,8 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
         .count();
     b = b.push(
         row![
-            text(format!("自定义启用集：已选 {}/{total} 条特征", p.selected.len())).size(13).color(C_HEAD),
-            text(format!("（其中 {extra} 条不在默认集）")).size(10).color(C_DIM),
+            text(format!("自定义启用集：已选 {}/{total} 条特征", p.selected.len())).size(crate::ui::text::s_emph()).color(crate::ui::pal::head()),
+            text(format!("（其中 {extra} 条不在默认集）")).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center),
@@ -1390,30 +1373,30 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
     b = b.push(preset_bar(p));
     b = b.push(
         row![
-            text("时间窗口").size(12).color(C_HEAD),
-            text("全局").size(11).color(C_DIM),
+            text("时间窗口").size(crate::ui::text::s_body()).color(crate::ui::pal::head()),
+            text("全局").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
             iced::widget::text_input("空 = 字典默认；如 1m 5m 15m", &p.global_text)
                 .on_input(Msg::PickGlobalWindows)
-                .size(11)
+                .size(crate::ui::text::s_small())
                 .width(Length::Fixed(220.0)),
-            text("每条特征的「窗口」列可单独覆盖；两者都随选择集保存，应用时一起写入").size(10).color(C_DIM),
+            text("每条特征的「窗口」列可单独覆盖；两者都随选择集保存，应用时一起写入").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center),
     );
     if let Err(e) = p.windows() {
-        b = b.push(text(format!("✗ {e}")).size(10).color(C_BAD));
+        b = b.push(text(format!("✗ {e}")).size(crate::ui::text::s_meta()).color(crate::ui::pal::bad()));
     }
     b = b.push(
         row![
             iced::widget::text_input("搜索键名或中文名…", &p.search)
                 .on_input(Msg::PickSearch)
-                .size(11)
+                .size(crate::ui::text::s_small())
                 .width(Length::Fixed(260.0)),
             chip("全选".into(), false, Msg::PickBulk(None, Bulk::All)),
             chip("全不选".into(), false, Msg::PickBulk(None, Bulk::None)),
             chip("恢复默认".into(), false, Msg::PickBulk(None, Bulk::Default)),
-            text("　").size(11),
+            text("　").size(crate::ui::text::s_small()),
             chip("✔ 应用并重启引擎".into(), true, Msg::ApplyPicker),
             chip("取消".into(), false, Msg::ClosePicker),
         ]
@@ -1428,14 +1411,14 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
     ));
     b = b.push(
         row![
-            pc(text("").size(10), 1),
-            pc(text("特征").size(10).color(C_DIM), P_NAME),
-            pc(text("先验").size(10).color(C_DIM), 2),
-            pc(text("级别").size(10).color(C_DIM), 2),
-            pc(text("数据层").size(10).color(C_DIM), P_LAYER),
-            pc(text("默认窗口").size(10).color(C_DIM), 4),
-            pc(text("窗口覆盖").size(10).color(C_DIM), 4),
-            pc(text("默认集").size(10).color(C_DIM), 2),
+            pc(text("").size(crate::ui::text::s_meta()), 1),
+            pc(text("特征").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()), P_NAME),
+            pc(text("先验").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()), 2),
+            pc(text("级别").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()), 2),
+            pc(text("数据层").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()), P_LAYER),
+            pc(text("默认窗口").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()), 4),
+            pc(text("窗口覆盖").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()), 4),
+            pc(text("默认集").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()), 2),
         ]
         .spacing(6),
     );
@@ -1466,10 +1449,10 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
                 let k2 = h.key.clone();
                 iced::widget::text_input("—", p.win_text.get(&h.key).map_or("", String::as_str))
                     .on_input(move |t| Msg::PickWindows(k2.clone(), t))
-                    .size(10)
+                    .size(crate::ui::text::s_meta())
                     .into()
             } else {
-                text("固定").size(10).color(C_PEND).into()
+                text("固定").size(crate::ui::text::s_meta()).color(crate::ui::pal::pend()).into()
             };
             let lat = match h.latency.as_str() {
                 "hot" => "逐事件".to_string(),
@@ -1479,20 +1462,20 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
             };
             b = b.push(
                 row![
-                    pc(iced::widget::checkbox(on).on_toggle(move |x| Msg::PickToggle(k.clone(), x)).size(14), 1),
+                    pc(iced::widget::checkbox(on).on_toggle(move |x| Msg::PickToggle(k.clone(), x)).size(crate::ui::text::s_section()), 1),
                     pc(
                         column![
-                            text(h.name_cn.clone()).size(11).color(if h.not_implemented() { C_PEND } else { C_TXT }),
-                            text(h.key.clone()).size(9).color(C_DIM),
+                            text(h.name_cn.clone()).size(crate::ui::text::s_small()).color(if h.not_implemented() { crate::ui::pal::pend() } else { crate::ui::pal::txt() }),
+                            text(h.key.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
                         ],
                         P_NAME
                     ),
-                    pc(text(pt).size(10).color(pcol), 2),
-                    pc(text(lat).size(10).color(C_DIM), 2),
+                    pc(text(pt).size(crate::ui::text::s_meta()).color(pcol), 2),
+                    pc(text(lat).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()), 2),
                     pc(layer_badges(h), P_LAYER),
-                    pc(text(wins).size(10).color(C_DIM), 4),
+                    pc(text(wins).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()), 4),
                     pc(over, 4),
-                    pc(text(if h.default_on { "✓" } else { "" }).size(10).color(C_OK), 2),
+                    pc(text(if h.default_on { "✓" } else { "" }).size(crate::ui::text::s_meta()).color(crate::ui::pal::ok()), 2),
                 ]
                 .spacing(6)
                 .align_y(iced::Alignment::Center),
@@ -1511,8 +1494,8 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
 fn source_bar<'a>(s: &super::feature_source::View) -> Element<'a, Msg> {
     use super::feature_source::{Pace, SourceMsg};
     let mut head = row![
-        text("数据源").size(11).color(C_HEAD),
-        text(s.reading.clone()).size(11).color(if s.is_replay { C_WARN } else { C_TXT }),
+        text("数据源").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
+        text(s.reading.clone()).size(crate::ui::text::s_small()).color(if s.is_replay { crate::ui::pal::warn() } else { crate::ui::pal::txt() }),
         chip(if s.open { "▴ 收起".into() } else { "▾ 选择数据".into() }, s.open, Msg::Source(SourceMsg::Toggle)),
     ]
     .spacing(8)
@@ -1528,12 +1511,12 @@ fn source_bar<'a>(s: &super::feature_source::View) -> Element<'a, Msg> {
     }
     let mut b = column![head].spacing(5);
     if !s.status.is_empty() {
-        b = b.push(text(s.status.clone()).size(10).color(if s.paused {
-            C_WARN
+        b = b.push(text(s.status.clone()).size(crate::ui::text::s_meta()).color(if s.paused {
+            crate::ui::pal::warn()
         } else if s.running {
-            C_OK
+            crate::ui::pal::ok()
         } else {
-            C_DIM
+            crate::ui::pal::dim()
         }));
     }
     if s.open {
@@ -1542,11 +1525,11 @@ fn source_bar<'a>(s: &super::feature_source::View) -> Element<'a, Msg> {
             super::data_picker_view::view(&s.pick, &opts).map(|m| Msg::Source(SourceMsg::Data(m))),
         );
         if s.pick.local_key().is_some() {
-            let mut pr = row![text("回放速度").size(11).color(C_DIM)].spacing(4).align_y(iced::Alignment::Center);
+            let mut pr = row![text("回放速度").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(4).align_y(iced::Alignment::Center);
             for p in Pace::ALL {
                 pr = pr.push(chip(p.label().into(), s.pace == p, Msg::Source(SourceMsg::Pace(p))));
             }
-            pr = pr.push(text("　").size(11)).push(chip(
+            pr = pr.push(text("　").size(crate::ui::text::s_small())).push(chip(
                 if s.running { "↻ 重新开始".into() } else { "▶ 开始回放".into() },
                 false,
                 Msg::Source(SourceMsg::Start),
@@ -1559,50 +1542,50 @@ fn source_bar<'a>(s: &super::feature_source::View) -> Element<'a, Msg> {
                     Msg::Source(SourceMsg::Pause),
                 )
             } else {
-                text("⏸ 暂停回放").size(11).color(C_PEND).into()
+                text("⏸ 暂停回放").size(crate::ui::text::s_small()).color(crate::ui::pal::pend()).into()
             });
             b = b.push(pr).push(
                 text(
                     "回放由特征引擎直接读数据商接口（不转格式），启用集与时间窗口用本面板的配置；\
                      写自己的一组文件，常驻引擎照常运行。选回 B1 即切回实时。",
                 )
-                .size(10)
-                .color(C_DIM),
+                .size(crate::ui::text::s_meta())
+                .color(crate::ui::pal::dim()),
             );
         }
     }
     if !s.note.is_empty() {
-        b = b.push(text(s.note.clone()).size(10).color(C_WARN));
+        b = b.push(text(s.note.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
     }
-    container(b).padding([4, 6]).into()
+    container(b).padding(crate::ui::metrics::pad2(1, 2)).into()
 }
 
 fn engine_bar<'a>() -> Element<'a, Msg> {
     let note = super::feature_matrix::engine_note();
-    let mut r = row![text("特征引擎 ").size(12).color(C_HEAD)]
+    let mut r = row![text("特征引擎 ").size(crate::ui::text::s_body()).color(crate::ui::pal::head())]
         .spacing(6)
         .align_y(iced::Alignment::Center);
     match super::feature_matrix::engine_state() {
         // 轮询还没出第一轮：别猜状态，也别给按钮——猜错了按钮就是反的
-        None => r = r.push(text("查询中…").size(11).color(C_DIM)),
+        None => r = r.push(text("查询中…").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())),
         Some(st) if st.active => {
             r = r
-                .push(text("● 运行中").size(11).color(C_OK))
+                .push(text("● 运行中").size(crate::ui::text::s_small()).color(crate::ui::pal::ok()))
                 .push(
                     text(format!("已运行 {}", super::svcctl::fmt_dur(st.uptime_secs)))
-                        .size(10)
-                        .color(C_DIM),
+                        .size(crate::ui::text::s_meta())
+                        .color(crate::ui::pal::dim()),
                 )
                 .push(chip("■ 停止".into(), false, Msg::Engine("stop")));
         }
         Some(_) => {
             r = r
-                .push(text("○ 已停止").size(11).color(C_WARN))
+                .push(text("○ 已停止").size(crate::ui::text::s_small()).color(crate::ui::pal::warn()))
                 .push(chip("▶ 启动".into(), false, Msg::Engine("start")));
         }
     }
     if !note.is_empty() {
-        r = r.push(text(note).size(10).color(C_DIM));
+        r = r.push(text(note).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     }
     r.into()
 }
@@ -1614,7 +1597,7 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
         "订单流与市场微观结构 · 特征矩阵（docs/31 · 感知层·非交易信号）".into()
     )]
     .spacing(6)
-    .padding(10);
+    .padding(crate::ui::metrics::space(3));
 
     // 视图切换 + 收起控件
     let mut vr = row![].spacing(4);
@@ -1622,7 +1605,7 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
         vr = vr.push(chip(view.label().into(), v.view == view, Msg::SetView(view)));
     }
     if v.view != View::Engine && v.picker.is_none() {
-        vr = vr.push(text("　").size(11)).push(chip(
+        vr = vr.push(text("　").size(crate::ui::text::s_small())).push(chip(
             if v.fold_controls { "▾ 展开控件".into() } else { "▴ 收起控件".into() },
             v.fold_controls,
             Msg::ToggleFoldControls,
@@ -1641,7 +1624,7 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
     if let Some(p) = &v.picker {
         if !m.present {
             return b
-                .push(text("还没有快照：先启动一次引擎，面板才拿得到完整的特征清单").size(11).color(C_WARN))
+                .push(text("还没有快照：先启动一次引擎，面板才拿得到完整的特征清单").size(crate::ui::text::s_small()).color(crate::ui::pal::warn()))
                 .push(chip("取消".into(), false, Msg::ClosePicker))
                 .into();
         }
@@ -1661,8 +1644,8 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
                      选了本地数据：点上面的「▶ 开始回放」，回放跑起来后这里就有快照。",
                     ro::board_path().display()
                 ))
-                .size(11)
-                .color(C_DIM),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::dim()),
             )
             .into();
     }
@@ -1671,8 +1654,8 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
         // 停了之后旁路文件还在：不说一声，人会把最后一张快照当成现在
         b = b.push(
             text("引擎已停止：下面是停止前的最后一次快照，不再更新")
-                .size(11)
-                .color(C_WARN),
+                .size(crate::ui::text::s_small())
+                .color(crate::ui::pal::warn()),
         );
     }
     if v.view == View::Chart {
@@ -1719,7 +1702,7 @@ pub fn pane_body<'a>() -> Element<'a, Msg> {
         .height(Length::Fill);
     column![
         b,
-        container(head).padding([0, 10]),
+        container(head).padding(crate::ui::metrics::pad2(0, 3)),
         container(body)
             .padding(iced::Padding { top: 0.0, right: 10.0, bottom: 4.0, left: 10.0 })
             .height(Length::Fill),
@@ -1776,16 +1759,16 @@ mod tests {
     #[test]
     fn 数据层徽标覆盖引擎的全部词表() {
         // 这一条守的是那个安静的漏：配色表里的串与引擎的词表差一个大小写，
-        // 徽标就全变成兜底色。用**兜底色本身**当判据——落到 C_DIM 即视为未覆盖。
+        // 徽标就全变成兜底色。用**兜底色本身**当判据——落到 crate::ui::pal::dim() 即视为未覆盖。
         for l in ENGINE_LAYERS {
             let c = layer_color(l);
             assert!(
-                (c.r - C_DIM.r).abs() + (c.g - C_DIM.g).abs() + (c.b - C_DIM.b).abs() > 0.05,
+                (c.r - crate::ui::pal::dim().r).abs() + (c.g - crate::ui::pal::dim().g).abs() + (c.b - crate::ui::pal::dim().b).abs() > 0.05,
                 "数据层 `{l}` 落到了兜底色——配色表里的串与引擎的 DataLayer::as_str() 不一致"
             );
         }
         // 没登记过的串仍然要走兜底而不是 panic。
-        assert_eq!(layer_color("不存在的层").r, C_DIM.r);
+        assert_eq!(layer_color("不存在的层").r, crate::ui::pal::dim().r);
     }
 
     #[test]

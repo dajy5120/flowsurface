@@ -152,3 +152,35 @@ mod tests {
         assert!(matches!(mono_font().family, Family::Name(_) | Family::Monospace));
     }
 }
+
+// ── 旧字号的迁移目标（docs/35 批 5–7）─────────────────────────────────
+//
+// 各面板原本手写 `.size(10/11/12/13/14)`。迁移时按就近原则归到角色，字号从此随密度走：
+//
+// | 旧 | 新 | 紧凑 / 舒适 / 宽松 |
+// |---|---|---|
+// | 10 | [`s_meta`]（元数据字号，不转大写） | 10.5 |
+// | 11 | [`s_small`]（说明） | 12 |
+// | 12 | [`s_body`]（标签 / 正文） | 12 / 13 / 14 |
+// | 13 | [`s_emph`]（正文 + 1） | 13 / 14 / 15 |
+// | 14–16 | [`s_section`]（分组标题） | 15 |
+// | ≥ 17 | [`s_title`]（标题） | 20 |
+
+pub fn s_meta() -> f32 {
+    size(Role::Metadata)
+}
+pub fn s_small() -> f32 {
+    size(Role::Caption)
+}
+pub fn s_body() -> f32 {
+    size(Role::Label)
+}
+pub fn s_emph() -> f32 {
+    size(Role::Label) + 1.0
+}
+pub fn s_section() -> f32 {
+    size(Role::Section)
+}
+pub fn s_title() -> f32 {
+    size(Role::Title)
+}

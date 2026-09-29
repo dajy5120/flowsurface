@@ -18,30 +18,23 @@ use iced::{Alignment, Color, Element, Length};
 use super::orders::{Trade, WorkingOrder};
 use super::readout::Readout;
 
-const C_HEAD: Color = Color::from_rgb(0.55, 0.8, 1.0);
-const C_DIM: Color = Color::from_rgb(0.55, 0.55, 0.6);
-const C_BUY: Color = Color::from_rgb(0.3, 0.85, 0.45);
-const C_SELL: Color = Color::from_rgb(0.92, 0.45, 0.42);
-const C_POS: Color = Color::from_rgb(0.35, 0.78, 0.45);
-const C_NEG: Color = Color::from_rgb(0.88, 0.42, 0.4);
-
 /// 明细表最多渲染多少行。`OrderState` 那边已按 FILL_CAP 裁过，这里再兜一层：
 /// 整日回测可能上千笔，一次性铺开会让 iced 每帧都重建几千个 widget。
 const ROW_CAP: usize = 300;
 
 fn money(v: f64) -> Color {
     if v > 0.0 {
-        C_POS
+        crate::ui::pal::up()
     } else if v < 0.0 {
-        C_NEG
+        crate::ui::pal::down()
     } else {
-        C_DIM
+        crate::ui::pal::dim()
     }
 }
 
 fn side_txt<'a, M: 'a>(side: u8) -> Element<'a, M> {
-    let (s, c) = if side == 1 { ("买", C_BUY) } else { ("卖", C_SELL) };
-    text(s).size(11).color(c).into()
+    let (s, c) = if side == 1 { ("买", crate::ui::pal::up()) } else { ("卖", crate::ui::pal::down()) };
+    text(s).size(crate::ui::text::s_small()).color(c).into()
 }
 
 /// 秒级 epoch（毫秒输入）→ `MM-DD HH:MM:SS`。
@@ -56,30 +49,30 @@ fn ts_txt(ms: u64) -> String {
 }
 
 fn cell<'a, M: 'a>(s: impl Into<String>, w: f32, c: Color) -> Element<'a, M> {
-    container(text(s.into()).size(11).color(c)).width(Length::Fixed(w)).into()
+    container(text(s.into()).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
 }
 
 /// 顶部读数条：持仓 + 收益 + 手续费 + 笔数。
 fn summary<'a, M: 'a>(st: &Readout) -> Element<'a, M> {
     let pos_color = match st.pos_side.as_str() {
-        "LONG" => C_BUY,
-        "SHORT" => C_SELL,
-        _ => C_DIM,
+        "LONG" => crate::ui::pal::up(),
+        "SHORT" => crate::ui::pal::down(),
+        _ => crate::ui::pal::dim(),
     };
     let unreal = st.unrealized.unwrap_or(0.0);
     let total = st.realized_net + unreal;
     let kv = |k: &'static str, v: String, c: Color| -> Element<'a, M> {
-        column![text(k).size(9).color(C_DIM), text(v).size(13).color(c)].spacing(1).into()
+        column![text(k).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()), text(v).size(crate::ui::text::s_emph()).color(c)].spacing(1).into()
     };
     row![
         kv("持仓", format!("{} {:.4}", st.pos_side, st.net_qty), pos_color),
-        kv("均价", format!("{:.2}", st.avg_px), C_DIM),
+        kv("均价", format!("{:.2}", st.avg_px), crate::ui::pal::dim()),
         kv("已实现(净)", format!("{:+.4}", st.realized_net), money(st.realized_net)),
         kv("未实现", format!("{unreal:+.4}"), money(unreal)),
         kv("合计", format!("{total:+.4}"), money(total)),
-        kv("手续费", format!("{:.4}", st.fee_total), C_NEG),
-        kv("买/卖", format!("{} / {}", st.n_buy, st.n_sell), C_DIM),
-        kv("挂单", format!("{}", st.working.len()), C_DIM),
+        kv("手续费", format!("{:.4}", st.fee_total), crate::ui::pal::down()),
+        kv("买/卖", format!("{} / {}", st.n_buy, st.n_sell), crate::ui::pal::dim()),
+        kv("挂单", format!("{}", st.working.len()), crate::ui::pal::dim()),
         kv("权益", format!("{:.2}", st.equity), money(st.return_pct)),
     ]
     .spacing(18)
@@ -91,22 +84,22 @@ fn summary<'a, M: 'a>(st: &Readout) -> Element<'a, M> {
 /// 但策略端只发 `OrderFilled`（docs/27 §9.2 已修）。
 fn working_table<'a, M: 'a>(working: &[&WorkingOrder]) -> Element<'a, M> {
     if working.is_empty() {
-        return text("（无活动挂单）").size(11).color(C_DIM).into();
+        return text("（无活动挂单）").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()).into();
     }
     let head = row![
-        cell("方向", 40.0, C_HEAD),
-        cell("价格", 90.0, C_HEAD),
-        cell("数量", 80.0, C_HEAD),
-        cell("订单号", 220.0, C_HEAD),
+        cell("方向", 40.0, crate::ui::pal::head()),
+        cell("价格", 90.0, crate::ui::pal::head()),
+        cell("数量", 80.0, crate::ui::pal::head()),
+        cell("订单号", 220.0, crate::ui::pal::head()),
     ]
     .spacing(6);
     let rows = working.iter().fold(column![head].spacing(2), |col, w| {
         col.push(
             row![
                 container(side_txt::<M>(w.side)).width(Length::Fixed(40.0)),
-                cell(format!("{:.2}", w.price), 90.0, C_DIM),
-                cell(format!("{:.4}", w.qty), 80.0, C_DIM),
-                cell(w.order_id.clone(), 220.0, C_DIM),
+                cell(format!("{:.2}", w.price), 90.0, crate::ui::pal::dim()),
+                cell(format!("{:.4}", w.qty), 80.0, crate::ui::pal::dim()),
+                cell(w.order_id.clone(), 220.0, crate::ui::pal::dim()),
             ]
             .spacing(6),
         )
@@ -117,37 +110,37 @@ fn working_table<'a, M: 'a>(working: &[&WorkingOrder]) -> Element<'a, M> {
 /// 订单明细表（逐笔，新的在上）。
 fn trades_table<'a, M: 'a>(trades: &[Trade]) -> Element<'a, M> {
     if trades.is_empty() {
-        return text("（本次运行还没有成交）").size(11).color(C_DIM).into();
+        return text("（本次运行还没有成交）").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()).into();
     }
     let head = row![
-        cell("#", 34.0, C_HEAD),
-        cell("时间", 108.0, C_HEAD),
-        cell("向", 28.0, C_HEAD),
-        cell("类型", 58.0, C_HEAD),
-        cell("价格", 84.0, C_HEAD),
-        cell("数量", 68.0, C_HEAD),
-        cell("金额", 84.0, C_HEAD),
-        cell("毛收益", 76.0, C_HEAD),
-        cell("手续费", 70.0, C_HEAD),
-        cell("净收益", 76.0, C_HEAD),
-        cell("完成", 48.0, C_HEAD),
+        cell("#", 34.0, crate::ui::pal::head()),
+        cell("时间", 108.0, crate::ui::pal::head()),
+        cell("向", 28.0, crate::ui::pal::head()),
+        cell("类型", 58.0, crate::ui::pal::head()),
+        cell("价格", 84.0, crate::ui::pal::head()),
+        cell("数量", 68.0, crate::ui::pal::head()),
+        cell("金额", 84.0, crate::ui::pal::head()),
+        cell("毛收益", 76.0, crate::ui::pal::head()),
+        cell("手续费", 70.0, crate::ui::pal::head()),
+        cell("净收益", 76.0, crate::ui::pal::head()),
+        cell("完成", 48.0, crate::ui::pal::head()),
     ]
     .spacing(6);
     // 新的在上：回测跑起来后人盯的是「刚刚发生了什么」。
     let rows = trades.iter().rev().take(ROW_CAP).fold(column![head].spacing(2), |col, t| {
         col.push(
             row![
-                cell(format!("{}", t.seq), 34.0, C_DIM),
-                cell(ts_txt(t.ts), 108.0, C_DIM),
+                cell(format!("{}", t.seq), 34.0, crate::ui::pal::dim()),
+                cell(ts_txt(t.ts), 108.0, crate::ui::pal::dim()),
                 container(side_txt::<M>(t.side)).width(Length::Fixed(28.0)),
-                cell(t.order_type.clone(), 58.0, C_DIM),
-                cell(format!("{:.2}", t.price), 84.0, C_DIM),
-                cell(format!("{:.4}", t.qty), 68.0, C_DIM),
-                cell(format!("{:.2}", t.amount), 84.0, C_DIM),
+                cell(t.order_type.clone(), 58.0, crate::ui::pal::dim()),
+                cell(format!("{:.2}", t.price), 84.0, crate::ui::pal::dim()),
+                cell(format!("{:.4}", t.qty), 68.0, crate::ui::pal::dim()),
+                cell(format!("{:.2}", t.amount), 84.0, crate::ui::pal::dim()),
                 cell(format!("{:+.4}", t.gross), 76.0, money(t.gross)),
-                cell(format!("{:.4}", t.fee), 70.0, C_NEG),
+                cell(format!("{:.4}", t.fee), 70.0, crate::ui::pal::down()),
                 cell(format!("{:+.4}", t.net), 76.0, money(t.net)),
-                cell(format!("{:.0}%", t.filled_pct), 48.0, C_DIM),
+                cell(format!("{:.0}%", t.filled_pct), 48.0, crate::ui::pal::dim()),
             ]
             .spacing(6),
         )
@@ -162,14 +155,14 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     if st.run_id.is_empty() && st.trades.is_empty() {
         return container(iced::widget::center(
             column![
-                text("订单").size(16).color(C_HEAD),
-                text("等待运行——跑一次回测或实盘后这里会逐笔填充").size(12).color(C_DIM),
-                text("（数据来自通道① trader-{run}:stream:events.*）").size(10).color(C_DIM),
+                text("订单").size(crate::ui::text::s_section()).color(crate::ui::pal::head()),
+                text("等待运行——跑一次回测或实盘后这里会逐笔填充").size(crate::ui::text::s_body()).color(crate::ui::pal::dim()),
+                text("（数据来自通道① trader-{run}:stream:events.*）").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
             ]
             .spacing(6)
             .align_x(Alignment::Center),
         ))
-        .padding(12)
+        .padding(crate::ui::metrics::space(4))
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
@@ -181,20 +174,20 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     column![
         row![
             text(format!("订单 · run {}", if st.run_id.is_empty() { "—" } else { &st.run_id }))
-                .size(13)
-                .color(C_HEAD),
-            text(format!("本金 {:.0}", st.capital)).size(10).color(C_DIM),
+                .size(crate::ui::text::s_emph())
+                .color(crate::ui::pal::head()),
+            text(format!("本金 {:.0}", st.capital)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(12)
         .align_y(Alignment::Center),
         summary::<M>(&st),
-        text("活动挂单").size(11).color(C_HEAD),
+        text("活动挂单").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
         working_table::<M>(&working),
-        text(format!("订单明细（{} 笔，新的在上）", st.trades.len())).size(11).color(C_HEAD),
+        text(format!("订单明细（{} 笔，新的在上）", st.trades.len())).size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
         trades_table::<M>(&st.trades),
     ]
     .spacing(8)
-    .padding(10)
+    .padding(crate::ui::metrics::space(3))
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
@@ -228,8 +221,8 @@ mod tests {
 
     #[test]
     fn 收益着色分三档() {
-        assert_eq!(money(1.0), C_POS);
-        assert_eq!(money(-1.0), C_NEG);
-        assert_eq!(money(0.0), C_DIM, "零收益不该染成红或绿");
+        assert_eq!(money(1.0), crate::ui::pal::up());
+        assert_eq!(money(-1.0), crate::ui::pal::down());
+        assert_eq!(money(0.0), crate::ui::pal::dim(), "零收益不该染成红或绿");
     }
 }
