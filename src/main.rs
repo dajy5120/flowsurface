@@ -196,6 +196,7 @@ struct Flowsurface {
     specimen: Option<ws::specimen::Specimen>,     // 界面样张模式（docs/35）：轮换工作区自截图
     shell: ui::shell::Shell,                      // 外壳（docs/35 批 3）：命令面板 / 底部面板 / 检查器
     commands: Vec<ui::command::Entry>,            // 命令注册表（UPDS V2 §12）
+    gallery: Option<ui::gallery::Gallery>,        // 组件样张页（样张模式 WS_UI_SPECIMEN_COMPONENTS）
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +238,8 @@ enum Message {
     Shell(ui::shell::ShellEvent),
     /// 执行一条命令（命令面板、快捷键、外壳按钮都走这里，UPDS V2 §12）
     RunCommand(ui::command::Cmd),
+    /// 组件样张页的事件
+    Gallery(ui::gallery::GalleryMsg),
 }
 
 impl Flowsurface {
@@ -285,6 +288,7 @@ impl Flowsurface {
             specimen: ws::specimen::Specimen::from_env(),
             shell: ui::shell::Shell::default(),
             commands: ui::command::registry(&ws::workspace::WORKSPACES),
+            gallery: if ws::specimen::enabled() { ui::gallery::Gallery::from_env() } else { None },
         };
 
         if let Some(err) = audio_init_err {
@@ -317,8 +321,13 @@ impl Flowsurface {
                     sp.queue.push((l.id.unique, name.to_string()));
                 }
             }
+            // 组件样张页只截一张
+            if state.gallery.is_some() {
+                sp.queue.truncate(1);
+            }
             log::info!("[specimen] {} 个工作区 → {}", sp.queue.len(), sp.dir.display());
         }
+
 
         let active_layout_id = state
             .layout_manager
@@ -453,6 +462,11 @@ impl Flowsurface {
                 }
             }
             Message::RunCommand(cmd) => return self.run_command(cmd),
+            Message::Gallery(m) => {
+                if let Some(g) = self.gallery.as_mut() {
+                    g.update(m);
+                }
+            }
             Message::Tick(now) => {
                 // 界面偏好可能被 Studio 改了（每秒最多看一次文件修改时间）
                 ui::poll();
@@ -521,7 +535,11 @@ impl Flowsurface {
                     None => return Task::none(),
                 };
                 match step {
-                    ws::specimen::Step::Load(uid) => return self.load_layout(uid, main),
+                    ws::specimen::Step::Load(uid) => {
+                        // 组件样张页：网格此时已渲染过，滚动指令才有对象可滚
+                        let scroll = self.gallery.as_ref().map(|g| g.initial_scroll()).unwrap_or_else(Task::none);
+                        return self.load_layout(uid, main).chain(scroll);
+                    }
                     ws::specimen::Step::Shoot => {
                         return iced::window::screenshot(main).map(Message::SpecimenShot);
                     }
@@ -1030,12 +1048,16 @@ impl Flowsurface {
                 .view(self.audio_stream.volume(), &workspaces)
                 .map(Message::Sidebar);
 
-            let dashboard_view = dashboard
-                .view(&self.main_window, tickers_table, self.timezone)
-                .map(move |msg| Message::Dashboard {
-                    layout_id: None,
-                    event: msg,
-                });
+            let dashboard_view: Element<'_, Message> = match &self.gallery {
+                // 组件样张页替换工作区（外壳照常，便于同时检查命令栏 / 状态栏）
+                Some(g) => g.view().map(Message::Gallery),
+                None => dashboard
+                    .view(&self.main_window, tickers_table, self.timezone)
+                    .map(move |msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    }),
+            };
 
             let header_title = {
                 #[cfg(target_os = "macos")]

@@ -13,10 +13,14 @@
 //! 不做 IO。
 
 pub mod command;
+pub mod fmt;
+pub mod gallery;
+pub mod grid;
 pub mod metrics;
 pub mod shell;
 pub mod text;
 pub mod theme;
+pub mod widgets;
 
 use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
