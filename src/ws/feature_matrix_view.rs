@@ -1589,7 +1589,7 @@ fn engine_bar<'a>() -> Element<'a, Msg> {
 ///
 /// `hosted` = 这个面板的可编辑属性正显示在检查器里（见 `ws::inspector_props`）。
 pub fn pane_body<'a>(hosted: bool) -> Element<'a, Msg> {
-    let m: Matrix = ro::snapshot();
+    let m = ro::snapshot();
     let v = super::feature_matrix::state();
     let mut b = column![sec(
         "订单流与市场微观结构 · 特征矩阵（docs/31 · 感知层·非交易信号）".into()

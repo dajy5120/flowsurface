@@ -433,7 +433,7 @@ pub fn edit_block<'a>(m: &Matrix) -> Element<'a, Msg> {
 /// 视图本体（放在特征面板的 scrollable 里）。
 ///
 /// `hosted` = 口径设置正显示在检查器里（docs/35 §16.5 第 3 项），这里只留一行提示。
-pub fn view<'a>(m: &Matrix, hosted: bool) -> Element<'a, Msg> {
+pub fn view<'a>(m: &std::sync::Arc<Matrix>, hosted: bool) -> Element<'a, Msg> {
     let c = &m.chart;
     if !c.present {
         return text("这份快照没有图表参数段：常驻引擎 / 回放程序还是旧版本，重新编译并重启 ws-features（或重新开始回放）")
@@ -485,7 +485,8 @@ pub fn view<'a>(m: &Matrix, hosted: bool) -> Element<'a, Msg> {
 
     // 卡片网格：按宽度自动定列数（最多 6 列），卡片固定高度、内容在卡片里滚动（docs/33 排版 A 方案）
     let owned: Vec<(usize, Card)> = cards.iter().map(|(i, k)| (*i, (*k).clone())).collect();
-    let mm = m.clone();
+    // 只复制指针（交给 responsive 闭包）；原来每帧把整份 Matrix 深拷贝一次
+    let mm = std::sync::Arc::clone(m);
     let grid = iced::widget::responsive(move |size| {
         let idx = SlotIndex::new(&mm);
         let now = idx.slot("mid_price", Some(0)).and_then(|s| s.value);

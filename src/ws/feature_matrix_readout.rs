@@ -248,7 +248,9 @@ impl Matrix {
     }
 }
 
-static CACHE: OnceLock<Mutex<(Option<SystemTime>, Matrix)>> = OnceLock::new();
+/// 解析好的快照，按文件修改时间失效。存 `Arc`：面板、图表参数卡片、检查器每帧都取，
+/// 原来每次取都把整份 Matrix 深拷贝一遍（在渲染线程上）。
+static CACHE: OnceLock<Mutex<(Option<SystemTime>, std::sync::Arc<Matrix>)>> = OnceLock::new();
 
 /// 面板读的旁路文件。**必须与主仓 `sidecar::board_path()` 算出同一个路径**——
 /// 两边各写一份默认值，表现是面板说「暂无快照」而引擎日志显示一直在写。
@@ -263,9 +265,9 @@ pub fn board_path() -> PathBuf {
         .unwrap_or_else(|_| super::paths::data_dir().join("cockpit").join("feature_matrix.json"))
 }
 
-pub fn snapshot() -> Matrix {
-    let lock = CACHE.get_or_init(|| Mutex::new((None, Matrix::default())));
-    let Ok(mut g) = lock.lock() else { return Matrix::default() };
+pub fn snapshot() -> std::sync::Arc<Matrix> {
+    let lock = CACHE.get_or_init(|| Mutex::new((None, std::sync::Arc::default())));
+    let Ok(mut g) = lock.lock() else { return std::sync::Arc::default() };
     let p = board_path();
     let mt = std::fs::metadata(&p).ok().and_then(|m| m.modified().ok());
     if g.0.is_some() && g.0 == mt {
@@ -277,6 +279,7 @@ pub fn snapshot() -> Matrix {
     };
     v.refreshed = chrono::Local::now().format("%H:%M:%S").to_string();
     record(&v);
+    let v = std::sync::Arc::new(v);
     *g = (mt, v.clone());
     v
 }
