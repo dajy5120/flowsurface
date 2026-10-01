@@ -330,6 +330,8 @@ pub enum RadarMsg {
     Start,
     Stop,
     Refresh,
+    /// 抓取一次（`ws-radar --once`，不常驻）
+    FetchOnce,
     SetWindow(usize),
     SetSize(Opt),
     SetColor(Opt),
@@ -560,6 +562,7 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
         // 这几条**不改 `ViewState`**：启停/刷新/打开链接是副作用（在 `handle` 里），
         // 强制刷新只写请求文件。`ManualEdited` 等已在上面各自处理，不再列
         RadarMsg::Start
+        | RadarMsg::FetchOnce
         | RadarMsg::ForceBlock(_)
         | RadarMsg::Stop
         | RadarMsg::Refresh
@@ -573,6 +576,7 @@ pub fn handle(msg: RadarMsg) {
     let m = match msg {
         RadarMsg::Start => ro::radar_start(),
         RadarMsg::Stop => ro::radar_stop(),
+        RadarMsg::FetchOnce => super::once::RADAR.start(ro::snapshot().svc.active),
         // 打开浏览器是个副作用，走这一路而不是 `apply`——`apply` 是纯函数
         RadarMsg::OpenLink(id) => ro::open_link(id),
         // 写请求文件也是副作用

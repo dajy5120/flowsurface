@@ -912,7 +912,9 @@ pub fn start() {
                     .ok()
                     .and_then(|g| *g)
                     .is_some_and(|t| t.elapsed().as_secs() < 10);
-                waker().wait(std::time::Duration::from_secs(if watching { 2 } else { 20 }));
+                // 页面开着 2 秒（速度按 2 秒采样算）；关着只给状态栏「对外 N 条」供数，30 秒一轮
+                // （2026-10-01，原 20 秒）
+                waker().wait(std::time::Duration::from_secs(if watching { 2 } else { 30 }));
             }
         });
     });
@@ -922,10 +924,10 @@ pub fn start() {
 pub fn rows() -> Vec<Row> {
     start();
     if let Ok(mut g) = LAST_VIEW.lock() {
-        let first = g.is_none();
+        // 刚打开（或隔了一阵重新打开）这一页时立刻刷一轮，别让人对着 30 秒前的数
+        let reopened = g.is_none_or(|t| t.elapsed().as_secs() >= 10);
         *g = Some(std::time::Instant::now());
-        // 刚打开这一页时立刻刷一轮，别让人对着 20 秒前的数
-        if first {
+        if reopened {
             waker().request();
         }
     }

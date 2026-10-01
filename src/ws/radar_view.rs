@@ -2927,6 +2927,11 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
                 .color(if running { crate::ui::pal::ok() } else { crate::ui::pal::dim() }),
             text("　").size(crate::ui::text::s_small()),
             button(text("⟳ 立即获取").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 2)).on_press(RadarMsg::Refresh),
+            // 不常驻也能看一眼最新数据：抓一轮（含回填，约 5–15 分钟）就退出
+            button(text("⇩ 抓取一次").size(crate::ui::text::s_small()))
+                .padding(crate::ui::metrics::pad2(0, 2))
+                .on_press_maybe((!running && !super::once::RADAR.running()).then_some(RadarMsg::FetchOnce)),
+            text(super::once::RADAR.status()).size(crate::ui::text::s_meta()).color(crate::ui::pal::info()),
             text(format!("  刷新于 {}", st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(4)
@@ -2940,7 +2945,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
 
     if !st.present || st.rows.is_empty() {
         body = body.push(
-            text("暂无快照——点上方「▶ 启动」拉起 ws-radar 守护（首轮约 5s 出数据）")
+            text("暂无快照——点上方「⇩ 抓取一次」抓一轮就停（含回填约 5–15 分钟），或「▶ 启动」常驻（首轮约 5s 出数据）")
                 .size(crate::ui::text::s_small())
                 .color(crate::ui::pal::dim()),
         );

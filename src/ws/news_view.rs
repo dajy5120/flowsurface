@@ -40,6 +40,8 @@ fn link_style(_t: &iced::Theme, status: iced::widget::button::Status) -> iced::w
 pub enum NewsMsg {
     Start,
     Stop,
+    /// 抓取一次（`ws-news --once`：每个源请求一次就退出，不常驻）
+    FetchOnce,
     /// 打开原文。
     Open(String),
     /// 折叠/展开源健康区。
@@ -156,6 +158,8 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
             text("新闻资讯").size(crate::ui::text::s_emph()).color(crate::ui::pal::txt()),
             chip("▶ 启动", NewsMsg::Start),
             chip("■ 停止", NewsMsg::Stop),
+            chip("⇩ 抓取一次", NewsMsg::FetchOnce),
+            text(super::once::NEWS.status()).size(crate::ui::text::s_meta()).color(crate::ui::pal::info()),
             text(if st.svc.active {
                 format!("守护运行中 {}s", st.svc.uptime_secs)
             } else {

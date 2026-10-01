@@ -58,6 +58,7 @@ pub mod feature_matrix;
 pub mod feature_matrix_readout;
 pub mod feature_matrix_view;
 pub mod bridge;
+pub mod once;
 pub mod inspector_props;
 pub mod feature_presets;
 pub mod feature_lab_view;

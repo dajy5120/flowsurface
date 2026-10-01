@@ -13,6 +13,10 @@ pub fn handle(m: NewsMsg) {
         NewsMsg::Stop => {
             let _ = ro::svc_action("stop");
         }
+        // 结果写进按钮旁边的状态行（once::NEWS.status）
+        NewsMsg::FetchOnce => {
+            let _ = super::once::NEWS.start(ro::snapshot().svc.active);
+        }
         NewsMsg::Open(url) => open_in_browser(&url),
         // 打字只改面板内存：守护照常收全部
         NewsMsg::FilterEdited(t) => ro::set_filter_text(&t),

@@ -218,15 +218,34 @@ pub fn nightly_toggle_timer(enable: bool) -> String {
 
 fn ensure_poller() {
     POLLER.get_or_init(|| {
-        super::spawn_named("ws-factory-rd", || loop {
-            DEMAND.wait_viewed();
-            let mut snap = poll_once();
-            poll_nightly_units(&mut snap);
-            let lock = READOUT.get_or_init(|| Mutex::new(FactoryReadout::default()));
-            if let Ok(mut g) = lock.lock() {
-                *g = snap;
+        super::spawn_named("ws-factory-rd", || {
+            // 查库 + 扫数据 + 读夜跑日志只在：第一轮 / 面板重新打开 / 点「⟳ 刷新」/ 夜跑进行中
+            // （跟进度）时做（2026-10-01，用户要求耗资源的部分人工刷新）。平时 10 秒只查一次
+            // 夜跑单元的状态——原来每 4 秒全量一次。
+            let mut full = true;
+            loop {
+                if DEMAND.wait_viewed() {
+                    full = true;
+                }
+                let lock = READOUT.get_or_init(|| Mutex::new(FactoryReadout::default()));
+                let running = lock.lock().map(|g| g.svc.active).unwrap_or(false);
+                let snap = if full || running {
+                    let mut s = poll_once();
+                    poll_nightly_units(&mut s);
+                    s
+                } else {
+                    let mut s = lock.lock().map(|g| g.clone()).unwrap_or_default();
+                    poll_nightly_units(&mut s);
+                    s
+                };
+                // 夜跑刚开始跑：下一轮立刻全量跟上
+                let started_now = snap.svc.active && !running;
+                if let Ok(mut g) = lock.lock() {
+                    *g = snap;
+                }
+                let interval = if running || started_now { 4 } else { 10 };
+                full = WAKER.wait_requested(Duration::from_secs(interval)) || started_now;
             }
-            WAKER.wait(Duration::from_secs(4));
         });
     });
 }

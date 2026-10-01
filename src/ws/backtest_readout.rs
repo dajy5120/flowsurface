@@ -254,13 +254,24 @@ pub fn out_dir_display() -> String {
 
 fn ensure_poller() {
     POLLER.get_or_init(|| {
-        super::spawn_named("ws-backtest", || loop {
-            let snap = load_latest();
-            let lock = STATE.get_or_init(|| Mutex::new(BacktestResult::default()));
-            if let Ok(mut g) = lock.lock() {
-                *g = snap;
+        super::spawn_named("ws-backtest", || {
+            // 有回测在跑：3 秒全量读一次（边跑边出结果）。没在跑：15 秒看一眼 latest.json 的
+            // 修改时间，变了才重读（2026-10-01，原来不分情况每 3 秒全量读）。
+            // 没有 latest.json（旧结果目录，靠扫子目录）时照旧每轮全量读。
+            let mut last_mtime = None;
+            loop {
+                let running = super::active_run::backtest_running();
+                let mt = std::fs::metadata(out_dir().join("latest.json")).ok().and_then(|m| m.modified().ok());
+                if running || mt.is_none() || mt != last_mtime {
+                    last_mtime = mt;
+                    let snap = load_latest();
+                    let lock = STATE.get_or_init(|| Mutex::new(BacktestResult::default()));
+                    if let Ok(mut g) = lock.lock() {
+                        *g = snap;
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(if running { 3 } else { 15 }));
             }
-            std::thread::sleep(Duration::from_secs(3));
         });
     });
 }

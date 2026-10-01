@@ -31,11 +31,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// How often to refresh stats while the ticker table is visible (seconds).
+/// Minimum gap between two stats fetches of the same venue (seconds).
+///
+/// WealthSpring（2026-10-01，用户要求耗网络的请求人工触发）：24h 统计**不再定时拉**
+/// ——原来列表显示时每 13 秒、隐藏时每 5 分钟对所有选中的交易所各发一次 REST。
+/// 现在只在打开列表、切换交易所、点「⟳」时拉；这个间隔只用来挡住连点。
 const ACTIVE_UPDATE_INTERVAL: u64 = 13;
-
-/// How often to refresh stats while the ticker table is hidden (seconds).
-const INACTIVE_UPDATE_INTERVAL: u64 = 300;
 
 /// Wait this long after exchange toggles before firing one merged stats fetch (milliseconds).
 const EXCHANGE_TOGGLE_DEBOUNCE_MS: u64 = 1_000;
@@ -266,6 +267,13 @@ impl TickersTable {
                         );
                     }
 
+                    // 打开列表时拉一次 24h 统计（不再定时拉，见 ACTIVE_UPDATE_INTERVAL）
+                    if let Some(task) = self.selected_stats_fetch_task() {
+                        return Some(Action::Fetch(Task::batch([
+                            task,
+                            iced::widget::operation::focus("full_ticker_search_box"),
+                        ])));
+                    }
                     return Some(Action::FocusWidget("full_ticker_search_box".into()));
                 }
             }
@@ -338,26 +346,16 @@ impl TickersTable {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        let stats_fetch = iced::time::every(Duration::from_secs(if self.is_shown {
-            ACTIVE_UPDATE_INTERVAL
-        } else {
-            INACTIVE_UPDATE_INTERVAL
-        }))
-        .map(|_| Message::FetchStats);
-
         // 200ms 的防抖 / 加载动画 Tick **只在需要时订阅**（docs/35 §16.5）：原来一直在跑，
         // 列表隐藏时也每秒发 5 条消息、每条触发一次整屏重绘，是空闲 CPU 的来源之一。
         let needs_tick = self.stats_fetch_state.debounce_pending()
             || (self.is_shown
                 && (self.stats_fetch_state.any_in_flight() || self.metadata_fetch_state.any_in_flight()));
         if !needs_tick {
-            return stats_fetch;
+            return Subscription::none();
         }
-        let debounce_tick =
-            iced::time::every(Duration::from_millis(EXCHANGE_TOGGLE_DEBOUNCE_TICK_MS))
-                .map(|_| Message::DebounceExchangeFetchTick);
-
-        Subscription::batch([stats_fetch, debounce_tick])
+        iced::time::every(Duration::from_millis(EXCHANGE_TOGGLE_DEBOUNCE_TICK_MS))
+            .map(|_| Message::DebounceExchangeFetchTick)
     }
 
     fn selected_stats_fetch_task(&mut self) -> Option<Task<Message>> {
@@ -860,6 +858,12 @@ impl TickersTable {
                 .id("full_ticker_search_box")
                 .align_x(Horizontal::Left)
                 .padding(crate::ui::metrics::space(2)),
+            // 手动刷新 24h 统计（只拉选中的交易所；13 秒内重复点会被挡住）
+            button(text("⟳").align_x(Horizontal::Center).align_y(Vertical::Center))
+                .height(28)
+                .width(28)
+                .on_press(Message::FetchStats)
+                .style(move |theme, status| style::button::transparent(theme, status, false)),
             button(
                 icon_text(Icon::Sort, 14)
                     .align_x(Horizontal::Center)

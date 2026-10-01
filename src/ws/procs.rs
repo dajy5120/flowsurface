@@ -220,6 +220,11 @@ static ROWS: OnceLock<Mutex<Vec<Row>>> = OnceLock::new();
 static WAKER: Waker = Waker::new();
 static STARTED: OnceLock<()> = OnceLock::new();
 static LAST_VIEW: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+/// 只在进程页 / 特征矩阵（读引擎状态）显示时工作（docs/35 §16.10，见 `svcctl::Demand`）。
+static DEMAND: svcctl::Demand = svcctl::Demand::new();
+/// 没人点、没有启停动作时多久自动查一轮（2026-10-01：原来 5 秒，每轮对约 15 个单元各起一次
+/// `systemctl`；用户要求耗资源的部分人工刷新，打开页面 / 点「刷新」/ 启停之后会立刻查）。
+const AUTO_SECS: u64 = 30;
 
 #[derive(Clone, Default)]
 pub struct Row {
@@ -255,7 +260,7 @@ pub fn waker() -> &'static Waker {
     &WAKER
 }
 
-/// 后台 poller：每 5s（或被叫醒）查一轮全部单元。
+/// 后台 poller：每 [`AUTO_SECS`]（或被叫醒）查一轮全部单元；没人看时挂起。
 ///
 /// **只在这里起子进程**——`systemctl show` 进渲染线程会卡帧（docs/20 §19.2）。
 pub fn start() {
@@ -263,6 +268,7 @@ pub fn start() {
         return;
     }
     super::spawn_named("ws-procs", || loop {
+        DEMAND.wait_viewed();
         let rows: Vec<Row> = ALL
             .iter()
             .map(|p| {
@@ -283,11 +289,12 @@ pub fn start() {
         if let Ok(mut g) = ROWS.get_or_init(|| Mutex::new(Vec::new())).lock() {
             *g = rows;
         }
-        WAKER.wait(Duration::from_secs(5));
+        WAKER.wait(Duration::from_secs(AUTO_SECS));
     });
 }
 
 pub fn rows() -> Vec<Row> {
+    DEMAND.touch();
     start();
     if let Ok(mut g) = LAST_VIEW.get_or_init(|| Mutex::new(None)).lock() {
         let first = g.is_none();

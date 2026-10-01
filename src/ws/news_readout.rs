@@ -642,17 +642,36 @@ static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
 pub fn snapshot() -> std::sync::Arc<NewsReadout> {
     DEMAND.touch();
     POLLER.get_or_init(|| {
-        super::spawn_named("ws-news-rd", || loop {
-            DEMAND.wait_viewed();
-            let mut snap = poll_once();
-            snap.svc = super::svcctl::query(SERVICE);
-            let lock =
-                READOUT.get_or_init(|| Mutex::new(std::sync::Arc::new(NewsReadout::default())));
-            if let Ok(mut g) = lock.lock() {
-                *g = std::sync::Arc::new(snap);
+        super::spawn_named("ws-news-rd", || {
+            // 文件变了才重读、服务状态 10 秒查一次（2026-10-01）：原来每 800ms 都整份重读重解析，
+            // 还每轮起一次 `systemctl show`（fork + exec）。快照的修改时间就是守护写出的节拍。
+            let mut last_mtime = None;
+            let mut svc = super::svcctl::UnitState::default();
+            let mut svc_at: Option<std::time::Instant> = None;
+            loop {
+                DEMAND.wait_viewed();
+                let mt = std::fs::metadata(board_path()).ok().and_then(|m| m.modified().ok());
+                let svc_due = svc_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(10));
+                if svc_due {
+                    svc = super::svcctl::query(SERVICE);
+                    svc_at = Some(std::time::Instant::now());
+                }
+                if mt != last_mtime || mt.is_none() || svc_due {
+                    let lock = READOUT.get_or_init(|| Mutex::new(std::sync::Arc::new(NewsReadout::default())));
+                    let mut snap = if mt != last_mtime || mt.is_none() {
+                        poll_once()
+                    } else {
+                        lock.lock().map(|g| (**g).clone()).unwrap_or_default()
+                    };
+                    last_mtime = mt;
+                    snap.svc = svc.clone();
+                    if let Ok(mut g) = lock.lock() {
+                        *g = std::sync::Arc::new(snap);
+                    }
+                }
+                // 读文件 + 解析在**后台线程**。渲染线程只取内存快照
+                std::thread::sleep(Duration::from_millis(800));
             }
-            // 读文件 + 解析在**后台线程**。渲染线程只取内存快照
-            std::thread::sleep(Duration::from_millis(800));
         });
     });
     READOUT

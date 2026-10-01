@@ -39,11 +39,18 @@ impl Waker {
     ///
     /// 虚假唤醒无害——最坏结果只是多刷一轮。
     pub fn wait(&self, d: Duration) {
-        if let Ok(g) = self.flag.lock()
-            && let Ok((mut g, _)) = self.cv.wait_timeout(g, d)
-        {
-            *g = false;
-        }
+        let _ = self.wait_requested(d);
+    }
+
+    /// 同 [`wait`](Self::wait)，返回这次是不是被 [`request`](Self::request) 叫醒的
+    /// （面板「刷新」按钮 → 该做的重活这一轮要做）。
+    pub fn wait_requested(&self, d: Duration) -> bool {
+        let Ok(g) = self.flag.lock() else { return false };
+        let g = if *g { g } else { self.cv.wait_timeout(g, d).map(|(g, _)| g).unwrap_or_else(|e| e.into_inner().0) };
+        let mut g = g;
+        let was = *g;
+        *g = false;
+        was
     }
 }
 
@@ -92,14 +99,18 @@ impl Demand {
     }
 
     /// 读数线程每轮开头调：没人看就挂起，直到面板再出现。
-    pub fn wait_viewed(&self) {
-        let Ok(mut g) = self.lock.lock() else { return };
+    /// 返回 true = 刚才挂起过、面板是**重新打开**的（该刷一轮全量）。
+    pub fn wait_viewed(&self) -> bool {
+        let Ok(mut g) = self.lock.lock() else { return false };
+        let mut slept = false;
         while !self.viewed_at(mono_ms()) {
+            slept = true;
             match self.cv.wait_timeout(g, Duration::from_secs(5)) {
                 Ok((ng, _)) => g = ng,
-                Err(_) => return,
+                Err(_) => return slept,
             }
         }
+        slept
     }
 }
 

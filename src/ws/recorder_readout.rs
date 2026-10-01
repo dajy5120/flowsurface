@@ -147,24 +147,37 @@ fn ensure_poller() {
             let mut prev: BTreeMap<String, SymLive> = BTreeMap::new();
             // 段区间缓存跨轮复用：封档的 parquet 永不变，首轮之后几乎零成本。
             let mut ts_cache: TsCache = TsCache::new();
+            // 重活（扫数据湖、读验收报告）只在：第一轮 / 面板重新打开 / 点「⟳ 刷新」时做
+            // （2026-10-01，用户要求耗资源的部分人工刷新）。原来每 3 秒一次，面板开着约 12% 一个核。
+            // 服务状态 10 秒一次；journalctl 只在录制器真在跑时读。
+            let mut full = true;
             loop {
-                DEMAND.wait_viewed();
+                if DEMAND.wait_viewed() {
+                    full = true;
+                }
                 let mut st = SvcState {
                     refreshed: chrono::Local::now().format("%H:%M:%S").to_string(),
                     started: true,
                     ..Default::default()
                 };
                 poll_service(&mut st);
-                poll_journal(&mut st, &prev);
+                if st.active {
+                    poll_journal(&mut st, &prev);
+                }
                 prev = st.live.clone();
-                let dd = super::recorder::config_data_dir();
-                scan_lake(&mut st, &super::recorder::expand_dir(&dd), &mut ts_cache);
-                poll_accept(&mut st, &super::recorder::expand_dir(&dd));
                 let lock = STATE.get_or_init(|| Mutex::new(SvcState::default()));
+                if full {
+                    let dd = super::recorder::config_data_dir();
+                    scan_lake(&mut st, &super::recorder::expand_dir(&dd), &mut ts_cache);
+                    poll_accept(&mut st, &super::recorder::expand_dir(&dd));
+                } else if let Ok(g) = lock.lock() {
+                    // 沿用上次扫描的结果（面板上标着「按日明细扫描于」，不会被当成实时值）
+                    carry_scan(&mut st, &g);
+                }
                 if let Ok(mut g) = lock.lock() {
                     *g = st;
                 }
-                WAKER.wait(Duration::from_secs(3));
+                full = WAKER.wait_requested(Duration::from_secs(10));
             }
         });
     });
@@ -250,6 +263,23 @@ fn poll_service(st: &mut SvcState) {
 }
 
 /// 解析 journal 最新每 symbol 状态行(`[recorder][SYM] l2=.. trades=.. ...`)。
+/// 不扫盘的那几轮：把上次扫描得到的字段原样带过来。
+fn carry_scan(st: &mut SvcState, last: &SvcState) {
+    st.span_first = last.span_first.clone();
+    st.span_last = last.span_last.clone();
+    st.span_days = last.span_days;
+    st.total_bytes = last.total_bytes;
+    st.lake = last.lake.clone();
+    st.rows = last.rows.clone();
+    st.data_dir = last.data_dir.clone();
+    st.exchange = last.exchange.clone();
+    st.syms_seen = last.syms_seen.clone();
+    st.coverage = last.coverage.clone();
+    st.accept = last.accept.clone();
+    st.accept_verdict = last.accept_verdict.clone();
+    st.accept_day = last.accept_day.clone();
+}
+
 fn poll_journal(st: &mut SvcState, prev: &BTreeMap<String, SymLive>) {
     let out = Command::new("journalctl")
         .args(["--user", "-u", SERVICE, "-n", "120", "--no-pager", "-o", "cat"])
