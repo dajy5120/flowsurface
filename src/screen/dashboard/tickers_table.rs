@@ -93,6 +93,8 @@ pub enum Message {
     UpdateMetadata(Venue, HashMap<Ticker, Option<TickerInfo>>),
     UpdateStats(Venue, HashMap<Ticker, TickerStats>),
     RetryMetadataFetch(Venue),
+    /// 手动重新拉交易对清单（选中的交易所），拉完写回本地缓存（见 `ws::ticker_cache`）
+    RefreshMetadata,
     MetadataFetchFailed(Venue, data::InternalError),
     StatsFetchFailed(Venue, data::InternalError),
 }
@@ -129,9 +131,10 @@ impl TickersTable {
     ) -> (Self, Task<Message>) {
         let selected_exchanges = settings.selected_exchanges.to_vec();
 
+        // 有本地缓存就用缓存、不联网（官方每次启动五家合计约 10 MB，见 `ws::ticker_cache`）
         let fetch_metadata = selected_exchanges
             .iter()
-            .map(|venue: &Venue| fetch_metadata_task(&handles, *venue))
+            .map(|venue: &Venue| metadata_task(&handles, *venue))
             .collect::<Vec<_>>();
 
         (
@@ -211,7 +214,7 @@ impl TickersTable {
 
                     if !self.metadata_fetch_state.has_fetched(exch) {
                         if self.metadata_fetch_state.begin_venue(exch) {
-                            return Some(Action::Fetch(fetch_metadata_task(&self.handles, exch)));
+                            return Some(Action::Fetch(metadata_task(&self.handles, exch)));
                         }
 
                         return None;
@@ -282,6 +285,20 @@ impl TickersTable {
                     return Some(Action::Fetch(task));
                 }
             }
+            Message::RefreshMetadata => {
+                let tasks: Vec<Task<Message>> = self
+                    .selected_exchanges
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .filter(|v| self.metadata_fetch_state.begin_venue(*v))
+                    .map(|v| fetch_metadata_task(&self.handles, v))
+                    .collect();
+                if !tasks.is_empty() {
+                    return Some(Action::Fetch(Task::batch(tasks)));
+                }
+            }
             Message::RetryMetadataFetch(venue) => {
                 if self.unavailable_exchanges.contains(&venue)
                     && self.metadata_fetch_state.begin_venue(venue)
@@ -328,7 +345,8 @@ impl TickersTable {
                     crate::ws::data_picker::publish_native_tickers(&venue.to_string(), mk, syms);
                 }
 
-                if self.selected_exchanges.contains(&venue) {
+                // 24h 统计只在列表开着时顺带拉（读缓存的启动路径不该因此联网）
+                if self.is_shown && self.selected_exchanges.contains(&venue) {
                     let venues = std::iter::once(venue).collect::<FxHashSet<_>>();
                     if let Some(task) = self.build_stats_fetch_task(venues) {
                         return Some(Action::Fetch(task));
@@ -859,11 +877,35 @@ impl TickersTable {
                 .align_x(Horizontal::Left)
                 .padding(crate::ui::metrics::space(2)),
             // 手动刷新 24h 统计（只拉选中的交易所；13 秒内重复点会被挡住）
-            button(text("⟳").align_x(Horizontal::Center).align_y(Vertical::Center))
-                .height(28)
-                .width(28)
-                .on_press(Message::FetchStats)
-                .style(move |theme, status| style::button::transparent(theme, status, false)),
+            iced::widget::tooltip(
+                button(text("⟳").align_x(Horizontal::Center).align_y(Vertical::Center))
+                    .height(28)
+                    .width(28)
+                    .on_press(Message::FetchStats)
+                    .style(move |theme, status| style::button::transparent(theme, status, false)),
+                container(text("刷新 24h 统计").size(crate::ui::text::s_small())).padding(crate::ui::metrics::space(2)).style(style::tooltip),
+                iced::widget::tooltip::Position::Bottom,
+            ),
+            // 手动重新拉交易对清单（平时用本地缓存，见 ws::ticker_cache）
+            iced::widget::tooltip(
+                button(text("⇩").align_x(Horizontal::Center).align_y(Vertical::Center))
+                    .height(28)
+                    .width(28)
+                    .on_press_maybe(
+                        (!self.metadata_fetch_state.any_in_flight()).then_some(Message::RefreshMetadata),
+                    )
+                    .style(move |theme, status| style::button::transparent(theme, status, false)),
+                container(
+                    text(format!(
+                        "重新拉交易对清单（{}）",
+                        crate::ws::ticker_cache::oldest_label(self.selected_exchanges.iter().copied())
+                    ))
+                    .size(crate::ui::text::s_small()),
+                )
+                .padding(crate::ui::metrics::space(2))
+                .style(style::tooltip),
+                iced::widget::tooltip::Position::Bottom,
+            ),
             button(
                 icon_text(Icon::Sort, 14)
                     .align_x(Horizontal::Center)
@@ -1701,13 +1743,25 @@ fn fetch_ticker_stats_task(
     })
 }
 
+/// 有本地缓存 → 直接用（不联网）；没有 → 联网拉一次并写缓存。
+fn metadata_task(handles: &AdapterHandles, venue: Venue) -> Task<Message> {
+    match crate::ws::ticker_cache::load(venue) {
+        Some((cached, _)) => Task::done(Message::UpdateMetadata(venue, cached)),
+        None => fetch_metadata_task(handles, venue),
+    }
+}
+
+/// 联网拉元数据；成功就写回本地缓存。
 fn fetch_metadata_task(handles: &AdapterHandles, venue: Venue) -> Task<Message> {
     let markets_to_fetch = available_markets(venue);
     let handles = handles.clone();
     let fetch = async move { handles.fetch_ticker_metadata(venue, markets_to_fetch).await };
 
     Task::perform(fetch, move |result| match result {
-        Ok(ticker_info) => Message::UpdateMetadata(venue, ticker_info),
+        Ok(ticker_info) => {
+            crate::ws::ticker_cache::save(venue, &ticker_info);
+            Message::UpdateMetadata(venue, ticker_info)
+        }
         Err(err) => {
             log::error!("Ticker metadata fetch failed for {venue:?}: {err}");
             Message::MetadataFetchFailed(
