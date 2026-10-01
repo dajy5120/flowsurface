@@ -320,7 +320,7 @@ fn shell_symbol(s: &str) -> Option<String> {
 
 /// 等回放写出图表流的 `meta` 行（最多 2 分钟：Databento 逐单窗口起点要先建簿）。
 fn watch_meta(chart: PathBuf) {
-    std::thread::spawn(move || {
+    super::spawn_named("ws-featuresourc", move || {
         for _ in 0..600 {
             // 期间又换了一次回放 / 切回实时：这一份作废
             if chart_override().as_ref() != Some(&chart) {

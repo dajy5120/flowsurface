@@ -50,7 +50,7 @@ pub fn subscription(redis_url: String) -> iced::Subscription<Option<ActiveRun>> 
             8,
             move |mut output: iced::futures::channel::mpsc::Sender<Option<ActiveRun>>| async move {
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<ActiveRun>>(8);
-                std::thread::spawn(move || {
+                super::spawn_named("ws-activerun", move || {
                     let mut watcher = ActiveRunWatcher::connect(&redis_url).ok();
                     let mut last: Option<ActiveRun> = None;
                     loop {

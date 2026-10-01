@@ -128,9 +128,12 @@ pub struct SvcState {
 
 static STATE: OnceLock<Mutex<SvcState>> = OnceLock::new();
 static POLLER: OnceLock<()> = OnceLock::new();
+/// 只在面板显示时工作（docs/35 §16.10，见 `svcctl::Demand`）。
+static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
 
 /// pane 渲染时读快照(惰性起 poller)。
 pub fn snapshot() -> SvcState {
+    DEMAND.touch();
     ensure_poller();
     STATE
         .get()
@@ -140,11 +143,12 @@ pub fn snapshot() -> SvcState {
 
 fn ensure_poller() {
     POLLER.get_or_init(|| {
-        std::thread::spawn(|| {
+        super::spawn_named("ws-recorder", || {
             let mut prev: BTreeMap<String, SymLive> = BTreeMap::new();
             // 段区间缓存跨轮复用：封档的 parquet 永不变，首轮之后几乎零成本。
             let mut ts_cache: TsCache = TsCache::new();
             loop {
+                DEMAND.wait_viewed();
                 let mut st = SvcState {
                     refreshed: chrono::Local::now().format("%H:%M:%S").to_string(),
                     started: true,

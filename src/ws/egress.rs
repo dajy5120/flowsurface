@@ -681,7 +681,7 @@ pub fn apply_startup() {
     if !on {
         set_streams_enabled(false);
     }
-    std::thread::spawn(move || {
+    super::spawn_named("ws-egress", move || {
         let n = if on { start_external() } else { stop_external() };
         set_note(&if on {
             if n > 0 { format!("启动设置「对外连接开启」：补开了 {n} 路") } else { String::new() }
@@ -900,7 +900,7 @@ static LAST_VIEW: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 /// （一轮 85ms，合 0.4% 的一个核）。
 pub fn start() {
     POLLER.get_or_init(|| {
-        std::thread::spawn(|| {
+        super::spawn_named("ws-egress", || {
             let mut prev = Prev::default();
             loop {
                 let v = collect(&mut prev);

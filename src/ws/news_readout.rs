@@ -636,10 +636,14 @@ pub fn board_path() -> std::path::PathBuf {
 
 static READOUT: OnceLock<Mutex<std::sync::Arc<NewsReadout>>> = OnceLock::new();
 static POLLER: OnceLock<()> = OnceLock::new();
+/// 只在面板显示时工作（docs/35 §16.10，见 `svcctl::Demand`）。
+static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
 
 pub fn snapshot() -> std::sync::Arc<NewsReadout> {
+    DEMAND.touch();
     POLLER.get_or_init(|| {
-        std::thread::spawn(|| loop {
+        super::spawn_named("ws-news-rd", || loop {
+            DEMAND.wait_viewed();
             let mut snap = poll_once();
             snap.svc = super::svcctl::query(SERVICE);
             let lock =

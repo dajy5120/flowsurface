@@ -328,7 +328,7 @@ pub fn subscription(redis_url: String) -> iced::Subscription<OrderState> {
             64,
             move |mut output: iced::futures::channel::mpsc::Sender<OrderState>| async move {
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<OrderState>(16);
-                std::thread::spawn(move || {
+                super::spawn_named("ws-orders", move || {
                     let mut watcher = ActiveRunWatcher::connect(&redis_url).ok();
                     let mut active: Option<String> = None;
                     let mut consumer: Option<EventsConsumer> = None;

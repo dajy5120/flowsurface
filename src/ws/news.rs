@@ -145,7 +145,7 @@ fn open_in_browser(url: &str) {
     let args = open_args(url);
     // 收尸放到后台线程：`xdg-open` 在某些桌面下会等浏览器起来，
     // 在 UI 线程里 wait 会卡住整个界面
-    std::thread::spawn(move || {
+    super::spawn_named("ws-news", move || {
         let url = args[0].clone();
         match std::process::Command::new("xdg-open").args(&args).output() {
             Ok(o) if o.status.success() => {}

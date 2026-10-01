@@ -87,6 +87,20 @@ pub mod tardis_replay_view;
 pub mod view;
 pub mod workspace;
 
+/// 后台线程一律带名字（docs/35 §16.10）：名字进 `/proc/<pid>/task/*/comm`，
+/// 空闲 CPU 花在哪个模块一看便知（不带名字时全叫 `flowsurface`，根本分不出来）。
+/// Linux 线程名最多 15 字节，超出截断。
+pub fn spawn_named<F, T>(name: &str, f: F) -> std::thread::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.chars().take(15).collect())
+        .spawn(f)
+        .expect("创建后台线程失败")
+}
+
 #[cfg(test)]
 mod subscription_liveness_tests {
     //! 订阅线程的对端存活探测（RELEASE_REMEDIATION_PLAN C-01）。
@@ -153,7 +167,7 @@ mod subscription_liveness_tests {
                 continue;
             }
             let Ok(src) = std::fs::read_to_string(&p) else { continue };
-            if !src.contains("pub fn subscription") || !src.contains("thread::spawn") {
+            if !src.contains("pub fn subscription") || !(src.contains("thread::spawn") || src.contains("spawn_named(")) {
                 continue;
             }
             checked += 1;

@@ -103,9 +103,6 @@ fn main() {
     }
 }
 
-/// 空闲时的 Tick 间隔（docs/35 §16.5）。
-const IDLE_TICK_MS: u64 = 500;
-
 /// 全局快捷键（UPDS V9 §77 Linux 列，docs/35 §5.1）。
 ///
 /// 用 `listen_with` 而不是 `keyboard::listen`：后者只给「没被控件吃掉」的按键，
@@ -199,8 +196,6 @@ struct Flowsurface {
     shell: ui::shell::Shell,                      // 外壳（docs/35 批 3）：命令面板 / 底部面板 / 检查器
     commands: Vec<ui::command::Entry>,            // 命令注册表（UPDS V2 §12）
     gallery: Option<ui::gallery::Gallery>,        // 组件样张页（样张模式 WS_UI_SPECIMEN_COMPONENTS）
-    /// 在此之前保持逐帧 Tick（有数据流入或用户在操作）；之后降到 4Hz（docs/35 §16.5）
-    hot_until: std::time::Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -292,7 +287,6 @@ impl Flowsurface {
             shell: ui::shell::Shell::default(),
             commands: ui::command::registry(&ws::workspace::WORKSPACES),
             gallery: if ws::specimen::enabled() { ui::gallery::Gallery::from_env() } else { None },
-            hot_until: std::time::Instant::now() + std::time::Duration::from_secs(5),
         };
 
         if let Some(err) = audio_init_err {
@@ -374,19 +368,6 @@ impl Flowsurface {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        // 有数据流入、或用户在操作面板 / 外壳 → 接下来 1 秒保持逐帧刷新（见 `subscription` 的 tick）
-        if matches!(
-            message,
-            Message::MarketWsEvent(_)
-                | Message::Dashboard { .. }
-                | Message::Shell(_)
-                | Message::RunCommand(_)
-                | Message::WsOrders(_)
-                | Message::WsSignals(_)
-                | Message::WindowEvent(_)
-        ) {
-            self.hot_until = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        }
         match message {
             Message::WsActiveRun(ar) => {
                 // WealthSpring 三态：记录活动 run（subscription() 据此切 live/回测 流）。
@@ -1368,19 +1349,17 @@ impl Flowsurface {
         let ws_signals =
             ws::signals::subscription(ws_redis_url, "BTCUSDT".to_string()).map(Message::WsSignals);
 
-        // **自适应刷新**（docs/35 §16.5，UPDS V5 §39 空闲 CPU < 2%）：
-        // 每条 Tick 都触发一次整屏重绘（上游开着 unconditional-rendering）。实测逐帧 60Hz 空闲
-        // 占 10–20% 一个核。有数据流入或用户在操作时保持逐帧，图表照样流畅；1 秒没动静降到 4Hz——
-        // 读数面板的刷新上限本来就是 4Hz（UPDS V5 §30）。鼠标拖动 / 十字线由事件本身触发重绘，不靠 Tick。
+        // **与官方一致**（docs/35 §16.10）：`unconditional-rendering` + 逐帧 Tick。图表按时钟刷新——
+        // 行情只进缓冲，各面板到了自己的刷新间隔（K 线 1s、Ladder / 逐笔 100ms、热图按基础周期、
+        // GPU 热图每帧）才清缓存重画；行情稀疏时时间轴照样平滑推进。
+        // 曾为「空闲 CPU < 2%」改成无数据时降到 2Hz，结果行情稀疏 / 回放暂停 / 断网时热图一顿一顿，
+        // 且实测空闲开销的大头根本不在渲染（主线程约 1%），已撤回。
         let tick = if self.specimen.is_some() {
             // 样张实例跑在 Xvfb 上：没有垂直同步，逐帧订阅会空转到 100%，改用 60Hz 定时
             iced::time::every(std::time::Duration::from_millis(16))
                 .map(|_| Message::Tick(std::time::Instant::now()))
-        } else if std::time::Instant::now() < self.hot_until {
-            iced::window::frames().map(Message::Tick)
         } else {
-            iced::time::every(std::time::Duration::from_millis(IDLE_TICK_MS))
-                .map(|_| Message::Tick(std::time::Instant::now()))
+            iced::window::frames().map(Message::Tick)
         };
         let specimen = if self.specimen.is_some() {
             iced::time::every(std::time::Duration::from_millis(500)).map(Message::SpecimenStep)

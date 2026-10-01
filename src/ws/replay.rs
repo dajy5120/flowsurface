@@ -91,7 +91,7 @@ pub fn subscription(redis_url: String, ticker_info: TickerInfo, run: String) -> 
             //
             // 现在只有一套：run 变 → App 重发 → `ReplayId` 变 → iced 丢掉旧订阅重建新的。
             // 「丢弃来源不符的帧」因此是**结构性保证**，不靠运行时比对。
-            std::thread::spawn(move || {
+            super::spawn_named("ws-replay", move || {
                 if run.is_empty() {
                     return; // 没有活动回测：本订阅无事可做，直接退出而不是空转轮询
                 }

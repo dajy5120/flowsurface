@@ -147,6 +147,8 @@ pub struct PmBinanceReadout {
 
 static READOUT: OnceLock<Mutex<PmBinanceReadout>> = OnceLock::new();
 static POLLER: OnceLock<()> = OnceLock::new();
+/// 只在面板显示时工作（docs/35 §16.10，见 `svcctl::Demand`）。
+static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
 
 fn board_path() -> PathBuf {
     std::env::var("WS_PM_BINANCE_BOARD").map(PathBuf::from).unwrap_or_else(|_| {
@@ -156,13 +158,14 @@ fn board_path() -> PathBuf {
 }
 
 pub fn snapshot() -> PmBinanceReadout {
+    DEMAND.touch();
     ensure_poller();
     READOUT.get().and_then(|m| m.lock().ok().map(|g| g.clone())).unwrap_or_default()
 }
 
 fn ensure_poller() {
     POLLER.get_or_init(|| {
-        std::thread::spawn(|| {
+        super::spawn_named("ws-pmbinance", || {
             // 按日明细要读每个段的 ts 列，成本是快照的几百倍。每 SCAN_EVERY 拍扫一次，
             // 中间沿用上一次的结果——面板上标了扫描时刻，不会让人当成实时值。
             const SCAN_EVERY: u32 = 30;
@@ -170,6 +173,7 @@ fn ensure_poller() {
             let mut days: Vec<PmDay> = Vec::new();
             let mut scanned = String::new();
             loop {
+                DEMAND.wait_viewed();
                 let mut st = load(&board_path());
                 if tick % SCAN_EVERY == 0 {
                     days = scan_days(&data_root(), &st.symbol);

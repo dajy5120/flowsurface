@@ -127,6 +127,8 @@ pub struct FactoryReadout {
 
 static READOUT: OnceLock<Mutex<FactoryReadout>> = OnceLock::new();
 static POLLER: OnceLock<()> = OnceLock::new();
+/// 只在面板显示时工作（docs/35 §16.10，见 `svcctl::Demand`）。
+static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -139,6 +141,7 @@ fn db_path() -> PathBuf {
 
 /// pane 渲染时读快照(惰性起 poller:首次调用才开后台线程)。
 pub fn snapshot() -> FactoryReadout {
+    DEMAND.touch();
     ensure_poller();
     READOUT
         .get()
@@ -215,7 +218,8 @@ pub fn nightly_toggle_timer(enable: bool) -> String {
 
 fn ensure_poller() {
     POLLER.get_or_init(|| {
-        std::thread::spawn(|| loop {
+        super::spawn_named("ws-factory-rd", || loop {
+            DEMAND.wait_viewed();
             let mut snap = poll_once();
             poll_nightly_units(&mut snap);
             let lock = READOUT.get_or_init(|| Mutex::new(FactoryReadout::default()));

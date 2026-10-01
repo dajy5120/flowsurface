@@ -27,9 +27,12 @@ pub struct ReplayStatus {
 
 static STATE: OnceLock<Mutex<ReplayStatus>> = OnceLock::new();
 static POLLER: OnceLock<()> = OnceLock::new();
+/// 只在面板显示时工作（docs/35 §16.10，见 `svcctl::Demand`）。
+static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
 
 /// pane 渲染时读快照（惰性起 poller）。
 pub fn snapshot() -> ReplayStatus {
+    DEMAND.touch();
     ensure_poller();
     STATE.get().and_then(|m| m.lock().ok().map(|g| g.clone())).unwrap_or_default()
 }
@@ -40,9 +43,10 @@ fn redis_url() -> String {
 
 fn ensure_poller() {
     POLLER.get_or_init(|| {
-        std::thread::spawn(|| {
+        super::spawn_named("ws-tardisreplay", || {
             let mut conn = None;
             loop {
+                DEMAND.wait_viewed();
                 if conn.is_none() {
                     conn = redis::Client::open(redis_url())
                         .ok()

@@ -99,7 +99,7 @@ pub fn subscription(redis_url: String, symbol: String) -> iced::Subscription<Sig
                 8,
                 move |mut output: iced::futures::channel::mpsc::Sender<Signals>| async move {
                     let (tx, mut rx) = tokio::sync::mpsc::channel::<Signals>(8);
-                    std::thread::spawn(move || {
+                    super::spawn_named("ws-signals", move || {
                         let mut conn = match Client::open(redis_url.as_str())
                             .and_then(|c| c.get_connection())
                         {

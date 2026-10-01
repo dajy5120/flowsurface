@@ -742,7 +742,7 @@ pub fn handle(m: FeatureMatrixMsg) -> Option<f32> {
         },
         FeatureMatrixMsg::PresetExport(name) => {
             set_preset_note(String::new());
-            std::thread::spawn(move || {
+            super::spawn_named("ws-featurematri", move || {
                 let Some(path) = super::feature_presets::ask_save_path(&name) else {
                     return;
                 };
@@ -754,7 +754,7 @@ pub fn handle(m: FeatureMatrixMsg) -> Option<f32> {
         }
         FeatureMatrixMsg::PresetImport => {
             set_preset_note(String::new());
-            std::thread::spawn(|| {
+            super::spawn_named("ws-featurematri", || {
                 let Some(path) = super::feature_presets::ask_open_path() else {
                     return;
                 };
@@ -888,7 +888,7 @@ fn write_and_restart(label: String, edit: impl FnOnce(&mut serde_json::Value)) {
         return;
     }
     set_engine_note(format!("{label}，正在重启引擎…"));
-    std::thread::spawn(move || {
+    super::spawn_named("ws-featurematri", move || {
         let r = super::procs::action(ENGINE_KEY, "restart");
         set_engine_note(format!("{label}：{r}（窗口从头累计，几分钟后才有长窗口的值）"));
     });
@@ -953,7 +953,7 @@ fn set_engine_note(t: String) {
 /// 丢后台线程——`systemctl stop` 要等进程退出，放在更新循环里会卡帧。
 fn engine_action(act: &'static str) {
     set_engine_note(format!("正在{}…", if act == "start" { "启动" } else { "停止" }));
-    std::thread::spawn(move || set_engine_note(super::procs::action(ENGINE_KEY, act)));
+    super::spawn_named("ws-featurematri", move || set_engine_note(super::procs::action(ENGINE_KEY, act)));
 }
 
 /// 特征引擎在进程清单（[`super::procs::ALL`]）里的 key。

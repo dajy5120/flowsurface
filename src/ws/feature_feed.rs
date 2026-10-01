@@ -340,7 +340,7 @@ pub fn subscription(path: String, kinds: Vec<StreamKind>) -> Subscription<Event>
                 let rx_path = path.clone();
 
                 // 阻塞读盘在独立线程（与 replay.rs 同形状）。
-                std::thread::spawn(move || {
+                super::spawn_named("ws-featurefeed", move || {
                     // 文件可能**还不存在**：回放进程要先把数据读进来、推断完刻度才建文件
                     // （本地录制数据要读整段 parquet，要好几秒）。原来打不开就直接退出，而订阅的身份
                     // （路径 + 流）没变、iced 不会再建一次 → 四张图永远 Waiting for data，不报任何错。

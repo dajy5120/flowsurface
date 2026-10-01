@@ -56,7 +56,7 @@ pub fn subscription(ticker_info: TickerInfo) -> Subscription<Event> {
                 // `is_current_run` 这道闸是必须的（docs/27 §12）：订阅刚建立时 last_dir 是空的，
                 // 于是会立刻把**上一次**回测的 result.json 推进图里——刚按 run 清空的图表
                 // 转眼又被旧数据填满，看起来就像「清空没生效」。
-                std::thread::spawn(move || {
+                super::spawn_named("ws-selfdata", move || {
                     let mut last_dir = String::new();
                     loop {
                         // 对端存活探测：**每轮无条件做一次**。

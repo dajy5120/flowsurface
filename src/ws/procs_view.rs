@@ -47,14 +47,14 @@ pub fn handle(m: ProcsMsg) -> String {
         // 十几个 HTTP 请求。**绝不能在渲染线程里做**——界面会整个卡住
         // （docs/20 §19.2 的每帧开销教训）。丢后台线程，回执写进进程级静态。
         ProcsMsg::CheckDeps => {
-            std::thread::spawn(|| {
+            super::spawn_named("ws-procsv", || {
                 let r = super::deps::check_all();
                 super::deps::set_note(&r);
             });
             "正在查上游版本…".into()
         }
         ProcsMsg::UpdateDep(k) => {
-            std::thread::spawn(move || {
+            super::spawn_named("ws-procsv", move || {
                 let r = super::deps::update(&k);
                 super::deps::set_note(&r);
             });

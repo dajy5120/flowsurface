@@ -78,6 +78,8 @@ impl C4Readout {
 
 static READOUT: OnceLock<Mutex<C4Readout>> = OnceLock::new();
 static POLLER: OnceLock<()> = OnceLock::new();
+/// 只在面板显示时工作（docs/35 §16.10，见 `svcctl::Demand`）。
+static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -95,6 +97,7 @@ fn ckpt_path() -> PathBuf {
 
 /// pane 渲染时读快照（惰性起 poller：首次调用才开后台线程）。
 pub fn snapshot() -> C4Readout {
+    DEMAND.touch();
     ensure_poller();
     READOUT
         .get()
@@ -139,7 +142,8 @@ pub fn svc_action(action: &str) -> String {
 
 fn ensure_poller() {
     POLLER.get_or_init(|| {
-        std::thread::spawn(|| loop {
+        super::spawn_named("ws-c4", || loop {
+            DEMAND.wait_viewed();
             let mut snap = poll_once();
             snap.svc = super::svcctl::query(SHADOW_SVC);
             let lock = READOUT.get_or_init(|| Mutex::new(C4Readout::default()));

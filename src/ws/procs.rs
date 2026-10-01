@@ -262,7 +262,7 @@ pub fn start() {
     if STARTED.set(()).is_err() {
         return;
     }
-    std::thread::spawn(|| loop {
+    super::spawn_named("ws-procs", || loop {
         let rows: Vec<Row> = ALL
             .iter()
             .map(|p| {

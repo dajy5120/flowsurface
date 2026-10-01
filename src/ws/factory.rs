@@ -34,7 +34,7 @@ pub fn subscription(redis_url: String) -> iced::Subscription<FactoryPool> {
             8,
             move |mut output: iced::futures::channel::mpsc::Sender<FactoryPool>| async move {
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<FactoryPool>(8);
-                std::thread::spawn(move || {
+                super::spawn_named("ws-factory", move || {
                     let mut conn = match Client::open(redis_url.as_str())
                         .and_then(|c| c.get_connection())
                     {

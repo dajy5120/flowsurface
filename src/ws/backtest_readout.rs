@@ -254,7 +254,7 @@ pub fn out_dir_display() -> String {
 
 fn ensure_poller() {
     POLLER.get_or_init(|| {
-        std::thread::spawn(|| loop {
+        super::spawn_named("ws-backtest", || loop {
             let snap = load_latest();
             let lock = STATE.get_or_init(|| Mutex::new(BacktestResult::default()));
             if let Ok(mut g) = lock.lock() {
@@ -545,7 +545,7 @@ fn ensure_progress_poller() {
     PROGRESS_POLLER.call_once(|| {
         let url = std::env::var("WS_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-        std::thread::spawn(move || {
+        super::spawn_named("ws-backtest", move || {
             loop {
                 // 只在回测跑着时才去读——没在跑的话连 run_id 都没有，白跑一次 Redis 往返。
                 let run = super::active_run::current()

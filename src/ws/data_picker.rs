@@ -314,7 +314,7 @@ pub fn scan(src: &str, root: &str, force: bool) -> Load<Scan> {
         return l.clone();
     }
     g.insert(key.clone(), Load::Loading);
-    std::thread::spawn(move || {
+    super::spawn_named("ws-datapicker", move || {
         let r = run_cli(&["scan", &key.0, "--root", &key.1]).map(|t| Scan::parse(&t));
         if let Ok(mut g) = SCANS.get_or_init(Default::default).lock() {
             g.insert(
@@ -605,7 +605,7 @@ impl DataPick {
             }
             DataPickMsg::BrowseRoot => {
                 let start = self.root_or_default();
-                std::thread::spawn(move || {
+                super::spawn_named("ws-datapicker", move || {
                     if let Some(d) = ask_dir(&start)
                         && let Ok(mut g) = PICKED_DIR.get_or_init(|| Mutex::new(None)).lock()
                     {

@@ -181,7 +181,7 @@ pub fn handle(m: LaunchMsg) {
         LaunchMsg::Strategy(s) => g.strategy = Some(s),
         LaunchMsg::BrowseStrategy => {
             let start = repo().join("strategies");
-            std::thread::spawn(move || {
+            super::spawn_named("ws-backtestlaun", move || {
                 let out = Command::new("zenity")
                     .args(["--file-selection", "--title=选策略文件", "--file-filter=*.py"])
                     .arg(format!("--filename={}/", start.display()))

@@ -334,6 +334,8 @@ pub const STATUS_KEY: &str = "ws:tardis_replay:status";
 
 static PLAY: OnceLock<Mutex<Playhead>> = OnceLock::new();
 static PLAY_POLLER: OnceLock<()> = OnceLock::new();
+/// 只在面板显示时工作（docs/35 §16.10，见 `svcctl::Demand`）。
+static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
 
 fn redis_url() -> String {
     std::env::var("WS_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
@@ -341,10 +343,12 @@ fn redis_url() -> String {
 
 /// 读播放头（惰性起 100ms poller——与 feeder 的发布节奏对齐，动画才顺滑）。
 pub fn playhead() -> Playhead {
+    DEMAND.touch();
     PLAY_POLLER.get_or_init(|| {
-        std::thread::spawn(|| {
+        super::spawn_named("ws-tardisboard", || {
             let mut conn = None;
             loop {
+                DEMAND.wait_viewed();
                 if conn.is_none() {
                     conn = redis::Client::open(redis_url())
                         .ok()

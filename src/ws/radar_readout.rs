@@ -588,6 +588,8 @@ pub struct RadarReadout {
 
 static READOUT: OnceLock<Mutex<std::sync::Arc<RadarReadout>>> = OnceLock::new();
 static POLLER: OnceLock<()> = OnceLock::new();
+/// 只在面板显示时工作（docs/35 §16.10，见 `svcctl::Demand`）。
+static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
 static WAKER: super::svcctl::Waker = super::svcctl::Waker::new();
 
 pub const RADAR_SVC: &str = "ws-radar.service";
@@ -639,6 +641,7 @@ fn slow_path() -> PathBuf {
 /// 重新分配几千万字节。列数从 72 涨到 114 之后这笔开销翻倍，主线程直接
 /// 打满一个核（实测 99.9%）。换成 `Arc` 后每帧只是一次引用计数加一。
 pub fn snapshot() -> std::sync::Arc<RadarReadout> {
+    DEMAND.touch();
     ensure_poller();
     READOUT
         .get()
@@ -892,23 +895,45 @@ pub fn radar_stop() -> String {
 
 fn ensure_poller() {
     POLLER.get_or_init(|| {
-        std::thread::spawn(|| {
+        super::spawn_named("ws-radar", || {
             let mut svc = super::svcctl::UnitState::default();
             let mut tick = 0u32;
+            let mut generation = 0u64;
+            // 三个文件的修改时间：都没变就不重读（docs/35 §16.10）。慢层 16MB，原先每 2s 整份
+            // 重解析一次，雷达守护停着、文件几天没变也照样解析——单这一项约 9% 一个核。
+            let mut last_key = None;
+            let mtime = |p: PathBuf| std::fs::metadata(p).ok().and_then(|m| m.modified().ok());
             loop {
-                let mut snap = poll_once();
-                snap.generation = tick as u64;
+                DEMAND.wait_viewed();
                 // `systemctl show` 是一次 **fork+exec**。每 2s 一次的话，光它就贡献了
                 // 每秒近百次读系统调用（实测），而服务状态几乎不变。降到 10s 一次，
                 // 中间沿用上次结果；面板按钮启停后会立刻 WAKER 唤醒，不必靠轮询看到。
-                if tick.is_multiple_of(5) {
-                    svc = super::svcctl::query(RADAR_SVC);
-                }
+                let svc_changed = if tick.is_multiple_of(5) {
+                    let s = super::svcctl::query(RADAR_SVC);
+                    let changed = s != svc;
+                    svc = s;
+                    changed
+                } else {
+                    false
+                };
                 tick = tick.wrapping_add(1);
-                snap.svc = svc.clone();
+                let key = Some((mtime(board_path()), mtime(slow_path()), mtime(progress_path())));
                 let lock =
                     READOUT.get_or_init(|| Mutex::new(std::sync::Arc::new(RadarReadout::default())));
-                if let Ok(mut g) = lock.lock() {
+                if key != last_key {
+                    last_key = key;
+                    // 数据变了才换代：面板的筛选 / 树图缓存按 generation 失效，不变就不重算
+                    generation += 1;
+                    let mut snap = poll_once();
+                    snap.generation = generation;
+                    snap.svc = svc.clone();
+                    if let Ok(mut g) = lock.lock() {
+                        *g = std::sync::Arc::new(snap);
+                    }
+                } else if svc_changed && let Ok(mut g) = lock.lock() {
+                    // 只有服务状态变了：沿用数据与代号，换掉状态
+                    let mut snap = (**g).clone();
+                    snap.svc = svc.clone();
                     *g = std::sync::Arc::new(snap);
                 }
                 WAKER.wait(Duration::from_secs(2));

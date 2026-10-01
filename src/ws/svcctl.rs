@@ -47,6 +47,68 @@ impl Waker {
     }
 }
 
+/// 「有人在看」闸门（docs/35 §16.10）：读数线程只在对应面板显示时工作。
+///
+/// 面板取快照时 [`touch`](Self::touch)（每帧一次，一次原子交换）；读数线程每轮开头
+/// [`wait_viewed`](Self::wait_viewed)——超过 [`DEMAND_IDLE`] 没人看就挂起，面板再出现时立刻唤醒。
+///
+/// 不加闸门时，这些线程从第一次打开对应工作区起就一直跑：实测雷达每 2s 整份重解析 16MB、
+/// 录制每 3s 扫整个数据湖 + 多次 systemctl / journalctl、工厂每 4s 三次 systemctl + 查库，
+/// 离开那个工作区也照跑，合计约 15% 一个核。
+pub struct Demand {
+    last_ms: std::sync::atomic::AtomicU64,
+    lock: Mutex<()>,
+    cv: Condvar,
+}
+
+/// 多久没人看就挂起。
+pub const DEMAND_IDLE: Duration = Duration::from_secs(10);
+
+fn mono_ms() -> u64 {
+    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    // +1：让「从没被看过」（0）与「刚启动就被看」区分开
+    T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+impl Demand {
+    pub const fn new() -> Self {
+        Self { last_ms: std::sync::atomic::AtomicU64::new(0), lock: Mutex::new(()), cv: Condvar::new() }
+    }
+
+    fn viewed_at(&self, now: u64) -> bool {
+        let last = self.last_ms.load(std::sync::atomic::Ordering::Relaxed);
+        last != 0 && now.saturating_sub(last) <= DEMAND_IDLE.as_millis() as u64
+    }
+
+    /// 面板正在显示（取快照的入口里调）。之前没人看 → 唤醒挂起的线程。
+    pub fn touch(&self) {
+        let now = mono_ms();
+        let prev = self.last_ms.swap(now, std::sync::atomic::Ordering::Relaxed);
+        if prev == 0 || now.saturating_sub(prev) > DEMAND_IDLE.as_millis() as u64 {
+            // 先拿锁再通知：线程「检查 → 等待」也在锁里，不会漏掉这次唤醒
+            let _g = self.lock.lock();
+            self.cv.notify_all();
+        }
+    }
+
+    /// 读数线程每轮开头调：没人看就挂起，直到面板再出现。
+    pub fn wait_viewed(&self) {
+        let Ok(mut g) = self.lock.lock() else { return };
+        while !self.viewed_at(mono_ms()) {
+            match self.cv.wait_timeout(g, Duration::from_secs(5)) {
+                Ok((ng, _)) => g = ng,
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+impl Default for Demand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Default for Waker {
     fn default() -> Self {
         Self::new()
@@ -54,7 +116,7 @@ impl Default for Waker {
 }
 
 /// 一个用户单元的运行状态（常驻服务与 oneshot 共用；字段按需取用）。
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq)]
 pub struct UnitState {
     /// 正在跑（`active`，oneshot 跑到一半是 `activating`，这里也算在跑）。
     pub active: bool,
