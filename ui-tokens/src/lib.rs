@@ -7,6 +7,7 @@
 //! 所有值在编译期从 `upds/upds-tokens.json` 与 `pack/wealthspring-pack.json` 生成并校验
 //! （对比度、主题完备、色弱可区分），见 `build.rs`。
 
+pub mod bridge;
 pub mod color;
 pub mod prefs;
 

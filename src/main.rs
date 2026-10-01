@@ -311,6 +311,10 @@ impl Flowsurface {
         ws::workspace::ensure_seeded(&mut state.layout_manager);
 
         // 样张模式下可把外壳的三个浮动区全打开，截图验证它们（docs/35 批 3）
+        // 跨进程命令（Studio「在 Cockpit 中查看本次回测」）。样张模式不监听：不和正在用的实例抢
+        if state.specimen.is_none() {
+            ws::bridge::start();
+        }
         if state.specimen.is_some() && std::env::var_os("WS_UI_SPECIMEN_SHELL").is_some() {
             state.shell.bottom = true;
             state.shell.inspector = true;
@@ -493,6 +497,23 @@ impl Flowsurface {
                 }
             }
             Message::Tick(now) => {
+                // Studio 发来的跨进程命令（docs/35 §16.5 第 4 项）：切到回测工作区并把窗口提到前面
+                let from_studio = ws::bridge::take();
+                if !from_studio.is_empty() {
+                    let mut tasks = Vec::new();
+                    for c in from_studio {
+                        if let ws::bridge::UiCommand::ShowRun { run_id } = c {
+                            self.notifications.push(Toast::info(if run_id.is_empty() {
+                                "Studio：查看本次回测".to_string()
+                            } else {
+                                format!("Studio：查看回测 run {run_id}")
+                            }));
+                            tasks.push(self.run_command(ui::command::Cmd::Workspace(ws::workspace::WS_BACKTEST.to_string())));
+                            tasks.push(iced::window::gain_focus(self.main_window.id));
+                        }
+                    }
+                    return Task::batch(tasks);
+                }
                 // 界面偏好可能被 Studio 改了（每秒最多看一次文件修改时间）
                 if ui::poll() {
                     self.apply_ui_change();
@@ -1527,6 +1548,10 @@ impl Flowsurface {
             Cmd::OpenSettings => self.sidebar.set_menu(Some(sidebar::Menu::Settings)),
             Cmd::OpenLayouts => self.sidebar.set_menu(Some(sidebar::Menu::Layout)),
             Cmd::OpenDataFolder => return self.update(Message::DataFolderRequested),
+            Cmd::OpenInStudio => match ws::bridge::open_in_studio() {
+                Ok(m) => self.notifications.push(Toast::info(m)),
+                Err(m) => self.notifications.push(Toast::warn(m)),
+            },
         }
         Task::none()
     }

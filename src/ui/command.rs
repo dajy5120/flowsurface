@@ -38,6 +38,8 @@ pub enum Cmd {
     OpenDataFolder,
     /// 底部面板切到某一页并打开
     BottomTab(super::shell::BottomTab),
+    /// 跨进程：把当前策略发给 Studio 打开（docs/35 §16.5 第 4 项）
+    OpenInStudio,
 }
 
 /// 命令面板里的一行。
@@ -88,6 +90,7 @@ pub fn registry(workspaces: &[&str]) -> Vec<Entry> {
         e(Cmd::OpenSettings, "设置", "打开设置", "Ctrl ,"),
         e(Cmd::OpenLayouts, "设置", "布局管理", ""),
         e(Cmd::OpenDataFolder, "设置", "打开数据文件夹", ""),
+        e(Cmd::OpenInStudio, "运行", "在 Studio 中打开策略", ""),
     ]);
     v
 }
