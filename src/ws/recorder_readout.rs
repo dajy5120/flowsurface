@@ -152,7 +152,19 @@ fn ensure_poller() {
             // 服务状态 10 秒一次；journalctl 只在录制器真在跑时读。
             let mut full = true;
             loop {
-                if DEMAND.wait_viewed() {
+                // 10 分钟没显示：释放快照（见 svcctl::release_after）
+                let w = DEMAND.wait(|| {
+                    if let Some(m) = STATE.get()
+                        && let Ok(mut g) = m.lock()
+                    {
+                        *g = SvcState::default();
+                    }
+                });
+                if w.released {
+                    ts_cache = TsCache::new();
+                    prev.clear();
+                }
+                if w.resumed {
                     full = true;
                 }
                 let mut st = SvcState {

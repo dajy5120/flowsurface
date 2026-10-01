@@ -272,7 +272,17 @@ fn ensure_poller() {
             let mut svc = super::svcctl::UnitState::default();
             let mut svc_at: Option<std::time::Instant> = None;
             loop {
-                DEMAND.wait_viewed();
+                // 10 分钟没显示：释放快照（见 svcctl::release_after）
+                let w = DEMAND.wait(|| {
+                    if let Some(m) = READOUT.get()
+                        && let Ok(mut g) = m.lock()
+                    {
+                        *g = std::sync::Arc::new(ObsReadout::default());
+                    }
+                });
+                if w.released {
+                    last_mtime = None; // 否则文件没变就不重读，重开后面板是空的
+                }
                 let mt = std::fs::metadata(board_path()).ok().and_then(|m| m.modified().ok());
                 let svc_due = svc_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(10));
                 if svc_due {

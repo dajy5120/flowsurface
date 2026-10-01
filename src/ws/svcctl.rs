@@ -71,6 +71,42 @@ pub struct Demand {
 /// 多久没人看就挂起。
 pub const DEMAND_IDLE: Duration = Duration::from_secs(10);
 
+/// 多久没人看就释放快照（2026-10-01，用户确认 10 分钟）。各面板的数据快照原先离开后一直留在
+/// 内存里——实测依次打开几个面板后 RSS 从 233 MB 涨到 474 MB。`WS_RELEASE_AFTER_SECS` 可改（验证用）。
+pub fn release_after() -> Duration {
+    static D: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *D.get_or_init(|| {
+        std::env::var("WS_RELEASE_AFTER_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map_or(Duration::from_secs(600), Duration::from_secs)
+    })
+}
+
+/// 把 glibc 手里空着的堆还给系统。快照里大多是小块分配（字符串、Vec），
+/// 不调这个的话 free 了 RSS 也不降。
+pub fn trim_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc 的 malloc_trim 线程安全，只整理空闲块
+        unsafe {
+            malloc_trim(0);
+        }
+    }
+}
+
+/// [`Demand::wait`] 的结果。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Wake {
+    /// 刚才挂起过、面板是重新打开的（该刷一轮全量）
+    pub resumed: bool,
+    /// 挂起期间超过 [`release_after`]，快照已释放（「文件没变不重读」的记录也要清掉，否则重开后是空的）
+    pub released: bool,
+}
+
 fn mono_ms() -> u64 {
     static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     // +1：让「从没被看过」（0）与「刚启动就被看」区分开
@@ -101,16 +137,33 @@ impl Demand {
     /// 读数线程每轮开头调：没人看就挂起，直到面板再出现。
     /// 返回 true = 刚才挂起过、面板是**重新打开**的（该刷一轮全量）。
     pub fn wait_viewed(&self) -> bool {
-        let Ok(mut g) = self.lock.lock() else { return false };
-        let mut slept = false;
+        self.wait(|| {}).resumed
+    }
+
+    /// 同 [`wait_viewed`](Self::wait_viewed)，另外：挂起满 [`release_after`] 时调一次 `release`
+    /// （清掉本模块的快照），然后把空闲堆还给系统。
+    pub fn wait(&self, release: impl Fn()) -> Wake {
+        let Ok(mut g) = self.lock.lock() else { return Wake::default() };
+        let mut w = Wake::default();
         while !self.viewed_at(mono_ms()) {
-            slept = true;
+            w.resumed = true;
+            let last = self.last_ms.load(std::sync::atomic::Ordering::Relaxed);
+            if !w.released && last != 0 && mono_ms().saturating_sub(last) >= release_after().as_millis() as u64 {
+                release();
+                trim_heap();
+                w.released = true;
+                log::info!(
+                    "[{}] {}s 没显示，已释放快照",
+                    std::thread::current().name().unwrap_or("?"),
+                    release_after().as_secs()
+                );
+            }
             match self.cv.wait_timeout(g, Duration::from_secs(5)) {
                 Ok((ng, _)) => g = ng,
-                Err(_) => return slept,
+                Err(_) => return w,
             }
         }
-        slept
+        w
     }
 }
 

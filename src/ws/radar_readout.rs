@@ -904,7 +904,17 @@ fn ensure_poller() {
             let mut last_key = None;
             let mtime = |p: PathBuf| std::fs::metadata(p).ok().and_then(|m| m.modified().ok());
             loop {
-                DEMAND.wait_viewed();
+                // 10 分钟没显示：释放快照（见 svcctl::release_after）
+                let w = DEMAND.wait(|| {
+                    if let Some(m) = READOUT.get()
+                        && let Ok(mut g) = m.lock()
+                    {
+                        *g = std::sync::Arc::new(RadarReadout::default());
+                    }
+                });
+                if w.released {
+                    last_key = None; // 否则文件没变就不重读，重开后面板是空的
+                }
                 // `systemctl show` 是一次 **fork+exec**。每 2s 一次的话，光它就贡献了
                 // 每秒近百次读系统调用（实测），而服务状态几乎不变。降到 10s 一次，
                 // 中间沿用上次结果；面板按钮启停后会立刻 WAKER 唤醒，不必靠轮询看到。

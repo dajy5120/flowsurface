@@ -224,7 +224,15 @@ fn ensure_poller() {
             // 夜跑单元的状态——原来每 4 秒全量一次。
             let mut full = true;
             loop {
-                if DEMAND.wait_viewed() {
+                // 10 分钟没显示：释放快照（见 svcctl::release_after）
+                let w = DEMAND.wait(|| {
+                    if let Some(m) = READOUT.get()
+                        && let Ok(mut g) = m.lock()
+                    {
+                        *g = FactoryReadout::default();
+                    }
+                });
+                if w.resumed {
                     full = true;
                 }
                 let lock = READOUT.get_or_init(|| Mutex::new(FactoryReadout::default()));

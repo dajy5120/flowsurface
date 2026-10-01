@@ -46,7 +46,14 @@ fn ensure_poller() {
         super::spawn_named("ws-tardisreplay", || {
             let mut conn = None;
             loop {
-                DEMAND.wait_viewed();
+                // 10 分钟没显示：释放快照（见 svcctl::release_after）
+                DEMAND.wait(|| {
+                    if let Some(m) = STATE.get()
+                        && let Ok(mut g) = m.lock()
+                    {
+                        *g = Default::default();
+                    }
+                });
                 if conn.is_none() {
                     conn = redis::Client::open(redis_url())
                         .ok()

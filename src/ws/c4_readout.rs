@@ -143,7 +143,14 @@ pub fn svc_action(action: &str) -> String {
 fn ensure_poller() {
     POLLER.get_or_init(|| {
         super::spawn_named("ws-c4", || loop {
-            DEMAND.wait_viewed();
+            // 10 分钟没显示：释放快照（见 svcctl::release_after）
+            DEMAND.wait(|| {
+                if let Some(m) = READOUT.get()
+                    && let Ok(mut g) = m.lock()
+                {
+                    *g = Default::default();
+                }
+            });
             let mut snap = poll_once();
             snap.svc = super::svcctl::query(SHADOW_SVC);
             let lock = READOUT.get_or_init(|| Mutex::new(C4Readout::default()));

@@ -173,7 +173,18 @@ fn ensure_poller() {
             let mut days: Vec<PmDay> = Vec::new();
             let mut scanned = String::new();
             loop {
-                DEMAND.wait_viewed();
+                // 10 分钟没显示：释放快照（见 svcctl::release_after）
+                let w = DEMAND.wait(|| {
+                    if let Some(m) = READOUT.get()
+                        && let Ok(mut g) = m.lock()
+                    {
+                        *g = Default::default();
+                    }
+                });
+                if w.released {
+                    days = Vec::new();
+                    tick = 0; // 重开后立刻重扫按日明细
+                }
                 let mut st = load(&board_path());
                 if tick % SCAN_EVERY == 0 {
                     days = scan_days(&data_root(), &st.symbol);
