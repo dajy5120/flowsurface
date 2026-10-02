@@ -688,6 +688,20 @@ impl State {
                 .height(widget::PANE_CONTROL_BTN_HEIGHT);
 
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
+        } else if !matches!(self.content, Content::Starter) {
+            // WS 自研面板：统一的标题栏标题 + 状态位（docs/35 §5.1，见 ws::panel_status）
+            top_left_buttons = top_left_buttons.push(
+                text(self.content.to_string())
+                    .size(crate::ui::text::s_body())
+                    .color(crate::ui::pal::head())
+                    .align_y(Alignment::Center)
+                    .line_height(1.4),
+            );
+            if let Some((s, c)) = crate::ws::panel_status::status(&self.content) {
+                top_left_buttons = top_left_buttons.push(
+                    text(s).size(crate::ui::text::s_meta()).color(c).align_y(Alignment::Center).line_height(1.4),
+                );
+            }
         }
 
         let modifier: Option<modal::stream::Modifier> = self.modal.clone().and_then(|m| {

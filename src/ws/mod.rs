@@ -59,6 +59,7 @@ pub mod feature_matrix_readout;
 pub mod feature_matrix_view;
 pub mod bridge;
 pub mod once;
+pub mod panel_status;
 pub mod ticker_cache;
 pub mod inspector_props;
 pub mod feature_presets;
