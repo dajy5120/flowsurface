@@ -142,6 +142,8 @@ pub enum Event {
     ToggleFreeze,
     /// K 线数据表视图里的网格交互
     KlineTable(crate::ui::grid::GridMsg),
+    /// 期权面板策略表的网格交互
+    OptionsGrid(crate::ui::grid::GridMsg),
 }
 
 pub struct State {
@@ -889,7 +891,8 @@ impl State {
             }
             Content::OptionsBoard => {
                 // 期权/0DTE 回测（docs/18）：渲染走 ws::options_readout 旁路快照（options_board.json）。
-                let base = crate::ws::options_view::pane_body();
+                let base = crate::ws::options_view::pane_body()
+                    .map(move |m| Message::PaneEvent(id, Event::OptionsGrid(m)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1644,6 +1647,7 @@ impl State {
             Event::LinkBadgeClicked => crate::ws::provenance::on_link_click(),
             Event::ToggleFreeze => self.frozen = !self.frozen,
             Event::KlineTable(m) => crate::ws::kline_table::handle(self.id, m),
+            Event::OptionsGrid(m) => crate::ws::options_view::grid_update(m),
             Event::FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg::Source(m)) => {
                 // 特征数据源：选择 / 开始 / 停止回放。换了图表流就请上层清图。
                 if crate::ws::feature_source::handle(m) {
