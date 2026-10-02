@@ -279,6 +279,29 @@ pub enum GridMsg {
     ClearFilters,
     /// 有固定列时，其余列按整列翻页（+1 右翻 / -1 左翻）
     ColPage(i32),
+    /// 在第 i 行上右键：在光标处弹出菜单（UPDS V2 §12）
+    RowMenu(usize),
+    CloseMenu,
+    /// 菜单项：复制这一行 / 复制选中的行（TSV，含表头）
+    CopyRow(usize),
+    CopySelected,
+    /// 菜单项：全选 / 取消选中
+    SelectAll,
+    ClearSelection,
+}
+
+/// 网格复制出来、等主循环写进剪贴板的文字（网格自己发不了 iced 的剪贴板 Task）。
+static CLIP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// 主循环每个 Tick 取一次：有就写进剪贴板。
+pub fn take_clipboard() -> Option<String> {
+    CLIP.lock().ok().and_then(|mut g| g.take())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CopyReq {
+    Row(usize),
+    Selected,
 }
 
 /// 选中行的计数与合计（见 [`GridState::selection_summary`]）。
@@ -358,6 +381,12 @@ pub struct GridState {
     pub panel: Option<GridPanel>,
     /// 有固定列时，非固定列从第几个开始显示（按整列翻页）
     pub col_start: usize,
+    /// 右键菜单：哪一行、弹在哪（相对网格左上角）
+    menu: Option<(usize, Point)>,
+    /// 光标位置（相对网格），右键菜单定位用
+    cursor: Point,
+    /// 待办的复制（等下一次带数据的 resort 生成 TSV）
+    copy_req: Option<CopyReq>,
 }
 
 /// 变化高亮持续多久（UPDS V5 §30）。
@@ -393,7 +422,23 @@ impl GridState {
             filters: Vec::new(),
             panel: None,
             col_start: 0,
+            menu: None,
+            cursor: Point::ORIGIN,
+            copy_req: None,
         }
+    }
+
+    /// 选中行（或指定一行）的 TSV：表头 + 行，按当前可见列。
+    fn rows_tsv(&self, cols: &[Column], rows: &[Vec<Cell>], which: &[usize]) -> String {
+        let vis = self.ordered_cols(cols.len());
+        let mut out = vis.iter().map(|&i| cols[i].title.clone()).collect::<Vec<_>>().join("\t");
+        for &r in which {
+            if let Some(row) = rows.get(r) {
+                out.push('\n');
+                out.push_str(&vis.iter().map(|&i| row.get(i).map_or_else(String::new, Cell::plain)).collect::<Vec<_>>().join("\t"));
+            }
+        }
+        out
     }
 
     /// 列的显示顺序（列下标），不含隐藏的。
@@ -506,6 +551,18 @@ impl GridState {
 
     /// 数据或排序变了之后调：重排 `order`。稳定排序，平局保持原顺序（UPDS：同一排序跑两遍不换位）。
     pub fn resort(&mut self, cols: &[Column], rows: &[Vec<Cell>]) {
+        // 待办的复制：有数据时生成 TSV 交给主循环写剪贴板
+        if !rows.is_empty()
+            && let Some(req) = self.copy_req.take()
+        {
+            let which = match req {
+                CopyReq::Row(r) => vec![r],
+                CopyReq::Selected => self.selection(),
+            };
+            if let Ok(mut g) = CLIP.lock() {
+                *g = Some(self.rows_tsv(cols, rows, &which));
+            }
+        }
         self.diff_cells(cols, rows);
         let held: Option<Vec<String>> = (self.hovering && !rows.is_empty() && !self.order.is_empty())
             .then(|| self.order.iter().filter_map(|&i| self.prev_keys.get(i).cloned()).collect());
@@ -620,7 +677,31 @@ impl GridState {
                     self.drag = Some((i, None, *w));
                 }
             }
+            GridMsg::RowMenu(i) => self.menu = Some((i, self.cursor)),
+            GridMsg::CloseMenu => self.menu = None,
+            GridMsg::CopyRow(i) => {
+                self.copy_req = Some(CopyReq::Row(i));
+                self.menu = None;
+                self.resort(cols, rows);
+            }
+            GridMsg::CopySelected => {
+                self.copy_req = Some(CopyReq::Selected);
+                self.menu = None;
+                self.resort(cols, rows);
+            }
+            GridMsg::SelectAll => {
+                let all: Vec<usize> = self.order.clone();
+                self.selected = all.first().copied();
+                self.extra = all.into_iter().skip(1).collect();
+                self.menu = None;
+            }
+            GridMsg::ClearSelection => {
+                self.selected = None;
+                self.extra.clear();
+                self.menu = None;
+            }
             GridMsg::DragMove(p) => {
+                self.cursor = p;
                 if let Some((i, start, w0)) = self.drag.as_mut() {
                     let s = *start.get_or_insert(p.x);
                     let w = (*w0 + p.x - s).max(40.0);
@@ -921,6 +1002,9 @@ where
     let dragging = st.borrow().drag.is_some();
     let scroll_id = st.borrow().id.clone();
     let settings = settings_panel(cols, st.borrow(), &on);
+    // 右键菜单要的东西也先取出来（状态随后移进行区的闭包）
+    let menu_at = st.borrow().menu;
+    let n_sel = st.borrow().selection().len();
 
     let on_r = on.clone();
     let body = responsive(move |size| {
@@ -973,21 +1057,26 @@ where
             }
             let on_sel = on_r.clone();
             let stripe = pos % 2 == 1;
+            let on_menu = on_r.clone();
             col = col.push(
-                button(r)
-                    .padding(0)
-                    .width(Length::Fixed(total_w))
-                    .on_press(on_sel(GridMsg::Select(di)))
-                    .style(move |th, s| {
-                        let mut b = widgets::button_style(widgets::Kind::Ghost, th, s);
-                        let c = core();
-                        b.text_color = color(c.text_primary);
-                        if selected || b.background.is_none() {
-                            b.background = row_tint(if stripe { 1 } else { 0 }, selected).map(Background::Color);
-                        }
-                        b.border = Border::default();
-                        b
-                    }),
+                mouse_area(
+                    button(r)
+                        .padding(0)
+                        .width(Length::Fixed(total_w))
+                        .on_press(on_sel(GridMsg::Select(di)))
+                        .style(move |th, s| {
+                            let mut b = widgets::button_style(widgets::Kind::Ghost, th, s);
+                            let c = core();
+                            b.text_color = color(c.text_primary);
+                            if selected || b.background.is_none() {
+                                b.background = row_tint(if stripe { 1 } else { 0 }, selected).map(Background::Color);
+                            }
+                            b.border = Border::default();
+                            b
+                        }),
+                )
+                // 右键：在光标处弹菜单（UPDS V2 §12）
+                .on_right_press(on_menu(GridMsg::RowMenu(di))),
             );
         }
         col = col.push(Space::new().height(Length::Fixed((shown - last) as f32 * row_h)));
@@ -1017,6 +1106,45 @@ where
         table.interaction(iced::mouse::Interaction::ResizingHorizontally).into()
     } else {
         table.into()
+    };
+    // 右键菜单：叠在表上、左上角对准光标；点菜单外面收起（UPDS V2 §12：最多 9 项）
+    let table: Element<'a, M> = match menu_at {
+        Some((di, at)) => {
+            let item = |label: &str, msg: GridMsg| -> Element<'a, M> {
+                button(t::body(label.to_string()))
+                    .width(Length::Fill)
+                    .padding(Padding::from([metrics::space(1), metrics::space(3)]))
+                    .on_press(on(msg))
+                    .style(|th, s| widgets::button_style(widgets::Kind::Ghost, th, s))
+                    .into()
+            };
+            let menu = container(
+                column![
+                    item("复制这一行（TSV）", GridMsg::CopyRow(di)),
+                    item(&format!("复制选中的 {n_sel} 行（TSV）"), GridMsg::CopySelected),
+                    item("全选（当前筛选结果）", GridMsg::SelectAll),
+                    item("取消选中", GridMsg::ClearSelection),
+                ]
+                .width(Length::Fixed(220.0)),
+            )
+            .padding(metrics::space(1))
+            .style(|_| {
+                let c = core();
+                container::Style {
+                    background: Some(Background::Color(color(c.surface_elevated))),
+                    border: Border { width: 1.0, color: color(c.border_default), radius: metrics::radius::MD.into() },
+                    ..Default::default()
+                }
+            });
+            let on_close = on.clone();
+            iced::widget::stack![
+                table,
+                mouse_area(container(Space::new()).width(Length::Fill).height(Length::Fill)).on_press(on_close(GridMsg::CloseMenu)),
+                container(menu).padding(Padding { top: at.y, left: at.x, right: 0.0, bottom: 0.0 }),
+            ]
+            .into()
+        }
+        None => table,
     };
 
     column![
@@ -1319,6 +1447,23 @@ mod tests {
             assert_eq!(Cell::Colored(s.into(), Color::WHITE).sort_num(), Some(v), "{s}");
         }
         assert_eq!(Cell::Text("等待".into()).sort_num(), None);
+    }
+
+    #[test]
+    fn 右键复制_拿不到数据时等下一次重排() {
+        let (cols, rows) = data();
+        let mut st = GridState::new(&cols);
+        st.update(GridMsg::RowMenu(2), &cols, &[]);
+        assert!(st.menu.is_some());
+        st.update(GridMsg::CopyRow(2), &cols, &[]); // 订单表的 handle() 就是这样：没有数据
+        assert!(st.menu.is_none());
+        assert_eq!(take_clipboard(), None, "没有数据时还生成不了");
+        st.resort(&cols, &rows); // 下一帧 view 带数据重排
+        assert_eq!(take_clipboard().as_deref(), Some("代码\t实际\nCC-1\t7"));
+        st.update(GridMsg::SelectAll, &cols, &rows);
+        assert_eq!(st.selection().len(), 3);
+        st.update(GridMsg::CopySelected, &cols, &rows);
+        assert_eq!(take_clipboard().map(|t| t.lines().count()), Some(4), "表头 + 3 行");
     }
 
     #[test]

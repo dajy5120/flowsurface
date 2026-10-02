@@ -510,6 +510,11 @@ impl Flowsurface {
                 }
             }
             Message::Tick(now) => {
+                // 网格右键菜单复制出来的文字（网格自己发不了剪贴板 Task）
+                if let Some(t) = ui::grid::take_clipboard() {
+                    self.notifications.push(Toast::info(format!("已复制 {} 行", t.lines().count().saturating_sub(1))));
+                    return iced::clipboard::write(t);
+                }
                 // Studio 发来的跨进程命令（docs/35 §16.5 第 4 项）：切到回测工作区并把窗口提到前面
                 let from_studio = ws::bridge::take();
                 if !from_studio.is_empty() {

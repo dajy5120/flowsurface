@@ -28,7 +28,8 @@ pub fn tooltip<'a, Message: 'a>(
     tooltip: Option<&'a str>,
     position: Position,
 ) -> Element<'a, Message> {
-    tooltip_with_delay(content, tooltip, position, std::time::Duration::ZERO)
+    // UPDS V3 §14：提示延迟 450ms（光标扫过不弹，停住才弹），docs/35 §6.1
+    tooltip_with_delay(content, tooltip, position, std::time::Duration::from_millis(450))
 }
 
 pub fn tooltip_with_delay<'a, Message: 'a>(
