@@ -236,7 +236,24 @@ fn dashboard_from_template(name: &str) -> Option<Dashboard> {
 /// 播种 + 刷新管理工作区：这 6 个是固定用途工作区（其 pane 树由模板定义），每次启动按当前
 /// 模板**就地刷新内容**（保留 LayoutId.unique，激活态不丢），使模板更新重启即生效。
 /// 缺失则新建；非管理的用户 layout 一律不动。返回新建数量。
+/// 上游缺省布局「Layout 1」（五个空 Starter 面板）是否可以清掉（docs/35 §5.3）：
+/// 只有**全是空面板**、没有弹出窗口时才算遗留——用户在里面放过任何东西都保留。
+fn is_leftover_default(name: &str, d: &Dashboard) -> bool {
+    name == "Layout 1"
+        && d.popout.is_empty()
+        && d.panes.iter().all(|(_, st)| matches!(st.content, crate::screen::dashboard::pane::Content::Starter))
+}
+
 pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
+    // 遗留的上游缺省布局（docs/35 §5.3）：空的就删；正在用的不删（删了会没有活动工作区）
+    let active = manager.active_layout_id().map(|l| l.unique);
+    let before = manager.layouts.len();
+    manager
+        .layouts
+        .retain(|l| Some(l.id.unique) == active || !is_leftover_default(&l.id.name, &l.dashboard));
+    if manager.layouts.len() < before {
+        log::info!("WS workspaces: 清掉遗留的空布局「Layout 1」");
+    }
     // 合并迁移：多个旧工作区 → 同一个新工作区。第一个就地改名，其余删掉。
     for (old, new) in MERGES {
         let has_new = manager.layouts.iter().any(|l| l.id.name == new);
@@ -282,6 +299,16 @@ pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 只清空的缺省布局() {
+        // 未知名字的模板兜底是一个 Starter 空面板（见 pane_template 的 `_` 分支）
+        let empty = dashboard_from_template("Layout 1").expect("兜底模板");
+        assert!(is_leftover_default("Layout 1", &empty));
+        assert!(!is_leftover_default("我的布局", &empty), "只认上游缺省名");
+        let real = dashboard_from_template(WS_BACKTEST).expect("回测模板");
+        assert!(!is_leftover_default("Layout 1", &real), "里面放过真面板的要保留");
+    }
 
     #[test]
     fn 侧栏顺序等于分组摊平() {

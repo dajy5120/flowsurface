@@ -40,6 +40,16 @@ pub enum Cmd {
     BottomTab(super::shell::BottomTab),
     /// 跨进程：把当前策略发给 Studio 打开（docs/35 §16.5 第 4 项）
     OpenInStudio,
+    /// 聚焦当前工作区的第 n 个面板（0 起，Ctrl 1–9；docs/35 §5.1）
+    FocusPane(usize),
+    /// 侧栏：显示 / 隐藏（Ctrl B）
+    ToggleSidebar,
+    /// 界面缩放：放大 / 缩小 / 复位（Ctrl + / Ctrl − / Ctrl 0）
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    /// 打开命令面板并预填范围前缀（Ctrl P → `#`，Ctrl Shift P → `@`，Ctrl / → `?`）
+    PaletteScope(&'static str),
 }
 
 /// 命令面板里的一行。
@@ -55,6 +65,16 @@ pub struct Entry {
 
 fn e(cmd: Cmd, category: &'static str, title: impl Into<String>, shortcut: &'static str) -> Entry {
     Entry { cmd, title: title.into(), category, shortcut }
+}
+
+/// 当前工作区的面板，作为命令面板里的「对象」（`#` 范围；Ctrl 1–9 直达前 9 个）。
+pub fn pane_entries(names: &[String]) -> Vec<Entry> {
+    const SC: [&str; 9] = ["Ctrl 1", "Ctrl 2", "Ctrl 3", "Ctrl 4", "Ctrl 5", "Ctrl 6", "Ctrl 7", "Ctrl 8", "Ctrl 9"];
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| e(Cmd::FocusPane(i), "面板对象", format!("聚焦面板 {}：{n}", i + 1), SC.get(i).copied().unwrap_or("")))
+        .collect()
 }
 
 /// 全部命令。`workspaces` 按侧栏顺序，第 n 组的第一个工作区有 Ctrl Shift n 直达。
@@ -74,6 +94,13 @@ pub fn registry(workspaces: &[&str]) -> Vec<Entry> {
         e(Cmd::FocusNextPane, "面板", "聚焦下一个面板", "F6"),
         e(Cmd::FocusPrevPane, "面板", "聚焦上一个面板", "Shift F6"),
         e(Cmd::ToggleMaximize, "面板", "最大化 / 还原当前面板", "Ctrl Shift M"),
+        e(Cmd::PaletteScope("#"), "视图", "快速切换：面板与工作区", "Ctrl P"),
+        e(Cmd::PaletteScope("@"), "视图", "切换工作区", "Ctrl Shift P"),
+        e(Cmd::PaletteScope("?"), "视图", "快捷键速查", "Ctrl /"),
+        e(Cmd::ToggleSidebar, "视图", "侧栏：显示 / 隐藏", "Ctrl B"),
+        e(Cmd::ZoomIn, "外观", "界面放大", "Ctrl +"),
+        e(Cmd::ZoomOut, "外观", "界面缩小", "Ctrl −"),
+        e(Cmd::ZoomReset, "外观", "界面缩放复位", "Ctrl 0"),
         e(Cmd::CycleTheme, "外观", "循环主题", "Ctrl Alt T"),
         e(Cmd::CycleDensity, "外观", "循环密度", "Ctrl Alt D"),
     ]);
@@ -98,13 +125,31 @@ pub fn registry(workspaces: &[&str]) -> Vec<Entry> {
 /// 按输入过滤并排序：标题开头命中 > 词首命中 > 任意位置命中；空输入返回全部（原顺序）。
 ///
 /// 大小写不敏感；也匹配分组名（输入「外观」列出全部外观命令）。
+/// 范围前缀（UPDS V2 §12，docs/35 §6.1）：`@` 工作区、`#` 面板与工作区（对象）、`>` 命令、
+/// `:` 外观与设置、`?` 有快捷键的条目（速查）。返回（该条目在不在范围内，去掉前缀后的查询）。
+fn scope(query: &str) -> (fn(&Entry) -> bool, &str) {
+    let q = query.trim_start();
+    let mut chars = q.chars();
+    let f: fn(&Entry) -> bool = match chars.next() {
+        Some('@') => |e| e.category == "工作区",
+        Some('#') => |e| e.category == "面板对象" || e.category == "工作区",
+        Some('>') => |e| e.category != "工作区" && e.category != "面板对象",
+        Some(':') => |e| e.category == "外观" || e.category == "设置",
+        Some('?') => |e| !e.shortcut.is_empty(),
+        _ => return (|_| true, q),
+    };
+    (f, chars.as_str())
+}
+
 pub fn filter<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
-    let q = query.trim().to_lowercase();
+    let (in_scope, rest) = scope(query);
+    let entries: Vec<&'a Entry> = entries.iter().filter(|e| in_scope(e)).collect();
+    let q = rest.trim().to_lowercase();
     if q.is_empty() {
-        return entries.iter().collect();
+        return entries;
     }
     let mut scored: Vec<(u8, usize, &Entry)> = entries
-        .iter()
+        .into_iter()
         .enumerate()
         .filter_map(|(i, en)| {
             let t = en.title.to_lowercase();
@@ -130,6 +175,22 @@ pub fn filter<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 范围前缀() {
+        let mut r = registry(&["回测", "订单流特征"]);
+        r.extend(pane_entries(&["K 线".into(), "特征矩阵".into()]));
+        assert!(filter(&r, "@").iter().all(|e| e.category == "工作区"));
+        assert_eq!(filter(&r, "@").len(), 2);
+        let objs = filter(&r, "#");
+        assert!(objs.iter().any(|e| e.cmd == Cmd::FocusPane(1)), "面板对象在 # 里");
+        assert!(objs.iter().any(|e| e.category == "工作区"), "# 也能切工作区");
+        assert!(filter(&r, ">").iter().all(|e| e.category != "工作区" && e.category != "面板对象"));
+        assert!(filter(&r, ":主题").iter().all(|e| e.category == "外观"));
+        assert!(filter(&r, "?").iter().all(|e| !e.shortcut.is_empty()), "速查只列有快捷键的");
+        assert_eq!(filter(&r, "#特征")[0].cmd, Cmd::FocusPane(1), "前缀后照常按标题搜");
+        assert_eq!(pane_entries(&["a".into()])[0].shortcut, "Ctrl 1");
+    }
 
     #[test]
     fn 过滤_按命中位置排序_大小写不敏感() {

@@ -77,11 +77,13 @@ pub struct Shell {
     pub bottom_tab: BottomTab,
     pub inspector: bool,
     pub log: LogTail,
+    /// 侧栏收起（Ctrl B）
+    pub sidebar_hidden: bool,
 }
 
 impl Default for Shell {
     fn default() -> Self {
-        Self { palette: None, bottom: false, bottom_tab: BottomTab::Log, inspector: false, log: LogTail::default() }
+        Self { palette: None, bottom: false, bottom_tab: BottomTab::Log, inspector: false, log: LogTail::default(), sidebar_hidden: false }
     }
 }
 

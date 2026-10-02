@@ -151,6 +151,17 @@ fn shortcut(
             let c = c.to_ascii_lowercase();
             match (shift, alt, c.as_str()) {
                 (false, false, "k") => Some(Cmd::TogglePalette),
+                (false, false, "p") => Some(Cmd::PaletteScope("#")),
+                (true, false, "p") => Some(Cmd::PaletteScope("@")),
+                (false, false, "/") => Some(Cmd::PaletteScope("?")),
+                (false, false, "b") => Some(Cmd::ToggleSidebar),
+                (_, false, "=" | "+") => Some(Cmd::ZoomIn),
+                (false, false, "-") => Some(Cmd::ZoomOut),
+                (false, false, "0") => Some(Cmd::ZoomReset),
+                // Ctrl 1–9：聚焦第 n 个面板
+                (false, false, d @ ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")) => {
+                    Some(Cmd::FocusPane(d.parse::<usize>().unwrap_or(1) - 1))
+                }
                 (false, false, "j") => Some(Cmd::ToggleBottom),
                 (false, false, "i") => Some(Cmd::ToggleInspector),
                 (false, false, ",") => Some(Cmd::OpenSettings),
@@ -195,6 +206,8 @@ struct Flowsurface {
     specimen: Option<ws::specimen::Specimen>,     // 界面样张模式（docs/35）：轮换工作区自截图
     shell: ui::shell::Shell,                      // 外壳（docs/35 批 3）：命令面板 / 底部面板 / 检查器
     commands: Vec<ui::command::Entry>,            // 命令注册表（UPDS V2 §12）
+    /// 命令面板实际列的条目 = 注册表 + 当前工作区的面板（打开面板时刷新）
+    palette_entries: Vec<ui::command::Entry>,
     gallery: Option<ui::gallery::Gallery>,        // 组件样张页（样张模式 WS_UI_SPECIMEN_COMPONENTS）
 }
 
@@ -286,6 +299,7 @@ impl Flowsurface {
             specimen: ws::specimen::Specimen::from_env(),
             shell: ui::shell::Shell::default(),
             commands: ui::command::registry(&ws::workspace::WORKSPACES),
+            palette_entries: ui::command::registry(&ws::workspace::WORKSPACES),
             gallery: if ws::specimen::enabled() { ui::gallery::Gallery::from_env() } else { None },
         };
 
@@ -467,7 +481,7 @@ impl Flowsurface {
                 }
             }
             Message::Shell(ev) => {
-                if let Some(cmd) = self.shell.update(ev, &self.commands) {
+                if let Some(cmd) = self.shell.update(ev, &self.palette_entries) {
                     return self.run_command(cmd);
                 }
             }
@@ -1163,6 +1177,8 @@ impl Flowsurface {
                 header_title,
                 command_bar,
                 match sidebar_pos {
+                    // Ctrl B 收起侧栏
+                    _ if self.shell.sidebar_hidden => row![work],
                     sidebar::Position::Left => row![sidebar_view, work,],
                     sidebar::Position::Right => row![work, sidebar_view],
                 }
@@ -1182,7 +1198,7 @@ impl Flowsurface {
             match &self.shell.palette {
                 Some(p) => {
                     let overlay =
-                        ui::shell::palette_overlay(p, &self.commands).map(Message::Shell);
+                        ui::shell::palette_overlay(p, &self.palette_entries).map(Message::Shell);
                     iced::widget::stack![base, overlay].into()
                 }
                 None => base,
@@ -1485,9 +1501,33 @@ impl Flowsurface {
             Cmd::HeatmapScale(v) => ui::update(|p| p.heatmap_scale = v.to_string()),
             Cmd::TogglePalette => {
                 if self.shell.palette.take().is_none() {
+                    self.refresh_palette_entries();
                     self.shell.palette = Some(ui::shell::Palette::default());
                     return iced::widget::operation::focus(ui::shell::palette_input_id());
                 }
+            }
+            Cmd::PaletteScope(prefix) => {
+                self.refresh_palette_entries();
+                self.shell.palette = Some(ui::shell::Palette { query: prefix.to_string(), sel: 0 });
+                return iced::widget::operation::focus(ui::shell::palette_input_id());
+            }
+            Cmd::FocusPane(i) => {
+                let dashboard = self.active_dashboard_mut();
+                let mut panes: Vec<pane_grid::Pane> = dashboard.panes.iter().map(|(p, _)| *p).collect();
+                panes.sort();
+                if let Some(p) = panes.get(i) {
+                    dashboard.focus = Some((main, *p));
+                }
+            }
+            Cmd::ToggleSidebar => self.shell.sidebar_hidden = !self.shell.sidebar_hidden,
+            Cmd::ZoomIn | Cmd::ZoomOut | Cmd::ZoomReset => {
+                let cur: f32 = self.ui_scale_factor.into();
+                let next = match cmd {
+                    Cmd::ZoomIn => cur + 0.1,
+                    Cmd::ZoomOut => cur - 0.1,
+                    _ => 1.0,
+                };
+                return self.update(Message::ScaleFactorChanged(next.into()));
             }
             Cmd::ToggleBottom => self.shell.bottom = !self.shell.bottom,
             Cmd::ToggleInspector => self.shell.inspector = !self.shell.inspector,
@@ -1534,6 +1574,18 @@ impl Flowsurface {
             },
         }
         Task::none()
+    }
+
+    /// 命令面板条目 = 注册表 + 当前工作区的面板（按面板次序，与 F6 / Ctrl 1–9 同一顺序）。
+    fn refresh_palette_entries(&mut self) {
+        let dashboard = self.active_dashboard();
+        let mut panes: Vec<(pane_grid::Pane, String)> =
+            dashboard.panes.iter().map(|(p, st)| (*p, st.content.to_string())).collect();
+        panes.sort_by_key(|(p, _)| *p);
+        let names: Vec<String> = panes.into_iter().map(|(_, n)| n).collect();
+        let mut v = self.commands.clone();
+        v.extend(ui::command::pane_entries(&names));
+        self.palette_entries = v;
     }
 
     /// 外壳需要的一帧信息（命令栏、状态栏、检查器）。
