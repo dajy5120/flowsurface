@@ -898,15 +898,17 @@ fn cell_view<'a, M: 'a>(cell: &Cell, align: Align, w: f32) -> Element<'a, M> {
         // 放不下的部分由下面的 clip 截掉，完整文字右键「复制这一行」可得
         Cell::Text(s) => t::body(s.clone()).wrapping(iced::widget::text::Wrapping::None).into(),
         Cell::Id(s) => {
-            // 按列宽估一个字符数（等宽字体约 0.6em）
-            let max = ((w - 8.0) / (t::size(super::Role::Code) * 0.6)).max(6.0) as usize;
-            t::code(fmt::elide_middle(s, max)).into()
+            // 按列宽估能放几个半角单位（等宽字体半角约 0.6em，全角算两个），超出就省略中间、不折行
+            let max = ((w - metrics::space(2) * 2.0) / (t::size(super::Role::Code) * 0.6)).max(6.0) as usize;
+            t::code(fmt::elide_middle_width(s, max)).wrapping(iced::widget::text::Wrapping::None).into()
         }
         Cell::Num { s, prov, v } => {
-            let el: Element<'a, M> = widgets::value(s.clone(), *prov).into();
+            // 放不下的数不截断（截掉几位会被读成另一个数）：改用缩写写法，悬停看完整值
+            let need = s.chars().count() as f32 * t::size(super::Role::Numeric) * 0.6 + metrics::space(2) * 2.0;
             match v {
-                Some(v) if abbreviated(s) => with_full(el, *v),
-                _ => el,
+                Some(x) if need > w => with_full(widgets::value(fmt::compact(*x, 2), *prov).wrapping(iced::widget::text::Wrapping::None).into(), *x),
+                Some(x) if abbreviated(s) => with_full(widgets::value(s.clone(), *prov).wrapping(iced::widget::text::Wrapping::None).into(), *x),
+                _ => widgets::value(s.clone(), *prov).wrapping(iced::widget::text::Wrapping::None).into(),
             }
         }
         Cell::ColoredNum(v, s, fg) => with_full(t::numeric(s.clone()).color(*fg).wrapping(iced::widget::text::Wrapping::None).into(), *v),
@@ -1054,6 +1056,15 @@ where
     let body = responsive(move |size| {
         let st: &GridState = st.borrow();
         let rows = rows.as_ref();
+        // 空表要说明为什么空（docs/35 §8 空态）：本来没有数据，还是被筛选掉了——两回事
+        if shown == 0 {
+            let msg = if n == 0 {
+                "这张表现在没有数据行".to_string()
+            } else {
+                format!("筛选条件下没有行（{n} 行都被筛掉了）——在页脚「筛选 ▸」里放宽或清除")
+            };
+            return container(t::caption(msg)).padding(metrics::space(4)).width(Length::Fill).into();
+        }
         let t0 = std::time::Instant::now();
         let visible = (size.height / row_h).ceil() as usize + 2;
         let first = ((st.offset / row_h).floor() as usize).min(shown.saturating_sub(1));

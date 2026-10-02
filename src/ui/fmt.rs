@@ -283,8 +283,46 @@ pub fn elide_middle(s: &str, max_chars: usize) -> String {
     format!("{head}…{tail}")
 }
 
+/// 按显示宽度省略中间：全角字（中文等）算 2 个单位、半角算 1 个。
+/// 只数字符数时，中文多的标识符会被低估宽度而折行（docs/35 §16.15 第 20 项超长值场景实测）。
+pub fn elide_middle_width(s: &str, max_units: usize) -> String {
+    let unit = |c: char| if c.is_ascii() { 1 } else { 2 };
+    let total: usize = s.chars().map(unit).sum();
+    if total <= max_units || max_units < 5 {
+        return s.to_string();
+    }
+    let half = (max_units - 1) / 2;
+    let (mut head, mut used) = (String::new(), 0);
+    for c in s.chars() {
+        if used + unit(c) > half {
+            break;
+        }
+        used += unit(c);
+        head.push(c);
+    }
+    let (mut tail, mut used) = (Vec::new(), 0);
+    for c in s.chars().rev() {
+        if used + unit(c) > half {
+            break;
+        }
+        used += unit(c);
+        tail.push(c);
+    }
+    let tail: String = tail.into_iter().rev().collect();
+    format!("{head}…{tail}")
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn 按宽度省略中间_中文算两格() {
+        let s = super::elide_middle_width("超长合约名-PERP-XXXXXXXXXX-尾巴", 16);
+        let w: usize = s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
+        assert!(w <= 16, "{s} 宽 {w}");
+        assert!(s.contains('…') && s.starts_with("超") && s.ends_with("巴"));
+        assert_eq!(super::elide_middle_width("BTCUSDT", 16), "BTCUSDT");
+    }
 
     #[test]
     fn 模拟金额带波浪号_隐藏时为三点() {

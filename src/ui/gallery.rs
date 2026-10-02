@@ -40,7 +40,7 @@ impl Gallery {
             Column::text("状态", 90.0).groupable(),
         ];
         let d = super::domain();
-        let rows: Vec<Vec<Cell>> = (0..n)
+        let mut rows: Vec<Vec<Cell>> = (0..n)
             .map(|i| {
                 let px = 100.0 + (i as f64 * 0.37).sin() * 50.0 + i as f64 * 1e-3;
                 let chg = ((i as f64) * 0.013).cos() * 0.05;
@@ -61,6 +61,13 @@ impl Gallery {
                 ]
             })
             .collect();
+        // WS_UI_SPECIMEN_LONG=1：第一行放一个超长值（docs/35 §13.1「数据规模」维度）——超长的合约名
+        // （中英混合）与一个极大的价格，看标识符中间省略、数字列不折行不撑破
+        if std::env::var_os("WS_UI_SPECIMEN_LONG").is_some() && !rows.is_empty() {
+            let huge = 9_876_543_210_987_654.32;
+            rows[0][0] = Cell::Id(format!("超长合约名-PERP-{}-季度交割-永续掉期-{}", "X".repeat(60), "尾巴"));
+            rows[0][1] = Cell::Num { v: Some(huge), s: fmt::number(huge, 2, Rounding::Money), prov: Provenance::Measured };
+        }
         let mut grid = GridState::new(&cols);
         // WS_UI_SPECIMEN_GROUP=1：样张按「状态」分组并折叠「良好」，证明分组 + 折叠 + 虚拟滚动一起工作
         if std::env::var_os("WS_UI_SPECIMEN_GROUP").is_some() {

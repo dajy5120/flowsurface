@@ -279,7 +279,15 @@ impl Flowsurface {
         let saved_state = layout::load_saved_state();
 
         let (main_window_id, open_main_window) = {
-            let (position, size) = saved_state.window();
+            let (position, mut size) = saved_state.window();
+            // 样张模式可指定窗口尺寸（WS_UI_SPECIMEN_WINDOW=1920x1800）：数据规模等场景要把整张网格截进来
+            if ws::specimen::enabled()
+                && let Some((w, h)) = std::env::var("WS_UI_SPECIMEN_WINDOW")
+                    .ok()
+                    .and_then(|s| s.split_once('x').and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))))
+            {
+                size = iced::Size::new(w, h);
+            }
             let config = window::Settings {
                 size,
                 position,
