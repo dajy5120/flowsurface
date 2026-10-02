@@ -466,8 +466,18 @@ impl ViewState {
     }
 }
 
+/// 检查器里正在看的特征（点特征名设）。
+static INSPECT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// 检查器要显示定义的那条特征的键。
+pub fn inspected() -> Option<String> {
+    INSPECT.lock().ok().and_then(|g| g.clone())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FeatureMatrixMsg {
+    /// 点特征名：在检查器里看这条特征的定义（docs/35 §16.15 第 10 项）
+    Inspect(String),
     SetView(View),
     SetQuality(QualityFilter),
     SetStatus(StatusFilter),
@@ -1103,6 +1113,11 @@ pub fn apply_with(st: &mut ViewState, m: FeatureMatrixMsg, snap: &super::feature
 /// 纯函数形式的状态转移。测试直接测它——不需要碰全局锁。
 pub fn apply(st: &mut ViewState, m: FeatureMatrixMsg) {
     match m {
+        FeatureMatrixMsg::Inspect(k) => {
+            if let Ok(mut g) = INSPECT.lock() {
+                *g = Some(k);
+            }
+        }
         FeatureMatrixMsg::SetView(v) => st.view = v,
         FeatureMatrixMsg::SetQuality(q) => st.quality = q,
         FeatureMatrixMsg::SetStatus(s) => st.status = s,

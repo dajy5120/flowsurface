@@ -129,6 +129,21 @@ fn market_block<'a, M: 'a>(m: &MarketRow) -> Element<'a, M> {
         if !ai.rationale.is_empty() {
             col = col.push(text(format!("  ↳ {}", ai.rationale)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
         }
+        if !ai.key_uncertainty.is_empty() {
+            col = col.push(text(format!("  ? 关键不确定：{}", ai.key_uncertainty)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
+        }
+        // 来源、模型与时间（UPDS V6 §50：AI 给的东西要说清是谁、什么时候说的；docs/35 §16.15 第 13 项）
+        let model = ai.provider.strip_prefix("claude:").unwrap_or(&ai.provider);
+        let when = ai.generated_at.get(..16).map(|t| t.replace('T', " "));
+        col = col.push(
+            text(format!(
+                "  · AI 生成 · 模型 {} · {} · 仅供参考，不是信号",
+                if model.is_empty() { crate::ui::fmt::UNKNOWN } else { model },
+                when.map_or_else(|| "生成时间未记录（旧快照）".to_string(), |t| format!("{t} UTC{}", super::staleness::suffix(&ai.generated_at))),
+            ))
+            .size(crate::ui::text::s_meta())
+            .color(crate::ui::pal::dim()),
+        );
     }
     col.into()
 }

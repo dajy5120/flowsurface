@@ -78,6 +78,8 @@ pub struct RecorderPaneState {
     /// 明细表当前显示的行数上限。数据湖铺开是几千行，一次全渲染会把帧率拖垮，
     /// 所以默认只出一屏，点「显示更多」再加。
     pub det_limit: usize,
+    /// 日志时间线停住时的那一份（`None` = 跟随最新）
+    pub log_frozen: Option<Vec<crate::ui::widgets::TimelineLine>>,
 }
 
 /// 筛选下拉里的「不筛选」项。用字面量而不是 `Option<String>`：
@@ -123,6 +125,7 @@ impl RecorderPaneState {
             det_sym: ALL.into(),
             det_stream: ALL.into(),
             det_limit: DET_PAGE,
+            log_frozen: None,
         }
     }
 }
@@ -149,6 +152,8 @@ pub enum RecorderMsg {
     DetailStream(String),
     /// 明细表多显示一页。
     DetailMore,
+    /// 日志时间线：跟随最新 / 停在此刻
+    LogFollow,
 }
 
 /// 处理一条交互:改状态 + 必要的副作用(systemctl / 写 toml)。
@@ -193,6 +198,12 @@ pub fn handle(st: &mut RecorderPaneState, msg: RecorderMsg) {
             st.det_limit = DET_PAGE;
         }
         RecorderMsg::DetailMore => st.det_limit += DET_PAGE,
+        RecorderMsg::LogFollow => {
+            st.log_frozen = match st.log_frozen.take() {
+                Some(_) => None,
+                None => Some(super::recorder_readout::snapshot().log),
+            };
+        }
     }
 }
 

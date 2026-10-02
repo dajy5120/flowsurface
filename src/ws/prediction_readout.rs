@@ -16,6 +16,12 @@ pub struct AiView {
     pub edge: Option<f64>,
     pub confidence: String,
     pub rationale: String,
+    /// 哪个模型（`claude:模型名`）；旧快照没有时为空
+    pub provider: String,
+    /// 生成时刻（UTC ISO）；旧快照没有时为空
+    pub generated_at: String,
+    /// 模型自己说的关键不确定性
+    pub key_uncertainty: String,
 }
 
 /// 校准曲线一个分箱（AI 预测区间 vs 实际发生率）。
@@ -278,6 +284,9 @@ fn parse_board(v: &serde_json::Value) -> PredictionReadout {
                         edge: optf(a, "edge"),
                         confidence: s(a, "confidence"),
                         rationale: s(a, "rationale"),
+                        provider: s(a, "provider"),
+                        generated_at: s(a, "generated_at"),
+                        key_uncertainty: s(a, "key_uncertainty"),
                     }),
                 })
                 .collect()

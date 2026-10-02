@@ -237,6 +237,15 @@ impl Cell {
         }
     }
 
+    /// 给人看的文字（检查器里列一行的全部字段用）：缺失类显示符号。
+    pub fn display_text(&self) -> String {
+        match self {
+            Self::Absent(a) => a.glyph().to_string(),
+            Self::Num { s, .. } | Self::ColoredNum(_, s, _) => s.clone(),
+            _ => self.plain(),
+        }
+    }
+
     /// 复制为 TSV 时的文字（完整值，不省略）。
     fn plain(&self) -> String {
         match self {

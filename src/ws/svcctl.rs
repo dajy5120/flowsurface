@@ -192,6 +192,10 @@ pub struct UnitState {
     pub last_result: String,
     /// 上次跑完的时刻（人读，空表示没跑过）。
     pub last_finish: String,
+    /// 整个单元（含子进程）当前占用的内存（字节；systemd 记账，没开或没在跑为 `None`）
+    pub mem_bytes: Option<u64>,
+    /// 整个单元累计用掉的 CPU 时间（纳秒）。两次之差除以间隔 = CPU%（由调用方算）
+    pub cpu_ns: Option<u64>,
 }
 
 impl UnitState {
@@ -224,6 +228,10 @@ pub fn query(unit: &str) -> UnitState {
             "Result",
             "-p",
             "ExecMainExitTimestamp",
+            "-p",
+            "MemoryCurrent",
+            "-p",
+            "CPUUsageNSec",
         ])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
@@ -243,6 +251,9 @@ pub fn query(unit: &str) -> UnitState {
         restarts: get("NRestarts").parse().unwrap_or(0),
         last_result: get("Result"),
         last_finish: get("ExecMainExitTimestamp"),
+        // 「[not set]」或很大的哨兵值都当没有
+        mem_bytes: get("MemoryCurrent").parse::<u64>().ok().filter(|v| *v < u64::MAX / 2),
+        cpu_ns: get("CPUUsageNSec").parse::<u64>().ok().filter(|v| *v < u64::MAX / 2),
         ..Default::default()
     };
     if st.active {

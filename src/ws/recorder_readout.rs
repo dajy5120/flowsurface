@@ -96,6 +96,8 @@ pub struct LakeSym {
 
 #[derive(Default, Clone)]
 pub struct SvcState {
+    /// 服务日志最近若干条（时间, 级别, 内容），新的在后；给录制面板的时间线（docs/35 §10 P2）
+    pub log: Vec<crate::ui::widgets::TimelineLine>,
     pub active: bool,
     pub uptime_secs: i64,
     pub restarts: i64,
@@ -294,12 +296,31 @@ fn carry_scan(st: &mut SvcState, last: &SvcState) {
 
 fn poll_journal(st: &mut SvcState, prev: &BTreeMap<String, SymLive>) {
     let out = Command::new("journalctl")
-        .args(["--user", "-u", SERVICE, "-n", "120", "--no-pager", "-o", "cat"])
+        .args(["--user", "-u", SERVICE, "-n", "200", "--no-pager", "-o", "short-iso"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
+    // short-iso：`2026-10-02T12:00:00+0800 主机 单元[pid]: 内容`。时间留时分秒，内容取第一个「]: 」之后
+    st.log = out
+        .lines()
+        .filter(|l| !l.starts_with("-- "))
+        .map(|l| {
+            let time = l.get(11..19).unwrap_or("").to_string();
+            let msg = l.split_once("]: ").map_or(l, |(_, m)| m).to_string();
+            let low = msg.to_ascii_lowercase();
+            let lvl = if low.contains("error") || msg.contains("错误") || msg.contains("失败") {
+                'E'
+            } else if low.contains("warn") || msg.contains("重连") || msg.contains("断开") {
+                'W'
+            } else {
+                'I'
+            };
+            (time, lvl, msg)
+        })
+        .collect();
     for line in out.lines() {
-        let Some(rest) = line.strip_prefix("[recorder][") else {
+        // short-iso 前面带时间和单元名：在行里找录制器自己的前缀
+        let Some(rest) = line.find("[recorder][").map(|i| &line[i + "[recorder][".len()..]) else {
             continue;
         };
         let Some((sym, kv)) = rest.split_once("] ") else {

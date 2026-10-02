@@ -97,6 +97,34 @@ pub fn handle(m: OrdersMsg) {
     });
 }
 
+/// 订单表里选中的那一行的全部字段（检查器显示，docs/35 §16.15 第 10 项）。成交表优先。
+pub fn selected_detail() -> Option<(&'static str, Vec<(String, String)>)> {
+    let pick = |state: &'static std::thread::LocalKey<RefCell<Option<GridState>>>,
+                rows: &'static std::thread::LocalKey<RefCell<Option<(std::time::Instant, bool, Rows)>>>,
+                cols: Vec<Column>| {
+        let sel = state.with(|s| s.borrow().as_ref().and_then(|g| g.selected))?;
+        rows.with(|r| {
+            let r = r.borrow();
+            let row = r.as_ref()?.2.get(sel)?.clone();
+            Some(
+                cols.iter()
+                    .zip(row.iter())
+                    .map(|(c, cell)| {
+                        let title = match &c.unit {
+                            Some(u) => format!("{}（{u}）", c.title),
+                            None => c.title.clone(),
+                        };
+                        (title, cell.display_text())
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+    };
+    pick(&TRADES, &TRADE_ROWS, trade_cols())
+        .map(|v| ("选中的成交", v))
+        .or_else(|| pick(&WORKING, &WORKING_ROWS, working_cols()).map(|v| ("选中的挂单", v)))
+}
+
 /// 取出状态并按本帧数据重排（几百行，排序是微秒级）。
 fn state_for(
     cell: &'static std::thread::LocalKey<RefCell<Option<GridState>>>,

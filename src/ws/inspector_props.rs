@@ -61,6 +61,38 @@ pub fn view<'a>(content: &'a Content) -> Option<Element<'a, Event>> {
             ]
             .spacing(crate::ui::metrics::space(2));
             let m = super::feature_matrix_readout::snapshot();
+            // 特征定义（点矩阵里的特征名选中）
+            let kv = |k: &str, v: String| {
+                iced::widget::row![
+                    text(k.to_string()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()).width(Length::Fixed(72.0)),
+                    text(v).size(crate::ui::text::s_small()).color(crate::ui::pal::txt()),
+                ]
+                .spacing(crate::ui::metrics::space(2))
+            };
+            match super::feature_matrix::inspected().and_then(|k| m.slots.iter().find(|s| s.key == k).cloned()) {
+                Some(s) => {
+                    let list = |v: &[String]| if v.is_empty() { crate::ui::fmt::missing() } else { v.join(" · ") };
+                    b = b
+                        .push(section("特征定义"))
+                        .push(kv("名称", s.name_cn.clone()))
+                        .push(kv("键", s.key.clone()))
+                        .push(kv("阶段 / 族", format!("{} · {}", s.stage, s.family)))
+                        .push(kv("单位", if s.unit.is_empty() { crate::ui::fmt::na() } else { s.unit.clone() }))
+                        .push(kv("窗口", s.window_label()))
+                        .push(kv("所需数据", list(&s.inputs)))
+                        .push(kv("市场", list(&s.markets)))
+                        .push(kv("实现", format!("{} · 第 {} 批", s.status, s.wave)))
+                        .push(kv("先验", if s.prior.is_empty() { crate::ui::fmt::unknown() } else { s.prior.clone() }))
+                        .push(kv("延迟档", s.latency.clone()))
+                        .push(kv("默认启用", if s.default_on { "是".into() } else { "否".into() }))
+                        .push(kv("当前质量", if s.reason.is_empty() { s.quality.clone() } else { format!("{} · {}", s.quality, s.reason) }));
+                }
+                None => {
+                    b = b.push(section("特征定义")).push(
+                        text("点矩阵里的特征名，这里显示它的定义").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
+                    );
+                }
+            }
             if m.chart.present && !m.chart.editable.is_empty() {
                 b = b.push(section("图表参数口径")).push(
                     super::chart_params_view::edit_block(&m).map(Event::FeatureMatrixInteraction),
@@ -98,6 +130,20 @@ pub fn view<'a>(content: &'a Content) -> Option<Element<'a, Event>> {
             .spacing(crate::ui::metrics::space(2))
             .into(),
         ),
+        // 订单：选中一行 → 检查器列出它的全部字段（docs/35 §16.15 第 10 项）；没选中不占检查器
+        Content::Orders => super::orders_view::selected_detail().map(|(title, fields)| {
+            let mut b = column![section(title)].spacing(crate::ui::metrics::space(1));
+            for (k, v) in fields {
+                b = b.push(
+                    iced::widget::row![
+                        text(k).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()).width(Length::Fixed(80.0)),
+                        text(v).size(crate::ui::text::s_small()).color(crate::ui::pal::txt()),
+                    ]
+                    .spacing(crate::ui::metrics::space(2)),
+                );
+            }
+            b.width(Length::Fill).into()
+        }),
         _ => None,
     }
 }

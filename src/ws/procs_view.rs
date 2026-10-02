@@ -41,8 +41,8 @@ fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, ProcsMsg>
 }
 
 /// 常驻守护表里两个操作列的列号（handle 按它认是哪个操作）
-const ACT_TOGGLE: usize = 5;
-const ACT_RESTART: usize = 6;
+const ACT_TOGGLE: usize = 7;
+const ACT_RESTART: usize = 8;
 /// 按点触发表的操作列
 const TIMER_ACT: usize = 3;
 
@@ -53,6 +53,9 @@ fn daemon_cols() -> Vec<Column> {
         Column::text("状态", 110.0).groupable(),
         Column::num("已运行", None, 96.0),
         Column::num("重启", None, 56.0),
+        // 资源可见性（docs/35 §8，UPDS V7 §60）：谁最占内存 / CPU，一眼看得出来该先停哪个
+        Column::num("内存", Some("MB"), 76.0),
+        Column::num("CPU", Some("%"), 64.0),
         Column { sort: crate::ui::grid::SortKind::None, ..Column::text("启停", 72.0) },
         Column { sort: crate::ui::grid::SortKind::None, ..Column::text("重启", 72.0) },
         Column::text("停了会怎样", 360.0),
@@ -230,6 +233,19 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
                 if r.st.active { Cell::num(r.st.uptime_secs as f64, super::svcctl::fmt_dur(r.st.uptime_secs)) } else { Cell::Absent(crate::ui::fmt::Absence::NotApplicable) },
                 // 重启次数不为 0 就标出来：它说明这个服务在反复爬起来，而「现在是运行中」会把这件事盖住
                 Cell::Colored(r.st.restarts.to_string(), if r.st.restarts > 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
+                match r.st.mem_bytes.filter(|_| r.st.active) {
+                    Some(b) => {
+                        let mb = b as f64 / 1_048_576.0;
+                        // 不到 10MB 留一位小数：取整会把几百 KB 的小服务显示成「0」
+                        Cell::num(mb, if mb < 10.0 { format!("{mb:.1}") } else { format!("{mb:.0}") })
+                    }
+                    None => Cell::Absent(if r.st.active { crate::ui::fmt::Absence::Unknown } else { crate::ui::fmt::Absence::NotApplicable }),
+                },
+                match r.cpu_pct {
+                    Some(p) => Cell::num(p, format!("{p:.1}")),
+                    // 第一轮还没有上一次的值：「未取到」；没在跑：不适用
+                    None => Cell::Absent(if r.st.active { crate::ui::fmt::Absence::Unknown } else { crate::ui::fmt::Absence::NotApplicable }),
+                },
                 Cell::Action(if r.st.active { "停止".into() } else { "启动".into() }, Tone::Neutral),
                 Cell::Action("重启".into(), Tone::Neutral),
                 // 停了会怎样：只在已停止时写（运行时挂着是噪音，停了却不说会以为功能还在）

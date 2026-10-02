@@ -580,6 +580,11 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
         );
     }
 
+    // 服务日志（时间线：固定时间列 + 跟随开关，docs/35 §10 P2）
+    let log_lines = app.log_frozen.clone().unwrap_or_else(|| st.log.clone());
+    live = live.push(text("服务日志").size(crate::ui::text::s_small()).color(crate::ui::pal::head()));
+    live = live.push(crate::ui::widgets::timeline(&log_lines, app.log_frozen.is_none(), RecorderMsg::LogFollow, 180.0));
+
     // ③ 已录制总览
     let pct = (st.span_days as f64 / GOAL_DAYS as f64).min(1.0);
     let filled = (pct * 24.0) as usize;

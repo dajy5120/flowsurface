@@ -737,7 +737,10 @@ fn feature_line<'a>(
     let h = r.head();
     let muted = h.not_implemented() || !r.enabled();
     let mut line = row![
-        fcell(nowrap(h.name_cn.clone(), 11.0, if muted { crate::ui::pal::pend() } else { crate::ui::pal::txt() }), w.name, false),
+        // 点特征名：检查器显示这条特征的定义
+        iced::widget::mouse_area(fcell(nowrap(h.name_cn.clone(), 11.0, if muted { crate::ui::pal::pend() } else { crate::ui::pal::txt() }), w.name, false))
+            .on_press(Msg::Inspect(h.key.clone()))
+            .interaction(iced::mouse::Interaction::Pointer),
         sep(false),
         fcell(nowrap(h.key.clone(), 10.0, crate::ui::pal::dim()), w.key, false),
         sep(true),

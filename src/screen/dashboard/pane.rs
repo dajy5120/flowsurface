@@ -140,6 +140,8 @@ pub enum Event {
     LinkBadgeClicked,
     /// 冻结 / 解冻这个面板（停止重画，docs/35 §8）
     ToggleFreeze,
+    /// 标题栏「⋯」：展开 / 收起不常用的动作（docs/35 §10 第 1 条：标题栏 ≤ 3 个动作 + 溢出）
+    ToggleOverflow,
     /// K 线数据表视图里的网格交互
     KlineTable(crate::ui::grid::GridMsg),
     /// 自绘图（自有数据图、Tardis 历史面板）的数据表视图交互
@@ -164,6 +166,8 @@ pub struct State {
     pub frozen: bool,
     /// 数据表视图（Ctrl Shift D，docs/35 §6.3）：K 线面板显示成表格。不存盘
     pub table_view: bool,
+    /// 标题栏「⋯」展开着（不常用的动作露出来）。不存盘
+    pub overflow: bool,
 }
 
 impl State {
@@ -1574,6 +1578,8 @@ impl State {
     pub fn update(&mut self, msg: Event) -> Option<Effect> {
         match msg {
             Event::ShowModal(requested_modal) => {
+                // 从「⋯」里点开了设置 / 指标：收起溢出
+                self.overflow = false;
                 return self.show_modal_with_focus(requested_modal);
             }
             Event::HideModal => {
@@ -1667,6 +1673,7 @@ impl State {
             Event::OrdersInteraction(m) => crate::ws::orders_view::handle(m),
             Event::LinkBadgeClicked => crate::ws::provenance::on_link_click(),
             Event::ToggleFreeze => self.frozen = !self.frozen,
+            Event::ToggleOverflow => self.overflow = !self.overflow,
             Event::KlineTable(m) => crate::ws::kline_table::handle(self.id, m),
             Event::SeriesTable(m) => crate::ws::series_table::handle(self.id, m),
             Event::OptionsGrid(m) => crate::ws::options_view::grid_update(m),
@@ -2067,12 +2074,15 @@ impl State {
             matches!(&self.content, Content::Starter) || !self.content.initialized();
 
         let tooltip_pos = tooltip::Position::Bottom;
-        let mut buttons = row![];
+        // 标题栏动作分两类（docs/35 §10 第 1 条，UPDS V2 §11：≤ 3 个动作 + 溢出菜单）：
+        // 常驻 = 冻结、最大化、关闭；其余（设置、指标、弹出窗口）超过 3 个时收进「⋯」
+        let mut buttons: Vec<Element<'_, Message>> = Vec::new();
+        let mut primary: Vec<Element<'_, Message>> = Vec::new();
 
         let show_modal = |modal: Modal| Message::PaneEvent(pane, Event::ShowModal(modal));
 
         if !treat_as_starter {
-            buttons = buttons.push(button_with_tooltip(
+            buttons.push(button_with_tooltip(
                 icon_text(Icon::Cog, 12),
                 show_modal(Modal::Settings),
                 None,
@@ -2086,7 +2096,7 @@ impl State {
                 Content::Heatmap { .. } | Content::Kline { .. } | Content::ShaderHeatmap { .. }
             )
         {
-            buttons = buttons.push(button_with_tooltip(
+            buttons.push(button_with_tooltip(
                 icon_text(Icon::ChartOutline, 12),
                 show_modal(Modal::Indicators),
                 Some("Indicators"),
@@ -2097,7 +2107,7 @@ impl State {
 
         // 冻结（docs/35 §8）：行情图表、盘口、逐笔、订单表
         if !treat_as_starter && (self.stream_pair_kind().is_some() || matches!(&self.content, Content::Orders)) {
-            buttons = buttons.push(button_with_tooltip(
+            primary.push(button_with_tooltip(
                 text(if self.frozen { "▶" } else { "❄" }).size(crate::ui::text::s_small()),
                 Message::PaneEvent(pane, Event::ToggleFreeze),
                 Some(if self.frozen { "解冻（追上最新数据）" } else { "冻结：停止刷新，便于阅读和截图" }),
@@ -2107,7 +2117,7 @@ impl State {
         }
 
         if is_popout {
-            buttons = buttons.push(button_with_tooltip(
+            buttons.push(button_with_tooltip(
                 icon_text(Icon::Popout, 12),
                 Message::Merge,
                 Some("Merge"),
@@ -2115,7 +2125,7 @@ impl State {
                 control_btn_style(is_popout),
             ));
         } else if total_panes > 1 {
-            buttons = buttons.push(button_with_tooltip(
+            buttons.push(button_with_tooltip(
                 icon_text(Icon::Popout, 12),
                 Message::Popout,
                 Some("Pop out"),
@@ -2131,7 +2141,7 @@ impl State {
                 (Icon::ResizeFull, Message::MaximizePane(pane))
             };
 
-            buttons = buttons.push(button_with_tooltip(
+            primary.push(button_with_tooltip(
                 icon_text(resize_icon, 12),
                 message,
                 None,
@@ -2139,7 +2149,7 @@ impl State {
                 control_btn_style(is_maximized),
             ));
 
-            buttons = buttons.push(button_with_tooltip(
+            primary.push(button_with_tooltip(
                 icon_text(Icon::Close, 12),
                 Message::ClosePane(pane),
                 None,
@@ -2148,7 +2158,26 @@ impl State {
             ));
         }
 
-        buttons
+        let mut bar = row![];
+        let crowded = buttons.len() + primary.len() > 3;
+        if !crowded || self.overflow {
+            for b in buttons {
+                bar = bar.push(b);
+            }
+        }
+        if crowded {
+            bar = bar.push(button_with_tooltip(
+                text("⋯").size(crate::ui::text::s_small()),
+                Message::PaneEvent(pane, Event::ToggleOverflow),
+                Some(if self.overflow { "收起" } else { "更多：设置、指标、弹出窗口" }),
+                tooltip_pos,
+                control_btn_style(self.overflow),
+            ));
+        }
+        for b in primary {
+            bar = bar.push(b);
+        }
+        bar
             .padding(padding::right(4).left(4))
             .align_y(Alignment::Center)
             .height(Length::Fixed(32.0))
@@ -2403,6 +2432,7 @@ impl Default for State {
             link_group: None,
             frozen: false,
             table_view: false,
+            overflow: false,
         }
     }
 }

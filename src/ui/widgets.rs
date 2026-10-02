@@ -395,6 +395,48 @@ pub fn time_range<'a, M: Clone + 'a>(date: Option<&str>, start: &str, minutes: u
     column![presets, t::caption(resolved)].spacing(metrics::space(1)).into()
 }
 
+/// 时间线里的一条（时间, 级别, 内容）。级别：`E` 错误 / `W` 警告 / 其他为信息。
+pub type TimelineLine = (String, char, String);
+
+/// 时间线（docs/35 §10 P2：日志区用时间线组件）：固定宽度的时间列 + 级别符号 + 内容，新的在下；
+/// 「跟随」开着时显示最新的（贴底），关掉后由调用方停在关掉那一刻的内容，方便慢慢读。
+pub fn timeline<'a, M: Clone + 'a>(lines: &[TimelineLine], follow: bool, on_follow: M, height: f32) -> Element<'a, M> {
+    let c = core();
+    let head = row![
+        t::caption(format!("{} 条", lines.len())),
+        Space::new().width(Length::Fill),
+        button(t::caption(if follow { "● 跟随最新" } else { "○ 已停住 · 点此跟随" }))
+            .padding(Padding::from([0.0, metrics::space(2)]))
+            .on_press(on_follow)
+            .style(move |th, st| button_style(if follow { Kind::Subtle } else { Kind::Standard }, th, st)),
+    ]
+    .align_y(Alignment::Center);
+    let mut body = column![].spacing(1);
+    if lines.is_empty() {
+        body = body.push(t::caption("还没有日志"));
+    }
+    for (time, lvl, msg) in lines {
+        let (g, fg) = match lvl {
+            'E' => (Tone::Danger.glyph(), Tone::Danger.color()),
+            'W' => (Tone::Warning.glyph(), Tone::Warning.color()),
+            _ => ("·", color(c.text_tertiary)),
+        };
+        body = body.push(
+            row![
+                container(t::code(time.clone()).color(color(c.text_tertiary))).width(Length::Fixed(72.0)),
+                container(text(g).color(fg)).width(Length::Fixed(14.0)),
+                t::code(msg.clone()).color(if *lvl == 'E' || *lvl == 'W' { fg } else { color(c.text_secondary) }),
+            ]
+            .spacing(metrics::space(2)),
+        );
+    }
+    let scroll = iced::widget::scrollable(body)
+        .anchor_y(if follow { iced::widget::scrollable::Anchor::End } else { iced::widget::scrollable::Anchor::Start })
+        .height(Length::Fixed(height))
+        .width(Length::Fill);
+    column![head, scroll].spacing(metrics::space(1)).into()
+}
+
 #[cfg(test)]
 mod time_range_tests {
     use super::*;

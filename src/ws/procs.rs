@@ -238,6 +238,8 @@ pub struct Row {
     /// 不等于「不会再跑」，只看状态会得出「已经全停了」的错误结论。
     pub next: String,
     pub st: UnitState,
+    /// 最近一个轮询间隔里的 CPU 占用（% 一个核）；第一轮没有上一次的值，为 `None`
+    pub cpu_pct: Option<f64>,
 }
 
 static NOTE: OnceLock<Mutex<String>> = OnceLock::new();
@@ -267,8 +269,12 @@ pub fn start() {
     if STARTED.set(()).is_err() {
         return;
     }
-    super::spawn_named("ws-procs", || loop {
+    super::spawn_named("ws-procs", || {
+    // 上一轮各单元的（时刻, 累计 CPU 纳秒）：算资源页的 CPU%（docs/35 §8 资源可见性）
+    let mut prev_cpu: std::collections::HashMap<&'static str, (std::time::Instant, u64)> = std::collections::HashMap::new();
+    loop {
         DEMAND.wait_viewed();
+        let now = std::time::Instant::now();
         let rows: Vec<Row> = ALL
             .iter()
             .map(|p| {
@@ -283,13 +289,28 @@ pub fn start() {
                     // timer 的「已运行」没有意义（它本来就不在跑），要的是下次触发
                     next: if timer { svcctl::fmt_stamp(&svcctl::next_elapse(p.unit)) } else { String::new() },
                     st: svcctl::query(p.unit),
+                    cpu_pct: None,
                 }
+            })
+            .map(|mut r| {
+                let key = ALL.iter().find(|p| p.key == r.key).map(|p| p.unit).unwrap_or("");
+                if let Some(ns) = r.st.cpu_ns.filter(|_| r.st.active) {
+                    if let Some((t0, ns0)) = prev_cpu.get(key) {
+                        let dt = now.duration_since(*t0).as_secs_f64();
+                        if dt > 0.5 && ns >= *ns0 {
+                            r.cpu_pct = Some((ns - ns0) as f64 / 1e9 / dt * 100.0);
+                        }
+                    }
+                    prev_cpu.insert(key, (now, ns));
+                }
+                r
             })
             .collect();
         if let Ok(mut g) = ROWS.get_or_init(|| Mutex::new(Vec::new())).lock() {
             *g = rows;
         }
         WAKER.wait(Duration::from_secs(AUTO_SECS));
+    }
     });
 }
 

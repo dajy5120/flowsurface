@@ -558,7 +558,10 @@ fn item_row<'a>(it: &NewsRow, now: i64) -> Element<'a, NewsMsg> {
     //
     // 标题**完整显示**，长了折行——地址那次的教训（docs/24）：
     // 定宽格子会把区别切掉，而新闻标题的区别常常在后半截
-    r = r.push(if it.url.is_empty() {
+    // 测量宽度 ≤ 90 个字符（docs/35 §10 P2，UPDS 正文行宽）：宽屏上标题不再拉成一整行，
+    // 超出就折行（照上面的约定完整显示，不截断）。按半角平均字宽 0.62em 折算
+    let measure = 90.0 * crate::ui::text::s_small() * 0.62;
+    let title: Element<'a, NewsMsg> = if it.url.is_empty() {
         // 没有链接的（Deribit 那种没有单条页面的）显示成普通文本，
         // 不给一个点了没反应的假按钮
         Element::from(text(it.title.clone()).size(crate::ui::text::s_small()).color(crate::ui::pal::dim()).width(Length::Fill))
@@ -571,7 +574,8 @@ fn item_row<'a>(it: &NewsRow, now: i64) -> Element<'a, NewsMsg> {
             .on_press(NewsMsg::Open(it.url.clone()))
             .width(Length::Fill)
             .into()
-    });
+    };
+    r = r.push(iced::widget::container(title).max_width(measure).width(Length::Fill));
 
     // 「说的那件事什么时候发生」和「什么时候说的」不是一回事
     if let Some(e) = it.effective_ms {
