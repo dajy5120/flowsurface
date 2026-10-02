@@ -46,6 +46,8 @@ pub enum BottomTab {
     Activity,
     /// 告警（docs/35 §5.1，UPDS V6 §49）：新闻守护的告警规则命中记录
     Alerts,
+    /// 通知中心（docs/35 §6.1）：本次运行弹过的全部提示
+    Notices,
 }
 
 impl BottomTab {
@@ -55,6 +57,7 @@ impl BottomTab {
             Self::Problems => "问题",
             Self::Activity => "活动",
             Self::Alerts => "告警",
+            Self::Notices => "通知",
         }
     }
 }
@@ -140,13 +143,15 @@ pub struct Shell {
     pub inspector: bool,
     pub log: LogTail,
     pub alerts: AlertTail,
+    /// 通知中心的历史（时刻, 标题, 正文, 级别），新的在后；底部面板开在「通知」页时由 main 刷新
+    pub notices: Vec<(String, String, String, Level)>,
     /// 侧栏收起（Ctrl B）
     pub sidebar_hidden: bool,
 }
 
 impl Default for Shell {
     fn default() -> Self {
-        Self { palette: None, bottom: false, bottom_tab: BottomTab::Log, inspector: false, log: LogTail::default(), alerts: AlertTail::default(), sidebar_hidden: false }
+        Self { palette: None, bottom: false, bottom_tab: BottomTab::Log, inspector: false, log: LogTail::default(), alerts: AlertTail::default(), notices: Vec::new(), sidebar_hidden: false }
     }
 }
 
@@ -489,6 +494,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
         tab(BottomTab::Problems),
         tab(BottomTab::Activity),
         tab(BottomTab::Alerts),
+        tab(BottomTab::Notices),
         space::horizontal(),
         button(t::label("✕")).padding([2, 8]).on_press(ShellEvent::Run(Cmd::ToggleBottom)).style(|th, st| crate::style::button::transparent(th, st, false)),
     ]
@@ -533,6 +539,18 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
                     col = col.push(line(l));
                 }
                 scrollable(col).anchor_bottom().height(Length::Fill).into()
+            }
+        }
+        BottomTab::Notices => {
+            if shell.notices.is_empty() {
+                empty("还没有通知", "弹出过的提示都会留在这里（最多 200 条）：同时最多显示 3 条，挤掉的和自动消失的在这里都能查到。")
+            } else {
+                let mut col = column![].spacing(1);
+                for (time, title, body, level) in shell.notices.iter().rev() {
+                    let l = LogLine { time: time.clone(), level: *level, msg: if title.is_empty() { body.clone() } else { format!("{title}　{body}") } };
+                    col = col.push(line(&l));
+                }
+                scrollable(col).height(Length::Fill).into()
             }
         }
         BottomTab::Alerts => {

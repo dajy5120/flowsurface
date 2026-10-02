@@ -13,7 +13,8 @@ use iced::{Border, mouse, padding, theme, window};
 
 use crate::style;
 
-const DEFAULT_TIMEOUT: u64 = 8;
+/// 普通提示停留时长（UPDS V3 §16，docs/35 §6.1：4 秒）。错误提示不自动消失，见 `sticky`。
+const DEFAULT_TIMEOUT: u64 = 4;
 const MAX_TOAST_BODY_HEIGHT: f32 = 120.0;
 
 const MIN_VISIBLE_TOAST_HEIGHT: f32 = 40.0;
@@ -85,6 +86,8 @@ impl Toast {
 pub struct Manager<'a, Message> {
     content: Element<'a, Message>,
     toasts: Vec<Element<'a, Message>>,
+    /// 每条是否常驻（错误提示不自动消失，要人点掉）
+    sticky: Vec<bool>,
     timeout_secs: u64,
     on_close: Box<dyn Fn(usize) -> Message + 'a>,
     alignment: Alignment,
@@ -100,6 +103,7 @@ where
         alignment: Alignment,
         on_close: impl Fn(usize) -> Message + 'a,
     ) -> Self {
+        let sticky = toasts.iter().map(|t| matches!(t.status, Status::Danger)).collect();
         let toasts = toasts
             .iter()
             .enumerate()
@@ -143,6 +147,7 @@ where
             content: content.into(),
             alignment,
             toasts,
+            sticky,
             timeout_secs: DEFAULT_TIMEOUT,
             on_close: Box::new(on_close),
         }
@@ -317,6 +322,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Manager<'_, Message> {
                 state: toasts_state,
                 instants,
                 on_close: &self.on_close,
+                sticky: &self.sticky,
                 timeout_secs: self.timeout_secs,
             }))
         });
@@ -335,6 +341,7 @@ struct Overlay<'a, 'b, Message> {
     state: &'b mut [Tree],
     instants: &'b mut [Option<Instant>],
     on_close: &'b dyn Fn(usize) -> Message,
+    sticky: &'b [bool],
     timeout_secs: u64,
 }
 
@@ -371,6 +378,10 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, '_, Mes
                 .iter_mut()
                 .enumerate()
                 .for_each(|(index, maybe_instant)| {
+                    // 错误提示常驻：不倒计时
+                    if self.sticky.get(index).copied().unwrap_or(false) {
+                        return;
+                    }
                     if let Some(instant) = maybe_instant.as_mut() {
                         let remaining =
                             time::seconds(self.timeout_secs).saturating_sub(instant.elapsed());

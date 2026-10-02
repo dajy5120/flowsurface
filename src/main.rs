@@ -535,6 +535,9 @@ impl Flowsurface {
                 if self.shell.bottom {
                     self.shell.log.refresh();
                     self.shell.alerts.refresh();
+                    if self.shell.bottom_tab == ui::shell::BottomTab::Notices {
+                        self.refresh_notices();
+                    }
                 }
                 let main_window_id = self.main_window.id;
                 let handles = self.handles.clone();
@@ -1622,6 +1625,23 @@ impl Flowsurface {
             },
         }
         Task::none()
+    }
+
+    /// 通知中心：把提示历史抄进外壳（底部面板开在「通知」页时，每个 Tick 一次；最多 200 条）。
+    fn refresh_notices(&mut self) {
+        use crate::widget::toast::Status;
+        self.shell.notices = self
+            .notifications
+            .history()
+            .map(|(t, toast)| {
+                let level = match toast.status() {
+                    Status::Danger => ui::shell::Level::Error,
+                    Status::Warning => ui::shell::Level::Warn,
+                    _ => ui::shell::Level::Info,
+                };
+                (t.clone(), toast.title().to_string(), toast.body().to_string(), level)
+            })
+            .collect();
     }
 
     /// 命令面板条目 = 注册表 + 当前工作区的面板（按面板次序，与 F6 / Ctrl 1–9 同一顺序）。

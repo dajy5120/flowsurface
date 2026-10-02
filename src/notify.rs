@@ -22,6 +22,9 @@ const DEDUPE_CACHE_TTL_SECS: u64 = 300;
 pub struct Notifications {
     /// Toasts currently shown in the UI.
     toasts: Vec<Toast>,
+    /// 通知中心（docs/35 §6.1）：本次运行里弹过的每一条（时刻, 提示），新的在后，最多 200 条。
+    /// 同时最多显示 3 条，挤掉的、自动消失的都还能在这里查到。
+    history: std::collections::VecDeque<(String, Toast)>,
     /// Per-toast state used for dedupe windows and retry aggregation.
     dedupe_cache: FxHashMap<Toast, DedupeState>,
 }
@@ -79,7 +82,7 @@ impl Notifications {
             state.last_emitted_at = now;
             state.suppressed_since_emit = 0;
 
-            self.toasts.push(toast_to_show);
+            self.show(toast_to_show);
             return;
         }
 
@@ -92,7 +95,24 @@ impl Notifications {
                 error_backoff_level: 0,
             },
         );
+        self.show(toast);
+    }
+
+    /// 显示一条：记进通知中心；同时最多 3 条，超了挤掉最早的（历史里还在）。
+    fn show(&mut self, toast: Toast) {
+        self.history.push_back((chrono::Local::now().format("%H:%M:%S").to_string(), toast.clone()));
+        while self.history.len() > 200 {
+            self.history.pop_front();
+        }
         self.toasts.push(toast);
+        while self.toasts.len() > 3 {
+            self.toasts.remove(0);
+        }
+    }
+
+    /// 通知中心的历史（新的在后）。
+    pub fn history(&self) -> impl Iterator<Item = &(String, Toast)> {
+        self.history.iter()
     }
 
     /// Removes a toast by index if the index exists.
@@ -140,4 +160,20 @@ fn aggregate_toast(base: &Toast, suppressed_count: u32) -> Toast {
         format!("{} (still failing, {retries})", base.body()),
         base.status(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 最多显示三条_历史都留着() {
+        let mut n = Notifications::new();
+        for i in 0..5 {
+            n.push(Toast::info(format!("第 {i} 条")));
+        }
+        assert_eq!(n.toasts().len(), 3, "同时最多 3 条");
+        assert_eq!(n.toasts()[0].body(), "第 2 条", "挤掉的是最早的");
+        assert_eq!(n.history().count(), 5, "挤掉的在通知中心里还查得到");
+    }
 }
