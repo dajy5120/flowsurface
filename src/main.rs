@@ -215,6 +215,8 @@ struct Flowsurface {
     specimen: Option<ws::specimen::Specimen>,     // 界面样张模式（docs/35）：轮换工作区自截图
     shell: ui::shell::Shell,                      // 外壳（docs/35 批 3）：命令面板 / 底部面板 / 检查器
     commands: Vec<ui::command::Entry>,            // 命令注册表（UPDS V2 §12）
+    /// 设置窗口的搜索词
+    settings_query: String,
     /// 主窗口宽度（逻辑像素）：窄于 [`NARROW_PX`] 时检查器变浮层抽屉
     main_width: f32,
     /// 命令面板实际列的条目 = 注册表 + 当前工作区的面板（打开面板时刷新）
@@ -244,6 +246,8 @@ enum Message {
     DataFolderRequested,
     OpenUrlRequested(Cow<'static, str>),
     ScaleFactorChanged(data::ScaleFactor),
+    /// 设置窗口的搜索框
+    SettingsQuery(String),
     SetTimezone(data::UserTimezone),
     ToggleTradeFetch(bool),
     ApplyVolumeSizeUnit(exchange::SizeUnit),
@@ -312,6 +316,7 @@ impl Flowsurface {
             commands: ui::command::registry(&ws::workspace::WORKSPACES),
             palette_entries: ui::command::registry(&ws::workspace::WORKSPACES),
             main_width: f32::MAX,
+            settings_query: String::new(),
             gallery: if ws::specimen::enabled() { ui::gallery::Gallery::from_env() } else { None },
         };
 
@@ -802,6 +807,7 @@ impl Flowsurface {
             Message::ScaleFactorChanged(value) => {
                 self.ui_scale_factor = value;
             }
+            Message::SettingsQuery(q) => self.settings_query = q,
             Message::ToggleTradeFetch(checked) => {
                 self.layout_manager
                     .iter_dashboards_mut()
@@ -1702,37 +1708,16 @@ impl Flowsurface {
         match menu {
             sidebar::Menu::Settings => {
                 let settings_modal = {
-                    // 外观（docs/35 批 7）：与 Studio 共用 ~/.config/wealthspring/ui.json，改了两边同时变。
-                    // 取代上游的主题下拉框与主题编辑器——自定义颜色会绕过 token 的对比度与色弱检查。
-                    let appearance = {
-                        use ui::command::Cmd;
-                        let p = ui::prefs();
-                        let run = Message::RunCommand;
-                        let item = |label: &'static str, body: Element<'static, Message>| -> Element<'static, Message> {
-                            column![ui::text::caption(label), body].spacing(4).into()
-                        };
-                        column![
-                            item("主题", ui::widgets::segmented(
-                                &[("深色", ui::ThemeId::Dark), ("浅色", ui::ThemeId::Light), ("OLED", ui::ThemeId::OledDark), ("高对比", ui::ThemeId::HighContrast)],
-                                &p.theme, move |t| run(Cmd::Theme(t)))),
-                            item("密度", ui::widgets::segmented(
-                                &[("紧凑", ui::Density::Compact), ("舒适", ui::Density::Comfortable), ("宽松", ui::Density::Spacious)],
-                                &p.density, move |d| run(Cmd::Density(d)))),
-                            item("涨跌颜色", ui::widgets::segmented(
-                                &[("绿涨红跌", ui::UpDown::International), ("红涨绿跌", ui::UpDown::China)],
-                                &p.up_down, move |v| run(Cmd::UpDown(v)))),
-                            item("色弱安全配色", ui::widgets::segmented(&[("关", false), ("开", true)], &p.cvd_safe, move |v| run(Cmd::Cvd(v)))),
-                            item("隐藏数值（演示 / 截图）", ui::widgets::segmented(&[("关", false), ("开", true)], &p.hide_values, move |v| run(Cmd::HideValues(v)))),
-                            item("热图色阶", ui::widgets::segmented(
-                                &[("inferno", "inferno"), ("viridis", "viridis"), ("cividis", "cividis")],
-                                &match p.heatmap_scale.as_str() { "viridis" => "viridis", "cividis" => "cividis", _ => "inferno" },
-                                move |v| run(Cmd::HeatmapScale(v)))),
-                            ui::text::caption("主题编辑器已下线：自定义颜色会绕过对比度与色弱检查。快捷键 Ctrl Alt T / D 循环主题 / 密度。"),
-                        ]
-                        .spacing(10)
-                    };
-
-                    let toggle_network_editor = button(text("Network")).on_press(Message::Sidebar(
+                    // 设置窗口（docs/35 §10 最后一行，UPDS V5 §28）：可搜索、每项写明值从哪来、改过的能单项重置。
+                    // 外观类偏好在 ~/.config/wealthspring/ui.json（与 Studio 共用，改了两边同时变）；
+                    // 其余在本机状态文件（saved-state.json）。主题编辑器已下线：自定义颜色会绕过对比度与色弱检查。
+                    use ui::command::Cmd;
+                    let p = ui::prefs();
+                    let d = wealthspring_ui_tokens::Prefs::default();
+                    let run = Message::RunCommand;
+                    let heat = match p.heatmap_scale.as_str() { "viridis" => "viridis", "cividis" => "cividis", _ => "inferno" };
+                    let heat_def: &'static str = match d.heatmap_scale.as_str() { "viridis" => "viridis", "cividis" => "cividis", _ => "inferno" };
+                    let toggle_network_editor = button(text("网络与代理…")).on_press(Message::Sidebar(
                         dashboard::sidebar::Message::ToggleSidebarMenu(Some(
                             sidebar::Menu::Network,
                         )),
@@ -1751,7 +1736,7 @@ impl Flowsurface {
                         };
 
                         let checkbox = iced::widget::checkbox(is_active)
-                            .label("Size in quote currency")
+                            .label("量按计价币显示")
                             .on_toggle(|checked| {
                                 let on_dialog_confirm = Message::ApplyVolumeSizeUnit(if checked {
                                     exchange::SizeUnit::Quote
@@ -1772,7 +1757,7 @@ impl Flowsurface {
                         tooltip(
                             checkbox,
                             Some(
-                                "Display sizes/volumes in quote currency (USD)\nHas no effect on inverse perps or open interest",
+                                "量与成交额按计价币（USD）显示\n对反向永续与持仓量无效；改了要重启",
                             ),
                             TooltipPosition::Top,
                         )
@@ -1821,7 +1806,7 @@ impl Flowsurface {
                         let is_active = connector::fetcher::is_trade_fetch_enabled();
 
                         let checkbox = iced::widget::checkbox(is_active)
-                            .label("Fetch trades (Binance)")
+                            .label("补拉逐笔成交（Binance）")
                             .on_toggle(|checked| {
                                 if checked {
                                     let confirm_dialog = screen::ConfirmDialog::new(
@@ -1837,18 +1822,18 @@ impl Flowsurface {
 
                         tooltip(
                             checkbox,
-                            Some("Try to fetch trades for footprint charts"),
+                            Some("为足迹图补拉历史逐笔（实验性，可能慢且不稳）"),
                             TooltipPosition::Top,
                         )
                     };
 
                     let open_data_folder = {
                         let button =
-                            button(text("Open data folder")).on_press(Message::DataFolderRequested);
+                            button(text("打开数据文件夹")).on_press(Message::DataFolderRequested);
 
                         tooltip(
                             button,
-                            Some("Open the folder where the data & config is stored"),
+                            Some("数据与配置所在的文件夹"),
                             TooltipPosition::Top,
                         )
                     };
@@ -1905,21 +1890,66 @@ impl Flowsurface {
                     ]
                     .spacing(8);
 
-                    let column_content = split_column![
-                        column![open_data_folder,].spacing(8),
-                        column![text("Sidebar position").size(crate::style::text_size::SECTION), sidebar_pos_picklist,].spacing(12),
-                        column![text("Time zone").size(crate::style::text_size::SECTION), timezone_picklist,].spacing(12),
-                        column![text("Market data").size(crate::style::text_size::SECTION), size_in_quote_currency_checkbox,].spacing(12),
-                        column![text("外观").size(crate::style::text_size::SECTION), appearance,].spacing(12),
-                        column![text("Interface scale").size(crate::style::text_size::SECTION), scale_factor,].spacing(12),
-                        column![
-                            text("Experimental").size(crate::style::text_size::SECTION),
-                            column![trade_fetch_checkbox, toggle_network_editor].spacing(8),
-                        ]
-                        .spacing(12),
-                        footer,
-                        ; spacing = 16, align_x = Alignment::Start
+                    // 每一项：(名称, 搜索关键词, 改过没有, 存在哪, 重置消息, 控件)
+                    let tz_def = data::UserTimezone::default();
+                    let scale_now: f32 = self.ui_scale_factor.into();
+                    let items: Vec<(&str, &str, bool, &str, Option<Message>, Element<'_, Message>)> = vec![
+                        ("主题", "theme 深色 浅色 oled 高对比 外观", p.theme != d.theme, "ui.json", Some(run(Cmd::Theme(d.theme))),
+                            ui::widgets::segmented(&[("深色", ui::ThemeId::Dark), ("浅色", ui::ThemeId::Light), ("OLED", ui::ThemeId::OledDark), ("高对比", ui::ThemeId::HighContrast)], &p.theme, move |t| run(Cmd::Theme(t)))),
+                        ("密度", "density 紧凑 舒适 宽松 外观", p.density != d.density, "ui.json", Some(run(Cmd::Density(d.density))),
+                            ui::widgets::segmented(&[("紧凑", ui::Density::Compact), ("舒适", ui::Density::Comfortable), ("宽松", ui::Density::Spacious)], &p.density, move |v| run(Cmd::Density(v)))),
+                        ("涨跌颜色", "绿涨红跌 红涨绿跌 颜色 外观", p.up_down != d.up_down, "ui.json", Some(run(Cmd::UpDown(d.up_down))),
+                            ui::widgets::segmented(&[("绿涨红跌", ui::UpDown::International), ("红涨绿跌", ui::UpDown::China)], &p.up_down, move |v| run(Cmd::UpDown(v)))),
+                        ("色弱安全配色", "cvd 色盲 颜色 外观", p.cvd_safe != d.cvd_safe, "ui.json", Some(run(Cmd::Cvd(d.cvd_safe))),
+                            ui::widgets::segmented(&[("关", false), ("开", true)], &p.cvd_safe, move |v| run(Cmd::Cvd(v)))),
+                        ("隐藏数值（演示 / 截图）", "hide 隐私 演示 截图 金额", p.hide_values != d.hide_values, "ui.json", Some(run(Cmd::HideValues(d.hide_values))),
+                            ui::widgets::segmented(&[("关", false), ("开", true)], &p.hide_values, move |v| run(Cmd::HideValues(v)))),
+                        ("热图色阶", "heatmap inferno viridis cividis 颜色", heat != heat_def, "ui.json", Some(run(Cmd::HeatmapScale(heat_def))),
+                            ui::widgets::segmented(&[("inferno", "inferno"), ("viridis", "viridis"), ("cividis", "cividis")], &heat, move |v| run(Cmd::HeatmapScale(v)))),
+                        ("界面缩放", "scale 缩放 字号 ctrl", (scale_now - 1.0).abs() > 1e-3, "本机状态", Some(Message::ScaleFactorChanged(1.0.into())), scale_factor.into()),
+                        ("时区", "timezone utc 本地 时间", self.timezone != tz_def, "本机状态", Some(Message::SetTimezone(tz_def)), timezone_picklist.into()),
+                        ("侧栏位置", "sidebar 左 右", sidebar_pos != sidebar::Position::default(), "本机状态",
+                            Some(Message::Sidebar(dashboard::sidebar::Message::SetSidebarPosition(sidebar::Position::default()))), sidebar_pos_picklist.into()),
+                        // 改计价单位要重启，不给一键重置（免得误点就重启）
+                        ("量的计价单位", "size quote base usd 成交额", self.volume_size_unit != exchange::SizeUnit::default(), "本机状态", None, size_in_quote_currency_checkbox.into()),
+                        ("补拉逐笔成交（实验）", "trades fetch footprint 足迹 实验", connector::fetcher::is_trade_fetch_enabled(), "本机状态",
+                            Some(Message::ToggleTradeFetch(false)), trade_fetch_checkbox.into()),
+                        ("网络与代理", "network proxy 代理 网络", false, "", None, toggle_network_editor.into()),
+                        ("数据文件夹", "data folder 文件夹 配置", false, "", None, open_data_folder.into()),
                     ];
+                    let q = self.settings_query.trim().to_lowercase();
+                    let mut list = column![
+                        iced::widget::text_input("搜索设置……", &self.settings_query)
+                            .on_input(Message::SettingsQuery)
+                            .padding(6)
+                            .size(ui::text::s_small()),
+                    ]
+                    .spacing(14);
+                    let mut shown = 0;
+                    for (label, keys, changed, store, reset, body) in items {
+                        if !q.is_empty() && !label.to_lowercase().contains(&q) && !keys.to_lowercase().contains(&q) {
+                            continue;
+                        }
+                        shown += 1;
+                        // 值的来源：缺省 / 已改（存在哪）——UPDS V5 §28「每项显示值来源」
+                        let src = if changed { format!("已改 · {store}") } else if store.is_empty() { String::new() } else { "缺省".into() };
+                        let mut head = row![ui::text::caption(label), iced::widget::space::horizontal(), ui::text::caption(src).color(if changed { ui::pal::warn() } else { ui::pal::dim() })]
+                            .spacing(6)
+                            .align_y(Alignment::Center);
+                        if changed && let Some(m) = reset {
+                            head = head.push(
+                                button(ui::text::caption("↺ 重置"))
+                                    .padding(crate::ui::metrics::pad2(0, 1))
+                                    .on_press(m)
+                                    .style(|th, st| style::button::transparent(th, st, false)),
+                            );
+                        }
+                        list = list.push(column![head, body].spacing(4));
+                    }
+                    if shown == 0 {
+                        list = list.push(ui::text::caption(format!("没有和「{}」相关的设置", self.settings_query.trim())));
+                    }
+                    let column_content = column![list, footer].spacing(16).align_x(Alignment::Start);
 
                     let content = scrollable::Scrollable::with_direction(
                         column_content,
