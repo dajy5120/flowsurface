@@ -18,6 +18,7 @@ pub mod fmt;
 pub mod gallery;
 pub mod grid;
 pub mod live;
+pub mod perf;
 pub mod metrics;
 pub mod pal;
 pub mod shell;

@@ -266,7 +266,7 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     if replaying {
         body = body.push(
             container(
-                text("⏵ 回放态——表里是历史数据。「滞后」列算的是**当时**的链路延迟，不是现在的")
+                text("⏵ 回放态——表里是历史数据。「滞后」列算的是当时的链路延迟，不是现在的")
                     .size(crate::ui::text::s_small())
                     .color(crate::ui::pal::warn()),
             )
@@ -865,7 +865,7 @@ fn trigger_block<'a>(sess: &ro::SessionView) -> Element<'a, ObsMsg> {
     // ── 触发规则 ──
     col = col.push(section(
         "触发录制",
-        "条件命中时把**命中之前**那几秒一起存下来——这是环形缓冲的兑现",
+        "条件命中时把命中之前那几秒一起存下来——这是环形缓冲的兑现",
     ));
     if !sess.triggers.is_empty() {
         let mut h = row![].spacing(3);

@@ -53,7 +53,7 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
             .size(crate::ui::text::s_section())
             .color(crate::ui::pal::head()),
         text(
-            "回放单位是**一轮**：5 分钟市场每轮换一个市场与一套盘口，跨轮把曲线接起来\
+            "回放单位是一轮：5 分钟市场每轮换一个市场与一套盘口，跨轮把曲线接起来\
              只会画出一次假的暴跌。"
         )
         .size(crate::ui::text::s_meta())

@@ -105,6 +105,15 @@ fn sanitize(s: &str) -> String {
 }
 
 /// RGBA → PPM（P6，丢掉 alpha）。
+/// 追加一个工作区的焦点顺序（F6 依次经过的面板）到 `focus-order.md`。
+pub fn append_focus_order(dir: &std::path::Path, workspace: &str, panes: &[String]) {
+    use std::io::Write;
+    let p = dir.join("focus-order.md");
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) else { return };
+    let order: Vec<String> = panes.iter().enumerate().map(|(i, n)| format!("{}. {n}", i + 1)).collect();
+    let _ = writeln!(f, "| {workspace} | {} | {} |", panes.len(), order.join(" → "));
+}
+
 fn write_ppm(path: &std::path::Path, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
     let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
     out.reserve((w * h * 3) as usize);

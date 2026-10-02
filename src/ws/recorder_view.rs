@@ -195,7 +195,7 @@ fn coverage(app: &RecorderPaneState, st: &super::recorder_readout::SvcState) -> 
             .size(crate::ui::text::s_section())
             .color(crate::ui::pal::ok()),
         text(
-            "区间取自 parquet 页脚统计，只看得见**段间**的洞（段是 600 秒轮转）——             数字是「至少这么碎」。能不能跑最终由回测入口的窗口体检说了算。"
+            "区间取自 parquet 页脚统计，只看得见段间的洞（段是 600 秒轮转）——             数字是「至少这么碎」。能不能跑最终由回测入口的窗口体检说了算。"
         )
         .size(crate::ui::text::s_small())
         .color(crate::ui::pal::dim()),
@@ -308,7 +308,7 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
             .size(crate::ui::text::s_section())
             .color(head),
         text(
-            "这份数据**没有第三方历史源**：5 分钟市场结束即消失，不录就永远没有，             事后一秒都补不回来。启停在「进程」页，连接在「网络出口」页。"
+            "这份数据没有第三方历史源：5 分钟市场结束即消失，不录就永远没有，             事后一秒都补不回来。启停在「进程」页，连接在「网络出口」页。"
         )
         .size(crate::ui::text::s_small())
         .color(dimc),

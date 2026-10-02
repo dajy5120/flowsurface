@@ -169,7 +169,7 @@ pub static ALL: &[Source] = &[
     Source {
         key: "deps-check",
         label: "依赖版本检查",
-        what: "PyPI / crates.io / GitHub API——**只在「进程」页点「检查更新」时发一次**，无后台轮询",
+        what: "PyPI / crates.io / GitHub API——只在「进程」页点「检查更新」时发一次，无后台轮询",
         kind: Kind::InProcess,
         scope: Scope::External,
         unit: "",

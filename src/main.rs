@@ -44,6 +44,7 @@ use iced::{
 use std::{borrow::Cow, collections::HashMap, vec};
 
 fn main() {
+    ui::perf::mark_start();
     logger::install_panic_hook();
 
     if let Err(err) = logger::setup(cfg!(debug_assertions)) {
@@ -218,6 +219,10 @@ struct Flowsurface {
     commands: Vec<ui::command::Entry>,            // 命令注册表（UPDS V2 §12）
     /// 设置窗口的搜索词
     settings_query: String,
+    /// 连不上的交易所行情流：交易所 → (第一次断开的时刻, 原因)。重连成功即移除。
+    /// 上游每秒重试一次、只记 INFO，界面上只有「Waiting for data…」——离线时看不出为什么
+    /// （docs/35 §16.14 测试矩阵 offline 场景查出来的）。
+    stream_down: std::collections::BTreeMap<String, (std::time::Instant, String)>,
     /// 主窗口宽度（逻辑像素）：窄于 [`NARROW_PX`] 时检查器变浮层抽屉
     main_width: f32,
     /// 命令面板实际列的条目 = 注册表 + 当前工作区的面板（打开面板时刷新）
@@ -318,6 +323,7 @@ impl Flowsurface {
             palette_entries: ui::command::registry(&ws::workspace::WORKSPACES),
             main_width: f32::MAX,
             settings_query: String::new(),
+            stream_down: std::collections::BTreeMap::new(),
             gallery: if ws::specimen::enabled() { ui::gallery::Gallery::from_env() } else { None },
         };
 
@@ -460,9 +466,18 @@ impl Flowsurface {
                 let dashboard = self.active_dashboard_mut();
 
                 match event {
-                    exchange::Event::Connected(_exchange) => {}
+                    exchange::Event::Connected(exchange) => {
+                        if let Some((t0, _)) = self.stream_down.remove(&exchange.to_string()) {
+                            log::info!("[行情] {exchange} 已重新连上（断开了 {} 秒）", t0.elapsed().as_secs());
+                        }
+                    }
                     exchange::Event::Disconnected(exchange, reason) => {
                         log::info!("a stream disconnected from {exchange} WS: {reason:?}");
+                        // 只在「从好变坏」时记一条警告（进问题页）；上游每秒重试，逐次记会刷屏
+                        self.stream_down.entry(exchange.to_string()).or_insert_with(|| {
+                            log::warn!("[行情] {exchange} 连不上：{reason}——在重试（每秒一次）");
+                            (std::time::Instant::now(), reason.to_string())
+                        });
                     }
                     exchange::Event::DepthReceived(stream, update_t, depth) => {
                         let task = dashboard
@@ -636,10 +651,21 @@ impl Flowsurface {
                 }
             }
             Message::SpecimenShot(shot) => {
+                // 焦点顺序表（docs/35 §13.3「每个工作区一份焦点顺序表」）：F6 / Ctrl 1–9 走的面板次序
+                if let Some(sp) = &self.specimen {
+                    let ws_name = self.layout_manager.active_layout_id().map(|l| l.name.clone()).unwrap_or_default();
+                    let mut panes: Vec<(pane_grid::Pane, String)> =
+                        self.active_dashboard().panes.iter().map(|(p, st)| (*p, st.content.to_string())).collect();
+                    panes.sort_by_key(|(p, _)| *p);
+                    ws::specimen::append_focus_order(&sp.dir, &ws_name, &panes.into_iter().map(|(_, n)| n).collect::<Vec<_>>());
+                }
                 let done = self
                     .specimen
                     .as_mut()
                     .is_some_and(|sp| sp.save(&shot.rgba, shot.size.width, shot.size.height));
+                if done && let Some(sp) = &self.specimen {
+                    ui::perf::write(&sp.dir);
+                }
                 if done {
                     log::info!("[specimen] 全部截完，退出");
                     return iced::exit();
@@ -1048,6 +1074,14 @@ impl Flowsurface {
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
+        let t0 = std::time::Instant::now();
+        let el = self.view_inner(id);
+        // 性能预算的测量（docs/35 §13.2）：冷启动、切换工作区
+        ui::perf::view_done(t0.elapsed());
+        el
+    }
+
+    fn view_inner(&self, id: window::Id) -> Element<'_, Message> {
         // WealthSpring 原生 dockable pane（docs/08）：每帧把 ws_* 状态旁路给 readout 快照，
         // 供 `Content::WealthSpring` 面板渲染（pane 视图拿不到 &App，沿用旁路模式）。
         {
@@ -1704,6 +1738,13 @@ impl Flowsurface {
             env_detail: badge.detail,
             run,
             streams_on: ws::egress::streams_enabled(),
+            // 断开超过 3 秒才算（正常的断线重连一两秒就好，不该闪）
+            streams_down: self
+                .stream_down
+                .iter()
+                .filter(|(_, (t0, _))| t0.elapsed().as_secs() >= 3)
+                .map(|(k, (_, why))| (k.clone(), why.clone()))
+                .collect(),
             wire: ws::egress::wire_rate(),
             egress_conns: ws::egress::external_conns(),
             focused,
@@ -1713,6 +1754,10 @@ impl Flowsurface {
     }
 
     fn load_layout(&mut self, layout_uid: uuid::Uuid, main_window: window::Id) -> Task<Message> {
+        if let Some(l) = self.layout_manager.layouts.iter().find(|l| l.id.unique == layout_uid) {
+            ui::perf::switch_started(&l.id.name);
+        }
+
         if let Err(err) = self.layout_manager.set_active_layout(layout_uid) {
             log::error!("Failed to set active layout: {}", err);
             return Task::none();

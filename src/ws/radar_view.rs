@@ -1732,7 +1732,7 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
     // ── 永续 ──
     col = col.push(section(
         "永续 · 资金费",
-        "按**年化**费率绝对值排。各所结算间隔不同（Hyperliquid 每小时、其余 8 小时），只有年化能横比",
+        "按年化费率绝对值排。各所结算间隔不同（Hyperliquid 每小时、其余 8 小时），只有年化能横比",
     ));
     const PERP_COLS: [Hd; 8] = [
         ("合约", 150.0, false),
@@ -1829,7 +1829,7 @@ fn crypto_listings<'a>(p: &Panorama) -> Element<'a, RadarMsg> {
     }
     col = col.push(section(
         "新上市",
-        "口径是币安期货的 onboardDate——公开接口里**只有它**给上市时间，故这一栏只覆盖币安永续",
+        "口径是币安期货的 onboardDate——公开接口里只有它给上市时间，故这一栏只覆盖币安永续",
     ));
     col = col.push(days_bar(
         tbl::CRY_LISTING,
@@ -1889,7 +1889,7 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a
         Some(blk::PREDICTION),
     ));
     col = col.push(
-        text("价格就是概率；涨跌是**概率点**，不是收益率。")
+        text("价格就是概率；涨跌是概率点，不是收益率。")
             .size(crate::ui::text::s_meta())
             .color(crate::ui::pal::dim()),
     );
@@ -2011,7 +2011,7 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a
     col = col.push(table(
         tbl::PRED_HOT,
         "热门榜",
-        "两家**各自排序后交错**，不跨平台比大小——成交额的窗口和单位都不同，直接混排会让一家整体压过另一家",
+        "两家各自排序后交错，不跨平台比大小——成交额的窗口和单位都不同，直接混排会让一家整体压过另一家",
         &p.hot,
         // 守护已经把两家各自排好再交错了，别再按某一列拍平
         NO_SORT,
@@ -2418,14 +2418,14 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState, fetched: i64) -> Element<'a
     col = col.push(stock_table(
         tbl::EQ_HOT,
         &format!("热门榜（全表 {} 只）", p.universe),
-        "按**成交额**排，不按成交股数——1.7 美元的票成交 2.7 亿股，钱远不如 1016 美元那只多",
+        "按成交额排，不按成交股数——1.7 美元的票成交 2.7 亿股，钱远不如 1016 美元那只多",
         &p.hot,
         5,
     ));
     col = col.push(stock_table(
         tbl::EQ_GAIN,
         "涨幅榜",
-        "价格与成交额**两个地板都设了**：不设价格地板，榜首永远是 $0.016 涨 1130% 的仙股",
+        "价格与成交额两个地板都设了：不设价格地板，榜首永远是 $0.016 涨 1130% 的仙股",
         &p.gainers,
         4,
     ));
@@ -2599,7 +2599,7 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState, fetched: i64) -> Element<'a, Rad
     // 通胀数据本身可能是九个月前公布的。两个都要显示，只显示前者更误导
     col = col.push(fresh_bar(
         Tier::Periodic,
-        "央行/统计局按期公布，不是行情。**抓取时刻 ≠ 观测日期**——见每行的「观测」列",
+        "央行/统计局按期公布，不是行情。抓取时刻 ≠ 观测日期——见每行的「观测」列",
         fetched,
         "1 小时",
         Some(blk::MACROS),

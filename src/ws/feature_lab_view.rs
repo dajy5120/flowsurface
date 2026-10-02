@@ -114,7 +114,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
             .into(),
     ));
     b = b.push(dim(format!(
-        "单检验检出 2 点需 {:.0} 轮；{} 个检验需 {:.0} 轮——**特征越多，样本要求越高**，\
+        "单检验检出 2 点需 {:.0} 轮；{} 个检验需 {:.0} 轮——特征越多，样本要求越高，\
          这是「全都做进去」的明码标价。",
         st.power.single, st.power.n_tests, st.power.multi
     )));
@@ -122,7 +122,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     // ③ 检验结果
     b = b.push(sec("条件检验 · y ~ logit(市场价) + 特征".into()));
     b = b.push(dim(
-        "控制市场价之后特征还有没有**增量**信息。CI 走按轮聚类 bootstrap——\
+        "控制市场价之后特征还有没有增量信息。CI 走按轮聚类 bootstrap——\
          同一轮内的快照共享结果标签，按快照算会把区间缩小十几倍。"
             .into(),
     ));
@@ -201,7 +201,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     // ⑤ 注册表
     b = b.push(sec(format!("注册表 · {} 个特征", st.registry.len())));
     b = b.push(dim(
-        "机制假设是**必填**：说不出「它为什么可能预测 5 分钟后的涨跌」的特征不该进库。\
+        "机制假设是必填：说不出「它为什么可能预测 5 分钟后的涨跌」的特征不该进库。\
          这是防过拟合的第一道闸，比任何统计检验都靠前。"
             .into(),
     ));

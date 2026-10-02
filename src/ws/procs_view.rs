@@ -137,7 +137,7 @@ pub fn handle(m: ProcsMsg) -> String {
         ProcsMsg::Act(k, a) => procs::action(&k, a),
         ProcsMsg::Refresh => {
             procs::waker().request();
-            super::deps::refresh_local(); // 本地版本，零网络
+            super::deps::refresh_local_bg(); // 本地版本，零网络；后台读，不卡帧
             String::new()
         }
         // 十几个 HTTP 请求。**绝不能在渲染线程里做**——界面会整个卡住
@@ -183,14 +183,14 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
         .align_y(iced::Alignment::Center),
     );
     body = body.push(
-        text("下面这些守护**跟随本窗口**：Cockpit 一起来就拉起，关掉就一并停止。")
+        text("下面这些守护跟随本窗口：Cockpit 一起来就拉起，关掉就一并停止。")
             .size(crate::ui::text::s_meta())
             .color(crate::ui::pal::ok()),
     );
     body = body.push(
         text(
             "级联由 systemd 负责（各单元 PartOf=ws-stack.target），所以停止是原子的、\
-             也不需要面板懂依赖次序。**但 Cockpit 被 kill -9 时没有任何用户态代码能跑**——\
+             也不需要面板懂依赖次序。但 Cockpit 被 kill -9 时没有任何用户态代码能跑——\
              那种情况下守护会留着，下次启动 Cockpit 时被同一个 target 接管，不会变成孤儿。",
         )
         .size(crate::ui::text::s_meta())
@@ -250,7 +250,7 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
         body = body.push(
             text(
                 "这些是研究任务，绑进窗口生命周期等于「Cockpit 没开着就永远不跑」——\
-                 那不是关掉后台，是把夜跑废掉。列在这里是为了让它们**可见**：\
+                 那不是关掉后台，是把夜跑废掉。列在这里是为了让它们可见：\
                  关掉界面之后还会按时启动的，就只有这几个。",
             )
             .size(crate::ui::text::s_meta())
@@ -296,11 +296,14 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
     body = body.push(
         text(
             "不做后台轮询——你没在看的时候它不会去问上游。「最新版本」空着表示\
-             **还没查过**，不是「已经是最新」。",
+             还没查过，不是「已经是最新」。",
         )
         .size(crate::ui::text::s_meta())
         .color(crate::ui::pal::dim()),
     );
+    if drows.is_empty() && super::deps::loading() {
+        body = body.push(text("正在读取本地版本…").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
+    }
     if !dnote.is_empty() {
         body = body.push(text(dnote).size(crate::ui::text::s_small()).color(crate::ui::pal::warn()));
     }
@@ -324,9 +327,9 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
     body = body.push(ptable(2, dep_cols(), rows_dep));
     body = body.push(
         text(
-            "更新的代价按类型不同：pip 包更新完**用到它的守护要重启**；Rust 依赖\
-             只改 Cargo.lock，**要重新编译才生效**；FlowSurface 是带着六十多个自有\
-             模块的 fork，「更新」只做 git fetch **不合并**——在运行中的界面里替你\
+            "更新的代价按类型不同：pip 包更新完用到它的守护要重启；Rust 依赖\
+             只改 Cargo.lock，要重新编译才生效；FlowSurface 是带着六十多个自有\
+             模块的 fork，「更新」只做 git fetch 不合并——在运行中的界面里替你\
              merge 上游、再把你脚下的二进制重编，那是事故不是便利。",
         )
         .size(crate::ui::text::s_meta())

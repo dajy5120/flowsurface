@@ -867,7 +867,9 @@ pub fn group_title(key: &str, count: usize, collapsed: bool) -> String {
 
 fn cell_view<'a, M: 'a>(cell: &Cell, align: Align, w: f32) -> Element<'a, M> {
     let body: Element<'a, M> = match cell {
-        Cell::Text(s) => t::body(s.clone()).into(),
+        // 单行不折行：行高固定，折到第二行会被裁掉半截（200% 缩放测试矩阵里看到的）；
+        // 放不下的部分由下面的 clip 截掉，完整文字右键「复制这一行」可得
+        Cell::Text(s) => t::body(s.clone()).wrapping(iced::widget::text::Wrapping::None).into(),
         Cell::Id(s) => {
             // 按列宽估一个字符数（等宽字体约 0.6em）
             let max = ((w - 8.0) / (t::size(super::Role::Code) * 0.6)).max(6.0) as usize;
@@ -876,7 +878,7 @@ fn cell_view<'a, M: 'a>(cell: &Cell, align: Align, w: f32) -> Element<'a, M> {
         Cell::Num { s, prov, .. } => widgets::value(s.clone(), *prov).into(),
         Cell::Absent(a) => widgets::absent(*a).into(),
         Cell::Badge(s, tone) => widgets::badge(s.clone(), *tone),
-        Cell::Colored(s, fg) => t::numeric(s.clone()).color(*fg).into(),
+        Cell::Colored(s, fg) => t::numeric(s.clone()).color(*fg).wrapping(iced::widget::text::Wrapping::None).into(),
         // 操作格在行里单独画（要发消息），这里不会走到；给个空白兜底
         Cell::Action(..) => Space::new().into(),
     };

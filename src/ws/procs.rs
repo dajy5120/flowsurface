@@ -88,7 +88,7 @@ pub static ALL: &[Proc] = &[
         what: "Binance @trade → 通道② ring（有外连，需 VPN）",
         unit: "ws-trades-feed",
         kind: Kind::Daemon,
-        if_stopped: "**静默降级**：撤补退化成「总移除量」近似，combo 缺成交类特征",
+        if_stopped: "静默降级：撤补退化成「总移除量」近似，combo 缺成交类特征",
     },
     Proc {
         key: "features",
@@ -96,7 +96,7 @@ pub static ALL: &[Proc] = &[
         what: "通道② ring（由 signals 分流）→ 订单流特征 → 两份 cockpit 旁路文件",
         unit: "ws-features",
         kind: Kind::Daemon,
-        if_stopped: "「订单流特征」工作区的矩阵与四张图停在最后一次快照；**无数据缺口**，录制器仍在落盘，事后可回放重算",
+        if_stopped: "「订单流特征」工作区的矩阵与四张图停在最后一次快照；无数据缺口，录制器仍在落盘，事后可回放重算",
     },
     Proc {
         key: "factory-bridge",
@@ -144,7 +144,7 @@ pub static ALL: &[Proc] = &[
         what: "Binance USDS-M L2/成交/标记价 → ~/ws-data parquet",
         unit: "wealthspring-recorder",
         kind: Kind::Daemon,
-        if_stopped: "**录制出现空洞**，且事后无法补——研究数据是一次性的",
+        if_stopped: "录制出现空洞，且事后无法补——研究数据是一次性的",
     },
     Proc {
         key: "pm-recorder",
@@ -152,7 +152,7 @@ pub static ALL: &[Proc] = &[
         what: "币安钱包 BTC 5 分钟涨跌：WS 盘口(Up) + REST(Down) → ~/ws-data/raw/pm_book",
         unit: "ws-pm-recorder",
         kind: Kind::Daemon,
-        if_stopped: "**这份数据没有第三方历史源**——5 分钟市场结束即消失，不录就永远没有，\
+        if_stopped: "这份数据没有第三方历史源——5 分钟市场结束即消失，不录就永远没有，\
                      事后一秒都补不回来。也是「预测市场」页 Binance 视图的唯一数据来源",
     },
     Proc {
@@ -201,7 +201,7 @@ pub static ALL: &[Proc] = &[
         what: "GPUI IDE：文件树 / 编辑器 / 终端 / 监控，也是发起回测与实盘 run 的入口",
         unit: "ws-studio",
         kind: Kind::Daemon,
-        if_stopped: "写码与发起 run 的入口没了；**已经在跑的 run 不受影响**——\
+        if_stopped: "写码与发起 run 的入口没了；已经在跑的 run 不受影响——\
                      它们是 ws-control 的子进程，不在 Studio 名下",
     },
 ];

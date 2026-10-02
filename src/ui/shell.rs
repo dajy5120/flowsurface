@@ -323,6 +323,8 @@ pub struct Info {
     pub run: String,
     /// 交易所行情订阅开着吗（网络出口页的开关）
     pub streams_on: bool,
+    /// 连不上的行情流（交易所, 原因）；空 = 都好
+    pub streams_down: Vec<(String, String)>,
     /// 整机网速（下行, 上行）字节/秒
     pub wire: Option<(f64, f64)>,
     /// 本项目对外连接条数
@@ -451,6 +453,13 @@ pub fn status_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
             t::metadata(net),
             sep(),
             t::metadata(streams),
+            if info.streams_on && !info.streams_down.is_empty() {
+                let names: Vec<&str> = info.streams_down.iter().map(|(k, _)| k.as_str()).collect();
+                let why: Vec<String> = info.streams_down.iter().map(|(k, w)| format!("{k}：{w}")).collect();
+                chip(format!("▲ 连不上 {}", names.join("、")), color(c.status_warning), format!("{}\n每秒重试；检查网络 / 代理设置", why.join("\n")))
+            } else {
+                iced::widget::Space::new().into()
+            },
             sep(),
             button(t::metadata(act)).padding(0).style(|th, st| crate::style::button::transparent(th, st, false)).on_press(ShellEvent::Run(Cmd::BottomTab(BottomTab::Activity))),
             space::horizontal(),
@@ -675,7 +684,9 @@ pub fn palette_overlay<'a>(
     entries: &'a [Entry],
 ) -> Element<'a, ShellEvent> {
     let c = core();
+    let t0 = std::time::Instant::now();
     let hits = command::filter(entries, &p.query);
+    super::perf::palette_filtered(t0.elapsed());
     let input = text_input("输入命令、工作区或设置……", &p.query)
         .id(palette_input_id())
         .on_input(ShellEvent::PaletteQuery)

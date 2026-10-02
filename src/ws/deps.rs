@@ -248,9 +248,30 @@ pub fn refresh_local() {
     }
 }
 
+/// 本地版本读到一半（后台线程）。
+static LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 在后台重读本地版本。**别在渲染线程里调 [`refresh_local`]**：它读四份 Cargo.lock、
+/// 扫 pip 包、跑 git，实测 217ms——「资源」页第一次打开时整帧卡住（docs/35 §16.14 性能闸门查出来的）。
+pub fn refresh_local_bg() {
+    if LOADING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    super::spawn_named("ws-deps", || {
+        refresh_local();
+        LOADING.store(false, std::sync::atomic::Ordering::Release);
+    });
+}
+
+/// 本地版本还没读完（界面显示「正在读取」而不是一张空表）。
+pub fn loading() -> bool {
+    LOADING.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// 当前缓存的版本表。空的话就在后台去读，这一帧先返回空表。
 pub fn rows() -> Vec<Row> {
     if rows_cell().lock().map(|g| g.is_empty()).unwrap_or(true) {
-        refresh_local();
+        refresh_local_bg();
     }
     rows_cell().lock().map(|g| g.clone()).unwrap_or_default()
 }
@@ -401,7 +422,7 @@ pub fn update(key: &str) -> String {
             match r {
                 Ok(o) if o.status.success() => {
                     refresh_local();
-                    format!("✔ {} 已更新——**用到它的守护要重启才生效**", d.label)
+                    format!("✔ {} 已更新——用到它的守护要重启才生效", d.label)
                 }
                 Ok(o) => format!("✗ pip 失败：{}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
                 Err(e) => format!("✗ 起不了 pip：{e}"),
@@ -416,7 +437,7 @@ pub fn update(key: &str) -> String {
             match r {
                 Ok(o) if o.status.success() => {
                     refresh_local();
-                    format!("✔ {} 的 Cargo.lock 已更新——**要重新编译才生效**", d.label)
+                    format!("✔ {} 的 Cargo.lock 已更新——要重新编译才生效", d.label)
                 }
                 Ok(o) => format!("✗ cargo update 失败：{}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
                 Err(e) => format!("✗ 起不了 cargo：{e}"),

@@ -250,7 +250,7 @@ mod data_lake_date_tests {
             let name = p.file_name().unwrap().to_string_lossy().to_string();
             assert!(
                 !src.contains("Local::now().format(\"%Y-%m-%d\")"),
-                "{name} 用本地时间算数据湖日期——录制器按 **UTC** 分目录，\
+                "{name} 用本地时间算数据湖日期——录制器按 UTC 分目录，\
                  两边不同口径会在本地日界前后错位几小时且不报错（F-01）"
             );
             assert!(

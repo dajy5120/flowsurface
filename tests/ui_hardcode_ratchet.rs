@@ -163,3 +163,43 @@ fn 计数规则() {
     count_line(".padding([2, 6]).size(crate::ui::text::LABEL)", &mut a);
     assert_eq!(a, [2, 1, 1, 1]);
 }
+
+/// 界面文字里不许有 Markdown 加粗记号 `**`（docs/35 §16.14）：iced 的 text 不解析 Markdown，
+/// 写进去就原样显示成两个星号——「下面这些守护**跟随本窗口**」在 200% 缩放截图里一眼可见。
+/// 强调靠颜色 / 分行 / 措辞。只认紧挨着中文的 `**`，代码里的 `**x`（两次解引用）不算。
+#[test]
+fn 界面文字没有markdown加粗() {
+    fn cjk(c: char) -> bool {
+        ('\u{4e00}'..='\u{9fff}').contains(&c) || ('\u{3000}'..='\u{303f}').contains(&c) || ('\u{ff00}'..='\u{ffef}').contains(&c)
+    }
+    let mut hits = Vec::new();
+    let mut stack = vec![root().join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().is_none_or(|x| x != "rs") {
+                continue;
+            }
+            for (i, line) in std::fs::read_to_string(&p).unwrap_or_default().lines().enumerate() {
+                // 注释里随便写（文档注释本来就是 Markdown）
+                let code = match line.find("//") {
+                    Some(k) => &line[..k],
+                    None => line,
+                };
+                let cs: Vec<char> = code.chars().collect();
+                let bad = cs.windows(3).any(|w| {
+                    (w[0] == '*' && w[1] == '*' && cjk(w[2])) || (cjk(w[0]) && w[1] == '*' && w[2] == '*')
+                });
+                if bad {
+                    hits.push(format!("{}:{}", rel(&p), i + 1));
+                }
+            }
+        }
+    }
+    assert!(hits.is_empty(), "界面文字里有 `**`（会原样显示成星号）：\n{}", hits.join("\n"));
+}
