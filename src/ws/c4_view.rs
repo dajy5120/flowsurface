@@ -94,7 +94,7 @@ pub fn pane_body<'a>() -> Element<'a, C4Msg> {
                 row![
                     cell(format!("fills {}", t.n_fills), 80.0, crate::ui::pal::txt()),
                     cell(format!("库存 {:+.2}", t.inv), 90.0, crate::ui::pal::txt()),
-                    cell(format!("日净值 {:+.3}U", t.day_pnl), 120.0, sign_c(t.day_pnl)),
+                    cell(format!("日净值 {}", crate::ui::fmt::sim(format!("{:+.3}U", t.day_pnl))), 120.0, sign_c(t.day_pnl)),
                     cell(format!("胜率 {}", wr_s(t.win_rate)), 90.0, crate::ui::pal::txt()),
                 ]
                 .spacing(4),
@@ -140,7 +140,7 @@ pub fn pane_body<'a>() -> Element<'a, C4Msg> {
                 row![
                     cell(day_md, 50.0, c),
                     cell(wr_s(d.win_rate), 50.0, c),
-                    cell(format!("{:+.2}", d.pnl), 70.0, sign_c(d.pnl)),
+                    cell(crate::ui::fmt::sim(format!("{:+.2}", d.pnl)), 70.0, sign_c(d.pnl)),
                     cell(bp_s(d.bp), 60.0, d.bp.map(sign_c).unwrap_or(crate::ui::pal::dim())),
                     cell(format!("{:.0}%", d.uptime_secs / 864.0), 50.0, c),
                     cell(format!("{}", d.reconnects), 40.0, crate::ui::pal::dim()),

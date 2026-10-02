@@ -124,7 +124,8 @@ impl Cell {
     fn sort_num(&self) -> Option<f64> {
         match self {
             Self::Num { v, .. } => *v,
-            Self::Text(s) | Self::Colored(s, _) => s.replace([' ', '−'], "").parse().ok(),
+            // 去掉来源前缀（~ 模拟、≈ 估算、^ 覆盖、· 派生）再解析，否则带标记的数排不了序
+            Self::Text(s) | Self::Colored(s, _) => s.replace([' ', '−', '~', '≈', '^', '·'], "").parse().ok(),
             _ => None,
         }
     }
@@ -667,6 +668,19 @@ mod tests {
         st.update(GridMsg::CycleGroup, &cols, &rows);
         assert_eq!(st.group_by, None, "只有一个可分组列：再点回到不分组");
         assert_eq!(st.len(rows.len()), 4);
+    }
+
+    #[test]
+    fn 带来源前缀的数照样按数值排() {
+        let cols = vec![Column::num("净", None, 80.0)];
+        let rows = vec![
+            vec![Cell::Colored("~ +2.5".into(), Color::WHITE)],
+            vec![Cell::Colored("~ -10".into(), Color::WHITE)],
+            vec![Cell::Colored("~ +30".into(), Color::WHITE)],
+        ];
+        let mut st = GridState::new(&cols);
+        st.update(GridMsg::Sort(0), &cols, &rows);
+        assert_eq!(st.order, [2, 0, 1], "降序：30 > 2.5 > -10");
     }
 
     #[test]

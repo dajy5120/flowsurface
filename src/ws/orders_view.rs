@@ -56,15 +56,15 @@ fn summary<'a, M: 'a>(st: &Readout) -> Element<'a, M> {
         column![text(k).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()), text(v).size(crate::ui::text::s_emph()).color(c)].spacing(1).into()
     };
     row![
-        kv("持仓", format!("{} {:.4}", st.pos_side, st.net_qty), pos_color),
-        kv("均价", format!("{:.2}", st.avg_px), crate::ui::pal::dim()),
-        kv("已实现(净)", format!("{:+.4}", st.realized_net), money(st.realized_net)),
-        kv("未实现", format!("{unreal:+.4}"), money(unreal)),
-        kv("合计", format!("{total:+.4}"), money(total)),
-        kv("手续费", format!("{:.4}", st.fee_total), crate::ui::pal::down()),
+        kv("持仓", sim(format!("{} {:.4}", st.pos_side, st.net_qty)), pos_color),
+        kv("均价", sim(format!("{:.2}", st.avg_px)), crate::ui::pal::dim()),
+        kv("已实现(净)", sim(format!("{:+.4}", st.realized_net)), money(st.realized_net)),
+        kv("未实现", sim(format!("{unreal:+.4}")), money(unreal)),
+        kv("合计", sim(format!("{total:+.4}")), money(total)),
+        kv("手续费", sim(format!("{:.4}", st.fee_total)), crate::ui::pal::down()),
         kv("买/卖", format!("{} / {}", st.n_buy, st.n_sell), crate::ui::pal::dim()),
         kv("挂单", format!("{}", st.working.len()), crate::ui::pal::dim()),
-        kv("权益", format!("{:.2}", st.equity), money(st.return_pct)),
+        kv("权益", sim(format!("{:.2}", st.equity)), money(st.return_pct)),
     ]
     .spacing(18)
     .align_y(Alignment::Center)
@@ -110,6 +110,23 @@ fn state_for(
     })
 }
 
+use crate::ui::fmt::sim;
+
+/// 数量 / 金额格（docs/35 §7.2）：这里的一切都来自回测或模拟盘，带 `~` 模拟标记；
+/// 隐藏数值模式下显示 `•••`（§9.3）。
+fn sim_num(v: f64, s: String) -> Cell {
+    if crate::ui::hide_values() {
+        Cell::Absent(Absence::Withheld)
+    } else {
+        Cell::Num { v: Some(v), s, prov: crate::ui::fmt::Provenance::Simulated }
+    }
+}
+
+/// 带涨跌色的模拟金额（毛收益 / 手续费 / 净收益）。
+fn sim_colored(s: String, c: Color) -> Cell {
+    if crate::ui::hide_values() { Cell::Absent(Absence::Withheld) } else { Cell::Colored(sim(s), c) }
+}
+
 fn side_cell(side: u8) -> Cell {
     // 文字本身就是非颜色的区分（UPDS：颜色不能是唯一信号）
     if side == 1 { Cell::Colored("买".into(), crate::ui::pal::up()) } else { Cell::Colored("卖".into(), crate::ui::pal::down()) }
@@ -140,7 +157,7 @@ fn working_table<'a>(working: &[WorkingOrder]) -> Element<'a, OrdersMsg> {
             vec![
                 side_cell(w.side),
                 Cell::num(w.price, format!("{:.2}", w.price)),
-                Cell::num(w.qty, format!("{:.4}", w.qty)),
+                sim_num(w.qty, format!("{:.4}", w.qty)),
                 Cell::Id(w.order_id.clone()),
             ]
         })
@@ -184,11 +201,11 @@ fn trades_table<'a>(trades: &[Trade]) -> Element<'a, OrdersMsg> {
                 side_cell(t.side),
                 Cell::Text(t.order_type.clone()),
                 Cell::num(t.price, format!("{:.2}", t.price)),
-                Cell::num(t.qty, format!("{:.4}", t.qty)),
-                Cell::num(t.amount, format!("{:.2}", t.amount)),
-                Cell::Colored(format!("{:+.4}", t.gross), money(t.gross)),
-                Cell::Colored(format!("{:.4}", t.fee), crate::ui::pal::down()),
-                Cell::Colored(format!("{:+.4}", t.net), money(t.net)),
+                sim_num(t.qty, format!("{:.4}", t.qty)),
+                sim_num(t.amount, format!("{:.2}", t.amount)),
+                sim_colored(format!("{:+.4}", t.gross), money(t.gross)),
+                sim_colored(format!("{:.4}", t.fee), crate::ui::pal::down()),
+                sim_colored(format!("{:+.4}", t.net), money(t.net)),
                 Cell::num(t.filled_pct, format!("{:.0}", t.filled_pct)),
             ]
         })
@@ -196,7 +213,7 @@ fn trades_table<'a>(trades: &[Trade]) -> Element<'a, OrdersMsg> {
     // 页脚合计：净收益、手续费（分组折叠后也看得到全表合计）
     let net: f64 = trades.iter().map(|t| t.net).sum();
     let fee: f64 = trades.iter().map(|t| t.fee).sum();
-    let foot = format!("合计 净 {net:+.4} · 手续费 {fee:.4}");
+    let foot = format!("合计 净 {} · 手续费 {}", sim(format!("{net:+.4}")), sim(format!("{fee:.4}")));
     let st = state_for(&TRADES, &cols, &rows);
     grid::view(cols, rows, st, Some(foot), OrdersMsg::Trades)
 }
@@ -226,7 +243,7 @@ pub fn pane_body<'a>() -> Element<'a, OrdersMsg> {
             text(format!("订单 · run {}", if st.run_id.is_empty() { "—" } else { &st.run_id }))
                 .size(crate::ui::text::s_emph())
                 .color(crate::ui::pal::head()),
-            text(format!("本金 {:.0}", st.capital)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
+            text(format!("本金 {}", sim(format!("{:.0}", st.capital)))).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(12)
         .align_y(Alignment::Center),

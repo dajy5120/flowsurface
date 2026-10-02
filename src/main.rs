@@ -1206,7 +1206,8 @@ impl Flowsurface {
 
         toast::Manager::new(
             content,
-            self.notifications.toasts(),
+            // 隐藏数值模式：通知暂停（不弹出，队列照常保留，关掉后恢复显示），docs/35 §9.3
+            if ui::hide_values() { &[] } else { self.notifications.toasts() },
             match sidebar_pos {
                 sidebar::Position::Left => Alignment::Start,
                 sidebar::Position::Right => Alignment::End,

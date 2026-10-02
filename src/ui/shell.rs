@@ -294,6 +294,14 @@ pub fn command_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
     if !info.run.is_empty() {
         left = left.push(t::caption(info.run.clone()));
     }
+    // 隐藏数值模式（docs/35 §9.3）：常驻提示，截图里也看得出这是演示画面
+    if super::hide_values() {
+        left = left.push(chip(
+            "••• 数值已隐藏".into(),
+            color(c.status_warning),
+            "金额、持仓、账户标识显示为 •••，通知暂停；在设置或命令面板里关掉".into(),
+        ));
+    }
 
     container(
         row![left, space::horizontal(), search, toggle_btn("检查器", "Ctrl I", Cmd::ToggleInspector), toggle_btn("底部面板", "Ctrl J", Cmd::ToggleBottom)]
@@ -362,6 +370,7 @@ pub fn status_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
             sep(),
             t::metadata(look),
             sep(),
+            t::metadata(if super::hide_values() { "••• 数值已隐藏 · 通知暂停" } else { "" }).color(color(c.status_warning)),
             t::metadata(utc).color(color(c.text_secondary)),
         ]
         .spacing(metrics::space(3))

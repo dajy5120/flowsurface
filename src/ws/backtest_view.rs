@@ -36,6 +36,11 @@ fn fmt_date(ms: i64) -> String {
 
 /// 画 y 轴网格 + 刻度值（lo..hi 4 等分），返回绘图区映射闭包用的边界。
 fn draw_grid(frame: &mut Frame, w: f32, h: f32, lo: f64, hi: f64) {
+    draw_grid_labels(frame, w, h, lo, hi, true);
+}
+
+/// `labels = false`：只画网格线不写刻度值（资金曲线在隐藏数值模式下，docs/35 §9.3）。
+fn draw_grid_labels(frame: &mut Frame, w: f32, h: f32, lo: f64, hi: f64, labels: bool) {
     let pw = (w - ML - MR).max(1.0);
     for i in 0..=4 {
         let v = lo + (hi - lo) * (i as f64) / 4.0;
@@ -44,6 +49,9 @@ fn draw_grid(frame: &mut Frame, w: f32, h: f32, lo: f64, hi: f64) {
             &Path::line(Point::new(ML, y), Point::new(ML + pw, y)),
             Stroke::default().with_width(1.0).with_color(crate::ui::pal::grid()),
         );
+        if !labels {
+            continue;
+        }
         frame.fill_text(Text {
             content: fmt_num(v),
             position: Point::new(2.0, y - 5.0),
@@ -72,6 +80,8 @@ struct LineChart {
     color: Color,
     baseline: Option<f64>,
     fill: bool,
+    /// 纵轴是金额（资金曲线）：隐藏数值模式下不写刻度值
+    money: bool,
     cache: Cache,
 }
 
@@ -93,7 +103,7 @@ impl<M> canvas::Program<M> for LineChart {
             if (hi - lo).abs() < 1e-12 {
                 hi = lo + 1.0;
             }
-            draw_grid(frame, w, h, lo, hi);
+            draw_grid_labels(frame, w, h, lo, hi, !(self.money && crate::ui::hide_values()));
             let pw = (w - ML - MR).max(1.0);
             let ph = (h - MT - MB).max(1.0);
             let n = self.pts.len();
@@ -281,7 +291,12 @@ impl<M> canvas::Program<M> for PriceChart {
 // ───────────────────────── 组装小部件 ─────────────────────────
 
 fn line_chart<'a, M: 'a>(pts: Vec<f64>, xt: Vec<i64>, color: Color, baseline: Option<f64>, fill: bool, h: f32) -> Element<'a, M> {
-    Canvas::new(LineChart { pts, xt, color, baseline, fill, cache: Cache::new() })
+    chart_line(pts, xt, color, baseline, fill, false, h)
+}
+
+/// 同 [`line_chart`]，`money = true` 表示纵轴是金额。
+fn chart_line<'a, M: 'a>(pts: Vec<f64>, xt: Vec<i64>, color: Color, baseline: Option<f64>, fill: bool, money: bool, h: f32) -> Element<'a, M> {
+    Canvas::new(LineChart { pts, xt, color, baseline, fill, money, cache: Cache::new() })
         .width(Length::Fill)
         .height(Length::Fixed(h))
         .into()
@@ -326,6 +341,17 @@ fn kv<'a, M: 'a>(k: &str, v: &str) -> Element<'a, M> {
 }
 
 /// 一张「表」：标题 + 若干分节（每节子标题 + 行）。
+/// 一行「名称 · 值…」：值都标成模拟金额。
+fn sim_row(row: &[String]) -> Vec<String> {
+    row.iter().enumerate().map(|(i, v)| if i == 0 { v.clone() } else { crate::ui::fmt::sim(v.clone()) }).collect()
+}
+
+/// 绩效统计里哪些行是金额：带币种的那一节（`PnL Statistics (USDT)`）里，
+/// 名称不含 `%` / `Rate` 的行（PnL、盈亏单笔、期望）。比率、胜率、夏普不是金额。
+fn is_money_stat(section: &str, label: &str) -> bool {
+    section.contains("PnL") && !label.contains('%') && !label.contains("Rate")
+}
+
 fn table_card<'a, M: 'a>(title: &str, sections: Vec<(String, &Vec<Vec<String>>)>) -> Element<'a, M> {
     let mut col = column![].spacing(2);
     for (name, rows) in sections {
@@ -563,16 +589,30 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     let header = column![header, provenance_banner::<M>(&r)].spacing(6);
 
     // —— 上方两表 —— Run Information（+ Account Summary）/ Performance Statistics（分节）
+    // 回测里的金额一律是模拟出来的：带 `~`，隐藏数值模式下为 `•••`（docs/35 §7.2 / §9.3）
+    let account: Vec<Vec<String>> = r.account.iter().map(|row| sim_row(row)).collect();
+    let stats: Vec<(String, Vec<Vec<String>>)> = r
+        .stats_sections
+        .iter()
+        .map(|s| {
+            let rows = s
+                .rows
+                .iter()
+                .map(|row| if is_money_stat(&s.name, row.first().map_or("", String::as_str)) { sim_row(row) } else { row.clone() })
+                .collect();
+            (s.name.clone(), rows)
+        })
+        .collect();
     let run_table = table_card(
         "运行信息 / Run Information",
         vec![
             ("Run Information".to_string(), &r.run_info),
-            ("Account Summary".to_string(), &r.account),
+            ("Account Summary".to_string(), &account),
         ],
     );
     let stats_table = table_card(
         "绩效统计 / Performance Statistics",
-        r.stats_sections.iter().map(|s| (s.name.clone(), &s.rows)).collect(),
+        stats.iter().map(|(n, rows)| (n.clone(), rows)).collect(),
     );
 
     let equity_base = r.equity.v.first().copied();
@@ -582,7 +622,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
 
     let charts = column![
         // 报告顺序：equity → drawdown → monthly → distribution → rolling_sharpe → yearly
-        section("收益曲线 Equity（资金）", crate::ui::pal::up(), line_chart(r.equity.v.clone(), r.equity.t.clone(), crate::ui::pal::up(), equity_base, false, 200.0)),
+        section("收益曲线 Equity（资金 · ~ 模拟）", crate::ui::pal::up(), chart_line(r.equity.v.clone(), r.equity.t.clone(), crate::ui::pal::up(), equity_base, false, true, 200.0)),
         section("回撤 Drawdown %", crate::ui::pal::down(), line_chart(r.drawdown.v.clone(), r.drawdown.t.clone(), crate::ui::pal::down(), Some(0.0), true, 130.0)),
         section("月度收益 Monthly Returns %（年×月）", crate::ui::pal::head(), heatmap(&r.monthly)),
         section("收益分布 Distribution", crate::ui::pal::head(), bar_chart(r.distribution.counts.iter().map(|c| *c as f64).collect(), dist_labels, Some(crate::ui::pal::info()), 120.0)),

@@ -74,12 +74,12 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
     // ── 持仓 / PnL（F3a，含本金/权益/收益率）──
     {
         let mut col = column![
-            kv("方向", format!("{} {:.3} @ {:.2}", r.pos_side, r.net_qty, r.avg_px)),
-            kv("本金", format!("{:.2} USDT", r.capital)),
-            kv("权益", format!("{:.2} USDT", r.equity)),
+            kv("方向", crate::ui::fmt::sim(format!("{} {:.3} @ {:.2}", r.pos_side, r.net_qty, r.avg_px))),
+            kv("本金", crate::ui::fmt::sim(format!("{:.2} USDT", r.capital))),
+            kv("权益", crate::ui::fmt::sim(format!("{:.2} USDT", r.equity))),
             kv("收益率", format!("{:+.3} %", r.return_pct)),
-            kv("累计收益", format!("毛 {:+.2}   净 {:+.2}", r.realized, r.realized_net)),
-            kv("累计手续费", format!("{:.4}", r.fee_total)),
+            kv("累计收益", crate::ui::fmt::sim(format!("毛 {:+.2}   净 {:+.2}", r.realized, r.realized_net))),
+            kv("累计手续费", crate::ui::fmt::sim(format!("{:.4}", r.fee_total))),
             kv("成交", format!("{} 笔  买 {} / 卖 {}", r.n_fills, r.n_buy, r.n_sell)),
         ]
         .spacing(3);
@@ -310,7 +310,7 @@ fn trade_row<'a, M: 'a>(t: &super::orders::Trade) -> Element<'a, M> {
     let gross = if t.side == 1 {
         mono("—".to_string())
     } else {
-        text(format!("{:+.2}", t.gross)).size(sz).font(style::AZERET_MONO).color(pnl_color(t.gross))
+        text(crate::ui::fmt::sim(format!("{:+.2}", t.gross))).size(sz).font(style::AZERET_MONO).color(pnl_color(t.gross))
     };
     row![
         cell(mono(format!("#{}", t.seq)), Length::Fixed(COLW[0])),

@@ -68,6 +68,11 @@ pub fn prefs() -> Prefs {
     read(|s| s.prefs.clone())
 }
 
+/// 隐藏数值模式开着吗（docs/35 §9.3）：金额、持仓、账户标识显示为 `•••`，通知暂停。
+pub fn hide_values() -> bool {
+    read(|s| s.prefs.hide_values)
+}
+
 pub fn theme_id() -> ThemeId {
     read(|s| s.prefs.theme)
 }

@@ -41,8 +41,8 @@ fn strategy_block<'a, M: 'a>(r: &StrategyRow) -> Element<'a, M> {
             cell(format!("费 {:+.2}", r.fees), 70.0, crate::ui::pal::down()),
             cell(format!("价差 {:+.2}", r.spread_cost), 80.0, crate::ui::pal::down()),
             cell(format!("对冲 {:+.2}", r.hedge_cost), 80.0, crate::ui::pal::down()),
-            cell(format!("结算 {:+.2}", r.settle_pnl), 80.0, sign_c(r.settle_pnl)),
-            cell(format!("持仓残差 {:+.2}", r.hedge_mkt_pnl), 110.0, sign_c(r.hedge_mkt_pnl)),
+            cell(format!("结算 {}", crate::ui::fmt::sim(format!("{:+.2}", r.settle_pnl))), 80.0, sign_c(r.settle_pnl)),
+            cell(format!("持仓残差 {}", crate::ui::fmt::sim(format!("{:+.2}", r.hedge_mkt_pnl))), 110.0, sign_c(r.hedge_mkt_pnl)),
         ]
         .spacing(4),
         text(r.desc.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),

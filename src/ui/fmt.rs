@@ -181,6 +181,18 @@ pub fn withheld_if(hide: bool, s: String) -> String {
     if hide { Absence::Withheld.glyph().to_string() } else { s }
 }
 
+/// 私密数值（金额、持仓、账户标识）：隐藏数值模式下显示 `•••`（docs/35 §9.3）。
+pub fn private(s: impl Into<String>) -> String {
+    withheld_if(super::hide_values(), s.into())
+}
+
+/// 模拟出来的金额 / 持仓（回测、模拟盘、回放、影子）：前缀 `~`（docs/35 §7.2，UPDS V7 §57——
+/// 与实盘数值永远不能无标记地并列）；隐藏数值模式下显示 `•••`。
+pub fn sim(s: impl Into<String>) -> String {
+    let s = s.into();
+    withheld_if(super::hide_values(), format!("{}{s}", Provenance::Simulated.prefix()))
+}
+
 /// 自然排序比较（UPDS V8 §71）：数字段按数值比，`CC-2 < CC-10`、`v1.9 < v1.10`；
 /// 大小写不敏感，平局再按原文比保证稳定。
 pub fn natural_cmp(a: &str, b: &str) -> Ordering {
@@ -239,6 +251,15 @@ pub fn elide_middle(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn 模拟金额带波浪号_隐藏时为三点() {
+        // 测试里偏好固定为缺省（不隐藏）
+        assert_eq!(sim("1 024.50"), "~ 1 024.50");
+        assert_eq!(private("BTC 0.5"), "BTC 0.5");
+        assert_eq!(withheld_if(true, sim("1.00")), "•••");
+    }
+
     use super::*;
 
     #[test]
