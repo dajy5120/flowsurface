@@ -83,6 +83,8 @@ pub enum FactoryMsg {
     SetTimer(bool),
     /// 手动刷新：叫醒 poller 立刻取一次状态（不必等下一轮 4s）。
     Refresh,
+    /// 第 n 张表的网格交互（0 Stage-A / 1 Stage-B / 2 现役池 / 3 组合 / 4 数据底座）
+    Grid(u8, crate::ui::grid::GridMsg),
 }
 
 /// 最近一次操作结果（面板无自有状态，用进程级静态承载，同 tardis_board 的做法）。
@@ -95,6 +97,10 @@ pub fn action_message() -> String {
 pub fn handle(msg: FactoryMsg) {
     use super::factory_readout as ro;
     let m = match msg {
+        FactoryMsg::Grid(n, g) => {
+            super::factory_view::grid_update(n, g);
+            return;
+        }
         FactoryMsg::RunNightly => ro::nightly_start(),
         FactoryMsg::StopNightly => ro::nightly_stop(),
         FactoryMsg::SetTimer(on) => ro::nightly_toggle_timer(on),

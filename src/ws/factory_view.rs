@@ -6,6 +6,8 @@
 //!
 //! 本模块只渲染、不发消息,对 pane 的消息类型 `M` 泛型。
 
+use super::factory::FactoryMsg;
+use crate::ui::grid::{self, Cell, Column, GridMsg, GridState};
 use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
@@ -73,29 +75,35 @@ fn fmt_bp(v: f64) -> String {
     }
 }
 
-/// Stage-A 表达式格：有机理假设的（seed/llm）前缀「ⓘ」并悬浮显示假设；gp 子代多无假设。
-fn expr_cell<'a, M: 'a>(expr: &str, hypothesis: &str, leak: &str, w: f32) -> Element<'a, M> {
-    let has = !hypothesis.trim().is_empty();
-    let label = if has {
-        format!("ⓘ {}{leak}", trunc(expr, 37))
-    } else {
-        format!("{}{leak}", trunc(expr, 40))
-    };
-    let base = container(text(label).size(crate::ui::text::s_small())).width(Length::Fixed(w));
-    if has {
-        iced::widget::tooltip(
-            base,
-            container(text(format!("假设：{hypothesis}")).size(crate::ui::text::s_small()))
-                .style(crate::style::tooltip)
-                .padding(crate::ui::metrics::space(3))
-                .max_width(360.0),
-            iced::widget::tooltip::Position::Top,
-        )
-        .into()
-    } else {
-        base.into()
-    }
+thread_local! {
+    /// 五张表各自的网格状态与列定义（按表号）
+    static GRIDS: std::cell::RefCell<std::collections::HashMap<u8, (Vec<Column>, GridState)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 }
+
+/// 表格交互（经 FactoryMsg::Grid 回到这里）。
+pub fn grid_update(n: u8, m: GridMsg) {
+    GRIDS.with(|g| {
+        if let Some((cols, st)) = g.borrow_mut().get_mut(&n) {
+            st.update(m, &cols.clone(), &[]);
+        }
+    });
+}
+
+/// 一张固定高度（最多显示 `max_rows` 行，超出可滚动）的网格。
+fn ftable<'a>(n: u8, cols: Vec<Column>, rows: Vec<Vec<Cell>>, max_rows: usize) -> Element<'a, FactoryMsg> {
+    let shown = rows.len().clamp(1, max_rows);
+    let st = GRIDS.with(|g| {
+        let mut g = g.borrow_mut();
+        let e = g.entry(n).or_insert_with(|| (cols.clone(), GridState::new(&cols)));
+        e.0 = cols.clone();
+        e.1.resort(&cols, &rows);
+        e.1.clone()
+    });
+    let h = crate::ui::metrics::panel_header() + crate::ui::metrics::row_height() * (shown as f32 + 1.0) + 60.0;
+    container(grid::view(cols, rows, st, None, move |m| FactoryMsg::Grid(n, m))).height(Length::Fixed(h)).into()
+}
+
 
 
 /// IC 衰减曲线：x=视界（500ms→5m 等距），y=ic_mean（含 0 基线），每 alpha 一条线。
@@ -255,33 +263,36 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
 
     // —— 左列：Stage-A 排行 + Stage-B ——
     let mut sa = column![sec("② Stage-A 排行（按 |IC t|，F2/F3）", crate::ui::pal::up())].spacing(2);
-    sa = sa.push(
-        row![
-            cell("源", 46.0),
-            cell("视界", 50.0),
-            cell("IC", 64.0),
-            cell("t", 56.0),
-            cell("同号", 44.0),
-            cell("净bp", 60.0),
-            cell("表达式", 300.0)
-        ]
-        .spacing(4),
-    );
-    for a in &st.stage_a {
-        let leak = if a.leakage { " 🚨" } else { "" };
-        sa = sa.push(
-            row![
-                cellc(&a.gen_src, 46.0, src_color(&a.gen_src)),
-                cell(&a.horizon, 50.0),
-                cell(&format!("{:+.3}", a.ic_mean), 64.0),
-                cell(&format!("{:+.1}", a.ic_t), 56.0),
-                cell(&format!("{}/{}", a.folds_same, a.n_folds), 44.0),
-                cell(&fmt_bp(a.net_bp), 60.0),
-                expr_cell(&a.expr, &a.hypothesis, leak, 300.0),
-            ]
-            .spacing(4),
-        );
-    }
+    // 换成 ui::grid（docs/35 §16.13 第 5 项）：表达式不再截断；原来悬停才看得到的「假设」单独成列
+    sa = sa.push(ftable(
+        0,
+        vec![
+            Column::text("源", 52.0).groupable(),
+            Column::text("视界", 56.0).groupable(),
+            Column::num("IC", None, 70.0),
+            Column::num("t", None, 60.0),
+            Column::text("同号", 50.0),
+            Column::num("净bp", None, 66.0),
+            Column::text("表达式", 300.0).key(),
+            Column::text("假设", 300.0),
+        ],
+        st.stage_a
+            .iter()
+            .map(|a| {
+                vec![
+                    Cell::Colored(a.gen_src.clone(), src_color(&a.gen_src)),
+                    Cell::Text(a.horizon.clone()),
+                    Cell::Text(format!("{:+.3}", a.ic_mean)),
+                    Cell::Text(format!("{:+.1}", a.ic_t)),
+                    Cell::Text(format!("{}/{}", a.folds_same, a.n_folds)),
+                    Cell::Text(fmt_bp(a.net_bp)),
+                    Cell::Text(format!("{}{}", a.expr, if a.leakage { " 🚨" } else { "" })),
+                    Cell::Text(a.hypothesis.clone()),
+                ]
+            })
+            .collect(),
+        16,
+    ));
     // IC 衰减曲线（top6 alpha 的跨视界 IC 廓线）+ 配色图例
     let mut decay_legend = column![].spacing(1);
     for (i, l) in st.ic_decay.iter().enumerate() {
@@ -301,15 +312,16 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
     ]
     .spacing(3);
     let mut sb = column![sec("⑤ Stage-B 事件回测（Nautilus，F5）", crate::ui::pal::up())].spacing(2);
-    for b in &st.stage_b {
-        sb = sb.push(
-            row![
-                cell(&format!("{}笔", b.n_entries), 50.0),
-                cell(&fmt_bp(b.net_bp), 70.0),
-                cell(&trunc(&b.expr, 50), 400.0),
-            ]
-            .spacing(4),
-        );
+    if !st.stage_b.is_empty() {
+        sb = sb.push(ftable(
+            1,
+            vec![Column::num("笔数", None, 60.0), Column::num("净bp", None, 70.0), Column::text("表达式", 400.0).key()],
+            st.stage_b
+                .iter()
+                .map(|b| vec![Cell::num(b.n_entries as f64, format!("{}笔", b.n_entries)), Cell::Text(fmt_bp(b.net_bp)), Cell::Text(b.expr.clone())])
+                .collect(),
+            10,
+        ));
     }
     if st.stage_b.is_empty() {
         sb = sb.push(text("（暂无 Stage-B 记录）").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
@@ -324,53 +336,44 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
         crate::ui::pal::warn()
     )]
     .spacing(2);
-    pool = pool.push(
-        row![
-            cell("权重", 60.0),
-            cell("簇", 36.0),
-            cell("|t|", 50.0),
-            cell("表达式", 280.0)
-        ]
-        .spacing(4),
-    );
-    for p in &st.pool {
-        pool = pool.push(
-            row![
-                cell(&opt_f(p.weight, 3), 60.0),
-                cell(&p.cluster.to_string(), 36.0),
-                cell(&format!("{:.1}", p.ic_t), 50.0),
-                cell(&trunc(&p.expr, 38), 280.0),
-            ]
-            .spacing(4),
-        );
-    }
+    pool = pool.push(ftable(
+        2,
+        vec![
+            Column::num("权重", None, 64.0),
+            Column::text("簇", 40.0).groupable(),
+            Column::num("|t|", None, 56.0),
+            Column::text("表达式", 300.0).key(),
+        ],
+        st.pool
+            .iter()
+            .map(|p| vec![Cell::Text(opt_f(p.weight, 3)), Cell::Text(p.cluster.to_string()), Cell::Text(format!("{:.1}", p.ic_t)), Cell::Text(p.expr.clone())])
+            .collect(),
+        16,
+    ));
     let mut combos = column![sec("④ 组合（ICIR/Ridge 双法，F4）", crate::ui::pal::warn())].spacing(2);
-    combos = combos.push(
-        row![
-            cell("方法", 90.0),
-            cell("IC", 64.0),
-            cell("t", 56.0),
-            cell("净bp", 64.0),
-            cell("状态", 70.0)
-        ]
-        .spacing(4),
-    );
-    for c in &st.combos {
-        combos = combos.push(
-            row![
-                cell(&c.method, 90.0),
-                cell(&format!("{:+.3}", c.ic_mean), 64.0),
-                cell(&format!("{:+.1}", c.ic_t), 56.0),
-                cell(&fmt_bp(c.net_bp), 64.0),
-                cellc(
-                    &c.status,
-                    70.0,
-                    if c.status == "paper" { crate::ui::pal::up() } else { crate::ui::pal::dim() }
-                ),
-            ]
-            .spacing(4),
-        );
-    }
+    combos = combos.push(ftable(
+        3,
+        vec![
+            Column::text("方法", 96.0).key(),
+            Column::num("IC", None, 70.0),
+            Column::num("t", None, 60.0),
+            Column::num("净bp", None, 70.0),
+            Column::text("状态", 76.0).groupable(),
+        ],
+        st.combos
+            .iter()
+            .map(|c| {
+                vec![
+                    Cell::Text(c.method.clone()),
+                    Cell::Text(format!("{:+.3}", c.ic_mean)),
+                    Cell::Text(format!("{:+.1}", c.ic_t)),
+                    Cell::Text(fmt_bp(c.net_bp)),
+                    Cell::Colored(c.status.clone(), if c.status == "paper" { crate::ui::pal::up() } else { crate::ui::pal::dim() }),
+                ]
+            })
+            .collect(),
+        8,
+    ));
     let mid = column![pool, vgap(10.0), combos]
         .spacing(4)
         .width(Length::FillPortion(4));
@@ -395,26 +398,27 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
         live = live.push(text("（暂无影子/实盘记录——跑 shadow_run）").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
     }
     let mut lake = column![sec("① 数据底座（F0/F1）", crate::ui::pal::head())].spacing(2);
-    lake = lake.push(
-        row![
-            cell("币种", 90.0),
-            cell("录制天", 64.0),
-            cell("特征帧", 64.0),
-            cell("信号帧", 64.0)
-        ]
-        .spacing(4),
-    );
-    for r in &st.lake {
-        lake = lake.push(
-            row![
-                cell(&r.symbol, 90.0),
-                cell(&r.raw_days.to_string(), 64.0),
-                cell(&r.feat_frames.to_string(), 64.0),
-                cell(&r.sig_frames.to_string(), 64.0),
-            ]
-            .spacing(4),
-        );
-    }
+    lake = lake.push(ftable(
+        4,
+        vec![
+            Column::text("币种", 96.0).key(),
+            Column::num("录制天", None, 70.0),
+            Column::num("特征帧", None, 76.0),
+            Column::num("信号帧", None, 76.0),
+        ],
+        st.lake
+            .iter()
+            .map(|r| {
+                vec![
+                    Cell::Text(r.symbol.clone()),
+                    Cell::num(r.raw_days as f64, r.raw_days.to_string()),
+                    Cell::num(r.feat_frames as f64, r.feat_frames.to_string()),
+                    Cell::num(r.sig_frames as f64, r.sig_frames.to_string()),
+                ]
+            })
+            .collect(),
+        10,
+    ));
     let mut nightly = column![sec("⑦ Nightly 流水线（F7）", crate::ui::pal::series(5))].spacing(2);
     // 手动启停（docs/20 §26）。定时器与手动运行相互独立：关了定时器仍可手动跑。
     {
