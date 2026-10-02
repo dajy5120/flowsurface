@@ -33,7 +33,7 @@ impl Gallery {
         std::env::var_os("WS_UI_SPECIMEN_COMPONENTS")?;
         let n: usize = std::env::var("WS_UI_SPECIMEN_ROWS").ok().and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
         let cols = vec![
-            Column::text("合约", 120.0),
+            Column::text("合约", 120.0).key(),
             Column::num("最新价", Some("USD"), 110.0),
             Column::num("24h 涨跌", Some("%"), 90.0),
             Column::num("成交额", Some("USD"), 110.0),

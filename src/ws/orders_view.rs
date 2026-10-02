@@ -127,6 +127,31 @@ fn sim_colored(s: String, c: Color) -> Cell {
     if crate::ui::hide_values() { Cell::Absent(Absence::Withheld) } else { Cell::Colored(sim(s), c) }
 }
 
+type Rows = std::rc::Rc<[Vec<Cell>]>;
+
+thread_local! {
+    static WORKING_ROWS: RefCell<Option<(std::time::Instant, bool, Rows)>> = const { RefCell::new(None) };
+    static TRADE_ROWS: RefCell<Option<(std::time::Instant, bool, Rows)>> = const { RefCell::new(None) };
+}
+
+/// 表格行的节流与冻结（docs/35 §8，UPDS V5 §30）：最多每秒重建 4 次——整日回测时成交一秒几十笔，
+/// 逐帧重建既费 CPU 又晃眼；冻结时一直用冻结那一刻的行。隐藏数值开关一变立刻重建（不能等 250ms，
+/// 更不能因为冻结就一直露着数）。
+fn cached(cell: &'static std::thread::LocalKey<RefCell<Option<(std::time::Instant, bool, Rows)>>>, frozen: bool, build: impl FnOnce() -> Vec<Vec<Cell>>) -> Rows {
+    let hide = crate::ui::hide_values();
+    cell.with(|c| {
+        let mut c = c.borrow_mut();
+        let fresh = match &*c {
+            Some((t, h, _)) => *h == hide && (frozen || t.elapsed() < std::time::Duration::from_millis(250)),
+            None => false,
+        };
+        if !fresh {
+            *c = Some((std::time::Instant::now(), hide, build().into()));
+        }
+        c.as_ref().map(|(_, _, r)| r.clone()).unwrap_or_else(|| Vec::new().into())
+    })
+}
+
 fn side_cell(side: u8) -> Cell {
     // 文字本身就是非颜色的区分（UPDS：颜色不能是唯一信号）
     if side == 1 { Cell::Colored("买".into(), crate::ui::pal::up()) } else { Cell::Colored("卖".into(), crate::ui::pal::down()) }
@@ -137,38 +162,39 @@ fn working_cols() -> Vec<Column> {
         Column::text("方向", 52.0).groupable(),
         Column::num("价格", None, 100.0),
         Column::num("数量", None, 90.0),
-        Column::text("订单号", 240.0),
+        Column::text("订单号", 240.0).key(),
     ]
 }
 
 /// 活动挂单表。**这张表此前永远是空的**——`ws/orders.rs` 一直认 `OrderAccepted`，
 /// 但策略端只发 `OrderFilled`（docs/27 §9.2 已修）。
-fn working_table<'a>(working: &[WorkingOrder]) -> Element<'a, OrdersMsg> {
+fn working_table<'a>(working: &[WorkingOrder], frozen: bool) -> Element<'a, OrdersMsg> {
     if working.is_empty() {
         return text("（无活动挂单）").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()).into();
     }
     let cols = working_cols();
-    // 原始顺序 = 价格从高到低（和盘口一样读）；点表头可以改
-    let mut ws: Vec<&WorkingOrder> = working.iter().collect();
-    ws.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
-    let rows: Vec<Vec<Cell>> = ws
-        .iter()
-        .map(|w| {
-            vec![
-                side_cell(w.side),
-                Cell::num(w.price, format!("{:.2}", w.price)),
-                sim_num(w.qty, format!("{:.4}", w.qty)),
-                Cell::Id(w.order_id.clone()),
-            ]
-        })
-        .collect();
+    let rows = cached(&WORKING_ROWS, frozen, || {
+        // 原始顺序 = 价格从高到低（和盘口一样读）；点表头可以改
+        let mut ws: Vec<&WorkingOrder> = working.iter().collect();
+        ws.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
+        ws.iter()
+            .map(|w| {
+                vec![
+                    side_cell(w.side),
+                    Cell::num(w.price, format!("{:.2}", w.price)),
+                    sim_num(w.qty, format!("{:.4}", w.qty)),
+                    Cell::Id(w.order_id.clone()),
+                ]
+            })
+            .collect()
+    });
     let st = state_for(&WORKING, &cols, &rows);
     container(grid::view(cols, rows, st, None, OrdersMsg::Working)).height(Length::Fixed(170.0)).into()
 }
 
 fn trade_cols() -> Vec<Column> {
     vec![
-        Column::num("#", None, 48.0),
+        Column::num("#", None, 48.0).key(),
         Column::text("时间", 124.0),
         Column::text("标的", 110.0).groupable(),
         Column::text("向", 40.0).groupable(),
@@ -184,32 +210,34 @@ fn trade_cols() -> Vec<Column> {
 }
 
 /// 订单明细表（逐笔，原始顺序新的在上）。网格只渲染可见行，不再需要截断行数。
-fn trades_table<'a>(trades: &[Trade]) -> Element<'a, OrdersMsg> {
+fn trades_table<'a>(trades: &[Trade], frozen: bool) -> Element<'a, OrdersMsg> {
     if trades.is_empty() {
         return text("（本次运行还没有成交）").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()).into();
     }
     let cols = trade_cols();
-    // 新的在上：回测跑起来后人盯的是「刚刚发生了什么」。
-    let rows: Vec<Vec<Cell>> = trades
-        .iter()
-        .rev()
-        .map(|t| {
-            vec![
-                Cell::num(t.seq as f64, format!("{}", t.seq)),
-                Cell::Text(ts_txt(t.ts)),
-                if t.instrument.is_empty() { Cell::Absent(Absence::Missing) } else { Cell::Id(t.instrument.clone()) },
-                side_cell(t.side),
-                Cell::Text(t.order_type.clone()),
-                Cell::num(t.price, format!("{:.2}", t.price)),
-                sim_num(t.qty, format!("{:.4}", t.qty)),
-                sim_num(t.amount, format!("{:.2}", t.amount)),
-                sim_colored(format!("{:+.4}", t.gross), money(t.gross)),
-                sim_colored(format!("{:.4}", t.fee), crate::ui::pal::down()),
-                sim_colored(format!("{:+.4}", t.net), money(t.net)),
-                Cell::num(t.filled_pct, format!("{:.0}", t.filled_pct)),
-            ]
-        })
-        .collect();
+    let rows = cached(&TRADE_ROWS, frozen, || {
+        // 新的在上：回测跑起来后人盯的是「刚刚发生了什么」。
+        trades
+            .iter()
+            .rev()
+            .map(|t| {
+                vec![
+                    Cell::num(t.seq as f64, format!("{}", t.seq)),
+                    Cell::Text(ts_txt(t.ts)),
+                    if t.instrument.is_empty() { Cell::Absent(Absence::Missing) } else { Cell::Id(t.instrument.clone()) },
+                    side_cell(t.side),
+                    Cell::Text(t.order_type.clone()),
+                    Cell::num(t.price, format!("{:.2}", t.price)),
+                    sim_num(t.qty, format!("{:.4}", t.qty)),
+                    sim_num(t.amount, format!("{:.2}", t.amount)),
+                    sim_colored(format!("{:+.4}", t.gross), money(t.gross)),
+                    sim_colored(format!("{:.4}", t.fee), crate::ui::pal::down()),
+                    sim_colored(format!("{:+.4}", t.net), money(t.net)),
+                    Cell::num(t.filled_pct, format!("{:.0}", t.filled_pct)),
+                ]
+            })
+            .collect()
+    });
     // 页脚合计：净收益、手续费（分组折叠后也看得到全表合计）
     let net: f64 = trades.iter().map(|t| t.net).sum();
     let fee: f64 = trades.iter().map(|t| t.fee).sum();
@@ -219,7 +247,9 @@ fn trades_table<'a>(trades: &[Trade]) -> Element<'a, OrdersMsg> {
 }
 
 /// 面板主体。
-pub fn pane_body<'a>() -> Element<'a, OrdersMsg> {
+///
+/// `frozen` = 面板被冻结（docs/35 §8）：两张表停在冻结那一刻的内容。
+pub fn pane_body<'a>(frozen: bool) -> Element<'a, OrdersMsg> {
     let st = super::readout::snapshot();
 
     if st.run_id.is_empty() && st.trades.is_empty() {
@@ -249,9 +279,9 @@ pub fn pane_body<'a>() -> Element<'a, OrdersMsg> {
         .align_y(Alignment::Center),
         summary::<OrdersMsg>(&st),
         text("活动挂单").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
-        working_table(&st.working),
+        working_table(&st.working, frozen),
         text(format!("订单明细（{} 笔，新的在上）", st.trades.len())).size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
-        trades_table(&st.trades),
+        trades_table(&st.trades, frozen),
     ]
     .spacing(8)
     .padding(crate::ui::metrics::space(3))

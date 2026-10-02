@@ -138,6 +138,8 @@ pub enum Event {
     BacktestLaunchInteraction(crate::ws::backtest_launch::LaunchMsg),
     /// 点了链路徽标：跳到对应面板的数据源选择。
     LinkBadgeClicked,
+    /// 冻结 / 解冻这个面板（停止重画，docs/35 §8）
+    ToggleFreeze,
 }
 
 pub struct State {
@@ -149,6 +151,9 @@ pub struct State {
     pub streams: ResolvedStream,
     pub status: Status,
     pub link_group: Option<LinkGroup>,
+    /// 冻结（docs/35 §8，UPDS V5 §30）：停止重画，便于阅读和截图。数据照收，解冻后追上。
+    /// 不存盘——重启后总是不冻结
+    pub frozen: bool,
 }
 
 impl State {
@@ -704,6 +709,12 @@ impl State {
             }
         }
 
+        if self.frozen {
+            top_left_buttons = top_left_buttons.push(
+                text("❄ 已冻结").size(crate::ui::text::s_meta()).color(crate::ui::pal::info()).align_y(Alignment::Center).line_height(1.4),
+            );
+        }
+
         let modifier: Option<modal::stream::Modifier> = self.modal.clone().and_then(|m| {
             if let Modal::StreamModifier(modifier) = m {
                 Some(modifier)
@@ -1015,7 +1026,7 @@ impl State {
             }
             Content::Orders => {
                 // 数据走 ws::readout 旁路快照；表格交互（排序、分组、调宽）包成 pane 事件。
-                crate::ws::orders_view::pane_body().map(move |m| Message::PaneEvent(id, Event::OrdersInteraction(m)))
+                crate::ws::orders_view::pane_body(self.frozen).map(move |m| Message::PaneEvent(id, Event::OrdersInteraction(m)))
             }
             Content::BacktestResult => {
                 // 回测结果（docs/08 F6-P7）：渲染走 ws::backtest_readout 旁路快照。
@@ -1617,6 +1628,7 @@ impl State {
             Event::BacktestLaunchInteraction(m) => crate::ws::backtest_launch::handle(m),
             Event::OrdersInteraction(m) => crate::ws::orders_view::handle(m),
             Event::LinkBadgeClicked => crate::ws::provenance::on_link_click(),
+            Event::ToggleFreeze => self.frozen = !self.frozen,
             Event::FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg::Source(m)) => {
                 // 特征数据源：选择 / 开始 / 停止回放。换了图表流就请上层清图。
                 if crate::ws::feature_source::handle(m) {
@@ -2041,6 +2053,17 @@ impl State {
             ));
         }
 
+        // 冻结（docs/35 §8）：行情图表、盘口、逐笔、订单表
+        if !treat_as_starter && (self.stream_pair_kind().is_some() || matches!(&self.content, Content::Orders)) {
+            buttons = buttons.push(button_with_tooltip(
+                text(if self.frozen { "▶" } else { "❄" }).size(crate::ui::text::s_small()),
+                Message::PaneEvent(pane, Event::ToggleFreeze),
+                Some(if self.frozen { "解冻（追上最新数据）" } else { "冻结：停止刷新，便于阅读和截图" }),
+                tooltip_pos,
+                control_btn_style(self.frozen),
+            ));
+        }
+
         if is_popout {
             buttons = buttons.push(button_with_tooltip(
                 icon_text(Icon::Popout, 12),
@@ -2293,6 +2316,11 @@ impl State {
             return Some(Action::ResolveContent);
         }
 
+        // 冻结：不按时钟重画（图表收数据只进缓冲、重画全靠这里），画面停在冻结那一刻
+        if self.frozen {
+            return None;
+        }
+
         match (invalidate_interval, last_tick) {
             (Some(interval_ms), Some(previous_tick_time)) => {
                 if interval_ms > 0 {
@@ -2331,6 +2359,7 @@ impl Default for State {
             notifications: vec![],
             status: Status::Ready,
             link_group: None,
+            frozen: false,
         }
     }
 }

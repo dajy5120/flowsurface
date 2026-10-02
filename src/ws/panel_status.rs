@@ -13,14 +13,30 @@ use crate::screen::dashboard::pane::Content;
 /// (状态文字, 颜色)。文字里带符号（● ○ ⚠），不只靠颜色区分。
 pub fn status(content: &Content) -> Option<(String, Color)> {
     use crate::ui::pal;
+    use crate::ui::live::{LiveState, file_age};
+    use std::time::Duration;
+    let live = |st: LiveState, extra: &str| Some((format!("{}{extra}", st.label()), st.color()));
     match content {
-        Content::FeatureMatrix => super::feature_matrix::engine_state().map(|s| {
-            if s.active {
-                ("● 引擎运行中".to_string(), pal::ok())
-            } else {
-                ("○ 引擎未运行".to_string(), pal::dim())
-            }
-        }),
+        // 引擎每 0.5s 写一次快照；读的是本地文件的修改时间（一次 stat，不解析）
+        Content::FeatureMatrix => {
+            let up = super::feature_matrix::engine_state().is_some_and(|s| s.active);
+            let age = file_age(&super::feature_matrix_readout::board_path());
+            live(LiveState::classify(age, Duration::from_millis(500), up, false, false), if up { " · 引擎运行中" } else { " · 引擎未运行" })
+        }
+        // 新闻 / 雷达的快照是 Arc，取一次只复制指针（面板正显示，读数线程本来就在跑）
+        Content::News => {
+            let r = super::news_readout::snapshot();
+            let degraded = r.stale_sources > 0;
+            let age = file_age(&super::paths::runtime_dir().join("news_board.json"));
+            let extra = if degraded { format!(" · {} 个源已陈", r.stale_sources) } else { String::new() };
+            live(LiveState::classify(age, Duration::from_secs(60), r.svc.active, degraded, false), &extra)
+        }
+        Content::MarketMap => {
+            let r = super::radar_readout::snapshot();
+            let filling = !r.progress.cur.is_empty();
+            let age = file_age(&super::paths::runtime_dir().join("radar_board.json"));
+            live(LiveState::classify(age, Duration::from_secs(30), r.svc.active, false, filling), if filling { " · 抓取中" } else { "" })
+        }
         Content::BacktestResult | Content::Orders => match super::active_run::current() {
             Some(r) if r.mode == "backtest" => Some((format!("● 回测运行中 · {}", r.run_id), pal::ok())),
             Some(r) if r.mode == "live" => Some((format!("● 模拟盘运行中 · {}", r.run_id), pal::ok())),

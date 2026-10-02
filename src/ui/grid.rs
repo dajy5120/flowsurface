@@ -62,11 +62,14 @@ pub struct Column {
     pub sort: SortKind,
     /// 可以按这一列分组（页脚「分组」按钮在这些列之间轮换）
     pub group: bool,
+    /// 行身份列（docs/35 §8）：变化闪烁、光标下不重排都靠它认行——不能用数据下标，
+    /// 新行插在最上面时下标整体平移，整张表会一起闪
+    pub key: bool,
 }
 
 impl Column {
     pub fn text(title: impl Into<String>, width: f32) -> Self {
-        Self { title: title.into(), unit: None, align: Align::Left, width, sort: SortKind::Natural, group: false }
+        Self { title: title.into(), unit: None, align: Align::Left, width, sort: SortKind::Natural, group: false, key: false }
     }
 
     pub fn num(title: impl Into<String>, unit: Option<&str>, width: f32) -> Self {
@@ -77,7 +80,14 @@ impl Column {
             width,
             sort: SortKind::Number,
             group: false,
+            key: false,
         }
+    }
+
+    /// 这一列是行身份（见 [`Column::key`] 字段）。
+    pub fn key(mut self) -> Self {
+        self.key = true;
+        self
     }
 
     /// 允许按这一列分组。
@@ -159,6 +169,8 @@ pub enum GridMsg {
     CycleGroup,
     /// 点组头：折叠 / 展开这一组
     ToggleGroup(String),
+    /// 鼠标进 / 出行区：在里面时不重排（docs/35 §8，UPDS V5 §30）
+    Hover(bool),
 }
 
 /// 选中行的计数与合计（见 [`GridState::selection_summary`]）。
@@ -218,6 +230,25 @@ pub struct GridState {
     /// 分组时的显示序列（组头 + 行）；不分组时为空，直接用 `order`
     pub items: Vec<Item>,
     drag: Option<(usize, Option<f32>, f32)>,
+    /// 上一次每行（按键列）各格的显示文字：比出哪些格变了
+    prev: std::collections::HashMap<String, Vec<String>>,
+    /// 变了的格（键, 列）→ 变化时刻；120ms 内画高亮
+    flashed: std::collections::HashMap<(String, usize), std::time::Instant>,
+    /// 光标在行区里
+    hovering: bool,
+    /// 悬停期间积压的「本该移动」的行数；移开后提示「N 行已移动」
+    pending_moves: usize,
+    moved_note: Option<(usize, std::time::Instant)>,
+    /// 上一次数据里每行（数据下标）的键：悬停期间按键保持原有行序
+    prev_keys: Vec<String>,
+}
+
+/// 变化高亮持续多久（UPDS V5 §30）。
+const FLASH: std::time::Duration = std::time::Duration::from_millis(120);
+
+fn key_of(cols: &[Column], row: &[Cell]) -> Option<String> {
+    let k = cols.iter().position(|c| c.key)?;
+    row.get(k).map(Cell::plain)
 }
 
 impl GridState {
@@ -234,7 +265,41 @@ impl GridState {
             collapsed: HashSet::new(),
             items: Vec::new(),
             drag: None,
+            prev: Default::default(),
+            flashed: Default::default(),
+            hovering: false,
+            pending_moves: 0,
+            moved_note: None,
+            prev_keys: Vec::new(),
         }
+    }
+
+    /// 这一格是不是刚变过（120ms 内）。
+    fn flashing(&self, key: &str, col: usize) -> bool {
+        self.flashed.get(&(key.to_string(), col)).is_some_and(|t| t.elapsed() < FLASH)
+    }
+
+    /// 比出变了的格；更新比较基准。空数据（只处理消息、没给数据的调用）不动基准。
+    fn diff_cells(&mut self, cols: &[Column], rows: &[Vec<Cell>]) {
+        if rows.is_empty() || !cols.iter().any(|c| c.key) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        self.flashed.retain(|_, t| now.duration_since(*t) < FLASH);
+        let mut next = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let Some(k) = key_of(cols, row) else { continue };
+            let cells: Vec<String> = row.iter().map(Cell::plain).collect();
+            if let Some(old) = self.prev.get(&k) {
+                for (ci, (a, b)) in old.iter().zip(cells.iter()).enumerate() {
+                    if a != b {
+                        self.flashed.insert((k.clone(), ci), now);
+                    }
+                }
+            }
+            next.insert(k, cells);
+        }
+        self.prev = next;
     }
 
     /// 全部选中的数据行。
@@ -292,6 +357,9 @@ impl GridState {
 
     /// 数据或排序变了之后调：重排 `order`。稳定排序，平局保持原顺序（UPDS：同一排序跑两遍不换位）。
     pub fn resort(&mut self, cols: &[Column], rows: &[Vec<Cell>]) {
+        self.diff_cells(cols, rows);
+        let held: Option<Vec<String>> = (self.hovering && !rows.is_empty() && !self.order.is_empty())
+            .then(|| self.order.iter().filter_map(|&i| self.prev_keys.get(i).cloned()).collect());
         let mut order: Vec<usize> = (0..rows.len()).collect();
         if let Some((ci, desc)) = self.sort
             && let Some(col) = cols.get(ci)
@@ -314,6 +382,21 @@ impl GridState {
                 }),
                 SortKind::None => {}
             }
+        }
+        // 光标在行区里：不在眼前重排（UPDS V5 §30）。已有的行按原来的先后，新行按排序接在后面；
+        // 移开后再按排序排好，并提示「N 行已移动」
+        if let Some(held) = held.filter(|_| cols.iter().any(|c| c.key)) {
+            let keys_now: Vec<String> = rows.iter().map(|r| key_of(cols, r).unwrap_or_default()).collect();
+            let pos: std::collections::HashMap<&str, usize> =
+                keys_now.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
+            let mut kept: Vec<usize> = held.iter().filter_map(|k| pos.get(k.as_str()).copied()).collect();
+            let seen: std::collections::HashSet<usize> = kept.iter().copied().collect();
+            kept.extend(order.iter().copied().filter(|i| !seen.contains(i)));
+            self.pending_moves = kept.iter().zip(order.iter()).filter(|(a, b)| a != b).count();
+            order = kept;
+        }
+        if !rows.is_empty() {
+            self.prev_keys = rows.iter().map(|r| key_of(cols, r).unwrap_or_default()).collect();
         }
         self.order = order;
         self.items.clear();
@@ -402,6 +485,14 @@ impl GridState {
                 };
                 self.collapsed.clear();
                 self.resort(cols, rows);
+            }
+            GridMsg::Hover(h) => {
+                if self.hovering && !h && self.pending_moves > 0 {
+                    self.moved_note = Some((self.pending_moves, std::time::Instant::now()));
+                    self.pending_moves = 0;
+                }
+                self.hovering = h;
+                // 不在这里重排：下一次 resort（有数据时）自然按排序排
             }
             GridMsg::ToggleGroup(k) => {
                 if !self.collapsed.remove(&k) {
@@ -511,6 +602,7 @@ where
     let widths: Vec<f32> =
         cols.iter().enumerate().map(|(i, col)| st.borrow().widths.get(i).copied().unwrap_or(col.width)).collect();
     let aligns: Vec<Align> = cols.iter().map(|c| c.align).collect();
+    let key_col = cols.iter().position(|c| c.key);
     let total_w: f32 = widths.iter().sum::<f32>() + 3.0;
 
     // ── 表头：点标题排序，标题右侧的竖线可拖动调宽 ──
@@ -568,6 +660,14 @@ where
                 .style(|th, s| widgets::button_style(widgets::Kind::Ghost, th, s)),
         );
     }
+    if let Some((n, t0)) = st.borrow().moved_note
+        && t0.elapsed().as_secs() < 3
+    {
+        foot = foot.push(t::caption(format!("{n} 行已移动")).color(color(c.status_info)));
+    }
+    if st.borrow().pending_moves > 0 {
+        foot = foot.push(t::caption("光标在表上，暂不重排"));
+    }
     let summary = st.borrow().selection_summary(cols, rows.as_ref());
     if let Some(s) = &summary {
         foot = foot.push(t::caption(s.label()));
@@ -614,8 +714,18 @@ where
             })]
             .spacing(1)
             .height(Length::Fixed(row_h));
+            let rkey = key_col.and_then(|k| rows[di].get(k)).map(Cell::plain);
             for (ci, &align) in aligns.iter().enumerate() {
-                r = r.push(cell_view(rows[di].get(ci).unwrap_or(&ABSENT), align, widths[ci]));
+                let cell = cell_view(rows[di].get(ci).unwrap_or(&ABSENT), align, widths[ci]);
+                // 变化的格闪一下（120ms，UPDS V5 §30）
+                if rkey.as_deref().is_some_and(|k| st.flashing(k, ci)) {
+                    r = r.push(container(cell).style(|_| container::Style {
+                        background: Some(Background::Color(color(core().accent_soft))),
+                        ..Default::default()
+                    }));
+                } else {
+                    r = r.push(cell);
+                }
             }
             let on_sel = on_r.clone();
             let stripe = pos % 2 == 1;
@@ -650,6 +760,9 @@ where
     // 页脚（行数 · 排序 · 分组 · 选中 · 附加说明）在上面已拼好——用说明文字而不是元数据角色：
     // 元数据会转大写，单位 µs 会变成 MS（批 4 踩过）
 
+    // 行区的进出：在里面时不重排（GridMsg::Hover）
+    let (on_in, on_out) = (on.clone(), on.clone());
+    let body = mouse_area(body).on_enter(on_in(GridMsg::Hover(true))).on_exit(on_out(GridMsg::Hover(false)));
     let table = column![head, body].width(Length::Fixed(total_w + 12.0)).height(Length::Fill);
     let on_m = on.clone();
     let on_e = on.clone();
@@ -792,6 +905,45 @@ mod tests {
         assert!(s.label().contains("3 个中 1 个缺失"), "{}", s.label());
         st.update(GridMsg::Select(0), &cols, &rows); // 没按 Ctrl：回到单选（再点一次 = 取消）
         assert!(st.extra.is_empty());
+    }
+
+    #[test]
+    fn 变化的格按键认行_插在最上面不整表闪() {
+        let cols = vec![Column::text("号", 40.0).key(), Column::num("值", None, 60.0)];
+        let mut st = GridState::new(&cols);
+        let r1 = vec![vec![Cell::Text("a".into()), Cell::num(1.0, "1".into())]];
+        st.resort(&cols, &r1);
+        // 新行插在最上面（下标平移），a 的值也变了
+        let r2 = vec![
+            vec![Cell::Text("b".into()), Cell::num(9.0, "9".into())],
+            vec![Cell::Text("a".into()), Cell::num(2.0, "2".into())],
+        ];
+        st.resort(&cols, &r2);
+        assert!(st.flashing("a", 1), "a 的值变了要闪");
+        assert!(!st.flashing("a", 0), "a 的键没变");
+        assert!(!st.flashing("b", 1), "新行不算变化");
+        st.resort(&cols, &[]); // 只处理消息、没给数据：不动基准
+        st.resort(&cols, &r2);
+        assert!(!st.prev.is_empty());
+    }
+
+    #[test]
+    fn 光标在表上不重排_移开后提示() {
+        let cols = vec![Column::text("号", 40.0).key(), Column::num("值", None, 60.0)];
+        let rows = |a: f64, b: f64| {
+            vec![vec![Cell::Text("a".into()), Cell::num(a, a.to_string())], vec![Cell::Text("b".into()), Cell::num(b, b.to_string())]]
+        };
+        let mut st = GridState::new(&cols);
+        st.update(GridMsg::Sort(1), &cols, &rows(1.0, 2.0)); // 降序：b a
+        assert_eq!(st.order, [1, 0]);
+        st.update(GridMsg::Hover(true), &cols, &[]);
+        st.resort(&cols, &rows(5.0, 2.0)); // 本该变成 a b
+        assert_eq!(st.order, [1, 0], "光标在表上：顺序不动");
+        assert_eq!(st.pending_moves, 2);
+        st.update(GridMsg::Hover(false), &cols, &[]);
+        assert_eq!(st.moved_note.map(|(n, _)| n), Some(2), "移开后提示 2 行已移动");
+        st.resort(&cols, &rows(5.0, 2.0));
+        assert_eq!(st.order, [0, 1], "移开后按排序");
     }
 
     #[test]
