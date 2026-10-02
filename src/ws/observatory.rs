@@ -11,6 +11,7 @@ use super::observatory_view::ObsMsg;
 
 pub fn handle(m: ObsMsg) {
     match m {
+        ObsMsg::StreamsGrid(g) => super::observatory_view::streams_grid_update(g),
         ObsMsg::Start => {
             let _ = ro::svc_action("start");
         }

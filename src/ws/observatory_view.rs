@@ -17,8 +17,10 @@ use super::observatory_lib as lib;
 use super::observatory_readout::{self as ro, StreamStat};
 use super::observatory_table::{Palette, TailTable};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ObsMsg {
+    /// 流统计表的网格交互（ui::grid，docs/35 §16.13 第 5 项）
+    StreamsGrid(crate::ui::grid::GridMsg),
     Start,
     Stop,
     /// 连/断当前目标。
@@ -524,35 +526,7 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         "逐流指标",
         "丢弃按阶段分开：帧=太大 / 环=满了 / 盘=写不动。「UI 跳过」不是故障——人眼一秒读不了 20 行",
     ));
-    let mut h = row![].spacing(3);
-    for (t, w, n) in [
-        ("流", 90.0, false),
-        ("收", 84.0, true),
-        ("速率", 74.0, true),
-        ("字节率", 84.0, true),
-        ("丢·帧", 60.0, true),
-        ("丢·环", 60.0, true),
-        ("丢·盘", 60.0, true),
-        ("gap", 50.0, true),
-        ("UI 跳过", 74.0, true),
-        ("滞后 p50", 82.0, true),
-        ("p99", 82.0, true),
-    ] {
-        h = h.push(cell(t.into(), w, crate::ui::pal::head(), n));
-    }
-    body = body.push(h);
-    for s in &sess.streams {
-        body = body.push(stream_row(s));
-        if !s.spark_msg.is_empty() {
-            body = body.push(
-                row![
-                    cell(String::new(), 90.0, crate::ui::pal::dim(), false),
-                    text(spark(&s.spark_msg)).size(crate::ui::text::s_small()).color(crate::ui::pal::ok()),
-                ]
-                .spacing(3),
-            );
-        }
-    }
+    body = body.push(streams_grid(&sess.streams));
 
     }
 
@@ -1111,25 +1085,70 @@ fn cov_from(r: &ro::RingStat) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
-fn stream_row<'a>(s: &StreamStat) -> Element<'a, ObsMsg> {
-    let d = |n: i64| if n > 0 { crate::ui::pal::bad() } else { crate::ui::pal::dim() };
-    row![
-        cell(s.label.clone(), 90.0, crate::ui::pal::txt(), false),
-        cell(s.received.to_string(), 84.0, crate::ui::pal::txt(), true),
-        cell(format!("{}/s", s.rate_msg), 74.0, crate::ui::pal::ok(), true),
-        cell(format!("{}/s", human_bytes(s.rate_bytes)), 84.0, crate::ui::pal::dim(), true),
-        cell(s.drop_frame.to_string(), 60.0, d(s.drop_frame), true),
-        cell(s.drop_ring.to_string(), 60.0, d(s.drop_ring), true),
-        cell(s.drop_sink.to_string(), 60.0, d(s.drop_sink), true),
-        cell(s.gap.to_string(), 50.0, if s.gap > 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }, true),
-        // **不是故障色**：UI 跟不上是正常的
-        cell(s.skipped_ui.to_string(), 74.0, crate::ui::pal::dim(), true),
-        cell(ns(s.lag_p50_ns), 82.0, crate::ui::pal::txt(), true),
-        cell(ns(s.lag_p99_ns), 82.0, crate::ui::pal::dim(), true),
-    ]
-    .spacing(3)
-    .into()
+thread_local! {
+    static STREAMS: std::cell::RefCell<Option<crate::ui::grid::GridState>> = const { std::cell::RefCell::new(None) };
 }
+
+fn stream_cols() -> Vec<crate::ui::grid::Column> {
+    use crate::ui::grid::Column;
+    vec![
+        Column::text("流", 96.0).key().pinned(),
+        Column::num("收", None, 84.0),
+        Column::num("速率", Some("条/s"), 84.0),
+        Column::text("字节率", 90.0),
+        Column::num("丢·帧", None, 64.0),
+        Column::num("丢·环", None, 64.0),
+        Column::num("丢·盘", None, 64.0),
+        Column::num("gap", None, 56.0),
+        Column::num("UI 跳过", None, 76.0),
+        Column::text("滞后 p50", 86.0),
+        Column::text("p99", 86.0),
+        Column::text("近况（条/s 走势）", 200.0),
+    ]
+}
+
+/// 流统计表的网格交互（经 ObsMsg::StreamsGrid 回到这里）。
+pub fn streams_grid_update(m: crate::ui::grid::GridMsg) {
+    let cols = stream_cols();
+    STREAMS.with(|g| g.borrow_mut().get_or_insert_with(|| crate::ui::grid::GridState::new(&cols)).update(m, &cols, &[]));
+}
+
+/// 流统计表（ui::grid）：丢弃按阶段分列、故障色只给真故障；原来每行下面那条速率走势放进最后一列。
+fn streams_grid<'a>(streams: &[StreamStat]) -> Element<'a, ObsMsg> {
+    use crate::ui::grid::{self, Cell, GridState};
+    let d = |n: i64| if n > 0 { crate::ui::pal::bad() } else { crate::ui::pal::dim() };
+    let cols = stream_cols();
+    let rows: Vec<Vec<Cell>> = streams
+        .iter()
+        .map(|s| {
+            vec![
+                Cell::Text(s.label.clone()),
+                Cell::num(s.received as f64, s.received.to_string()),
+                Cell::Colored(format!("{}", s.rate_msg), crate::ui::pal::ok()),
+                Cell::Colored(format!("{}/s", human_bytes(s.rate_bytes)), crate::ui::pal::dim()),
+                Cell::Colored(s.drop_frame.to_string(), d(s.drop_frame)),
+                Cell::Colored(s.drop_ring.to_string(), d(s.drop_ring)),
+                Cell::Colored(s.drop_sink.to_string(), d(s.drop_sink)),
+                Cell::Colored(s.gap.to_string(), if s.gap > 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
+                // **不是故障色**：UI 跟不上是正常的
+                Cell::Colored(s.skipped_ui.to_string(), crate::ui::pal::dim()),
+                Cell::Text(ns(s.lag_p50_ns)),
+                Cell::Colored(ns(s.lag_p99_ns), crate::ui::pal::dim()),
+                Cell::Colored(if s.spark_msg.is_empty() { String::new() } else { spark(&s.spark_msg) }, crate::ui::pal::ok()),
+            ]
+        })
+        .collect();
+    let n = rows.len();
+    let st = STREAMS.with(|g| {
+        let mut g = g.borrow_mut();
+        let st = g.get_or_insert_with(|| GridState::new(&cols));
+        st.resort(&cols, &rows);
+        st.clone()
+    });
+    let h = crate::ui::metrics::panel_header() + crate::ui::metrics::row_height() * (n.clamp(1, 12) as f32 + 1.0) + 60.0;
+    container(grid::view(cols, rows, st, None, ObsMsg::StreamsGrid)).height(Length::Fixed(h)).into()
+}
+
 
 fn section<'a>(title: &str, note: &str) -> Element<'a, ObsMsg> {
     let mut r = row![text(format!("▍{title}")).size(crate::ui::text::s_body()).color(crate::ui::pal::head())].spacing(8);
