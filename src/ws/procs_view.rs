@@ -295,7 +295,8 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
     body = body.push(text("依赖").size(crate::ui::text::s_emph()).color(crate::ui::pal::head()));
     body = body.push(
         row![
-            chip("检查更新", ProcsMsg::CheckDeps),
+            // 查询要十几个 HTTP 请求：查的时候按钮转圈、宽度不变、不能重复点
+            crate::ui::widgets::btn_busy("检查更新", crate::ui::widgets::Kind::Standard, Some(ProcsMsg::CheckDeps), super::deps::checking()),
             text(if checked == 0 {
                 "当前版本全部来自本地（零网络）。上游版本要点上面那个按钮才去问。".to_string()
             } else if stale == 0 {

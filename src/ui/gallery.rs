@@ -179,6 +179,20 @@ impl Gallery {
             sec("标签页 · 分段按钮", row![tabs, seg].spacing(metrics::space(6)).into()),
             sec("状态：空 · 加载 · 骨架", states.into()),
             sec("状态：错误 · 过期 · 不可用", states2.into()),
+            // 输入与按钮状态（docs/35 §6.1 / §6.2）：时间输入正常 / 填错；禁用给原因；加载中宽度不变
+            sec(
+                "输入：时间步进（正常 · 填错）· 按钮：禁用给原因 · 加载中",
+                row![
+                    widgets::time_input("13:30", 15, |_| GalleryMsg::Noop),
+                    widgets::time_input("25:99", 15, |_| GalleryMsg::Noop),
+                    widgets::btn_why("▶ 运行回测", Kind::Primary, None::<GalleryMsg>, "数据还没选完：管线 → 来源 → 市场 → 标的 → 时间"),
+                    widgets::btn_busy("检查更新", Kind::Standard, Some(GalleryMsg::Noop), true),
+                    widgets::btn_busy("检查更新", Kind::Standard, Some(GalleryMsg::Noop), false),
+                ]
+                .spacing(metrics::space(5))
+                .align_y(iced::Alignment::Start)
+                .into(),
+            ),
             widgets::panel_header(
                 format!("数据网格 · {} 行（虚拟滚动，初始定位在中部）", self.rows.len()),
                 Some(widgets::badge("实时", Tone::Success)),

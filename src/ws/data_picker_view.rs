@@ -353,13 +353,8 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
     }
     if opts.time == TimeMode::Window {
         v.push(dim("起始（UTC）".into()));
-        v.push(
-            text_input("HH:MM", &p.start)
-                .on_input(DataPickMsg::Start)
-                .size(crate::ui::text::s_small())
-                .width(Length::Fixed(60.0))
-                .into(),
-        );
+        // 步进 ±15 分钟或手填；填错显示错误态（docs/35 §6.1 时间输入）
+        v.push(crate::ui::widgets::time_input(&p.start, 15, DataPickMsg::Start));
         v.push(dim("时长".into()));
         let mins: Vec<Choice> = [1u32, 5, 10, 15, 30, 60, 120, 240, 390, 1440]
             .iter()

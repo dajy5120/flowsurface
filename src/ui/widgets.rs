@@ -395,6 +395,107 @@ pub fn time_range<'a, M: Clone + 'a>(date: Option<&str>, start: &str, minutes: u
     column![presets, t::caption(resolved)].spacing(metrics::space(1)).into()
 }
 
+// ── 带原因的禁用 / 加载中（UPDS V3 §13 交互状态，docs/35 §6.2）────────────
+
+/// 按钮；`msg = None` 时禁用，并在悬停提示里说清**为什么**不能点（不给一个点了没反应的按钮）。
+pub fn btn_why<'a, M: Clone + 'a>(label: impl Into<String>, kind: Kind, msg: Option<M>, why: impl Into<String>) -> Element<'a, M> {
+    let disabled = msg.is_none();
+    let b = btn(label, kind, msg);
+    if !disabled {
+        return b;
+    }
+    iced::widget::tooltip(b, container(t::caption(why)).padding(metrics::space(2)).style(crate::style::tooltip), iced::widget::tooltip::Position::Top)
+        .delay(std::time::Duration::from_millis(450))
+        .into()
+}
+
+/// 加载中的按钮：**宽度不变**（按原文字宽度定死，转圈时版面不跳），文字前换成 `◌`，不可点。
+pub fn btn_busy<'a, M: Clone + 'a>(label: impl Into<String>, kind: Kind, msg: Option<M>, busy: bool) -> Element<'a, M> {
+    let label: String = label.into();
+    let units: f32 = label.chars().map(|c| if c.is_ascii() { 0.62 } else { 1.0 }).sum();
+    // 预留「◌ 」的宽度（符号约 1em + 空格），两种状态同宽，切换时版面不跳
+    let w = (units + 1.8) * t::size(super::Role::Label) + metrics::space(4) * 2.0;
+    let shown = if busy { format!("◌ {label}") } else { label };
+    let b = button(container(t::label(shown).wrapping(iced::widget::text::Wrapping::None)).height(Length::Fill).align_y(Alignment::Center).align_x(Alignment::Center).width(Length::Fill))
+        .height(Length::Fixed(metrics::control_height()))
+        .width(Length::Fixed(w))
+        .padding(Padding::from([0.0, metrics::space(4)]))
+        .style(move |th, st| button_style(kind, th, st));
+    match msg.filter(|_| !busy) {
+        Some(m) => b.on_press(m).into(),
+        None => b.into(),
+    }
+}
+
+// ── 步进 / 时间输入（docs/35 §6.1）──────────────────────────────────
+
+/// 步进输入：「− 输入框 +」。`valid = false` 时危险色边框 + 下方一行说明（错误态，UPDS V3 §13）。
+pub fn stepper<'a, M: Clone + 'a>(
+    value: &str,
+    placeholder: &str,
+    on_input: impl Fn(String) -> M + 'a,
+    on_step: impl Fn(i32) -> M,
+    valid: bool,
+    error: &str,
+    width: f32,
+) -> Element<'a, M> {
+    let c = core();
+    let step = |label: &'static str, d: i32| {
+        button(t::label(label))
+            .padding(Padding::from([0.0, metrics::space(2)]))
+            .height(Length::Fixed(metrics::control_height()))
+            .on_press(on_step(d))
+            .style(|th, st| button_style(Kind::Standard, th, st))
+    };
+    let danger = color(c.status_danger);
+    let input = iced::widget::text_input(placeholder, value)
+        .on_input(on_input)
+        .size(t::size(super::Role::Numeric))
+        .width(Length::Fixed(width))
+        .style(move |th, st| {
+            let mut s = iced::widget::text_input::default(th, st);
+            if !valid {
+                s.border = Border { width: 1.0, color: danger, radius: radius::SM.into() };
+            }
+            s
+        });
+    let r = row![step("−", -1), input, step("+", 1)].spacing(metrics::space(1)).align_y(Alignment::Center);
+    if valid {
+        r.into()
+    } else {
+        column![r, t::caption(error.to_string()).color(danger)].spacing(metrics::space(1)).into()
+    }
+}
+
+/// `HH:MM` 解析成当天的分钟数；不合法为 `None`。
+pub fn parse_hhmm(s: &str) -> Option<u32> {
+    let (h, m) = s.trim().split_once(':')?;
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
+/// 时刻 ± `d` 个 `step` 分钟，跨午夜回绕；原值不合法时从 00:00 起算。
+pub fn shift_hhmm(s: &str, d: i32, step: u32) -> String {
+    let base = parse_hhmm(s).unwrap_or(0) as i32;
+    let m = (base + d * step as i32).rem_euclid(1440);
+    format!("{:02}:{:02}", m / 60, m % 60)
+}
+
+/// 时刻输入（UTC 的 HH:MM）：步进 ±`step` 分钟，也能直接手填；填错显示错误态。
+pub fn time_input<'a, M: Clone + 'a>(value: &str, step: u32, on: impl Fn(String) -> M + Clone + 'a) -> Element<'a, M> {
+    let cur = value.to_string();
+    let on2 = on.clone();
+    stepper(
+        value,
+        "HH:MM",
+        on,
+        move |d| on2(shift_hhmm(&cur, d, step)),
+        parse_hhmm(value).is_some(),
+        "写成 HH:MM（UTC），如 13:30",
+        56.0,
+    )
+}
+
 /// 时间线里的一条（时间, 级别, 内容）。级别：`E` 错误 / `W` 警告 / 其他为信息。
 pub type TimelineLine = (String, char, String);
 
@@ -440,6 +541,16 @@ pub fn timeline<'a, M: Clone + 'a>(lines: &[TimelineLine], follow: bool, on_foll
 #[cfg(test)]
 mod time_range_tests {
     use super::*;
+
+    #[test]
+    fn 时刻步进跨午夜回绕_非法输入不猜() {
+        assert_eq!(parse_hhmm("13:30"), Some(810));
+        assert_eq!(parse_hhmm("24:00"), None);
+        assert_eq!(parse_hhmm("9:5"), Some(545));
+        assert_eq!(shift_hhmm("23:50", 1, 15), "00:05");
+        assert_eq!(shift_hhmm("00:00", -1, 15), "23:45");
+        assert_eq!(shift_hhmm("abc", 1, 15), "00:15", "不合法从 00:00 起算");
+    }
 
     #[test]
     fn 时段换算_跨日标次日() {

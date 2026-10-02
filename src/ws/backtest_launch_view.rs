@@ -62,10 +62,19 @@ pub fn view<'a>(hosted: bool) -> Element<'a, LaunchMsg> {
         });
         b = b.push(
             row![
-                btn(
+                // 不能点时说清为什么（docs/35 §6.2：禁用要给原因）
+                crate::ui::widgets::btn_why(
                     "▶ 运行回测",
+                    crate::ui::widgets::Kind::Primary,
                     (!v.running && v.strategy.is_some() && v.pick.selection(&bl::pick_opts()).is_some())
                         .then_some(LaunchMsg::Run),
+                    if v.running {
+                        "回测正在跑，跑完再发起下一次"
+                    } else if v.strategy.is_none() {
+                        "先在上面选一个策略文件"
+                    } else {
+                        "数据还没选完：管线 → 来源 → 市场 → 标的 → 时间"
+                    },
                 ),
                 text(
                     "这里选的是对策略 BACKTEST 声明的覆盖；费率、撮合等仍按策略与 runner 默认。\
