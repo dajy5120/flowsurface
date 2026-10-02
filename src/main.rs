@@ -1921,7 +1921,7 @@ impl Flowsurface {
                     let mut list = column![
                         iced::widget::text_input("搜索设置……", &self.settings_query)
                             .on_input(Message::SettingsQuery)
-                            .padding(6)
+                            .padding(ui::metrics::space(2))
                             .size(ui::text::s_small()),
                     ]
                     .spacing(14);
