@@ -8,6 +8,7 @@
 //! （对比度、主题完备、色弱可区分），见 `build.rs`。
 
 pub mod bridge;
+pub mod commands;
 pub mod color;
 pub mod prefs;
 

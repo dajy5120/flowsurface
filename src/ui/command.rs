@@ -184,6 +184,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn 共有命令与_studio_同名同键() {
+        // 唯一真相源在 wealthspring_ui_tokens::commands::SHARED；Studio 那边有同样的测试
+        let r = registry(&["回测"]);
+        for (id, title, sc) in wealthspring_ui_tokens::commands::SHARED {
+            assert!(r.iter().any(|e| e.title == title && e.shortcut == sc), "Cockpit 缺「{title}」（{sc}，id {id}）");
+        }
+    }
+
+    #[test]
     fn 范围前缀() {
         let mut r = registry(&["回测", "订单流特征"]);
         r.extend(pane_entries(&["K 线".into(), "特征矩阵".into()]));
