@@ -44,6 +44,8 @@ pub enum BottomTab {
     Log,
     Problems,
     Activity,
+    /// 告警（docs/35 §5.1，UPDS V6 §49）：新闻守护的告警规则命中记录
+    Alerts,
 }
 
 impl BottomTab {
@@ -52,8 +54,68 @@ impl BottomTab {
             Self::Log => "日志",
             Self::Problems => "问题",
             Self::Activity => "活动",
+            Self::Alerts => "告警",
         }
     }
+}
+
+/// 一条告警命中（来自新闻守护快照的 `alerts`，新的在前）。
+#[derive(Debug, Clone)]
+pub struct Alert {
+    pub time: String,
+    pub rule: String,
+    pub source: String,
+    pub title: String,
+    pub url: String,
+}
+
+/// 告警记录：底部面板开着时到点检查快照，文件变了才重读。
+#[derive(Debug, Clone, Default)]
+pub struct AlertTail {
+    pub items: Vec<Alert>,
+    read_at: Option<Instant>,
+    mtime: Option<std::time::SystemTime>,
+}
+
+impl AlertTail {
+    pub fn refresh(&mut self) {
+        if self.read_at.is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
+            return;
+        }
+        self.read_at = Some(Instant::now());
+        let p = crate::ws::paths::runtime_dir().join("news_board.json");
+        let mt = std::fs::metadata(&p).ok().and_then(|m| m.modified().ok());
+        if mt.is_some() && mt == self.mtime {
+            return;
+        }
+        self.mtime = mt;
+        let Ok(t) = std::fs::read_to_string(&p) else { return };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { return };
+        self.items = parse_alerts(&v);
+    }
+}
+
+fn parse_alerts(v: &serde_json::Value) -> Vec<Alert> {
+    let s = |a: &serde_json::Value, k: &str| a.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    v.get("alerts")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|a| Alert {
+                    time: a
+                        .get("ts_ms")
+                        .and_then(serde_json::Value::as_i64)
+                        .and_then(chrono::DateTime::from_timestamp_millis)
+                        .map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_default(),
+                    rule: s(a, "rule"),
+                    source: s(a, "source"),
+                    title: s(a, "title"),
+                    url: s(a, "url"),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -77,13 +139,14 @@ pub struct Shell {
     pub bottom_tab: BottomTab,
     pub inspector: bool,
     pub log: LogTail,
+    pub alerts: AlertTail,
     /// 侧栏收起（Ctrl B）
     pub sidebar_hidden: bool,
 }
 
 impl Default for Shell {
     fn default() -> Self {
-        Self { palette: None, bottom: false, bottom_tab: BottomTab::Log, inspector: false, log: LogTail::default(), sidebar_hidden: false }
+        Self { palette: None, bottom: false, bottom_tab: BottomTab::Log, inspector: false, log: LogTail::default(), alerts: AlertTail::default(), sidebar_hidden: false }
     }
 }
 
@@ -193,6 +256,8 @@ fn parse_line(s: &str) -> LogLine {
 pub enum Env {
     /// 只看图 / 实时引擎（不交易）
     View,
+    /// 实盘（真实下单）。目前没有实盘入口，留给接实盘时用（docs/35 §9）
+    Live,
     Paper,
     Backtest,
     Replay,
@@ -203,7 +268,9 @@ pub enum Env {
 impl Env {
     /// 从性质徽标推出环境（词汇与性质徽标一致，只是位置提升到全局）。
     pub fn from_badge(label: &str) -> Self {
-        if label.starts_with("模拟盘") {
+        if label.starts_with("实盘") {
+            Self::Live
+        } else if label.starts_with("模拟盘") {
             Self::Paper
         } else if label.starts_with("回测") {
             Self::Backtest
@@ -220,12 +287,26 @@ impl Env {
         let d = super::domain();
         color(match self {
             Self::View => d.env_idle,
+            Self::Live => d.env_live,
             Self::Paper => d.env_paper,
             Self::Backtest => d.env_backtest,
             Self::Replay => d.env_replay,
             Self::Idle => d.env_idle,
         })
     }
+}
+
+/// 实盘 / 模拟盘时窗口顶边的 2px 环境色条（UPDS V7 §57，docs/35 §9.1）：
+/// 最大化、截图时都在，一眼分得清「这个界面会不会动真钱」。其他环境不画。
+pub fn env_strip<'a, M: 'a>(env: Env) -> Option<Element<'a, M>> {
+    matches!(env, Env::Live | Env::Paper).then(|| {
+        let c = env.color();
+        container(space::horizontal())
+            .height(Length::Fixed(2.0))
+            .width(Length::Fill)
+            .style(move |_| container::Style { background: Some(Background::Color(c)), ..Default::default() })
+            .into()
+    })
 }
 
 pub struct Info {
@@ -368,6 +449,8 @@ pub fn status_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
             sep(),
             button(t::metadata(act)).padding(0).style(|th, st| crate::style::button::transparent(th, st, false)).on_press(ShellEvent::Run(Cmd::BottomTab(BottomTab::Activity))),
             space::horizontal(),
+            // 选中计数与合计（任一网格有选中时；合计说明缺口，docs/35 §5.1 / §7.1）
+            t::metadata(super::grid::current_selection().map(|s| format!("{}  │  ", s.label())).unwrap_or_default()),
             t::metadata(focus),
             sep(),
             t::metadata(look),
@@ -393,6 +476,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
         let active = shell.bottom_tab == tb;
         let label = match tb {
             BottomTab::Problems if n_prob > 0 => format!("{} {n_prob}", tb.label()),
+            BottomTab::Alerts if !shell.alerts.items.is_empty() => format!("{} {}", tb.label(), shell.alerts.items.len()),
             _ => tb.label().to_string(),
         };
         button(t::label(label))
@@ -404,6 +488,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
         tab(BottomTab::Log),
         tab(BottomTab::Problems),
         tab(BottomTab::Activity),
+        tab(BottomTab::Alerts),
         space::horizontal(),
         button(t::label("✕")).padding([2, 8]).on_press(ShellEvent::Run(Cmd::ToggleBottom)).style(|th, st| crate::style::button::transparent(th, st, false)),
     ]
@@ -448,6 +533,35 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
                     col = col.push(line(l));
                 }
                 scrollable(col).anchor_bottom().height(Length::Fill).into()
+            }
+        }
+        BottomTab::Alerts => {
+            if shell.alerts.items.is_empty() {
+                empty(
+                    "没有告警",
+                    "新闻守护的告警规则（news.toml 的 [[alert]]）命中后会列在这里，同时弹桌面通知。新闻守护没在跑时这里不会更新。",
+                )
+            } else {
+                let mut col = column![].spacing(1);
+                for a in &shell.alerts.items {
+                    let row_el = row![
+                        container(t::code(a.time.clone()).color(color(c.text_tertiary))).width(Length::Fixed(110.0)),
+                        container(t::label(a.rule.clone()).color(color(c.status_warning))).width(Length::Fixed(110.0)),
+                        container(t::caption(a.source.clone())).width(Length::Fixed(110.0)),
+                        t::body(a.title.clone()),
+                    ]
+                    .spacing(metrics::space(3));
+                    col = col.push(if a.url.is_empty() {
+                        Element::from(row_el)
+                    } else {
+                        button(row_el)
+                            .padding(0)
+                            .on_press(ShellEvent::Run(Cmd::OpenUrl(a.url.clone())))
+                            .style(|th, st| crate::style::button::transparent(th, st, false))
+                            .into()
+                    });
+                }
+                scrollable(col).height(Length::Fill).into()
             }
         }
         BottomTab::Activity => {
@@ -624,6 +738,9 @@ mod tests {
     fn 环境来自性质徽标() {
         assert_eq!(Env::from_badge("回测 A"), Env::Backtest);
         assert_eq!(Env::from_badge("模拟盘"), Env::Paper);
+        assert_eq!(Env::from_badge("实盘 · Binance"), Env::Live);
+        assert!(env_strip::<()>(Env::Live).is_some() && env_strip::<()>(Env::Paper).is_some());
+        assert!(env_strip::<()>(Env::Backtest).is_none() && env_strip::<()>(Env::View).is_none(), "只有实盘 / 模拟盘画色条");
         assert_eq!(Env::from_badge("回放·引擎同源"), Env::Replay);
         assert_eq!(Env::from_badge("实时·仅看图"), Env::View);
         assert_eq!(Env::from_badge("等待运行"), Env::Idle);

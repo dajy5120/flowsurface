@@ -161,6 +161,42 @@ pub enum GridMsg {
     ToggleGroup(String),
 }
 
+/// 选中行的计数与合计（见 [`GridState::selection_summary`]）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelSummary {
+    pub count: usize,
+    /// (列名, 合计, 缺失个数)
+    pub sum: Option<(String, f64, usize)>,
+}
+
+impl SelSummary {
+    /// 「选中 3 · Σ 净 12.50」「选中 12 · Σ 净 2 639.10 · 12 个中 3 个缺失」
+    pub fn label(&self) -> String {
+        let mut s = format!("选中 {}", self.count);
+        if let Some((name, v, missing)) = &self.sum {
+            s.push_str(&format!(" · Σ {name} {}", super::fmt::withheld_if(super::hide_values(), fmt::number(*v, 2, fmt::Rounding::Money))));
+            if *missing > 0 {
+                s.push_str(&format!(" · {} 个中 {missing} 个缺失", self.count));
+            }
+        }
+        s
+    }
+}
+
+static SEL: std::sync::Mutex<Option<(std::time::Instant, SelSummary)>> = std::sync::Mutex::new(None);
+
+/// 网格画出来时发布自己的选中合计；状态栏读最近 1 秒内发布的那份（多张网格时以最后画的为准）。
+pub fn publish_selection(s: Option<SelSummary>) {
+    if let (Some(s), Ok(mut g)) = (s, SEL.lock()) {
+        *g = Some((std::time::Instant::now(), s));
+    }
+}
+
+/// 状态栏用：当前可见网格的选中合计（1 秒内没有网格发布 = 没有选中）。
+pub fn current_selection() -> Option<SelSummary> {
+    SEL.lock().ok().and_then(|g| g.as_ref().filter(|(t, _)| t.elapsed().as_secs() < 1).map(|(_, s)| s.clone()))
+}
+
 #[derive(Debug, Clone)]
 pub struct GridState {
     pub offset: f32,
@@ -169,6 +205,8 @@ pub struct GridState {
     pub widths: Vec<f32>,
     /// 选中的数据行（数据下标，不是显示位置——排序、刷新后选中不丢）
     pub selected: Option<usize>,
+    /// Ctrl+点击加选的其他行（数据下标；与 `selected` 合起来是全部选中）
+    pub extra: std::collections::BTreeSet<usize>,
     /// 排好的显示顺序（数据下标）
     pub order: Vec<usize>,
     /// 行区滚动容器的 id（要从代码里滚动时用，例如定位到某一行）
@@ -189,6 +227,7 @@ impl GridState {
             sort: None,
             widths: cols.iter().map(|c| c.width).collect(),
             selected: None,
+            extra: Default::default(),
             order: Vec::new(),
             id: iced::widget::Id::unique(),
             group_by: None,
@@ -196,6 +235,35 @@ impl GridState {
             items: Vec::new(),
             drag: None,
         }
+    }
+
+    /// 全部选中的数据行。
+    pub fn selection(&self) -> Vec<usize> {
+        self.selected.into_iter().chain(self.extra.iter().copied()).collect()
+    }
+
+    fn is_selected(&self, di: usize) -> bool {
+        self.selected == Some(di) || self.extra.contains(&di)
+    }
+
+    /// 选中行的计数与合计（状态栏用，docs/35 §5.1 / §7.1：合计必须说明缺口）。
+    /// 合计列 = 当前排序列（若是数值列），否则第一个数值列；没有数值列只给计数。
+    pub fn selection_summary(&self, cols: &[Column], rows: &[Vec<Cell>]) -> Option<SelSummary> {
+        let sel = self.selection();
+        if sel.is_empty() {
+            return None;
+        }
+        let col = self
+            .sort
+            .map(|(c, _)| c)
+            .filter(|c| cols.get(*c).is_some_and(|x| x.sort == SortKind::Number))
+            .or_else(|| cols.iter().position(|c| c.sort == SortKind::Number));
+        let sum = col.map(|ci| {
+            let vals: Vec<Option<f64>> = sel.iter().map(|&r| rows.get(r).and_then(|row| row.get(ci)).and_then(Cell::sort_num)).collect();
+            let missing = vals.iter().filter(|v| v.is_none()).count();
+            (cols[ci].title.clone(), vals.iter().flatten().sum::<f64>(), missing)
+        });
+        Some(SelSummary { count: sel.len(), sum })
     }
 
     /// 显示位置的个数（分组时含组头、不含折叠掉的行）。
@@ -293,7 +361,24 @@ impl GridState {
                     self.resort(cols, rows);
                 }
             }
-            GridMsg::Select(i) => self.selected = if self.selected == Some(i) { None } else { Some(i) },
+            GridMsg::Select(i) => {
+                if super::ctrl_held() {
+                    // Ctrl+点击：加选 / 取消这一行，不动其他选中
+                    if self.selected == Some(i) {
+                        self.selected = self.extra.pop_first();
+                    } else if !self.extra.remove(&i) {
+                        match self.selected {
+                            None => self.selected = Some(i),
+                            Some(_) => {
+                                self.extra.insert(i);
+                            }
+                        }
+                    }
+                } else {
+                    self.extra.clear();
+                    self.selected = if self.selected == Some(i) { None } else { Some(i) };
+                }
+            }
             GridMsg::DragStart(i) => {
                 if let Some(w) = self.widths.get(i) {
                     self.drag = Some((i, None, *w));
@@ -483,9 +568,11 @@ where
                 .style(|th, s| widgets::button_style(widgets::Kind::Ghost, th, s)),
         );
     }
-    if st.borrow().selected.is_some() {
-        foot = foot.push(t::caption("已选 1"));
+    let summary = st.borrow().selection_summary(cols, rows.as_ref());
+    if let Some(s) = &summary {
+        foot = foot.push(t::caption(s.label()));
     }
+    publish_selection(summary);
     if let Some(f) = footer {
         foot = foot.push(container(t::caption(f)).width(Length::Fill).align_x(Alignment::End));
     }
@@ -520,7 +607,7 @@ where
                     continue;
                 }
             };
-            let selected = st.selected == Some(di);
+            let selected = st.is_selected(di);
             let mut r = row![container(Space::new().width(Length::Fixed(2.0)).height(Length::Fill)).style(move |_| container::Style {
                 background: selected.then(|| Background::Color(color(core().accent_primary))),
                 ..Default::default()
@@ -690,6 +777,21 @@ mod tests {
         let mut st = GridState::new(&cols);
         st.resort(&cols, &rows);
         let _: Element<'static, GridMsg> = view(cols, rows, std::rc::Rc::new(st), None, |m| m);
+    }
+
+    #[test]
+    fn 选中合计_说明缺口() {
+        let (cols, rows) = data(); // 实际列：3.0 / 缺失 / 7.0
+        let mut st = GridState::new(&cols);
+        st.selected = Some(0);
+        st.extra.insert(1);
+        st.extra.insert(2);
+        let s = st.selection_summary(&cols, &rows).expect("有选中");
+        assert_eq!(s.count, 3);
+        assert_eq!(s.sum, Some(("实际".into(), 10.0, 1)));
+        assert!(s.label().contains("3 个中 1 个缺失"), "{}", s.label());
+        st.update(GridMsg::Select(0), &cols, &rows); // 没按 Ctrl：回到单选（再点一次 = 取消）
+        assert!(st.extra.is_empty());
     }
 
     #[test]

@@ -103,6 +103,10 @@ fn main() {
     }
 }
 
+/// 窄窗口断点（UPDS V1 §08，docs/35 附录 A）：窄于它时检查器不再占宽度，改为盖在工作区右侧的抽屉。
+/// 侧栏本来就是 44px 的图标条，不必再收。
+const NARROW_PX: f32 = 900.0;
+
 /// 全局快捷键（UPDS V9 §77 Linux 列，docs/35 §5.1）。
 ///
 /// 用 `listen_with` 而不是 `keyboard::listen`：后者只给「没被控件吃掉」的按键，
@@ -117,6 +121,11 @@ fn shortcut(
     use keyboard::key::Named;
     use ui::command::Cmd;
     use ui::shell::ShellEvent;
+    // 修饰键变化：记下来给网格的 Ctrl+点击多选用（按钮按下事件不带修饰键）
+    if let iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) = &event {
+        ui::set_modifiers(m.control(), m.shift());
+        return None;
+    }
     let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else {
         return None;
     };
@@ -206,6 +215,8 @@ struct Flowsurface {
     specimen: Option<ws::specimen::Specimen>,     // 界面样张模式（docs/35）：轮换工作区自截图
     shell: ui::shell::Shell,                      // 外壳（docs/35 批 3）：命令面板 / 底部面板 / 检查器
     commands: Vec<ui::command::Entry>,            // 命令注册表（UPDS V2 §12）
+    /// 主窗口宽度（逻辑像素）：窄于 [`NARROW_PX`] 时检查器变浮层抽屉
+    main_width: f32,
     /// 命令面板实际列的条目 = 注册表 + 当前工作区的面板（打开面板时刷新）
     palette_entries: Vec<ui::command::Entry>,
     gallery: Option<ui::gallery::Gallery>,        // 组件样张页（样张模式 WS_UI_SPECIMEN_COMPONENTS）
@@ -300,6 +311,7 @@ impl Flowsurface {
             shell: ui::shell::Shell::default(),
             commands: ui::command::registry(&ws::workspace::WORKSPACES),
             palette_entries: ui::command::registry(&ws::workspace::WORKSPACES),
+            main_width: f32::MAX,
             gallery: if ws::specimen::enabled() { ui::gallery::Gallery::from_env() } else { None },
         };
 
@@ -516,6 +528,7 @@ impl Flowsurface {
                 // 底部面板开着才读日志尾巴（每 2 秒一次）
                 if self.shell.bottom {
                     self.shell.log.refresh();
+                    self.shell.alerts.refresh();
                 }
                 let main_window_id = self.main_window.id;
                 let handles = self.handles.clone();
@@ -569,6 +582,11 @@ impl Flowsurface {
                     active_windows.push(main_window);
 
                     return window::collect_window_specs(active_windows, Message::ExitRequested);
+                }
+                window::Event::Resized(w, size) => {
+                    if w == self.main_window.id {
+                        self.main_width = size.width;
+                    }
                 }
             },
             Message::SpecimenStep(now) => {
@@ -1164,9 +1182,13 @@ impl Flowsurface {
                         event: dashboard::Message::Pane(main_id, dashboard::pane::Message::PaneEvent(p, ev)),
                     }))
                 });
-                row![work, ui::shell::inspector(&info, props, Message::Shell)]
-                    .spacing(4)
-                    .into()
+                let insp = ui::shell::inspector(&info, props, Message::Shell);
+                if self.main_width < NARROW_PX {
+                    // 窄窗口：抽屉盖在工作区右侧，不挤占面板宽度。stack 以第一层为尺寸基准，工作区放第一层
+                    iced::widget::stack![work, row![iced::widget::space::horizontal(), insp]].into()
+                } else {
+                    row![work, insp].spacing(4).into()
+                }
             } else {
                 work
             };
@@ -1175,6 +1197,8 @@ impl Flowsurface {
 
             let base = column![
                 header_title,
+                // 实盘 / 模拟盘：顶边 2px 环境色条（docs/35 §9.1）
+                ui::shell::env_strip(info.env).unwrap_or_else(|| column![].into()),
                 command_bar,
                 match sidebar_pos {
                     // Ctrl B 收起侧栏
@@ -1520,6 +1544,7 @@ impl Flowsurface {
                 }
             }
             Cmd::ToggleSidebar => self.shell.sidebar_hidden = !self.shell.sidebar_hidden,
+            Cmd::OpenUrl(url) => return self.update(Message::OpenUrlRequested(url.into())),
             Cmd::ZoomIn | Cmd::ZoomOut | Cmd::ZoomReset => {
                 let cur: f32 = self.ui_scale_factor.into();
                 let next = match cmd {
@@ -1535,6 +1560,7 @@ impl Flowsurface {
                 self.shell.bottom = true;
                 self.shell.bottom_tab = tab;
                 self.shell.log.refresh();
+                self.shell.alerts.refresh();
             }
             Cmd::FocusNextPane | Cmd::FocusPrevPane => {
                 let step: i64 = if cmd == Cmd::FocusNextPane { 1 } else { -1 };

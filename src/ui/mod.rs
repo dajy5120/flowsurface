@@ -68,6 +68,19 @@ pub fn prefs() -> Prefs {
     read(|s| s.prefs.clone())
 }
 
+static MODS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 记下当前按着的修饰键（全局键盘监听里调）。网格的 Ctrl+点击多选靠它——
+/// iced 的按钮按下事件不带修饰键。
+pub fn set_modifiers(ctrl: bool, shift: bool) {
+    MODS.store(u8::from(ctrl) | (u8::from(shift) << 1), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Ctrl 按着吗。
+pub fn ctrl_held() -> bool {
+    MODS.load(std::sync::atomic::Ordering::Relaxed) & 1 != 0
+}
+
 /// 隐藏数值模式开着吗（docs/35 §9.3）：金额、持仓、账户标识显示为 `•••`，通知暂停。
 pub fn hide_values() -> bool {
     read(|s| s.prefs.hide_values)

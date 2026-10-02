@@ -24,6 +24,8 @@ pub fn default_size() -> Size {
 #[derive(Debug, Clone, Copy)]
 pub enum Event {
     CloseRequested(window::Id),
+    /// 窗口尺寸变了（逻辑像素）。外壳据此决定窄窗口布局（docs/35 附录 A：V1 §08）
+    Resized(window::Id, iced::Size),
 }
 
 pub fn events() -> Subscription<Event> {
@@ -39,6 +41,7 @@ fn filtered_events(
         iced::Event::Window(iced::window::Event::CloseRequested) => {
             Some(Event::CloseRequested(window))
         }
+        iced::Event::Window(iced::window::Event::Resized(size)) => Some(Event::Resized(window, *size)),
         _ => None,
     }
 }
