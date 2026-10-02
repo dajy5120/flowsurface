@@ -50,6 +50,8 @@ pub enum Cmd {
     ZoomReset,
     /// 用浏览器打开一个地址（底部「告警」页点原文）
     OpenUrl(String),
+    /// 聚焦的 K 线面板：图 ↔ 数据表（Ctrl Shift D，docs/35 §6.3）
+    ToggleDataTable,
     /// 打开命令面板并预填范围前缀（Ctrl P → `#`，Ctrl Shift P → `@`，Ctrl / → `?`）
     PaletteScope(&'static str),
 }
@@ -97,6 +99,7 @@ pub fn registry(workspaces: &[&str]) -> Vec<Entry> {
         e(Cmd::FocusNextPane, "面板", "聚焦下一个面板", "F6"),
         e(Cmd::FocusPrevPane, "面板", "聚焦上一个面板", "Shift F6"),
         e(Cmd::ToggleMaximize, "面板", "最大化 / 还原当前面板", "Ctrl Shift M"),
+        e(Cmd::ToggleDataTable, "面板", "K 线：图 ↔ 数据表", "Ctrl Shift D"),
         e(Cmd::PaletteScope("#"), "视图", "快速切换：面板与工作区", "Ctrl P"),
         e(Cmd::PaletteScope("@"), "视图", "切换工作区", "Ctrl Shift P"),
         e(Cmd::PaletteScope("?"), "视图", "快捷键速查", "Ctrl /"),

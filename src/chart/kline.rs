@@ -536,6 +536,14 @@ impl KlineChart {
         self.invalidate(None);
     }
 
+    /// 最近 `n` 根 K 线，新的在前（数据表视图用，docs/35 §6.3）。
+    pub fn recent_klines(&self, n: usize) -> Vec<Kline> {
+        match &self.data_source {
+            PlotData::TimeBased(ts) => ts.datapoints.values().rev().take(n).map(|dp| dp.kline).collect(),
+            PlotData::TickBased(tick) => tick.datapoints.iter().rev().take(n).map(|dp| dp.kline).collect(),
+        }
+    }
+
     pub fn basis(&self) -> Basis {
         self.chart.basis
     }
@@ -1082,6 +1090,11 @@ impl canvas::Program<Message> for KlineChart {
                         },
                     );
                 }
+            }
+
+            // 缺口标记（docs/35 §6.3）：时间轴上缺了 K 线的地方画淡色带，不插值连过去
+            if let PlotData::TimeBased(ts) = &self.data_source {
+                draw_gaps(frame, ts, &interval_to_x, region, chart.scaling, earliest, latest);
             }
 
             // F3b：在蜡烛/足迹图上叠加成交标记 ▲（买）/▼（卖）——读进程级旁路缓存（来自 ws::orders）。
@@ -2182,6 +2195,49 @@ fn draw_cluster_text(
     });
 }
 
+/// 时间轴 K 线的缺口：相邻两根相隔超过 1.5 个周期，就在中间画一道淡色带并标「缺口」。
+/// 数据空洞（采集中断、交易所断流）原先在图上完全看不出来——两根蜡烛照样挨着画。
+fn draw_gaps(
+    frame: &mut canvas::Frame,
+    ts: &TimeSeries<KlineDataPoint>,
+    interval_to_x: &impl Fn(u64) -> f32,
+    region: Rectangle,
+    scaling: f32,
+    earliest: u64,
+    latest: u64,
+) {
+    let iv = ts.interval.to_milliseconds();
+    if iv == 0 {
+        return;
+    }
+    let lo = earliest.saturating_sub(iv);
+    let mut prev: Option<u64> = None;
+    for (t, _) in ts.datapoints.range(UnixMs::new(lo)..=UnixMs::new(latest.saturating_add(iv))) {
+        let t = t.as_u64();
+        if let Some(p) = prev
+            && t > p + iv + iv / 2
+        {
+            let cell = interval_to_x(p + iv) - interval_to_x(p);
+            let x0 = interval_to_x(p + iv) - cell / 2.0;
+            let x1 = interval_to_x(t) - cell / 2.0;
+            let (l, r) = (x0.min(x1), x0.max(x1));
+            frame.fill_rectangle(
+                Point::new(l, region.y),
+                Size::new(r - l, region.height),
+                crate::ui::pal::alpha(crate::ui::pal::dim(), 0.10),
+            );
+            frame.fill_text(canvas::Text {
+                content: format!("缺口 {} 根", (t - p) / iv - 1),
+                position: Point::new(l + 2.0 / scaling, region.y + 4.0 / scaling),
+                size: iced::Pixels(10.0 / scaling),
+                color: crate::ui::pal::dim(),
+                ..canvas::Text::default()
+            });
+        }
+        prev = Some(t);
+    }
+}
+
 fn draw_crosshair_tooltip(
     data: &PlotData<KlineDataPoint>,
     ticker_info: &TickerInfo,
@@ -2192,6 +2248,29 @@ fn draw_crosshair_tooltip(
     visible_range: (u64, u64),
 ) {
     let (visible_earliest, visible_latest) = visible_range;
+
+    // 十字线落在缺口上（前后都有 K 线、这一格没有）：明说是缺口，不借前一根的数（docs/35 §6.3 不插值）
+    if let (PlotData::TimeBased(ts), Some(at)) = (data, at_interval)
+        && let (Some((first, _)), Some((last, _))) = (ts.datapoints.first_key_value(), ts.datapoints.last_key_value())
+        && at > first.as_u64()
+        && at < last.as_u64()
+        && !ts.datapoints.contains_key(&UnixMs::new(at))
+    {
+        let label = "缺口 · 这一根没有数据（不插值）";
+        frame.fill_rectangle(
+            Point::new(8.0, 8.0),
+            Size::new(label.chars().count() as f32 * TEXT_SIZE, 16.0),
+            palette.background.weakest.color.scale_alpha(0.9),
+        );
+        frame.fill_text(canvas::Text {
+            content: label.to_string(),
+            position: Point::new(8.0, 8.0),
+            size: iced::Pixels(crate::style::text_size::BODY),
+            color: crate::ui::pal::warn(),
+            ..canvas::Text::default()
+        });
+        return;
+    }
 
     let kline_opt = match (data, at_interval) {
         (PlotData::TimeBased(timeseries), Some(at_interval)) => {

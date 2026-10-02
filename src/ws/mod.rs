@@ -62,6 +62,7 @@ pub mod once;
 pub mod panel_status;
 pub mod ticker_cache;
 pub mod inspector_props;
+pub mod kline_table;
 pub mod feature_presets;
 pub mod feature_lab_view;
 pub mod flow;

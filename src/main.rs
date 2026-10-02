@@ -175,6 +175,7 @@ fn shortcut(
                 (false, false, "i") => Some(Cmd::ToggleInspector),
                 (false, false, ",") => Some(Cmd::OpenSettings),
                 (true, false, "m") => Some(Cmd::ToggleMaximize),
+                (true, false, "d") => Some(Cmd::ToggleDataTable),
                 (false, true, "t") => Some(Cmd::CycleTheme),
                 (false, true, "d") => Some(Cmd::CycleDensity),
                 // Ctrl Shift 1–5：各组的第一个工作区
@@ -1550,6 +1551,21 @@ impl Flowsurface {
                 }
             }
             Cmd::ToggleSidebar => self.shell.sidebar_hidden = !self.shell.sidebar_hidden,
+            Cmd::ToggleDataTable => {
+                let dashboard = self.active_dashboard_mut();
+                let focus = dashboard.focus.filter(|(w, _)| *w == main).map(|(_, p)| p);
+                let note = match focus.and_then(|p| dashboard.panes.get_mut(p)) {
+                    Some(st) if matches!(st.content, dashboard::pane::Content::Kline { .. }) => {
+                        st.table_view = !st.table_view;
+                        None
+                    }
+                    Some(_) => Some("这个面板没有数据表视图：目前只给 K 线；盘口与逐笔本身就是表格"),
+                    None => Some("先聚焦一个 K 线面板（点一下或按 F6）"),
+                };
+                if let Some(n) = note {
+                    self.notifications.push(Toast::info(n.to_string()));
+                }
+            }
             Cmd::OpenUrl(url) => return self.update(Message::OpenUrlRequested(url.into())),
             Cmd::ZoomIn | Cmd::ZoomOut | Cmd::ZoomReset => {
                 let cur: f32 = self.ui_scale_factor.into();

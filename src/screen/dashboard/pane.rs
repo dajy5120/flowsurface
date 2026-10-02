@@ -140,6 +140,8 @@ pub enum Event {
     LinkBadgeClicked,
     /// 冻结 / 解冻这个面板（停止重画，docs/35 §8）
     ToggleFreeze,
+    /// K 线数据表视图里的网格交互
+    KlineTable(crate::ui::grid::GridMsg),
 }
 
 pub struct State {
@@ -154,6 +156,8 @@ pub struct State {
     /// 冻结（docs/35 §8，UPDS V5 §30）：停止重画，便于阅读和截图。数据照收，解冻后追上。
     /// 不存盘——重启后总是不冻结
     pub frozen: bool,
+    /// 数据表视图（Ctrl Shift D，docs/35 §6.3）：K 线面板显示成表格。不存盘
+    pub table_view: bool,
 }
 
 impl State {
@@ -1312,9 +1316,19 @@ impl State {
                         }
                     }
 
-                    let base = chart::view(chart, indicators, timezone).map(move |message| {
-                        Message::PaneEvent(id, Event::ChartInteraction(message))
-                    });
+                    // Ctrl Shift D：图 ↔ 数据表（docs/35 §6.3）
+                    let base = if self.table_view {
+                        crate::ws::kline_table::view(
+                            self.id,
+                            &chart.recent_klines(5000),
+                            self.stream_pair().map(|ti| ti.min_ticksize),
+                        )
+                        .map(move |m| Message::PaneEvent(id, Event::KlineTable(m)))
+                    } else {
+                        chart::view(chart, indicators, timezone).map(move |message| {
+                            Message::PaneEvent(id, Event::ChartInteraction(message))
+                        })
+                    };
                     let settings_modal = || {
                         kline_cfg_view(
                             chart.study_configurator(),
@@ -1629,6 +1643,7 @@ impl State {
             Event::OrdersInteraction(m) => crate::ws::orders_view::handle(m),
             Event::LinkBadgeClicked => crate::ws::provenance::on_link_click(),
             Event::ToggleFreeze => self.frozen = !self.frozen,
+            Event::KlineTable(m) => crate::ws::kline_table::handle(self.id, m),
             Event::FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg::Source(m)) => {
                 // 特征数据源：选择 / 开始 / 停止回放。换了图表流就请上层清图。
                 if crate::ws::feature_source::handle(m) {
@@ -2360,6 +2375,7 @@ impl Default for State {
             status: Status::Ready,
             link_group: None,
             frozen: false,
+            table_view: false,
         }
     }
 }
