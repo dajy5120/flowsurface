@@ -4,13 +4,17 @@ use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Color, Element, Length};
 
 use super::procs::{self, Row};
+use crate::ui::grid::{self, Cell, Column, GridMsg, GridState};
+use crate::ui::widgets::Tone;
 
 /// 停掉即**永久数据缺口**的服务（关窗口会停掉它们）。
 /// 其余守护停了只是停更，重启就补回来。
 const IRREVERSIBLE: [&str; 2] = ["recorder", "maker-shadow"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ProcsMsg {
+    /// 第 n 张表的网格交互（0 常驻守护 / 1 按点触发 / 2 依赖；ui::grid，docs/35 §16.13 第 5 项）
+    Grid(u8, GridMsg),
     /// `(条目 key, systemctl 动作)`。
     Act(String, &'static str),
     Refresh,
@@ -36,8 +40,100 @@ fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, ProcsMsg>
         .into()
 }
 
+/// 常驻守护表里两个操作列的列号（handle 按它认是哪个操作）
+const ACT_TOGGLE: usize = 5;
+const ACT_RESTART: usize = 6;
+/// 按点触发表的操作列
+const TIMER_ACT: usize = 3;
+
+fn daemon_cols() -> Vec<Column> {
+    vec![
+        Column::text("服务", 130.0).key().pinned(),
+        Column::text("干什么", 360.0),
+        Column::text("状态", 110.0).groupable(),
+        Column::num("已运行", None, 96.0),
+        Column::num("重启", None, 56.0),
+        Column { sort: crate::ui::grid::SortKind::None, ..Column::text("启停", 72.0) },
+        Column { sort: crate::ui::grid::SortKind::None, ..Column::text("重启", 72.0) },
+        Column::text("停了会怎样", 360.0),
+        Column::text("提醒", 420.0),
+    ]
+}
+
+fn timer_cols() -> Vec<Column> {
+    vec![
+        Column::text("任务", 130.0).key(),
+        Column::text("干什么", 360.0),
+        Column::text("下次触发", 172.0),
+        Column { sort: crate::ui::grid::SortKind::None, ..Column::text("操作", 72.0) },
+    ]
+}
+
+fn dep_cols() -> Vec<Column> {
+    vec![
+        Column::text("依赖", 140.0).key(),
+        Column::text("在本项目里干什么", 360.0),
+        Column::text("当前", 172.0),
+        Column::text("最新", 130.0),
+        Column { sort: crate::ui::grid::SortKind::None, ..Column::text("操作", 72.0) },
+        Column::text("备注", 360.0),
+    ]
+}
+
+thread_local! {
+    static GRIDS: std::cell::RefCell<std::collections::HashMap<u8, GridState>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn cols_of(n: u8) -> Vec<Column> {
+    match n {
+        0 => daemon_cols(),
+        1 => timer_cols(),
+        _ => dep_cols(),
+    }
+}
+
+fn grid_update(n: u8, m: GridMsg) {
+    let cols = cols_of(n);
+    GRIDS.with(|g| g.borrow_mut().entry(n).or_insert_with(|| GridState::new(&cols)).update(m, &cols, &[]));
+}
+
+/// 一张按行数定高的网格（外层是滚动容器）。
+fn ptable<'a>(n: u8, cols: Vec<Column>, rows: Vec<Vec<Cell>>) -> Element<'a, ProcsMsg> {
+    let k = rows.len();
+    let st = GRIDS.with(|g| {
+        let mut g = g.borrow_mut();
+        let st = g.entry(n).or_insert_with(|| GridState::new(&cols));
+        st.resort(&cols, &rows);
+        st.clone()
+    });
+    let h = crate::ui::metrics::panel_header() + crate::ui::metrics::row_height() * (k.max(1) as f32 + 1.0) + 60.0;
+    container(grid::view(cols, rows, st, None, move |m| ProcsMsg::Grid(n, m))).height(Length::Fixed(h)).into()
+}
+
 pub fn handle(m: ProcsMsg) -> String {
     match m {
+        // 操作格：按同样的规则重新取一次清单，用行号找到是哪个服务（与 pane_body 建表顺序一致）
+        ProcsMsg::Grid(n, GridMsg::Action(row, col)) => {
+            if n == 2 {
+                return match super::deps::rows().get(row) {
+                    Some(d) => handle(ProcsMsg::UpdateDep(d.key.clone())),
+                    None => String::new(),
+                };
+            }
+            let rows = procs::rows();
+            let list: Vec<&Row> = rows.iter().filter(|r| r.timer == (n == 1)).collect();
+            let Some(r) = list.get(row) else { return String::new() };
+            let act = match (n, col) {
+                (0, ACT_TOGGLE) | (1, TIMER_ACT) => if r.st.active { "stop" } else { "start" },
+                (0, ACT_RESTART) => "restart",
+                _ => return String::new(),
+            };
+            procs::action(&r.key, act)
+        }
+        ProcsMsg::Grid(n, g) => {
+            grid_update(n, g);
+            String::new()
+        }
         ProcsMsg::Act(k, a) => procs::action(&k, a),
         ProcsMsg::Refresh => {
             procs::waker().request();
@@ -116,75 +212,37 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
         body = body.push(text(note.to_string()).size(crate::ui::text::s_small()).color(crate::ui::pal::warn()));
     }
 
-    // ── 表头 ──
-    let mut h = row![].spacing(4);
-    for (t, w, n) in [
-        ("服务", 130.0, false),
-        ("干什么", 360.0, false),
-        ("状态", 76.0, false),
-        ("已运行", 96.0, true),
-        ("重启", 56.0, true),
-        ("操作", 150.0, false),
-    ] {
-        h = h.push(cell(t.into(), w, crate::ui::pal::dim(), n));
-    }
-    body = body.push(h);
-
-    for r in &daemons {
-        let (st_txt, st_col) = if r.st.active {
-            ("运行中".to_string(), crate::ui::pal::ok())
-        } else if r.st.ever_ran() && !r.st.last_ok() {
-            (format!("停止（{}）", r.st.last_result), crate::ui::pal::warn())
-        } else {
-            ("已停止".to_string(), crate::ui::pal::dim())
-        };
-        let mut line = row![].spacing(4).align_y(iced::Alignment::Center);
-        line = line.push(cell(r.label.clone(), 130.0, crate::ui::pal::txt(), false));
-        line = line.push(cell(r.what.clone(), 360.0, crate::ui::pal::dim(), false));
-        line = line.push(cell(st_txt, 76.0, st_col, false));
-        line = line.push(cell(
-            if r.st.active { super::svcctl::fmt_dur(r.st.uptime_secs) } else { "—".into() },
-            96.0,
-            crate::ui::pal::txt(),
-            true,
-        ));
-        // 重启次数不为 0 就标出来：它说明这个服务在反复爬起来，
-        // 而「现在是运行中」会把这件事盖住
-        line = line.push(cell(
-            r.st.restarts.to_string(),
-            56.0,
-            if r.st.restarts > 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() },
-            true,
-        ));
-        let acts = row![
-            chip(if r.st.active { "停止" } else { "启动" },
-                 ProcsMsg::Act(r.key.clone(), if r.st.active { "stop" } else { "start" })),
-            chip("重启", ProcsMsg::Act(r.key.clone(), "restart")),
-        ]
-        .spacing(4);
-        line = line.push(container(acts).width(Length::Fixed(150.0)));
-        body = body.push(line);
-        // 停了会怎样：只在已停止时显示。运行时挂着一行警告是噪音，
-        // 停了却不说会让人以为「进程没了但功能还在」
-        if !r.st.active {
-            body = body.push(
-                container(text(format!("↳ {}", r.if_stopped)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()))
-                    .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 134.0 }),
-            );
-        }
-        // 这两个停掉是**永久缺口**，不是停更。关窗口就会停，所以要一直显示，
-        // 不能像 if_stopped 那样只在已停时才说——那时候已经晚了。
-        if IRREVERSIBLE.contains(&r.key.as_str()) {
-            body = body.push(
-                container(
-                    text("⚠ 停掉的时间就是数据的缺口，事后补不回来（关闭本窗口会停掉它）")
-                        .size(crate::ui::text::s_meta())
-                        .color(crate::ui::pal::warn()),
-                )
-                .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 134.0 }),
-            );
-        }
-    }
+    // ── 常驻守护（ui::grid）：原来挂在行下面的「停了会怎样」「永久缺口」提醒变成两列，一字不少 ──
+    let rows_d: Vec<Vec<Cell>> = daemons
+        .iter()
+        .map(|r| {
+            let (st_txt, st_col) = if r.st.active {
+                ("运行中".to_string(), crate::ui::pal::ok())
+            } else if r.st.ever_ran() && !r.st.last_ok() {
+                (format!("停止（{}）", r.st.last_result), crate::ui::pal::warn())
+            } else {
+                ("已停止".to_string(), crate::ui::pal::dim())
+            };
+            vec![
+                Cell::Text(r.label.clone()),
+                Cell::Colored(r.what.clone(), crate::ui::pal::dim()),
+                Cell::Colored(st_txt, st_col),
+                if r.st.active { Cell::num(r.st.uptime_secs as f64, super::svcctl::fmt_dur(r.st.uptime_secs)) } else { Cell::Absent(crate::ui::fmt::Absence::NotApplicable) },
+                // 重启次数不为 0 就标出来：它说明这个服务在反复爬起来，而「现在是运行中」会把这件事盖住
+                Cell::Colored(r.st.restarts.to_string(), if r.st.restarts > 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
+                Cell::Action(if r.st.active { "停止".into() } else { "启动".into() }, Tone::Neutral),
+                Cell::Action("重启".into(), Tone::Neutral),
+                // 停了会怎样：只在已停止时写（运行时挂着是噪音，停了却不说会以为功能还在）
+                Cell::Colored(if r.st.active { String::new() } else { r.if_stopped.clone() }, crate::ui::pal::dim()),
+                // 这两个停掉是永久缺口：一直显示（停了才说就晚了）
+                Cell::Colored(
+                    if IRREVERSIBLE.contains(&r.key.as_str()) { "⚠ 停掉的时间就是数据的缺口，事后补不回来（关闭本窗口会停掉它）".into() } else { String::new() },
+                    crate::ui::pal::warn(),
+                ),
+            ]
+        })
+        .collect();
+    body = body.push(ptable(0, daemon_cols(), rows_d));
 
     // ── 按点触发的任务 ──
     if !timers.is_empty() {
@@ -198,30 +256,19 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
             .size(crate::ui::text::s_meta())
             .color(crate::ui::pal::dim()),
         );
-        let mut h = row![].spacing(4);
-        for (t, w, n) in [("任务", 130.0, false), ("干什么", 360.0, false), ("下次触发", 172.0, false), ("操作", 150.0, false)] {
-            h = h.push(cell(t.into(), w, crate::ui::pal::dim(), n));
-        }
-        body = body.push(h);
-        for r in &timers {
-            let mut line = row![].spacing(4).align_y(iced::Alignment::Center);
-            line = line.push(cell(r.label.clone(), 130.0, crate::ui::pal::txt(), false));
-            line = line.push(cell(r.what.clone(), 360.0, crate::ui::pal::dim(), false));
-            // 「下次触发」是这一段的核心：只看「没在跑」会得出「已经全停了」的错误结论
-            line = line.push(cell(
-                if r.st.active { r.next.clone() } else { "已停用".into() },
-                172.0,
-                if r.st.active { crate::ui::pal::warn() } else { crate::ui::pal::dim() },
-                false,
-            ));
-            let acts = row![chip(
-                if r.st.active { "停用" } else { "启用" },
-                ProcsMsg::Act(r.key.clone(), if r.st.active { "stop" } else { "start" })
-            )]
-            .spacing(4);
-            line = line.push(container(acts).width(Length::Fixed(150.0)));
-            body = body.push(line);
-        }
+        let rows_t: Vec<Vec<Cell>> = timers
+            .iter()
+            .map(|r| {
+                vec![
+                    Cell::Text(r.label.clone()),
+                    Cell::Colored(r.what.clone(), crate::ui::pal::dim()),
+                    // 「下次触发」是这一段的核心：只看「没在跑」会得出「已经全停了」的错误结论
+                    Cell::Colored(if r.st.active { r.next.clone() } else { "已停用".into() }, if r.st.active { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
+                    Cell::Action(if r.st.active { "停用".into() } else { "启用".into() }, Tone::Neutral),
+                ]
+            })
+            .collect();
+        body = body.push(ptable(1, timer_cols(), rows_t));
     }
 
     // ── 依赖版本 ──
@@ -257,55 +304,24 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
     if !dnote.is_empty() {
         body = body.push(text(dnote).size(crate::ui::text::s_small()).color(crate::ui::pal::warn()));
     }
-    let mut dh = row![].spacing(4);
-    for (t, w, n) in [
-        ("依赖", 130.0, false),
-        ("在本项目里干什么", 360.0, false),
-        ("当前", 172.0, false),
-        ("最新", 130.0, false),
-        ("操作", 110.0, false),
-    ] {
-        dh = dh.push(cell(t.into(), w, crate::ui::pal::dim(), n));
-    }
-    body = body.push(dh);
-    for r in &drows {
-        let mut line = row![].spacing(4).align_y(iced::Alignment::Center);
-        line = line.push(cell(
-            if r.core { format!("★ {}", r.label) } else { r.label.clone() },
-            130.0,
-            if r.core { crate::ui::pal::ok() } else { crate::ui::pal::txt() },
-            false,
-        ));
-        line = line.push(cell(r.what.clone(), 360.0, crate::ui::pal::dim(), false));
-        line = line.push(cell(
-            if r.current.is_empty() { "读不到".into() } else { r.current.clone() },
-            172.0,
-            if r.current.is_empty() { crate::ui::pal::warn() } else { crate::ui::pal::txt() },
-            false,
-        ));
-        // 「未查」和「已最新」必须看得出区别——混在一起是这一页最容易骗人的地方
-        line = line.push(cell(
-            if !r.checked() { "未查".into() } else { r.latest.clone() },
-            130.0,
-            if r.outdated() {
-                crate::ui::pal::warn()
-            } else if r.checked() {
-                crate::ui::pal::ok()
-            } else {
-                crate::ui::pal::dim()
-            },
-            false,
-        ));
-        line = line.push(container(chip("更新", ProcsMsg::UpdateDep(r.key.clone())))
-            .width(Length::Fixed(110.0)));
-        body = body.push(line);
-        if !r.note.is_empty() {
-            body = body.push(
-                container(text(format!("↳ {}", r.note)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()))
-                    .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 134.0 }),
-            );
-        }
-    }
+    let rows_dep: Vec<Vec<Cell>> = drows
+        .iter()
+        .map(|r| {
+            vec![
+                Cell::Colored(if r.core { format!("★ {}", r.label) } else { r.label.clone() }, if r.core { crate::ui::pal::ok() } else { crate::ui::pal::txt() }),
+                Cell::Colored(r.what.clone(), crate::ui::pal::dim()),
+                Cell::Colored(if r.current.is_empty() { "读不到".into() } else { r.current.clone() }, if r.current.is_empty() { crate::ui::pal::warn() } else { crate::ui::pal::txt() }),
+                // 「未查」和「已最新」必须看得出区别——混在一起是这一页最容易骗人的地方
+                Cell::Colored(
+                    if !r.checked() { "未查".into() } else { r.latest.clone() },
+                    if r.outdated() { crate::ui::pal::warn() } else if r.checked() { crate::ui::pal::ok() } else { crate::ui::pal::dim() },
+                ),
+                Cell::Action("更新".into(), Tone::Neutral),
+                Cell::Colored(r.note.clone(), crate::ui::pal::dim()),
+            ]
+        })
+        .collect();
+    body = body.push(ptable(2, dep_cols(), rows_dep));
     body = body.push(
         text(
             "更新的代价按类型不同：pip 包更新完**用到它的守护要重启**；Rust 依赖\
@@ -323,6 +339,14 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 操作列号与表头对得上() {
+        // handle 靠列号认是哪个操作；列表改了顺序而常量没跟着改，点「重启」会变成「停止」
+        assert_eq!(daemon_cols()[ACT_TOGGLE].title, "启停");
+        assert_eq!(daemon_cols()[ACT_RESTART].title, "重启");
+        assert_eq!(timer_cols()[TIMER_ACT].title, "操作");
+    }
 
     #[test]
     fn the_button_offers_the_action_that_makes_sense_now() {

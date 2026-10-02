@@ -198,6 +198,9 @@ pub enum Cell {
     Badge(String, Tone),
     /// 带颜色的文字（涨跌之类）。**同时要有非颜色的区分**（符号或正负号）
     Colored(String, Color),
+    /// 操作按钮（启动 / 停止 / 更新…）：点了发 `GridMsg::Action(行, 列)`，由宿主决定做什么。
+    /// 文字为空 = 这一行没有这个操作（不画按钮）
+    Action(String, Tone),
 }
 
 impl Cell {
@@ -207,7 +210,7 @@ impl Cell {
 
     fn sort_text(&self) -> Option<&str> {
         match self {
-            Self::Text(s) | Self::Id(s) | Self::Colored(s, _) | Self::Badge(s, _) => Some(s),
+            Self::Text(s) | Self::Id(s) | Self::Colored(s, _) | Self::Badge(s, _) | Self::Action(s, _) => Some(s),
             Self::Num { s, .. } => Some(s),
             Self::Absent(_) => None,
         }
@@ -234,7 +237,7 @@ impl Cell {
     /// 复制为 TSV 时的文字（完整值，不省略）。
     fn plain(&self) -> String {
         match self {
-            Self::Text(s) | Self::Id(s) | Self::Colored(s, _) | Self::Badge(s, _) => s.clone(),
+            Self::Text(s) | Self::Id(s) | Self::Colored(s, _) | Self::Badge(s, _) | Self::Action(s, _) => s.clone(),
             Self::Num { v: Some(v), .. } => format!("{v}"),
             Self::Num { v: None, s, .. } => s.clone(),
             Self::Absent(a) => a.glyph().to_string(),
@@ -288,6 +291,8 @@ pub enum GridMsg {
     /// 菜单项：全选 / 取消选中
     SelectAll,
     ClearSelection,
+    /// 点了操作格（数据行, 列）——网格不处理，交给宿主
+    Action(usize, usize),
 }
 
 /// 网格复制出来、等主循环写进剪贴板的文字（网格自己发不了 iced 的剪贴板 Task）。
@@ -677,6 +682,7 @@ impl GridState {
                     self.drag = Some((i, None, *w));
                 }
             }
+            GridMsg::Action(..) => {}
             GridMsg::RowMenu(i) => self.menu = Some((i, self.cursor)),
             GridMsg::CloseMenu => self.menu = None,
             GridMsg::CopyRow(i) => {
@@ -871,6 +877,8 @@ fn cell_view<'a, M: 'a>(cell: &Cell, align: Align, w: f32) -> Element<'a, M> {
         Cell::Absent(a) => widgets::absent(*a).into(),
         Cell::Badge(s, tone) => widgets::badge(s.clone(), *tone),
         Cell::Colored(s, fg) => t::numeric(s.clone()).color(*fg).into(),
+        // 操作格在行里单独画（要发消息），这里不会走到；给个空白兜底
+        Cell::Action(..) => Space::new().into(),
     };
     container(body)
         .width(Length::Fixed(w))
@@ -1044,6 +1052,28 @@ where
             let rkey = key_col.and_then(|k| rows[di].get(k)).map(Cell::plain);
             for &ci in &vis {
                 let align = aligns[ci];
+                // 操作格：小按钮，点了把（行, 列）交给宿主
+                if let Some(Cell::Action(label, tone)) = rows[di].get(ci) {
+                    let on_a = on_r.clone();
+                    let tone = *tone;
+                    let btn: Element<'a, M> = if label.is_empty() {
+                        Space::new().width(Length::Fixed(widths[ci])).into()
+                    } else {
+                        container(
+                            button(t::caption(label.clone()).color(tone.color()))
+                                .padding(Padding::from([0.0, metrics::space(2)]))
+                                .on_press(on_a(GridMsg::Action(di, ci)))
+                                .style(|th, s| widgets::button_style(widgets::Kind::Standard, th, s)),
+                        )
+                        .width(Length::Fixed(widths[ci]))
+                        .padding(Padding::from([0.0, metrics::space(1)]))
+                        .align_y(Alignment::Center)
+                        .height(Length::Fill)
+                        .into()
+                    };
+                    r = r.push(btn);
+                    continue;
+                }
                 let cell = cell_view(rows[di].get(ci).unwrap_or(&ABSENT), align, widths[ci]);
                 // 变化的格闪一下（120ms，UPDS V5 §30）
                 if rkey.as_deref().is_some_and(|k| st.flashing(k, ci)) {
