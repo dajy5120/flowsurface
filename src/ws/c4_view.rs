@@ -8,6 +8,7 @@
 //! → C4 进度（合格日 n/7，判定规则 docs/preregister-c4-live.md）。
 
 use iced::widget::{button, column, container, row, scrollable, text};
+use crate::ui::grid::{self, Cell, Column, GridMsg, GridState};
 use iced::{Color, Element, Length};
 
 use super::c4::C4Msg;
@@ -27,6 +28,53 @@ fn wr_s(w: Option<f64>) -> String {
 }
 fn bp_s(b: Option<f64>) -> String {
     b.map(|x| format!("{x:+.2}")).unwrap_or_else(|| "—".into())
+}
+
+thread_local! {
+    static DAYS: std::cell::RefCell<Option<GridState>> = const { std::cell::RefCell::new(None) };
+    static VS: std::cell::RefCell<Option<GridState>> = const { std::cell::RefCell::new(None) };
+}
+
+fn day_cols() -> Vec<Column> {
+    vec![
+        Column::text("日", 60.0).key(),
+        Column::num("胜率", None, 60.0),
+        Column::num("费后", Some("U"), 80.0),
+        Column::num("bp/回合", None, 70.0),
+        Column::num("在线", Some("%"), 60.0),
+        Column::num("重连", None, 50.0),
+        Column::text("残段", 44.0).groupable(),
+    ]
+}
+
+fn vs_cols() -> Vec<Column> {
+    vec![
+        Column::text("日", 60.0).key(),
+        Column::num("活体", Some("bp/回合"), 100.0),
+        Column::num("重放", Some("bp/回合"), 100.0),
+        Column::num("Δ 活−放", None, 80.0),
+        Column::text("证伪", 80.0).groupable(),
+    ]
+}
+
+/// 两张表的网格交互（经 C4Msg::DaysGrid / VsGrid 回到这里）。
+pub fn grid_update(vs: bool, m: GridMsg) {
+    let (cell, cols) = if vs { (&VS, vs_cols()) } else { (&DAYS, day_cols()) };
+    cell.with(|g| g.borrow_mut().get_or_insert_with(|| GridState::new(&cols)).update(m, &cols, &[]));
+}
+
+/// 一张固定高度的网格（外层是滚动容器）。
+fn table<'a>(vs: bool, cols: Vec<Column>, rows: Vec<Vec<Cell>>, wrap: fn(GridMsg) -> C4Msg) -> Element<'a, C4Msg> {
+    let cell = if vs { &VS } else { &DAYS };
+    let n = rows.len();
+    let state = cell.with(|g| {
+        let mut g = g.borrow_mut();
+        let s = g.get_or_insert_with(|| GridState::new(&cols));
+        s.resort(&cols, &rows);
+        s.clone()
+    });
+    let h = crate::ui::metrics::panel_header() + crate::ui::metrics::row_height() * (n.min(14) as f32 + 1.0) + 60.0;
+    container(grid::view(cols, rows, state, None, wrap)).height(Length::Fixed(h)).into()
 }
 
 pub fn pane_body<'a>() -> Element<'a, C4Msg> {
@@ -121,61 +169,48 @@ pub fn pane_body<'a>() -> Element<'a, C4Msg> {
     if st.days.is_empty() {
         body = body.push(text("（暂无——首个整日于 UTC 午夜自动落账）").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
     } else {
-        body = body.push(
-            row![
-                cell("日".into(), 50.0, crate::ui::pal::dim()),
-                cell("胜率".into(), 50.0, crate::ui::pal::dim()),
-                cell("费后U".into(), 70.0, crate::ui::pal::dim()),
-                cell("bp/回合".into(), 60.0, crate::ui::pal::dim()),
-                cell("在线".into(), 50.0, crate::ui::pal::dim()),
-                cell("重连".into(), 40.0, crate::ui::pal::dim()),
-                cell("".into(), 30.0, crate::ui::pal::dim()),
-            ]
-            .spacing(4),
-        );
-        for d in &st.days {
-            let c = if d.partial { crate::ui::pal::dim() } else { crate::ui::pal::txt() };
-            let day_md = if d.day.len() >= 10 { d.day[5..].to_string() } else { d.day.clone() };
-            body = body.push(
-                row![
-                    cell(day_md, 50.0, c),
-                    cell(wr_s(d.win_rate), 50.0, c),
-                    cell(crate::ui::fmt::sim(format!("{:+.2}", d.pnl)), 70.0, sign_c(d.pnl)),
-                    cell(bp_s(d.bp), 60.0, d.bp.map(sign_c).unwrap_or(crate::ui::pal::dim())),
-                    cell(format!("{:.0}%", d.uptime_secs / 864.0), 50.0, c),
-                    cell(format!("{}", d.reconnects), 40.0, crate::ui::pal::dim()),
-                    cell(if d.partial { "残".into() } else { "".into() }, 30.0, crate::ui::pal::dim()),
+        // 换成 ui::grid（docs/35 §16.13 第 5 项）：可排序、调宽、多选合计、右键复制
+        let cols = day_cols();
+        let rows: Vec<Vec<Cell>> = st
+            .days
+            .iter()
+            .map(|d| {
+                let day_md = if d.day.len() >= 10 { d.day[5..].to_string() } else { d.day.clone() };
+                let c = if d.partial { crate::ui::pal::dim() } else { crate::ui::pal::txt() };
+                vec![
+                    Cell::Colored(day_md, c),
+                    Cell::Colored(wr_s(d.win_rate), c),
+                    Cell::Colored(crate::ui::fmt::sim(format!("{:+.2}", d.pnl)), sign_c(d.pnl)),
+                    Cell::Colored(bp_s(d.bp), d.bp.map(sign_c).unwrap_or(crate::ui::pal::dim())),
+                    Cell::Colored(format!("{:.0}%", d.uptime_secs / 864.0), c),
+                    Cell::num(d.reconnects as f64, d.reconnects.to_string()),
+                    Cell::Colored(if d.partial { "残".into() } else { String::new() }, crate::ui::pal::dim()),
                 ]
-                .spacing(4),
-            );
-        }
+            })
+            .collect();
+        body = body.push(table(false, cols, rows, C4Msg::DaysGrid));
     }
 
     // ── 活体 vs 重放（同日对照，证伪监测） ──
     if !st.vs.is_empty() {
         body = body.push(sec("活体 vs 重放（Δ=活体−重放 bp/回合）"));
-        for v in &st.vs {
-            let day_md = if v.day.len() >= 10 { v.day[5..].to_string() } else { v.day.clone() };
-            let dlt = v.live_bp.map(|l| l - v.replay_bp);
-            body = body.push(
-                row![
-                    cell(day_md, 50.0, crate::ui::pal::txt()),
-                    cell(format!("活 {}", bp_s(v.live_bp)), 80.0, crate::ui::pal::txt()),
-                    cell(format!("放 {:+.2}", v.replay_bp), 80.0, crate::ui::pal::txt()),
-                    cell(
-                        dlt.map(|d| format!("Δ {d:+.2}")).unwrap_or_else(|| "Δ —".into()),
-                        70.0,
-                        dlt.map(sign_c).unwrap_or(crate::ui::pal::dim()),
-                    ),
-                    cell(
-                        if v.falsify { "⚠ 证伪旗".into() } else { "".into() },
-                        70.0,
-                        crate::ui::pal::down(),
-                    ),
+        let cols = vs_cols();
+        let rows: Vec<Vec<Cell>> = st
+            .vs
+            .iter()
+            .map(|v| {
+                let day_md = if v.day.len() >= 10 { v.day[5..].to_string() } else { v.day.clone() };
+                let dlt = v.live_bp.map(|l| l - v.replay_bp);
+                vec![
+                    Cell::Text(day_md),
+                    Cell::Text(bp_s(v.live_bp)),
+                    Cell::Text(format!("{:+.2}", v.replay_bp)),
+                    Cell::Colored(dlt.map(|d| format!("{d:+.2}")).unwrap_or_else(|| "—".into()), dlt.map(sign_c).unwrap_or(crate::ui::pal::dim())),
+                    Cell::Colored(if v.falsify { "⚠ 证伪旗".into() } else { String::new() }, crate::ui::pal::down()),
                 ]
-                .spacing(4),
-            );
-        }
+            })
+            .collect();
+        body = body.push(table(true, cols, rows, C4Msg::VsGrid));
     }
 
     // ── C4 进度（preregister-c4-live：7 合格日 · 非残段 · 在线≥80%） ──

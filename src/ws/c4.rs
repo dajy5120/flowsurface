@@ -7,13 +7,16 @@
 //! 操作反馈存全局，由 view 读出显示。
 
 /// C4 面板的交互消息。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum C4Msg {
     StartShadow,
     StopShadow,
     RestartShadow,
     /// 手动刷新：叫醒 poller 立刻取一次状态（不必等下一轮 10s）。
     Refresh,
+    /// 影子日表 / 活体 vs 重放表的网格交互（ui::grid，docs/35 §16.13 第 5 项）
+    DaysGrid(crate::ui::grid::GridMsg),
+    VsGrid(crate::ui::grid::GridMsg),
 }
 
 static ACTION_MSG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
@@ -31,6 +34,14 @@ pub fn handle(msg: C4Msg) {
         C4Msg::Refresh => {
             ro::request_refresh();
             String::new() // 刷新无需反馈文字，时间戳自己会跳
+        }
+        C4Msg::DaysGrid(g) => {
+            super::c4_view::grid_update(false, g);
+            return;
+        }
+        C4Msg::VsGrid(g) => {
+            super::c4_view::grid_update(true, g);
+            return;
         }
     };
     if let Ok(mut g) = ACTION_MSG.lock() {
