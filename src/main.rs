@@ -551,10 +551,14 @@ impl Flowsurface {
                 if ui::poll() {
                     self.apply_ui_change();
                 }
+                // 告警常读（状态栏要数新命中）：每 2 秒只看一次修改时间，变了才重读
+                self.shell.alerts.refresh();
+                if self.shell.bottom && self.shell.bottom_tab == ui::shell::BottomTab::Alerts {
+                    self.shell.alerts.mark_seen();
+                }
                 // 底部面板开着才读日志尾巴（每 2 秒一次）
                 if self.shell.bottom {
                     self.shell.log.refresh();
-                    self.shell.alerts.refresh();
                     if self.shell.bottom_tab == ui::shell::BottomTab::Notices {
                         self.refresh_notices();
                     }
@@ -1312,11 +1316,16 @@ impl Flowsurface {
         ui::iced_theme()
     }
 
+    /// 窗口标题（docs/35 §5.1 / §9.1 / §9.3）：程序名 — 工作区 · 环境徽标 [· 数值已隐藏]。
+    /// 任务栏、窗口切换器、录屏里都看得见「这个窗口会不会动真钱」与「是不是在演示模式」。
     fn title(&self, _window: window::Id) -> String {
-        if let Some(id) = self.layout_manager.active_layout_id() {
-            format!("Flowsurface [{}]", id.name)
+        let ws = self.layout_manager.active_layout_id().map(|l| l.name.clone()).unwrap_or_default();
+        let env = ws::provenance::badge(ws::workspace::replay_mode()).label;
+        let hidden = if ui::hide_values() { " · ••• 数值已隐藏" } else { "" };
+        if ws.is_empty() {
+            format!("WealthSpring Cockpit · {env}{hidden}")
         } else {
-            "Flowsurface".to_string()
+            format!("WealthSpring Cockpit — {ws} · {env}{hidden}")
         }
     }
 
@@ -1523,6 +1532,7 @@ impl Flowsurface {
                 | ui::command::Cmd::UpDown(_)
                 | ui::command::Cmd::Cvd(_)
                 | ui::command::Cmd::HeatmapScale(_)
+                | ui::command::Cmd::SystemComfortable(_)
         );
         let task = self.run_command_inner(cmd);
         if look {
@@ -1571,6 +1581,7 @@ impl Flowsurface {
             Cmd::UpDown(v) => ui::update(|p| p.up_down = v),
             Cmd::Cvd(v) => ui::update(|p| p.cvd_safe = v),
             Cmd::HideValues(v) => ui::update(|p| p.hide_values = v),
+            Cmd::SystemComfortable(v) => ui::update(|p| p.system_comfortable = v),
             Cmd::HeatmapScale(v) => ui::update(|p| p.heatmap_scale = v.to_string()),
             Cmd::TogglePalette => {
                 if self.shell.palette.take().is_none() {
@@ -1727,7 +1738,31 @@ impl Flowsurface {
             .filter(|(w, _)| *w == self.main_window.id)
             .and_then(|(_, p)| dashboard.panes.get(p))
             .map(|st| st.content.to_string());
+        // 命令栏的数据链路（docs/35 §5.1）：聚焦面板吃行情就取它，否则取第一个吃行情的面板；
+        // 与面板标题上的链路徽标同一份计算（ws::provenance::link）
+        let link_pane = dashboard
+            .focus
+            .filter(|(w, _)| *w == self.main_window.id)
+            .and_then(|(_, p)| dashboard.panes.get(p))
+            .and_then(|st| st.stream_pair())
+            .or_else(|| dashboard.panes.iter().find_map(|(_, st)| st.stream_pair()));
+        let link = link_pane.map(|ti| {
+            let l = ws::provenance::link(
+                ws::workspace::replay_mode(),
+                &ti.ticker.exchange.venue().to_string(),
+                &ti.ticker.display_symbol_and_type().0,
+            );
+            let tone = match l.tone {
+                ws::provenance::LinkTone::Ok => ui::widgets::Tone::Success,
+                ws::provenance::LinkTone::Running => ui::widgets::Tone::Info,
+                ws::provenance::LinkTone::Warn | ws::provenance::LinkTone::Idle => ui::widgets::Tone::Warning,
+                ws::provenance::LinkTone::Bad => ui::widgets::Tone::Danger,
+            };
+            (format!("⇢ {}", l.label), l.detail, tone)
+        });
         ui::shell::Info {
+            alerts_unseen: self.shell.alerts.unseen(),
+            link,
             workspace: self
                 .layout_manager
                 .active_layout_id()
@@ -1756,6 +1791,11 @@ impl Flowsurface {
     fn load_layout(&mut self, layout_uid: uuid::Uuid, main_window: window::Id) -> Task<Message> {
         if let Some(l) = self.layout_manager.layouts.iter().find(|l| l.id.unique == layout_uid) {
             ui::perf::switch_started(&l.id.name);
+            // 工作区缺省密度（docs/35 §5.3）：「系统」组在紧凑下改用舒适
+            let system = ws::workspace::GROUPS.iter().any(|(g, names)| *g == "系统" && names.contains(&l.id.name.as_str()));
+            if ui::set_system_workspace(system) {
+                self.apply_ui_change();
+            }
         }
 
         if let Err(err) = self.layout_manager.set_active_layout(layout_uid) {
@@ -1984,6 +2024,8 @@ impl Flowsurface {
                             ui::widgets::segmented(&[("深色", ui::ThemeId::Dark), ("浅色", ui::ThemeId::Light), ("OLED", ui::ThemeId::OledDark), ("高对比", ui::ThemeId::HighContrast)], &p.theme, move |t| run(Cmd::Theme(t)))),
                         ("密度", "density 紧凑 舒适 宽松 外观", p.density != d.density, "ui.json", Some(run(Cmd::Density(d.density))),
                             ui::widgets::segmented(&[("紧凑", ui::Density::Compact), ("舒适", ui::Density::Comfortable), ("宽松", ui::Density::Spacious)], &p.density, move |v| run(Cmd::Density(v)))),
+                        ("系统组工作区用舒适密度", "density 密度 舒适 资源 新闻 系统", p.system_comfortable != d.system_comfortable, "ui.json", Some(run(Cmd::SystemComfortable(d.system_comfortable))),
+                            ui::widgets::segmented(&[("关", false), ("开", true)], &p.system_comfortable, move |v| run(Cmd::SystemComfortable(v)))),
                         ("涨跌颜色", "绿涨红跌 红涨绿跌 颜色 外观", p.up_down != d.up_down, "ui.json", Some(run(Cmd::UpDown(d.up_down))),
                             ui::widgets::segmented(&[("绿涨红跌", ui::UpDown::International), ("红涨绿跌", ui::UpDown::China)], &p.up_down, move |v| run(Cmd::UpDown(v)))),
                         ("色弱安全配色", "cvd 色盲 颜色 外观", p.cvd_safe != d.cvd_safe, "ui.json", Some(run(Cmd::Cvd(d.cvd_safe))),

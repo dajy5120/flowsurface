@@ -92,8 +92,26 @@ pub fn theme_id() -> ThemeId {
     read(|s| s.prefs.theme)
 }
 
+/// 当前工作区是不是「系统」组（切工作区时设）。
+static SYSTEM_WS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 切工作区时调：记下是不是「系统」组，返回实际密度变了没有（变了要通知图表重排）。
+pub fn set_system_workspace(on: bool) -> bool {
+    let before = density();
+    SYSTEM_WS.store(on, std::sync::atomic::Ordering::Relaxed);
+    density() != before
+}
+
+/// 实际生效的密度：偏好里的密度；「系统」组工作区在紧凑下改用舒适（docs/35 §5.3，可在设置里关）。
 pub fn density() -> Density {
-    read(|s| s.prefs.density)
+    read(|s| {
+        let d = s.prefs.density;
+        if d == Density::Compact && s.prefs.system_comfortable && SYSTEM_WS.load(std::sync::atomic::Ordering::Relaxed) {
+            Density::Comfortable
+        } else {
+            d
+        }
+    })
 }
 
 /// 当前主题的 UPDS 核心语义色。

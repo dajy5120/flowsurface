@@ -25,6 +25,9 @@ pub struct Prefs {
     pub hide_values: bool,
     /// 热图色阶：inferno / viridis / cividis
     pub heatmap_scale: String,
+    /// 「系统」组工作区（资源、新闻）在紧凑密度下改用舒适（docs/35 §5.3：设置 / 仪表盘模式读得多、
+    /// 不挤）。只影响 Cockpit；选了舒适 / 宽松时照选的来
+    pub system_comfortable: bool,
 }
 
 impl Default for Prefs {
@@ -38,6 +41,7 @@ impl Default for Prefs {
             reduce_motion: false,
             hide_values: false,
             heatmap_scale: crate::DEFAULT_HEATMAP_SCALE.to_string(),
+            system_comfortable: true,
         }
     }
 }
@@ -85,6 +89,7 @@ impl Prefs {
                 .filter(|x| ["inferno", "viridis", "cividis"].contains(x))
                 .map(str::to_string)
                 .unwrap_or(d.heatmap_scale),
+            system_comfortable: b("systemComfortable", d.system_comfortable),
         }
     }
 
@@ -98,6 +103,7 @@ impl Prefs {
             "reduceMotion": self.reduce_motion,
             "hideValues": self.hide_values,
             "heatmapScale": self.heatmap_scale,
+            "systemComfortable": self.system_comfortable,
         })
     }
 
@@ -143,6 +149,8 @@ mod tests {
             reduce_motion: true,
             hide_values: true,
             heatmap_scale: "viridis".into(),
+            // 非缺省值，往返才验得出这一项真的写进去了
+            system_comfortable: false,
         };
         assert_eq!(Prefs::from_json(&p.to_json()), p);
     }

@@ -25,6 +25,8 @@ pub enum Cmd {
     UpDown(super::UpDown),
     Cvd(bool),
     HideValues(bool),
+    /// 「系统」组工作区在紧凑下改用舒适（docs/35 §5.3）
+    SystemComfortable(bool),
     HeatmapScale(&'static str),
     TogglePalette,
     ToggleBottom,

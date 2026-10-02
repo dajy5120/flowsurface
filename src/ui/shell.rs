@@ -65,6 +65,7 @@ impl BottomTab {
 /// 一条告警命中（来自新闻守护快照的 `alerts`，新的在前）。
 #[derive(Debug, Clone)]
 pub struct Alert {
+    pub ts_ms: i64,
     pub time: String,
     pub rule: String,
     pub source: String,
@@ -78,6 +79,9 @@ pub struct AlertTail {
     pub items: Vec<Alert>,
     read_at: Option<Instant>,
     mtime: Option<std::time::SystemTime>,
+    /// 看过的最新一条（毫秒）。`None` = 还没读过快照：第一次读到时把已有的都算看过，
+    /// 状态栏只数本次运行里新来的，不把历史告警当成新的
+    seen_ms: Option<i64>,
 }
 
 impl AlertTail {
@@ -95,6 +99,24 @@ impl AlertTail {
         let Ok(t) = std::fs::read_to_string(&p) else { return };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { return };
         self.items = parse_alerts(&v);
+        if self.seen_ms.is_none() {
+            self.mark_seen();
+        }
+    }
+
+    fn newest_ms(&self) -> i64 {
+        self.items.iter().map(|a| a.ts_ms).max().unwrap_or(0)
+    }
+
+    /// 打开「告警」页时调：到目前为止的都算看过。
+    pub fn mark_seen(&mut self) {
+        self.seen_ms = Some(self.newest_ms());
+    }
+
+    /// 上次看过之后新来的条数（状态栏用）。
+    pub fn unseen(&self) -> usize {
+        let seen = self.seen_ms.unwrap_or(i64::MAX);
+        self.items.iter().filter(|a| a.ts_ms > seen).count()
     }
 }
 
@@ -105,6 +127,7 @@ fn parse_alerts(v: &serde_json::Value) -> Vec<Alert> {
         .map(|arr| {
             arr.iter()
                 .map(|a| Alert {
+                    ts_ms: a.get("ts_ms").and_then(serde_json::Value::as_i64).unwrap_or(0),
                     time: a
                         .get("ts_ms")
                         .and_then(serde_json::Value::as_i64)
@@ -323,8 +346,12 @@ pub struct Info {
     pub run: String,
     /// 交易所行情订阅开着吗（网络出口页的开关）
     pub streams_on: bool,
+    /// 当前数据链路（标签, 逐跳详情, 语气）；工作区里没有吃行情的面板时为空
+    pub link: Option<(String, String, super::widgets::Tone)>,
     /// 连不上的行情流（交易所, 原因）；空 = 都好
     pub streams_down: Vec<(String, String)>,
+    /// 上次打开「告警」页之后新命中的告警条数
+    pub alerts_unseen: usize,
     /// 整机网速（下行, 上行）字节/秒
     pub wire: Option<(f64, f64)>,
     /// 本项目对外连接条数
@@ -381,6 +408,10 @@ pub fn command_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
     ]
     .spacing(metrics::space(4))
     .align_y(Alignment::Center);
+    // 当前数据链路：B1/B2/B3 · 数据商 · 标的 · 状态（悬停看逐跳），与面板标题上的链路徽标同源
+    if let Some((label, detail, tone)) = &info.link {
+        left = left.push(chip(label.clone(), tone.color(), detail.clone()));
+    }
     if !info.run.is_empty() {
         left = left.push(t::caption(info.run.clone()));
     }
@@ -461,6 +492,16 @@ pub fn status_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
                 iced::widget::Space::new().into()
             },
             sep(),
+            // 告警（附录 A V6 §49）：上次打开「告警」页之后的新命中；点它打开告警页
+            if info.alerts_unseen > 0 {
+                button(t::metadata(format!("▲ 告警 {} 条新", info.alerts_unseen)).color(color(c.status_warning)))
+                    .padding(0)
+                    .style(|th, st| crate::style::button::transparent(th, st, false))
+                    .on_press(ShellEvent::Run(Cmd::BottomTab(BottomTab::Alerts)))
+                    .into()
+            } else {
+                Element::from(iced::widget::Space::new())
+            },
             button(t::metadata(act)).padding(0).style(|th, st| crate::style::button::transparent(th, st, false)).on_press(ShellEvent::Run(Cmd::BottomTab(BottomTab::Activity))),
             space::horizontal(),
             // 选中计数与合计（任一网格有选中时；合计说明缺口，docs/35 §5.1 / §7.1）
