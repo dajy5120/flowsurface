@@ -830,7 +830,7 @@ impl<M> canvas::Program<M> for TreemapCanvas {
         r: &Renderer,
         _t: &Theme,
         b: Rectangle,
-        _c: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let geo = self.cache.draw(r, b.size(), |frame: &mut Frame| {
             let (w, h) = (frame.width(), frame.height());
@@ -934,7 +934,33 @@ impl<M> canvas::Program<M> for TreemapCanvas {
                 }
             }
         });
-        vec![geo]
+        // 悬停读数（docs/35 §6.3）：放不下标签的小格子原先什么都看不到。光标所在格描边 + 「标的 · 值 · 分组」
+        let mut out = vec![geo];
+        if let Some(p) = cursor.position_in(b) {
+            let members: Vec<Vec<f64>> = self.groups.iter().map(|g| g.tiles.iter().map(|t| t.weight).collect()).collect();
+            'find: for gl in squarify_nested(&members, Rect::new(0.0, 0.0, b.width, b.height), self.header_h) {
+                let g = &self.groups[gl.group_idx];
+                for t in gl.tiles {
+                    let rc = t.rect;
+                    if p.x >= rc.x && p.x <= rc.x + rc.w && p.y >= rc.y && p.y <= rc.y + rc.h {
+                        let d = &g.tiles[t.idx];
+                        let mut hover = Frame::new(r, b.size());
+                        hover.stroke(
+                            &iced::widget::canvas::Path::rectangle(Point::new(rc.x + 0.5, rc.y + 0.5), Size::new((rc.w - 1.0).max(1.0), (rc.h - 1.0).max(1.0))),
+                            iced::widget::canvas::Stroke::default().with_width(1.5).with_color(crate::ui::pal::txt()),
+                        );
+                        let mut lines = vec![format!("{}  {}", d.label, d.value)];
+                        if !g.title.is_empty() {
+                            lines.push(g.title.clone());
+                        }
+                        super::chart_kit::readout_box(&mut hover, &lines, p, Rectangle::new(Point::ORIGIN, b.size()));
+                        out.push(hover.into_geometry());
+                        break 'find;
+                    }
+                }
+            }
+        }
+        out
     }
 }
 

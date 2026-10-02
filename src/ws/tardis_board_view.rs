@@ -242,6 +242,38 @@ impl ChartCanvas {
     }
 }
 
+/// 十字线用的绘图区：与画图时同一套纵轴范围（K 线的价格区不含下方 22% 成交量）。剖面图没有时间轴，不给。
+fn plot_of(ch: &ro::Chart, w: f32, h: f32) -> Option<super::chart_kit::Plot> {
+    let pw = w - ML - MR;
+    let ph = h - MT - MB;
+    if pw <= 4.0 || ph <= 4.0 {
+        return None;
+    }
+    let xr = finite_range(ch.x.iter().copied())?;
+    let (yr, ph) = match ch.kind.as_str() {
+        "profile" => return None,
+        "heatmap" => ((ch.y_lo, ch.y_lo + ch.y_step * ch.n_lv as f64), ph),
+        "candle" => (finite_range(ch.l.iter().chain(ch.h.iter()).copied())?, ph - ph * 0.22 - 4.0),
+        "scatter" => (finite_range(ch.y.iter().copied())?, ph),
+        "bar" => (finite_range(ch.series.iter().flat_map(|s| s.1.iter().copied()).chain(std::iter::once(0.0)))?, ph),
+        _ => (finite_range(ch.series.iter().flat_map(|s| s.1.iter().copied()))?, ph),
+    };
+    (xr.1 > xr.0 && yr.1 > yr.0).then_some(super::chart_kit::Plot { x0: ML, y0: MT, w: pw, h: ph, xr, yr })
+}
+
+/// 十字线附加读数：最近一个时间桶上这张图的各个值。
+fn readout(ch: &ro::Chart, i: usize) -> Vec<String> {
+    let g = |v: &Vec<f64>| v.get(i).copied().filter(|x| x.is_finite()).map_or_else(crate::ui::fmt::missing, fmt_num);
+    let mut out = vec![if ch.x_is_time { fmt_time(ch.x[i]) } else { fmt_num(ch.x[i]) }];
+    match ch.kind.as_str() {
+        "candle" => out.push(format!("开 {}  高 {}  低 {}  收 {}  量 {}", g(&ch.o), g(&ch.h), g(&ch.l), g(&ch.c), g(&ch.v))),
+        "scatter" => out.push(format!("{} {}", if ch.y_label.is_empty() { "Y" } else { &ch.y_label }, g(&ch.y))),
+        "heatmap" => out.push(format!("中价 {}", g(&ch.mid))),
+        _ => out.extend(ch.series.iter().map(|(n, v)| format!("{n} {}", g(v)))),
+    }
+    out
+}
+
 impl<M> canvas::Program<M> for ChartCanvas {
     type State = ();
 
@@ -251,7 +283,7 @@ impl<M> canvas::Program<M> for ChartCanvas {
         r: &Renderer,
         _t: &Theme,
         b: Rectangle,
-        _c: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let _t0 = std::time::Instant::now();
         let geo = self.cache.draw(r, b.size(), |frame: &mut Frame| {
@@ -436,6 +468,8 @@ impl<M> canvas::Program<M> for ChartCanvas {
                 return;
             };
             let sx = |v: f64| ML + pw * (((v - xr.0) / (xr.1 - xr.0)) as f32);
+            // 时间轴上的缺口（docs/35 §6.3）：标出来，折线在缺口处断开，不插值
+            let gap_at = if ch.x_is_time { super::chart_kit::gaps(&ch.x) } else { Vec::new() };
 
             match ch.kind.as_str() {
                 "candle" => {
@@ -572,6 +606,9 @@ impl<M> canvas::Program<M> for ChartCanvas {
                                 pending = None; // 断点：NaN 处断线，不连虚假直线
                                 continue;
                             }
+                            if gap_at.contains(&i) {
+                                pending = None; // 时间缺口同样断开
+                            }
                             let p = Point::new(sx(ch.x[i]), sy(v));
                             if let Some(prev) = pending {
                                 frame.stroke(
@@ -595,6 +632,9 @@ impl<M> canvas::Program<M> for ChartCanvas {
                 }
             }
 
+            if let Some(plot) = plot_of(ch, w, h) {
+                super::chart_kit::gap_bands(frame, &plot, &ch.x, &gap_at);
+            }
             // 播放头竖线：标出「已播到哪」，右侧留白即尚未播放的部分。
             if let Some(head) = self.playhead
                 && ch.x_is_time
@@ -611,7 +651,25 @@ impl<M> canvas::Program<M> for ChartCanvas {
             }
         });
         probe::record(_t0.elapsed().as_nanos() as u64);
-        vec![geo]
+        // 十字线读数（docs/35 §6.3）：两轴读数 + 最近时间桶上这张图的值；不进缓存，跟着光标每帧画
+        let mut out = vec![geo];
+        if let Some(p) = cursor.position_in(b)
+            && let Some(plot) = plot_of(&self.ch, b.width, b.height)
+        {
+            let mut hair = Frame::new(r, b.size());
+            let extra = super::chart_kit::nearest(&self.ch.x, plot.vx(p.x)).map(|i| readout(&self.ch, i)).unwrap_or_default();
+            let (is_time, xspan, yspan) = (self.ch.x_is_time, plot.xr.1 - plot.xr.0, plot.yr.1 - plot.yr.0);
+            super::chart_kit::crosshair(
+                &mut hair,
+                &plot,
+                p,
+                |v| if is_time { fmt_time(v) } else { fmt_tick(v, xspan) },
+                |v| fmt_tick(v, yspan),
+                &extra,
+            );
+            out.push(hair.into_geometry());
+        }
+        out
     }
 }
 

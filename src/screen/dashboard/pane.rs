@@ -142,6 +142,8 @@ pub enum Event {
     ToggleFreeze,
     /// K 线数据表视图里的网格交互
     KlineTable(crate::ui::grid::GridMsg),
+    /// 自绘图（自有数据图、Tardis 历史面板）的数据表视图交互
+    SeriesTable(crate::ui::grid::GridMsg),
     /// 期权面板策略表的网格交互
     OptionsGrid(crate::ui::grid::GridMsg),
     /// 回测结果两张统计表的网格交互（0 = 运行信息，1 = 绩效统计）
@@ -792,7 +794,14 @@ impl State {
             Content::WealthSpring(mode) => {
                 // WealthSpring 读数面板（docs/08）：渲染走 ws::readout 旁路快照，无行情流。
                 // 方案 2：按 pane 的三态过滤（Live/Backtest 仅在对应态显读数）。
-                let base = crate::ws::view::pane_body(*mode);
+                // 自有数据图在数据表视图下（Ctrl Shift D，docs/35 §6.3）显示成表
+                let base = if self.table_view && *mode == data::layout::pane::WsPaneMode::SelfChart {
+                    let pid = self.id;
+                    crate::ws::series_table::view(pid, &crate::ws::series_table::from_selfdata())
+                        .map(move |m| Message::PaneEvent(id, Event::SeriesTable(m)))
+                } else {
+                    crate::ws::view::pane_body(*mode)
+                };
                 self.compose_stack_view(
                     base,
                     id,
@@ -993,8 +1002,16 @@ impl State {
             }
             Content::TardisBoard(tb) => {
                 // Tardis 历史面板（docs/20 §9）：源→类型→图，全自绘、零交易所流。
-                let base = crate::ws::tardis_board_view::pane_body(tb, crate::ws::inspector_props::hosted(id))
-                    .map(move |m| Message::PaneEvent(id, Event::TardisBoardInteraction(m)));
+                // 数据表视图（Ctrl Shift D）：当前那张主图的数据换成表；没有可列的图时照常显示面板
+                let table = self.table_view.then(crate::ws::series_table::from_tardis).flatten();
+                let base = match table {
+                    Some(t) => {
+                        let pid = self.id;
+                        crate::ws::series_table::view(pid, &t).map(move |m| Message::PaneEvent(id, Event::SeriesTable(m)))
+                    }
+                    None => crate::ws::tardis_board_view::pane_body(tb, crate::ws::inspector_props::hosted(id))
+                        .map(move |m| Message::PaneEvent(id, Event::TardisBoardInteraction(m))),
+                };
                 self.compose_stack_view(
                     base,
                     id,
@@ -1651,6 +1668,7 @@ impl State {
             Event::LinkBadgeClicked => crate::ws::provenance::on_link_click(),
             Event::ToggleFreeze => self.frozen = !self.frozen,
             Event::KlineTable(m) => crate::ws::kline_table::handle(self.id, m),
+            Event::SeriesTable(m) => crate::ws::series_table::handle(self.id, m),
             Event::OptionsGrid(m) => crate::ws::options_view::grid_update(m),
             Event::BacktestGrid(w, m) => crate::ws::backtest_view::grid_update(w, m),
             Event::FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg::Source(m)) => {

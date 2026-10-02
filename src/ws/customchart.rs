@@ -196,6 +196,48 @@ fn fmt_x(v: f64, is_time: bool) -> String {
     }
 }
 
+/// 绘图区与两轴范围（缓存内画图与十字线共用同一份计算）。纵轴留 5% 余量。
+fn plot_of(d: &ChartData, w: f32, h: f32) -> Option<super::chart_kit::Plot> {
+    let (mut xlo, mut xhi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &x in &d.x {
+        if x.is_finite() {
+            xlo = xlo.min(x);
+            xhi = xhi.max(x);
+        }
+    }
+    let (mut ylo, mut yhi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for s in &d.series {
+        for &v in &s.1 {
+            if v.is_finite() {
+                ylo = ylo.min(v);
+                yhi = yhi.max(v);
+            }
+        }
+    }
+    if !(xlo.is_finite() && xhi.is_finite() && ylo.is_finite() && yhi.is_finite()) {
+        return None;
+    }
+    if (xhi - xlo).abs() < 1e-12 {
+        xhi = xlo + 1.0;
+    }
+    if (yhi - ylo).abs() < 1e-12 {
+        yhi = ylo + 1.0;
+    }
+    let pad = (yhi - ylo) * 0.05;
+    Some(super::chart_kit::Plot {
+        x0: ML,
+        y0: MT,
+        w: (w - ML - MR).max(1.0),
+        h: (h - MT - MB).max(1.0),
+        xr: (xlo, xhi),
+        yr: (ylo - pad, yhi + pad),
+    })
+}
+
+fn fmt_y(v: f64) -> String {
+    if v.abs() >= 1000.0 { format!("{v:.0}") } else { format!("{v:.3}") }
+}
+
 impl<M> canvas::Program<M> for Chart {
     type State = ();
     fn draw(
@@ -204,7 +246,7 @@ impl<M> canvas::Program<M> for Chart {
         r: &Renderer,
         _t: &Theme,
         b: Rectangle,
-        _c: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let geo = self.cache.draw(r, b.size(), |frame: &mut Frame| {
             let (w, h) = (frame.width(), frame.height());
@@ -225,41 +267,14 @@ impl<M> canvas::Program<M> for Chart {
                 });
                 return;
             }
-            // X / Y 范围。
-            let (mut xlo, mut xhi) = (f64::INFINITY, f64::NEG_INFINITY);
-            for &x in &d.x {
-                if x.is_finite() {
-                    xlo = xlo.min(x);
-                    xhi = xhi.max(x);
-                }
-            }
-            let (mut ylo, mut yhi) = (f64::INFINITY, f64::NEG_INFINITY);
-            for s in &d.series {
-                for &v in &s.1 {
-                    if v.is_finite() {
-                        ylo = ylo.min(v);
-                        yhi = yhi.max(v);
-                    }
-                }
-            }
-            if !(xlo.is_finite() && xhi.is_finite() && ylo.is_finite() && yhi.is_finite()) {
-                return;
-            }
-            if (xhi - xlo).abs() < 1e-12 {
-                xhi = xlo + 1.0;
-            }
-            if (yhi - ylo).abs() < 1e-12 {
-                yhi = ylo + 1.0;
-            }
-            // 纵轴留 5% 余量。
-            let pad = (yhi - ylo) * 0.05;
-            ylo -= pad;
-            yhi += pad;
-
-            let pw = (w - ML - MR).max(1.0);
-            let ph = (h - MT - MB).max(1.0);
+            let Some(plot) = plot_of(d, w, h) else { return };
+            let (xlo, xhi, ylo, yhi) = (plot.xr.0, plot.xr.1, plot.yr.0, plot.yr.1);
+            let (pw, ph) = (plot.w, plot.h);
             let mx = |x: f64| ML + ((x - xlo) / (xhi - xlo)) as f32 * pw;
             let my = |v: f64| MT + ((yhi - v) / (yhi - ylo)) as f32 * ph;
+            // 时间轴上的缺口（docs/35 §6.3）：断开不连线并标出
+            let gap_at = if d.x_is_time { super::chart_kit::gaps(&d.x) } else { Vec::new() };
+            super::chart_kit::gap_bands(frame, &plot, &d.x, &gap_at);
 
             // 网格 + 轴标签（Y 5 档、X 4 档）。
             for k in 0..=5 {
@@ -270,7 +285,7 @@ impl<M> canvas::Program<M> for Chart {
                 );
                 let val = yhi - (yhi - ylo) * k as f64 / 5.0;
                 frame.fill_text(Text {
-                    content: if val.abs() >= 1000.0 { format!("{val:.0}") } else { format!("{val:.3}") },
+                    content: fmt_y(val),
                     position: Point::new(2.0, y - 5.0),
                     color: crate::ui::pal::axis(),
                     size: iced::Pixels(9.0),
@@ -297,8 +312,9 @@ impl<M> canvas::Program<M> for Chart {
                 let line = Path::new(|p| {
                     for i in 0..m {
                         let v = s.1[i];
-                        if !v.is_finite() {
-                            started = false;
+                        // 缺值（NaN）与时间缺口都断开，不插值
+                        if !v.is_finite() || gap_at.contains(&i) {
+                            started = v.is_finite() && { p.move_to(Point::new(mx(d.x[i]), my(v))); true };
                             continue;
                         }
                         let pt = Point::new(mx(d.x[i]), my(v));
@@ -334,8 +350,37 @@ impl<M> canvas::Program<M> for Chart {
                     ..Default::default()
                 });
             }
+            // 横轴名称（单位由列名自带）写在右下角
+            if !d.x_label.is_empty() {
+                frame.fill_text(Text {
+                    content: d.x_label.clone(),
+                    position: Point::new(w - MR - d.x_label.chars().count() as f32 * 6.0, h - 10.0),
+                    color: crate::ui::pal::axis(),
+                    size: iced::Pixels(9.0),
+                    ..Default::default()
+                });
+            }
         });
-        vec![geo]
+        // 十字线读数（docs/35 §6.3）：两轴读数 + 最近一点上各序列的值
+        let mut out = vec![geo];
+        if let Some(p) = cursor.position_in(b)
+            && let Some(plot) = plot_of(&self.data, b.width, b.height)
+        {
+            let d = &self.data;
+            let mut hair = Frame::new(r, b.size());
+            let mut extra = Vec::new();
+            if let Some(i) = super::chart_kit::nearest(&d.x, plot.vx(p.x)) {
+                extra.push(format!("{} = {}", if d.x_label.is_empty() { "X" } else { &d.x_label }, fmt_x(d.x[i], d.x_is_time)));
+                for (name, v) in &d.series {
+                    let val = v.get(i).copied().filter(|x| x.is_finite()).map_or_else(crate::ui::fmt::missing, fmt_y);
+                    extra.push(format!("{name} = {val}"));
+                }
+            }
+            let is_time = d.x_is_time;
+            super::chart_kit::crosshair(&mut hair, &plot, p, |v| fmt_x(v, is_time), fmt_y, &extra);
+            out.push(hair.into_geometry());
+        }
+        out
     }
 }
 

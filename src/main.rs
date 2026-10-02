@@ -1608,12 +1608,19 @@ impl Flowsurface {
                 let dashboard = self.active_dashboard_mut();
                 let focus = dashboard.focus.filter(|(w, _)| *w == main).map(|(_, p)| p);
                 let note = match focus.and_then(|p| dashboard.panes.get_mut(p)) {
-                    Some(st) if matches!(st.content, dashboard::pane::Content::Kline { .. }) => {
+                    Some(st)
+                        if matches!(
+                            st.content,
+                            dashboard::pane::Content::Kline { .. }
+                                | dashboard::pane::Content::TardisBoard(_)
+                                | dashboard::pane::Content::WealthSpring(data::layout::pane::WsPaneMode::SelfChart)
+                        ) =>
+                    {
                         st.table_view = !st.table_view;
                         None
                     }
-                    Some(_) => Some("这个面板没有数据表视图：目前只给 K 线；盘口与逐笔本身就是表格"),
-                    None => Some("先聚焦一个 K 线面板（点一下或按 F6）"),
+                    Some(_) => Some("这个面板没有数据表视图：K 线、Tardis 历史面板、自有数据图有；盘口与逐笔本身就是表格"),
+                    None => Some("先聚焦一个图表面板（点一下或按 F6）"),
                 };
                 if let Some(n) = note {
                     self.notifications.push(Toast::info(n.to_string()));

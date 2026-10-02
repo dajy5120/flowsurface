@@ -88,20 +88,9 @@ struct LineChart {
     cache: Cache,
 }
 
-/// 时间序列里的缺口：相邻两点间隔超过中位间隔 3 倍的位置（返回缺口后那一点的下标）。
-/// 回测资金曲线按 bar 采样，休市、数据空洞处会跳一大段——**不插值**，断开画并标出来（docs/35 §6.3）。
+/// 时间序列里的缺口（规则在 [`super::chart_kit::gaps`]，全部自绘图共用一份）。
 fn gaps(xt: &[i64]) -> Vec<usize> {
-    // 点太少时「正常间隔」本身就不可靠（4 个点的资金曲线曾把最后一段误判成缺口）
-    if xt.len() < 10 {
-        return Vec::new();
-    }
-    let mut d: Vec<i64> = xt.windows(2).map(|w| w[1] - w[0]).filter(|x| *x > 0).collect();
-    if d.is_empty() {
-        return Vec::new();
-    }
-    d.sort_unstable();
-    let med = d[d.len() / 2].max(1);
-    xt.windows(2).enumerate().filter(|(_, w)| w[1] - w[0] > med * 3).map(|(i, _)| i + 1).collect()
+    super::chart_kit::gaps(&xt.iter().map(|t| *t as f64).collect::<Vec<_>>())
 }
 
 fn fmt_time(ms: i64) -> String {
@@ -314,9 +303,31 @@ struct PriceChart {
     cache: Cache,
 }
 
+impl PriceChart {
+    fn plot(&self, w: f32, h: f32) -> Option<super::chart_kit::Plot> {
+        if self.v.len() < 2 {
+            return None;
+        }
+        let lo = self.v.iter().cloned().fold(f64::INFINITY, f64::min);
+        let mut hi = self.v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        if (hi - lo).abs() < 1e-12 {
+            hi = lo + 1.0;
+        }
+        let (t0, t1) = (self.t[0], *self.t.last()?);
+        Some(super::chart_kit::Plot {
+            x0: ML,
+            y0: MT,
+            w: (w - ML - MR).max(1.0),
+            h: (h - MT - MB).max(1.0),
+            xr: (t0, t0 + (t1 - t0).max(1.0)),
+            yr: (lo, hi),
+        })
+    }
+}
+
 impl<M> canvas::Program<M> for PriceChart {
     type State = ();
-    fn draw(&self, _s: &(), r: &Renderer, _t: &Theme, b: Rectangle, _c: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(&self, _s: &(), r: &Renderer, _t: &Theme, b: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
         let geo = self.cache.draw(r, b.size(), |frame: &mut Frame| {
             let (w, h) = (frame.width(), frame.height());
             if self.v.len() < 2 {
@@ -373,7 +384,24 @@ impl<M> canvas::Program<M> for PriceChart {
                 });
             }
         });
-        vec![geo]
+        // 十字线读数：时间 · 价格；附近有成交时列出成交方向与价
+        let mut out = vec![geo];
+        if let Some(p) = cursor.position_in(b)
+            && let Some(plot) = self.plot(b.width, b.height)
+        {
+            let mut hair = Frame::new(r, b.size());
+            let mut extra = Vec::new();
+            if let Some(i) = super::chart_kit::nearest(&self.t, plot.vx(p.x)) {
+                extra.push(format!("{}  价 {}", fmt_time(self.t[i] as i64), fmt_num(self.v[i])));
+                let near = (plot.xr.1 - plot.xr.0) / f64::from(plot.w.max(1.0)) * 4.0;
+                for f in self.fills.iter().filter(|f| (f[0] - self.t[i]).abs() <= near).take(4) {
+                    extra.push(format!("{} @ {}", if f[1] < 1.5 { "▲ 买" } else { "▼ 卖" }, fmt_num(f[2])));
+                }
+            }
+            super::chart_kit::crosshair(&mut hair, &plot, p, |v| fmt_time(v as i64), fmt_num, &extra);
+            out.push(hair.into_geometry());
+        }
+        out
     }
 }
 
@@ -824,8 +852,8 @@ mod gap_tests {
 
     #[test]
     fn 间隔超过中位数三倍才算缺口() {
-        // 1 分钟一根，中间断了 10 分钟
-        let t: Vec<i64> = [0, 1, 2, 3, 4, 5, 15, 16, 17, 18, 19].iter().map(|m| m * 60_000).collect();
+        // 1 分钟一根，中间断了 30 分钟
+        let t: Vec<i64> = [0, 1, 2, 3, 4, 5, 35, 36, 37, 38, 39].iter().map(|m| m * 60_000).collect();
         assert_eq!(gaps(&t), vec![6]);
         // 均匀的没有缺口；点太少不判
         assert!(gaps(&(0..20).map(|m| m * 60_000).collect::<Vec<i64>>()).is_empty());
