@@ -325,8 +325,10 @@ impl ViewState {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum RadarMsg {
+    /// 筛选器网格的交互（ui::grid，docs/35 §16.13 第 5 项）
+    Grid(crate::ui::grid::GridMsg),
     Start,
     Stop,
     Refresh,
@@ -562,6 +564,7 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
         // 这几条**不改 `ViewState`**：启停/刷新/打开链接是副作用（在 `handle` 里），
         // 强制刷新只写请求文件。`ManualEdited` 等已在上面各自处理，不再列
         RadarMsg::Start
+        | RadarMsg::Grid(_)
         | RadarMsg::FetchOnce
         | RadarMsg::ForceBlock(_)
         | RadarMsg::Stop
@@ -577,6 +580,11 @@ pub fn handle(msg: RadarMsg) {
         RadarMsg::Start => ro::radar_start(),
         RadarMsg::Stop => ro::radar_stop(),
         RadarMsg::FetchOnce => super::once::RADAR.start(ro::snapshot().svc.active),
+        // 筛选器网格：排序点击已在视图里换成 SortBy；这里只剩网格自己的状态（调宽、选中、筛选…）
+        RadarMsg::Grid(g) => {
+            super::radar_view::grid_update(g);
+            String::new()
+        }
         // 打开浏览器是个副作用，走这一路而不是 `apply`——`apply` 是纯函数
         RadarMsg::OpenLink(id) => ro::open_link(id),
         // 写请求文件也是副作用

@@ -3524,51 +3524,112 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         let c = ColumnSet::Tv(i);
         cs = cs.push(chip(&t.label, c == v.cols, RadarMsg::SetColumns(c)));
     }
-    let shown = idx.len().min(80);
     cs = cs.push(
-        text(format!("　{} / {} 条 · 点列头排序", shown, idx.len()))
+        text(format!("　{} 条 · 点列头排序 · 右键行可复制", idx.len()))
             .size(crate::ui::text::s_meta())
             .color(crate::ui::pal::dim()),
     );
     // 色板不在这一行：官方筛选器的表格没有配色切换（热图页才有）。
     body = body.push(cs.align_y(iced::Alignment::Center));
 
-    let mut hdr = row![].spacing(3);
-    for c in &cols {
-        hdr = hdr.push(head_cell(c, ev));
-    }
-    body = body.push(hdr);
+    // 表格换成 ui::grid（docs/35 §16.13 第 5 项）：原来只画前 80 行，现在全部行可滚动查看
+    // （网格只渲染可见行）；可调宽、多选合计、列管理、过滤、右键复制。
+    // 排序仍走雷达自己的 SortBy——格子文字带单位（如 1.2 M），按文字解析会排错。
+    let grid = screener_grid(&cols, ev, &idx, &st);
+    let src = text(format!(
+        "源 {} · 快照 {}{} · ⏳=未热身 ≈=借横截面基线（均不可当结论）",
+        st.source,
+        st.stamp,
+        super::staleness::suffix(&st.stamp),
+    ))
+    .size(crate::ui::text::s_meta())
+    .color(crate::ui::pal::dim());
 
-    for &i in idx.iter().take(80) {
-        let r = &st.rows[i];
-        let mut tr = row![].spacing(3);
-        for c in &cols {
-            let (s, col) = cell_text(r, c.key, &st.catalog, v.palette);
-            tr = tr.push(cell(s, c.width, col, is_numeric(c.key)));
+    column![body, container(grid).height(Length::Fill), container(src).padding(crate::ui::metrics::pad2(0, 3))]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+type ScrRows = std::rc::Rc<[Vec<crate::ui::grid::Cell>]>;
+
+thread_local! {
+    static SCR_STATE: std::cell::RefCell<Option<crate::ui::grid::GridState>> = const { std::cell::RefCell::new(None) };
+    static SCR_COLS: std::cell::RefCell<Vec<crate::ui::grid::Column>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// 行缓存：数据代号 + 视图状态 + 列组不变就不重建（几千行 × 十几列的格子文字，每帧重建太贵）
+    static SCR_ROWS: std::cell::RefCell<Option<(u64, ViewState, Vec<SortKey>, ScrRows)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 筛选器网格的交互（经 RadarMsg::Grid 回到这里）。
+pub(crate) fn grid_update(g: crate::ui::grid::GridMsg) {
+    let cols = SCR_COLS.with(|c| c.borrow().clone());
+    SCR_STATE.with(|s| {
+        s.borrow_mut().get_or_insert_with(|| crate::ui::grid::GridState::new(&cols)).update(g, &cols, &[]);
+    });
+}
+
+fn screener_grid<'a>(cols: &[Col], ev: ViewState, idx: &[usize], st: &super::radar_readout::RadarReadout) -> Element<'a, RadarMsg> {
+    use crate::ui::grid::{self, Cell, Column, GridMsg, GridState};
+    // 排序箭头写进列标题（网格自己的排序状态保持为空，不按文字重排）
+    let mut gcols: Vec<Column> = cols
+        .iter()
+        .map(|c| {
+            let title = if c.key == ev.sort { format!("{} {}", if ev.desc { "↓" } else { "↑" }, c.title) } else { c.title.clone() };
+            let col = if is_numeric(c.key) { Column::num(title, None, c.width) } else { Column::text(title, c.width) };
+            if c.key == SortKey::Symbol { col.key().pinned() } else { col }
+        })
+        .collect();
+    gcols.push(Column { sort: grid::SortKind::None, ..Column::text("热身", 44.0) });
+    let keys: Vec<SortKey> = cols.iter().map(|c| c.key).collect();
+    let rows: ScrRows = SCR_ROWS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((g, v, k, r)) = &*cache
+            && *g == st.generation
+            && *v == ev
+            && *k == keys
+            && r.len() == idx.len()
+        {
+            return r.clone();
         }
-        let flag = if !r.sigma_ok && r.z_provisional {
-            "≈"
-        } else if !r.sigma_ok {
-            "⏳"
-        } else {
-            ""
-        };
-        tr = tr.push(cell(flag.into(), 22.0, crate::ui::pal::warn(), false));
-        body = body.push(tr);
-    }
-
-    body = body.push(
-        text(format!(
-            "源 {} · 快照 {}{} · ⏳=未热身 ≈=借横截面基线（均不可当结论）",
-            st.source,
-            st.stamp,
-            super::staleness::suffix(&st.stamp),
-        ))
-        .size(crate::ui::text::s_meta())
-        .color(crate::ui::pal::dim()),
-    );
-
-    scrollable(body).width(Length::Fill).height(Length::Fill).into()
+        let built: Vec<Vec<Cell>> = idx
+            .iter()
+            .map(|&i| {
+                let r = &st.rows[i];
+                let mut row: Vec<Cell> = cols
+                    .iter()
+                    .map(|c| {
+                        let (s, col) = cell_text(r, c.key, &st.catalog, ev.palette);
+                        Cell::Colored(s, col)
+                    })
+                    .collect();
+                let flag = if !r.sigma_ok && r.z_provisional {
+                    "≈"
+                } else if !r.sigma_ok {
+                    "⏳"
+                } else {
+                    ""
+                };
+                row.push(Cell::Colored(flag.into(), crate::ui::pal::warn()));
+                row
+            })
+            .collect();
+        let rc: ScrRows = built.into();
+        *cache = Some((st.generation, ev, keys.clone(), rc.clone()));
+        rc
+    });
+    SCR_COLS.with(|c| *c.borrow_mut() = gcols.clone());
+    let state = SCR_STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let state = s.get_or_insert_with(|| GridState::new(&gcols));
+        state.sort = None;
+        state.resort(&gcols, &rows);
+        state.clone()
+    });
+    grid::view(gcols, rows, state, None, move |m| match m {
+        // 点列头：换成雷达自己的排序（同列再点翻向，与原来一致）
+        GridMsg::Sort(i) if i < keys.len() => RadarMsg::SortBy(keys[i]),
+        other => RadarMsg::Grid(other),
+    })
 }
 
 #[cfg(test)]
