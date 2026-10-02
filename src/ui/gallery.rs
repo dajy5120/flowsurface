@@ -67,6 +67,11 @@ impl Gallery {
             grid.group_by = Some(4);
             grid.collapsed.insert("良好".into());
         }
+        // WS_UI_SPECIMEN_FILTER=1：展开过滤器，预置一条「24h 涨跌 > 0」
+        if std::env::var_os("WS_UI_SPECIMEN_FILTER").is_some() {
+            grid.filters.push(grid::Filter { col: 2, op: grid::FilterOp::Gt, value: "0".into() });
+            grid.panel = Some(grid::GridPanel::Filters);
+        }
         grid.resort(&cols, &rows);
         Some(Self { cols, rows, grid, tab: 0, seg: 1 })
     }

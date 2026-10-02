@@ -65,11 +65,13 @@ pub struct Column {
     /// 行身份列（docs/35 §8）：变化闪烁、光标下不重排都靠它认行——不能用数据下标，
     /// 新行插在最上面时下标整体平移，整张表会一起闪
     pub key: bool,
+    /// 固定在最左边（docs/35 §6.1）：其余列横向按整列翻页时它不动
+    pub pinned: bool,
 }
 
 impl Column {
     pub fn text(title: impl Into<String>, width: f32) -> Self {
-        Self { title: title.into(), unit: None, align: Align::Left, width, sort: SortKind::Natural, group: false, key: false }
+        Self { title: title.into(), unit: None, align: Align::Left, width, sort: SortKind::Natural, group: false, key: false, pinned: false }
     }
 
     pub fn num(title: impl Into<String>, unit: Option<&str>, width: f32) -> Self {
@@ -81,7 +83,14 @@ impl Column {
             sort: SortKind::Number,
             group: false,
             key: false,
+            pinned: false,
         }
+    }
+
+    /// 固定在最左边。
+    pub fn pinned(mut self) -> Self {
+        self.pinned = true;
+        self
     }
 
     /// 这一列是行身份（见 [`Column::key`] 字段）。
@@ -95,6 +104,79 @@ impl Column {
         self.group = true;
         self
     }
+}
+
+/// 过滤条件的比较方式（过滤器构建器，docs/35 §6.1 / UPDS V6 §43）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterOp {
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    Eq,
+    Contains,
+    NotContains,
+}
+
+impl FilterOp {
+    pub const ALL: [FilterOp; 7] = [Self::Gt, Self::Ge, Self::Lt, Self::Le, Self::Eq, Self::Contains, Self::NotContains];
+}
+
+impl std::fmt::Display for FilterOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Gt => ">",
+            Self::Ge => "≥",
+            Self::Lt => "<",
+            Self::Le => "≤",
+            Self::Eq => "=",
+            Self::Contains => "包含",
+            Self::NotContains => "不含",
+        })
+    }
+}
+
+/// 一条过滤条件：第 `col` 列 `op` `value`。值解析不出数时数值比较不生效（不误删行）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Filter {
+    pub col: usize,
+    pub op: FilterOp,
+    pub value: String,
+}
+
+impl Filter {
+    fn keeps(&self, row: &[Cell]) -> bool {
+        let Some(cell) = row.get(self.col) else { return true };
+        let v = self.value.trim();
+        if v.is_empty() {
+            return true;
+        }
+        match self.op {
+            FilterOp::Contains | FilterOp::NotContains => {
+                let hit = cell.plain().to_lowercase().contains(&v.to_lowercase());
+                hit == (self.op == FilterOp::Contains)
+            }
+            op => {
+                let Ok(want) = v.replace(['_', ' '], "").parse::<f64>() else { return true };
+                // 缺失值不满足任何数值条件（「> 0」不该把空格子留下）
+                let Some(x) = cell.sort_num() else { return false };
+                match op {
+                    FilterOp::Gt => x > want,
+                    FilterOp::Ge => x >= want,
+                    FilterOp::Lt => x < want,
+                    FilterOp::Le => x <= want,
+                    _ => (x - want).abs() < 1e-9,
+                }
+            }
+        }
+    }
+}
+
+/// 网格上方展开的设置区：列管理器 / 过滤器构建器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridPanel {
+    Columns,
+    Filters,
 }
 
 /// 一个显示位置上画什么：组头，或第几条数据行。
@@ -134,8 +216,17 @@ impl Cell {
     fn sort_num(&self) -> Option<f64> {
         match self {
             Self::Num { v, .. } => *v,
-            // 去掉来源前缀（~ 模拟、≈ 估算、^ 覆盖、· 派生）再解析，否则带标记的数排不了序
-            Self::Text(s) | Self::Colored(s, _) => s.replace([' ', '−', '~', '≈', '^', '·'], "").parse().ok(),
+            // 只取数字部分再解析：来源前缀（~ ≈ ^ ·）、方向符号（▲ ▼）、单位（%）、千分位空格都去掉，
+            // 否则「▲ +4.97%」这类格子既排不了序也过滤不了（曾经整列当缺失）
+            Self::Text(s) | Self::Colored(s, _) => {
+                let t: String = s
+                    .chars()
+                    .map(|c| if c == '−' { '-' } else { c })
+                    .filter(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
+                    .collect();
+                let t = t.trim_start_matches(['e', 'E']);
+                if t.is_empty() { None } else { t.parse().ok() }
+            }
             _ => None,
         }
     }
@@ -171,6 +262,23 @@ pub enum GridMsg {
     ToggleGroup(String),
     /// 鼠标进 / 出行区：在里面时不重排（docs/35 §8，UPDS V5 §30）
     Hover(bool),
+    /// 展开 / 收起列管理器或过滤器
+    Panel(GridPanel),
+    /// 列管理器：显示 / 隐藏第 i 列
+    ToggleCol(usize),
+    /// 列管理器：第 i 列前移（-1）/ 后移（+1）
+    MoveCol(usize, i8),
+    /// 列管理器：恢复全部列与原始顺序
+    ResetCols,
+    /// 过滤器：加一条 / 改第 k 条的列、比较方式、值 / 删第 k 条 / 全清
+    AddFilter,
+    FilterCol(usize, usize),
+    FilterOp(usize, FilterOp),
+    FilterVal(usize, String),
+    RemoveFilter(usize),
+    ClearFilters,
+    /// 有固定列时，其余列按整列翻页（+1 右翻 / -1 左翻）
+    ColPage(i32),
 }
 
 /// 选中行的计数与合计（见 [`GridState::selection_summary`]）。
@@ -241,6 +349,15 @@ pub struct GridState {
     moved_note: Option<(usize, std::time::Instant)>,
     /// 上一次数据里每行（数据下标）的键：悬停期间按键保持原有行序
     prev_keys: Vec<String>,
+    /// 列的显示顺序（列下标；空 = 原始顺序）与隐藏的列（列管理器）
+    pub col_order: Vec<usize>,
+    pub hidden: std::collections::BTreeSet<usize>,
+    /// 过滤条件（全部满足才显示）
+    pub filters: Vec<Filter>,
+    /// 展开着的设置区
+    pub panel: Option<GridPanel>,
+    /// 有固定列时，非固定列从第几个开始显示（按整列翻页）
+    pub col_start: usize,
 }
 
 /// 变化高亮持续多久（UPDS V5 §30）。
@@ -271,7 +388,33 @@ impl GridState {
             pending_moves: 0,
             moved_note: None,
             prev_keys: Vec::new(),
+            col_order: Vec::new(),
+            hidden: Default::default(),
+            filters: Vec::new(),
+            panel: None,
+            col_start: 0,
         }
+    }
+
+    /// 列的显示顺序（列下标），不含隐藏的。
+    pub fn ordered_cols(&self, n: usize) -> Vec<usize> {
+        let base: Vec<usize> = if self.col_order.len() == n { self.col_order.clone() } else { (0..n).collect() };
+        base.into_iter().filter(|i| !self.hidden.contains(i)).collect()
+    }
+
+    /// 实际画出来的列：固定列在前，其余从 `col_start` 起（没有固定列时就是全部）。
+    pub fn visible_cols(&self, cols: &[Column]) -> Vec<usize> {
+        let ord = self.ordered_cols(cols.len());
+        let (pinned, rest): (Vec<usize>, Vec<usize>) = ord.into_iter().partition(|&i| cols[i].pinned);
+        if pinned.is_empty() {
+            return rest;
+        }
+        let start = self.col_start.min(rest.len().saturating_sub(1));
+        pinned.into_iter().chain(rest.into_iter().skip(start)).collect()
+    }
+
+    fn filters_active(&self) -> bool {
+        self.filters.iter().any(|f| !f.value.trim().is_empty())
     }
 
     /// 这一格是不是刚变过（120ms 内）。
@@ -333,7 +476,13 @@ impl GridState {
 
     /// 显示位置的个数（分组时含组头、不含折叠掉的行）。
     pub fn len(&self, rows: usize) -> usize {
-        if self.group_by.is_some() { self.items.len() } else { rows }
+        if self.group_by.is_some() {
+            self.items.len()
+        } else if self.filters_active() {
+            self.order.len()
+        } else {
+            rows
+        }
     }
 
     /// 第 `pos` 个显示位置画什么。
@@ -397,6 +546,10 @@ impl GridState {
         }
         if !rows.is_empty() {
             self.prev_keys = rows.iter().map(|r| key_of(cols, r).unwrap_or_default()).collect();
+        }
+        // 过滤器（全部条件都满足才留下）
+        if self.filters_active() {
+            order.retain(|&i| self.filters.iter().all(|f| f.keeps(&rows[i])));
         }
         self.order = order;
         self.items.clear();
@@ -493,6 +646,68 @@ impl GridState {
                 }
                 self.hovering = h;
                 // 不在这里重排：下一次 resort（有数据时）自然按排序排
+            }
+            GridMsg::Panel(pn) => self.panel = if self.panel == Some(pn) { None } else { Some(pn) },
+            GridMsg::ToggleCol(i) => {
+                // 至少留一列
+                if !self.hidden.remove(&i) && self.hidden.len() + 1 < cols.len() {
+                    self.hidden.insert(i);
+                }
+            }
+            GridMsg::MoveCol(i, dir) => {
+                if self.col_order.len() != cols.len() {
+                    self.col_order = (0..cols.len()).collect();
+                }
+                if let Some(p) = self.col_order.iter().position(|&c| c == i) {
+                    let q = p as i64 + i64::from(dir);
+                    if (0..cols.len() as i64).contains(&q) {
+                        self.col_order.swap(p, q as usize);
+                    }
+                }
+            }
+            GridMsg::ResetCols => {
+                self.col_order.clear();
+                self.hidden.clear();
+                self.col_start = 0;
+            }
+            GridMsg::AddFilter => {
+                let col = cols.iter().position(|c| c.sort == SortKind::Number).unwrap_or(0);
+                let op = if cols.get(col).is_some_and(|c| c.sort == SortKind::Number) { FilterOp::Gt } else { FilterOp::Contains };
+                self.filters.push(Filter { col, op, value: String::new() });
+                self.panel = Some(GridPanel::Filters);
+            }
+            GridMsg::FilterCol(k, c) => {
+                if let Some(f) = self.filters.get_mut(k) {
+                    f.col = c;
+                }
+                self.resort(cols, rows);
+            }
+            GridMsg::FilterOp(k, op) => {
+                if let Some(f) = self.filters.get_mut(k) {
+                    f.op = op;
+                }
+                self.resort(cols, rows);
+            }
+            GridMsg::FilterVal(k, v) => {
+                if let Some(f) = self.filters.get_mut(k) {
+                    f.value = v;
+                }
+                self.resort(cols, rows);
+            }
+            GridMsg::RemoveFilter(k) => {
+                if k < self.filters.len() {
+                    self.filters.remove(k);
+                }
+                self.resort(cols, rows);
+            }
+            GridMsg::ClearFilters => {
+                self.filters.clear();
+                self.resort(cols, rows);
+            }
+            GridMsg::ColPage(d) => {
+                let rest = self.ordered_cols(cols.len()).into_iter().filter(|&i| !cols[i].pinned).count();
+                let next = self.col_start as i64 + i64::from(d);
+                self.col_start = next.clamp(0, rest.saturating_sub(1) as i64) as usize;
             }
             GridMsg::ToggleGroup(k) => {
                 if !self.collapsed.remove(&k) {
@@ -603,11 +818,14 @@ where
         cols.iter().enumerate().map(|(i, col)| st.borrow().widths.get(i).copied().unwrap_or(col.width)).collect();
     let aligns: Vec<Align> = cols.iter().map(|c| c.align).collect();
     let key_col = cols.iter().position(|c| c.key);
-    let total_w: f32 = widths.iter().sum::<f32>() + 3.0;
+    // 列管理器隐藏的、固定列翻页翻过去的不画
+    let vis: Vec<usize> = st.borrow().visible_cols(cols);
+    let total_w: f32 = vis.iter().map(|&i| widths[i]).sum::<f32>() + 3.0;
 
     // ── 表头：点标题排序，标题右侧的竖线可拖动调宽 ──
     let mut head = row![Space::new().width(Length::Fixed(3.0))].height(Length::Fixed(metrics::panel_header()));
-    for (i, col) in cols.iter().enumerate() {
+    for &i in &vis {
+        let col = &cols[i];
         let arrow = match st.borrow().sort {
             Some((ci, d)) if ci == i => if d { " ▼" } else { " ▲" },
             _ => "",
@@ -660,6 +878,30 @@ where
                 .style(|th, s| widgets::button_style(widgets::Kind::Ghost, th, s)),
         );
     }
+    {
+        let b = st.borrow();
+        let ghost = |label: String, msg: GridMsg, on: &dyn Fn(GridMsg) -> M| {
+            button(t::caption(label))
+                .padding(Padding::from([0.0, metrics::space(1)]))
+                .on_press(on(msg))
+                .style(|th, s| widgets::button_style(widgets::Kind::Ghost, th, s))
+        };
+        let n_hidden = b.hidden.len();
+        foot = foot.push(ghost(
+            if n_hidden > 0 { format!("列 ▸（隐藏 {n_hidden}）") } else { "列 ▸".into() },
+            GridMsg::Panel(GridPanel::Columns),
+            &on,
+        ));
+        let n_f = b.filters.iter().filter(|f| !f.value.trim().is_empty()).count();
+        foot = foot.push(ghost(
+            if n_f > 0 { format!("筛选 ▸（{n_f} 条，剩 {} 行）", b.order.len()) } else { "筛选 ▸".into() },
+            GridMsg::Panel(GridPanel::Filters),
+            &on,
+        ));
+        if cols.iter().any(|c| c.pinned) {
+            foot = foot.push(ghost("◀".into(), GridMsg::ColPage(-1), &on)).push(ghost("▶".into(), GridMsg::ColPage(1), &on));
+        }
+    }
     if let Some((n, t0)) = st.borrow().moved_note
         && t0.elapsed().as_secs() < 3
     {
@@ -678,6 +920,7 @@ where
     }
     let dragging = st.borrow().drag.is_some();
     let scroll_id = st.borrow().id.clone();
+    let settings = settings_panel(cols, st.borrow(), &on);
 
     let on_r = on.clone();
     let body = responsive(move |size| {
@@ -715,7 +958,8 @@ where
             .spacing(1)
             .height(Length::Fixed(row_h));
             let rkey = key_col.and_then(|k| rows[di].get(k)).map(Cell::plain);
-            for (ci, &align) in aligns.iter().enumerate() {
+            for &ci in &vis {
+                let align = aligns[ci];
                 let cell = cell_view(rows[di].get(ci).unwrap_or(&ABSENT), align, widths[ci]);
                 // 变化的格闪一下（120ms，UPDS V5 §30）
                 if rkey.as_deref().is_some_and(|k| st.flashing(k, ci)) {
@@ -776,6 +1020,7 @@ where
     };
 
     column![
+        settings.unwrap_or_else(|| Space::new().into()),
         container(table).height(Length::Fill).style(move |_| container::Style {
             background: Some(Background::Color(color(c.surface_primary))),
             ..Default::default()
@@ -785,6 +1030,88 @@ where
     // 外层撑满面板宽度：页脚里「撑满」的空白要有确定的父宽才排得开（批 4 踩过，右侧说明被挤没）
     .width(Length::Fill)
     .into()
+}
+
+/// 列管理器 / 过滤器构建器（网格上方展开的设置区，docs/35 §6.1）。
+fn settings_panel<'a, M: Clone + 'a>(cols: &[Column], st: &GridState, on: &(impl Fn(GridMsg) -> M + Clone + 'a)) -> Option<Element<'a, M>> {
+    let ghost = |label: &str, msg: GridMsg| -> Element<'a, M> {
+        button(t::caption(label.to_string()))
+            .padding(Padding::from([0.0, metrics::space(1)]))
+            .on_press(on(msg))
+            .style(|th, s| widgets::button_style(widgets::Kind::Ghost, th, s))
+            .into()
+    };
+    let body: Element<'a, M> = match st.panel? {
+        GridPanel::Columns => {
+            let order: Vec<usize> = if st.col_order.len() == cols.len() { st.col_order.clone() } else { (0..cols.len()).collect() };
+            let mut list = column![].spacing(1);
+            for i in order {
+                let on_t = on.clone();
+                let title = format!("{}{}", cols[i].title, if cols[i].pinned { "（固定）" } else { "" });
+                list = list.push(
+                    row![
+                        iced::widget::checkbox(!st.hidden.contains(&i)).label(title).on_toggle(move |_| on_t(GridMsg::ToggleCol(i))).size(t::size(super::Role::Caption)),
+                        Space::new().width(Length::Fill),
+                        ghost("↑", GridMsg::MoveCol(i, -1)),
+                        ghost("↓", GridMsg::MoveCol(i, 1)),
+                    ]
+                    .align_y(Alignment::Center),
+                );
+            }
+            column![
+                row![t::label("列"), Space::new().width(Length::Fill), ghost("全部恢复", GridMsg::ResetCols), ghost("✕", GridMsg::Panel(GridPanel::Columns))]
+                    .align_y(Alignment::Center),
+                scrollable(list).height(Length::Fixed(180.0)),
+            ]
+            .spacing(metrics::space(1))
+            .into()
+        }
+        GridPanel::Filters => {
+            let titles: Vec<String> = cols.iter().map(|c| c.title.clone()).collect();
+            let mut list = column![].spacing(metrics::space(1));
+            for (k, f) in st.filters.iter().enumerate() {
+                let (on_c, on_o, on_v) = (on.clone(), on.clone(), on.clone());
+                let ts = titles.clone();
+                list = list.push(
+                    row![
+                        iced::widget::pick_list(titles.clone(), titles.get(f.col).cloned(), move |t: String| {
+                            on_c(GridMsg::FilterCol(k, ts.iter().position(|x| *x == t).unwrap_or(0)))
+                        })
+                        .text_size(t::size(super::Role::Caption)),
+                        iced::widget::pick_list(FilterOp::ALL, Some(f.op), move |o| on_o(GridMsg::FilterOp(k, o)))
+                            .text_size(t::size(super::Role::Caption)),
+                        iced::widget::text_input("值", &f.value)
+                            .on_input(move |v| on_v(GridMsg::FilterVal(k, v)))
+                            .size(t::size(super::Role::Caption))
+                            .width(Length::Fixed(120.0)),
+                        ghost("✕", GridMsg::RemoveFilter(k)),
+                    ]
+                    .spacing(metrics::space(1))
+                    .align_y(Alignment::Center),
+                );
+            }
+            column![
+                row![
+                    t::label("筛选（全部满足才显示；数值列缺失值不满足任何数值条件）"),
+                    Space::new().width(Length::Fill),
+                    ghost("＋ 条件", GridMsg::AddFilter),
+                    ghost("全清", GridMsg::ClearFilters),
+                    ghost("✕", GridMsg::Panel(GridPanel::Filters)),
+                ]
+                .align_y(Alignment::Center),
+                list,
+            ]
+            .spacing(metrics::space(1))
+            .into()
+        }
+    };
+    Some(
+        container(body)
+            .padding(Padding::from([metrics::space(2), metrics::space(3)]))
+            .width(Length::Fill)
+            .style(|_| container::Style { background: Some(Background::Color(color(core().surface_secondary))), ..Default::default() })
+            .into(),
+    )
 }
 
 static ABSENT: Cell = Cell::Absent(Absence::Missing);
@@ -944,6 +1271,54 @@ mod tests {
         assert_eq!(st.moved_note.map(|(n, _)| n), Some(2), "移开后提示 2 行已移动");
         st.resort(&cols, &rows(5.0, 2.0));
         assert_eq!(st.order, [0, 1], "移开后按排序");
+    }
+
+    #[test]
+    fn 过滤_数值与文字_缺失不满足数值条件() {
+        let (cols, rows) = data(); // CC-10 3 / CC-2 缺失 / CC-1 7
+        let mut st = GridState::new(&cols);
+        st.update(GridMsg::AddFilter, &cols, &rows);
+        assert_eq!(st.filters[0], Filter { col: 1, op: FilterOp::Gt, value: String::new() }, "缺省落在第一个数值列");
+        st.update(GridMsg::FilterVal(0, "5".into()), &cols, &rows);
+        assert_eq!(st.order, [2], "> 5 只剩 CC-1（缺失的那行也不留）");
+        assert_eq!(st.len(rows.len()), 1);
+        st.update(GridMsg::FilterCol(0, 0), &cols, &rows);
+        st.update(GridMsg::FilterOp(0, FilterOp::Contains), &cols, &rows);
+        st.update(GridMsg::FilterVal(0, "cc-1".into()), &cols, &rows);
+        assert_eq!(st.order, [0, 2], "包含不分大小写：CC-10、CC-1");
+        st.update(GridMsg::FilterVal(0, "abc".into()), &cols, &rows);
+        st.update(GridMsg::FilterOp(0, FilterOp::Gt), &cols, &rows);
+        assert_eq!(st.order.len(), 3, "数值条件填了解析不出的值：不生效、不误删");
+        st.update(GridMsg::ClearFilters, &cols, &rows);
+        assert_eq!(st.len(rows.len()), 3);
+    }
+
+    #[test]
+    fn 列管理_隐藏_移动_至少留一列_固定列翻页() {
+        let cols = vec![Column::text("代码", 80.0).pinned(), Column::num("a", None, 60.0), Column::num("b", None, 60.0), Column::num("c", None, 60.0)];
+        let mut st = GridState::new(&cols);
+        st.update(GridMsg::ToggleCol(2), &cols, &[]);
+        assert_eq!(st.visible_cols(&cols), [0, 1, 3]);
+        st.update(GridMsg::MoveCol(3, -1), &cols, &[]);
+        assert_eq!(st.ordered_cols(4), [0, 1, 3], "隐藏的 2 不显示；3 前移到 2 的位置");
+        st.update(GridMsg::ColPage(1), &cols, &[]);
+        assert_eq!(st.visible_cols(&cols), [0, 3], "固定列不动，其余右翻一列");
+        st.update(GridMsg::ColPage(9), &cols, &[]);
+        assert_eq!(st.visible_cols(&cols), [0, 3], "翻到头为止，至少还有一列");
+        for i in 0..4 {
+            st.update(GridMsg::ToggleCol(i), &cols, &[]);
+        }
+        assert!(st.hidden.len() < 4, "至少留一列");
+        st.update(GridMsg::ResetCols, &cols, &[]);
+        assert_eq!(st.visible_cols(&cols), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn 带方向符号和单位的数照样能比() {
+        for (s, v) in [("▲ +4.97%", 4.97), ("▼ −0.15%", -0.15), ("~ 1 024.50", 1024.5), ("+30", 30.0)] {
+            assert_eq!(Cell::Colored(s.into(), Color::WHITE).sort_num(), Some(v), "{s}");
+        }
+        assert_eq!(Cell::Text("等待".into()).sort_num(), None);
     }
 
     #[test]
