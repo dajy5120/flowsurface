@@ -133,7 +133,7 @@ fn source_cells(s: &egress::Source, r: &egress::Row) -> Vec<Cell> {
     // 对外那块：数出网的（直连 + 经本机），顺带标出它连本机服务的几条；
     // 内部那块：只数本机服务连接
     let conns = match r.conns {
-        None => ("—".to_string(), crate::ui::pal::dim()),
+        None => (crate::ui::fmt::missing(), crate::ui::pal::dim()),
         Some(c) if external => {
             let mut t = c.label();
             if c.internal > 0 {
@@ -154,7 +154,7 @@ fn source_cells(s: &egress::Source, r: &egress::Row) -> Vec<Cell> {
         Cell::Colored(conns.0, conns.1),
         // 「—」= 还没有两次采样，或这一路根本没在跑。**和「0B/s」是两回事**：后者是「连着但没在传」
         Cell::Colored(
-            r.bps.map(|r| r.label()).unwrap_or_else(|| "—".into()),
+            r.bps.map(|r| r.label()).unwrap_or_else(|| crate::ui::fmt::missing()),
             if r.bps.is_some_and(|r| r.total_down() > 1024.0) { crate::ui::pal::warn() } else { dim },
         ),
         // 今日累计。0 就留空——一列 0B 只是噪声
@@ -162,7 +162,8 @@ fn source_cells(s: &egress::Source, r: &egress::Row) -> Vec<Cell> {
         Cell::Colored(when, dim),
         // 开机自启
         match s.kind {
-            Kind::InProcess | Kind::Foreign => Cell::Colored("—".into(), dim),
+            // 进程内连接、外部程序没有「开机自启」这回事：不适用
+            Kind::InProcess | Kind::Foreign => Cell::Colored(crate::ui::fmt::na(), dim),
             _ if r.enabled => Cell::Action("关自启".into(), Tone::Neutral),
             _ => Cell::Action("设自启".into(), Tone::Neutral),
         },
@@ -385,7 +386,7 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
         let (st, c) = if r.on { ("● 在跑", crate::ui::pal::ok()) } else { ("○ 停着", dim) };
         let conns = match r.conns {
             Some(k) => (format!("内部 {}", k.internal), if k.internal > 0 { crate::ui::pal::ok() } else { dim }),
-            None => ("—".to_string(), dim),
+            None => (crate::ui::fmt::missing(), dim),
         };
         int_rows.push(vec![
             Cell::Text(r.unit.into()),
@@ -395,7 +396,8 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
             Cell::Colored("不出网".into(), dim),
             Cell::Text(String::new()),
             Cell::Text(String::new()),
-            Cell::Colored("—".into(), dim),
+            // 不出网的单元没有「今日外网用量」：不适用
+            Cell::Colored(crate::ui::fmt::na(), dim),
             Cell::Colored("（启停在「进程」页）".into(), dim),
         ]);
     }

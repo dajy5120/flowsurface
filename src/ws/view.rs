@@ -124,7 +124,7 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
         let div = match r.divergence {
             1 => "↑ 看涨背离",
             -1 => "↓ 看跌背离",
-            _ => "—",
+            _ => crate::ui::fmt::MISSING,
         };
         body = body.push(section(
             "订单流",
@@ -307,8 +307,9 @@ fn trade_row<'a, M: 'a>(t: &super::orders::Trade) -> Element<'a, M> {
     let mono = |s: String| text(s).size(sz).font(style::AZERET_MONO);
     let (dir, dir_c) =
         if t.side == 1 { ("买", pnl_color(1.0)) } else { ("卖", pnl_color(-1.0)) };
+    // 买入开仓那一笔没有毛收益：不适用
     let gross = if t.side == 1 {
-        mono("—".to_string())
+        mono(crate::ui::fmt::na())
     } else {
         text(crate::ui::fmt::sim(format!("{:+.2}", t.gross))).size(sz).font(style::AZERET_MONO).color(pnl_color(t.gross))
     };

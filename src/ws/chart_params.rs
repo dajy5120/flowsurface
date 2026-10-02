@@ -259,9 +259,10 @@ pub fn format(fmt: &str, v: Option<f64>, text: Option<&str>, tick: Option<f64>) 
     if let Some(t) = text {
         return t.to_string();
     }
-    let Some(v) = v else { return "—".into() };
+    let Some(v) = v else { return crate::ui::fmt::missing() };
+    // 非有限值：出错，不是缺失
     if !v.is_finite() {
-        return "—".into();
+        return crate::ui::fmt::invalid_at(&format!("图表参数值不是有限数（{v}，格式 {fmt}）"));
     }
     match fmt {
         "price" => format!("{v:.*}", price_decimals(tick, v)),

@@ -695,7 +695,7 @@ pub fn pane_body<'a>() -> Element<'a, BtMsg> {
         let bar: Element<'a, BtMsg> = if p.run_id == run && !run.is_empty() {
             let clock = chrono::DateTime::from_timestamp((p.clock_ms / 1000) as i64, 0)
                 .map(|d| d.format("%m-%d %H:%M:%S").to_string())
-                .unwrap_or_else(|| "—".into());
+                .unwrap_or_else(crate::ui::fmt::unknown);
             column![
                 progress_bar::<BtMsg>(p.pct),
                 text(format!(

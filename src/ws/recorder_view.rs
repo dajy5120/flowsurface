@@ -121,7 +121,7 @@ fn details(
         } else if r.inprogress > 0 {
             (format!("{} / 0", r.inprogress), crate::ui::pal::warn())
         } else {
-            ("—".to_string(), crate::ui::pal::pend())
+            (crate::ui::fmt::missing(), crate::ui::pal::pend())
         };
         col = col.push(
             row![
@@ -404,7 +404,7 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
         text(format!(
             "洞的判据是相邻两条记录相隔超过 {} 秒——比行情流宽，因为 Down 那本走 REST              本来就 1 秒一拍。按日明细扫描于 {}（扫盘要读每段的时间列，不是每秒刷新）",
             pm::PM_GAP_NS / 1_000_000_000,
-            if st.days_scanned.is_empty() { "—" } else { &st.days_scanned }
+            if st.days_scanned.is_empty() { crate::ui::fmt::UNKNOWN } else { &st.days_scanned }
         ))
         .size(crate::ui::text::s_meta())
         .color(dimc),
@@ -557,9 +557,10 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
         } else if st.active {
             ("静默", crate::ui::pal::warn())
         } else {
-            ("—", crate::ui::pal::pend())
+            (crate::ui::fmt::MISSING, crate::ui::pal::pend())
         };
-        let stream = |n: u64| if n > 0 { group(n) } else { "—".into() };
+        // 0 条就是 0（真实的零，UPDS 六种「无」里零显示为数字，不显示成缺失）
+        let stream = |n: u64| group(n);
         live = live.push(
             row![
                 cell(sym, 90.0),

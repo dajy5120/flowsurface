@@ -39,7 +39,8 @@ fn ts_txt(ms: u64) -> String {
     let secs = (ms / 1000) as i64;
     match chrono::DateTime::from_timestamp(secs, 0) {
         Some(dt) => dt.format("%m-%d %H:%M:%S").to_string(),
-        None => "—".to_string(),
+        // 时间戳超出范围：出错
+        None => crate::ui::fmt::invalid_at(&format!("订单时间戳超出范围（{ms} ms）")),
     }
 }
 
@@ -270,7 +271,7 @@ pub fn pane_body<'a>(frozen: bool) -> Element<'a, OrdersMsg> {
 
     column![
         row![
-            text(format!("订单 · run {}", if st.run_id.is_empty() { "—" } else { &st.run_id }))
+            text(format!("订单 · run {}", if st.run_id.is_empty() { crate::ui::fmt::UNKNOWN } else { &st.run_id }))
                 .size(crate::ui::text::s_emph())
                 .color(crate::ui::pal::head()),
             text(format!("本金 {}", sim(format!("{:.0}", st.capital)))).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
@@ -313,7 +314,7 @@ mod tests {
 
     #[test]
     fn 非法时间戳不panic() {
-        assert_eq!(ts_txt(u64::MAX), "—");
+        assert_eq!(ts_txt(u64::MAX), "!", "非法时间戳是「出错」");
     }
 
     #[test]

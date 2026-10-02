@@ -24,10 +24,10 @@ fn cell<'a, M: 'a>(s: String, w: f32, c: Color) -> Element<'a, M> {
     container(text(s).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
 }
 fn wr_s(w: Option<f64>) -> String {
-    w.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "—".into())
+    w.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| crate::ui::fmt::missing())
 }
 fn bp_s(b: Option<f64>) -> String {
-    b.map(|x| format!("{x:+.2}")).unwrap_or_else(|| "—".into())
+    b.map(|x| format!("{x:+.2}")).unwrap_or_else(|| crate::ui::fmt::missing())
 }
 
 thread_local! {
@@ -205,7 +205,7 @@ pub fn pane_body<'a>() -> Element<'a, C4Msg> {
                     Cell::Text(day_md),
                     Cell::Text(bp_s(v.live_bp)),
                     Cell::Text(format!("{:+.2}", v.replay_bp)),
-                    Cell::Colored(dlt.map(|d| format!("{d:+.2}")).unwrap_or_else(|| "—".into()), dlt.map(sign_c).unwrap_or(crate::ui::pal::dim())),
+                    Cell::Colored(dlt.map(|d| format!("{d:+.2}")).unwrap_or_else(|| crate::ui::fmt::missing()), dlt.map(sign_c).unwrap_or(crate::ui::pal::dim())),
                     Cell::Colored(if v.falsify { "⚠ 证伪旗".into() } else { String::new() }, crate::ui::pal::down()),
                 ]
             })

@@ -26,7 +26,7 @@ fn cell<'a, M: 'a>(s: String, w: f32, c: Color) -> Element<'a, M> {
     container(text(s).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
 }
 fn pct(p: Option<f64>) -> String {
-    p.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "—".into())
+    p.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| crate::ui::fmt::missing())
 }
 fn usd(v: f64) -> String {
     if v >= 1e6 {
@@ -39,7 +39,7 @@ fn usd(v: f64) -> String {
 }
 
 fn brier(b: Option<f64>) -> String {
-    b.map(|x| format!("{x:.3}")).unwrap_or_else(|| "—".into())
+    b.map(|x| format!("{x:.3}")).unwrap_or_else(|| crate::ui::fmt::missing())
 }
 
 /// AI 校准追踪摘要区（docs/19 §5）：AI Brier vs 市场 Brier + 校准曲线（越低越好）。

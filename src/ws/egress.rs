@@ -1747,8 +1747,8 @@ mod live_check {
                 "{:<22} {:<8} 连接 {:<18} {:<34} 今日 ↓{:<8} {}",
                 s.label,
                 if r.on { "在跑" } else { "停着" },
-                r.conns.map(|c| c.label()).unwrap_or_else(|| "—".into()),
-                r.bps.map(|r| r.label()).unwrap_or_else(|| "—".into()),
+                r.conns.map(|c| c.label()).unwrap_or_else(|| crate::ui::fmt::missing()),
+                r.bps.map(|r| r.label()).unwrap_or_else(|| crate::ui::fmt::missing()),
                 super::human_bytes(r.today.0),
                 r.next
             );

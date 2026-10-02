@@ -38,6 +38,40 @@ impl Absence {
     }
 }
 
+/// 六种「无」的符号，面板里**不再手写**（docs/35 §16.15 第 5 项）：
+/// 缺失 `—`（窗口未满、数据没到）· 不适用 `n/a`（这一行本来就没有这个量）·
+/// 未取到 `···`（快照还没读到、守护没起）· 出错 `!`（解析失败、非有限值）。
+pub const MISSING: &str = tokens::ABSENT_MISSING;
+pub const NOT_APPLICABLE: &str = tokens::ABSENT_NOT_APPLICABLE;
+pub const UNKNOWN: &str = tokens::ABSENT_UNKNOWN;
+pub const INVALID: &str = tokens::ABSENT_INVALID;
+
+pub fn missing() -> String {
+    MISSING.to_string()
+}
+pub fn na() -> String {
+    NOT_APPLICABLE.to_string()
+}
+pub fn unknown() -> String {
+    UNKNOWN.to_string()
+}
+pub fn invalid() -> String {
+    INVALID.to_string()
+}
+
+/// 出错值：显示 `!`，并**进底部「问题」页**（UPDS V8：错误要同时出现在问题列表里）。
+/// 问题页读的是日志里的警告；同一个 `what` 只记一次，面板每帧重画不会刷屏。
+pub fn invalid_at(what: &str) -> String {
+    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+    if let Ok(mut g) = SEEN.lock() {
+        let set = g.get_or_insert_with(Default::default);
+        if set.len() < 500 && set.insert(what.to_string()) {
+            log::warn!("[数据] 出错值（界面显示 {INVALID}）：{what}");
+        }
+    }
+    invalid()
+}
+
 /// 单元格级来源（UPDS V8 §72）。标记是排版上的：灰度打印、色弱都看得出来。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Provenance {

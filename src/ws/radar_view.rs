@@ -229,16 +229,16 @@ pub(crate) fn base_asset(sym: &str) -> &str {
 
 fn usd(v: f64) -> String {
     // 市值动辄万亿——没有 T 档的话 NVDA 会显示成 5240.0B（TradingView 是 5.24 T）
+    // 只在 ≥ 10⁶ 时缩写（docs/35 §7.3，UPDS V8）；缩写的完整值在网格里悬停 / 复制可得。
+    // 负值同样走各档（原先只有 T 档看绝对值，−2e9 会显示成一长串数字）
     if v.abs() >= 1e12 {
         format!("{:.2}T", v / 1e12)
-    } else if v >= 1e9 {
+    } else if v.abs() >= 1e9 {
         format!("{:.1}B", v / 1e9)
-    } else if v >= 1e6 {
+    } else if v.abs() >= 1e6 {
         format!("{:.1}M", v / 1e6)
-    } else if v >= 1e3 {
-        format!("{:.0}K", v / 1e3)
     } else {
-        format!("{v:.0}")
+        crate::ui::fmt::number(v, 0, crate::ui::fmt::Rounding::Money)
     }
 }
 
@@ -258,10 +258,10 @@ fn money_cell(v: f64) -> String {
 fn date_cell(secs: f64) -> String {
     use chrono::{Datelike, TimeZone};
     if !secs.is_finite() || secs <= 0.0 {
-        return "—".into();
+        return crate::ui::fmt::missing();
     }
     let Some(t) = chrono::Local.timestamp_opt(secs as i64, 0).single() else {
-        return "—".into();
+        return crate::ui::fmt::invalid_at(&format!("雷达日期列时间戳无法换算（{secs}）"));
     };
     let now = chrono::Local::now();
     if t.year() == now.year() {
@@ -276,10 +276,15 @@ fn date_cell(secs: f64) -> String {
 /// 与 `date_cell`（Unix 秒）分开：不区分的话 20290214 会被当成秒、
 /// 显示成 1970 年；完全不标注则被当成数量、显示成 `20.3M`。
 fn ymd_cell(v: f64) -> String {
+    // 0 / 非有限：没有这个日期（缺失）
+    if !v.is_finite() || v <= 0.0 {
+        return crate::ui::fmt::missing();
+    }
     let n = v as i64;
     let (y, m, d) = (n / 10_000, (n / 100) % 100, n % 100);
+    // 有值但不是合法日期（Unix 秒、13 月 45 日）：是「出错」不是「缺失」（六种「无」）
     if !(1900..=2999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return "—".into();
+        return crate::ui::fmt::invalid_at(&format!("雷达日期列不是 YYYYMMDD（{v}）"));
     }
     format!("{y}-{m:02}-{d:02}")
 }
@@ -295,19 +300,19 @@ fn price(v: f64) -> String {
 }
 
 fn opt_pct(v: Option<f64>) -> String {
-    v.map(|x| format!("{:+.2}%", x * 100.0)).unwrap_or_else(|| "—".into())
+    v.map(|x| format!("{:+.2}%", x * 100.0)).unwrap_or_else(|| crate::ui::fmt::missing())
 }
 
 fn opt_z(v: Option<f64>) -> String {
-    v.map(|x| format!("{x:+.2}")).unwrap_or_else(|| "—".into())
+    v.map(|x| format!("{x:+.2}")).unwrap_or_else(|| crate::ui::fmt::missing())
 }
 
 /// 树图窄格用的紧凑写法（少一位小数 / 去掉百分号）。
 fn opt_pct_compact(v: Option<f64>) -> String {
-    v.map(|x| format!("{:+.1}", x * 100.0)).unwrap_or_else(|| "—".into())
+    v.map(|x| format!("{:+.1}", x * 100.0)).unwrap_or_else(|| crate::ui::fmt::missing())
 }
 fn opt_z_compact(v: Option<f64>) -> String {
-    v.map(|x| format!("{x:+.1}")).unwrap_or_else(|| "—".into())
+    v.map(|x| format!("{x:+.1}")).unwrap_or_else(|| crate::ui::fmt::missing())
 }
 
 // ───────────────────────── Screener 列定义 ─────────────────────────
@@ -682,7 +687,7 @@ pub(crate) fn cell_text(
         SortKey::Country => (r.country.clone(), crate::ui::pal::dim()),
         SortKey::Sector => (r.sector.clone(), crate::ui::pal::dim()),
         SortKey::Mcap => (
-            if r.mcap > 0.0 { usd(r.mcap) } else { "—".into() },
+            if r.mcap > 0.0 { usd(r.mcap) } else { crate::ui::fmt::missing() },
             crate::ui::pal::dim(),
         ),
         SortKey::Metric(key) => {
@@ -693,7 +698,7 @@ pub(crate) fn cell_text(
             }
             let v = r.m.get(key).copied();
             let txt = match v {
-                None => "—".to_string(),
+                None => crate::ui::fmt::missing(),
                 // 量纲由目录标注：百分数带 %、金额缩写并加 $、其余原样
                 Some(x) if cat.pct_keys.contains(key) => format!("{x:+.2}%"),
                 Some(x) if cat.money_keys.contains(key) => money_cell(x),
@@ -1566,7 +1571,7 @@ impl std::fmt::Display for MarketOpt {
 /// 0..1 → 定宽条形。纯文本块拼的，够表达占比且不必再起一层 canvas。
 fn bar<'a>(frac: Option<f64>, width: usize, c: Color) -> Element<'a, RadarMsg> {
     let Some(f) = frac else {
-        return text("—").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()).into();
+        return text(crate::ui::fmt::MISSING).size(crate::ui::text::s_small()).color(crate::ui::pal::dim()).into();
     };
     let n = ((f.clamp(0.0, 1.0)) * width as f64).round() as usize;
     row![
@@ -1579,7 +1584,7 @@ fn bar<'a>(frac: Option<f64>, width: usize, c: Color) -> Element<'a, RadarMsg> {
 
 fn pct_log(v: Option<f64>) -> String {
     v.map(|x| format!("{:+.2}%", (x.exp() - 1.0) * 100.0))
-        .unwrap_or_else(|| "—".into())
+        .unwrap_or_else(|| crate::ui::fmt::missing())
 }
 
 /// 加密全景（docs/22 §7）：八家交易所的公开 REST 汇成一屏。
@@ -1598,7 +1603,7 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
     let up = ramp(v.palette).up[2];
     let dn = ramp(v.palette).down[2];
     let sign = |x: f64| if x >= 0.0 { up } else { dn };
-    let money = |x: Option<f64>| x.map(usd).unwrap_or_else(|| "—".into());
+    let money = |x: Option<f64>| x.map(usd).unwrap_or_else(|| crate::ui::fmt::missing());
 
     col = col.push(fresh_bar(
         Tier::Live,
@@ -1653,19 +1658,20 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
                 // 抓取失败时成交额是 0；直接显示 0 和「今天没人交易」一模一样，
                 // 故失败行的数值列一律显示「—」
                 cell(
-                    if x.err.is_empty() { usd(x.vol_usd) } else { "—".into() },
+                    // 拉取失败的行：「出错」符号，不是「缺失」——这一家今天没有数据和这一家拉挂了是两回事
+                    if x.err.is_empty() { usd(x.vol_usd) } else { crate::ui::fmt::invalid_at(&format!("加密全景 · {} 拉取失败：{}", x.label, x.err)) },
                     104.0,
                     crate::ui::pal::txt(),
                     true
                 ),
                 cell(
-                    x.btc.map(|b| format!("{b:.0}")).unwrap_or_else(|| "—".into()),
+                    x.btc.map(|b| format!("{b:.0}")).unwrap_or_else(|| crate::ui::fmt::missing()),
                     96.0,
                     crate::ui::pal::txt(),
                     true
                 ),
                 cell(
-                    bp.map(|b| format!("{b:+.1}")).unwrap_or_else(|| "—".into()),
+                    bp.map(|b| format!("{b:+.1}")).unwrap_or_else(|| crate::ui::fmt::missing()),
                     104.0,
                     bp.map_or(crate::ui::pal::dim(), |b| if b.abs() > 20.0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
                     true
@@ -1797,7 +1803,7 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
                     link_cell(r.currency.clone(), &r.url, 92.0, crate::ui::pal::txt(), false),
                     cell(r.n.to_string(), 62.0, crate::ui::pal::dim(), true),
                     cell(
-                        r.underlying.map(|x| format!("{x:.0}")).unwrap_or_else(|| "—".into()),
+                        r.underlying.map(|x| format!("{x:.0}")).unwrap_or_else(|| crate::ui::fmt::missing()),
                         96.0,
                         crate::ui::pal::txt(),
                         true
@@ -1806,7 +1812,7 @@ fn crypto_view<'a>(p: &Panorama, v: ViewState, fetched: i64) -> Element<'a, Rada
                     cell(usd(r.vol_usd), 116.0, crate::ui::pal::dim(), true),
                     cell(usd(r.vol_notional_usd), 116.0, crate::ui::pal::txt(), true),
                     cell(
-                        r.iv.map(|x| format!("{x:.1}%")).unwrap_or_else(|| "—".into()),
+                        r.iv.map(|x| format!("{x:.1}%")).unwrap_or_else(|| crate::ui::fmt::missing()),
                         72.0,
                         crate::ui::pal::warn(),
                         true
@@ -1951,7 +1957,7 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a
                     link_cell(clip(&r.title, 46), &r.url, 340.0, crate::ui::pal::txt(), false),
                     cell(clip(&r.outcome, 20), 150.0, crate::ui::pal::txt(), false),
                     cell(
-                        r.prob.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "—".into()),
+                        r.prob.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| crate::ui::fmt::missing()),
                         62.0,
                         crate::ui::pal::txt(),
                         true
@@ -1959,7 +1965,7 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a
                     // 「+10pt」不是「+10%」：0.45→0.55 是十个概率点，
                     // 写成百分比会被读成 22% 的收益率
                     cell(
-                        chg.map(|x| format!("{:+.0}pt", x * 100.0)).unwrap_or_else(|| "—".into()),
+                        chg.map(|x| format!("{:+.0}pt", x * 100.0)).unwrap_or_else(|| crate::ui::fmt::missing()),
                         78.0,
                         chg.map_or(crate::ui::pal::dim(), |x| if x >= 0.0 { up } else { dn }),
                         true
@@ -1969,7 +1975,7 @@ fn prediction_view<'a>(p: &Prediction, v: ViewState, fetched: i64) -> Element<'a
                     // 口径必须跟着数字走，否则这一列在混排下就是在比两个不同的量
                     cell(r.vol_window.clone(), 52.0, crate::ui::pal::warn(), false),
                     cell(
-                        r.close_ms.map(day_cell).unwrap_or_else(|| "—".into()),
+                        r.close_ms.map(day_cell).unwrap_or_else(|| crate::ui::fmt::missing()),
                         88.0,
                         crate::ui::pal::dim(),
                         true
@@ -2313,7 +2319,7 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState, fetched: i64) -> Element<'a
             } else {
                 &p.status.previous_trade_date
             },
-            if p.status.indicator.is_empty() { "—" } else { &p.status.indicator },
+            if p.status.indicator.is_empty() { crate::ui::fmt::UNKNOWN } else { &p.status.indicator },
             p.status.next_trade_date,
         ),
         fetched,
@@ -2404,7 +2410,7 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState, fetched: i64) -> Element<'a
                     cell(usd(r.turnover), 96.0, crate::ui::pal::txt(), true),
                     // 0 是「原表没给」（多为 ETF），不是市值为零
                     cell(
-                        if r.mcap > 0.0 { usd(r.mcap) } else { "—".into() },
+                        if r.mcap > 0.0 { usd(r.mcap) } else { crate::ui::fmt::missing() },
                         96.0,
                         crate::ui::pal::dim(),
                         true
@@ -2471,7 +2477,7 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState, fetched: i64) -> Element<'a
                 cell(sr.dec.to_string(), 72.0, dn, true),
                 container(bar(frac, 14, up)).width(Length::Fixed(150.0)),
                 cell(
-                    sr.wtd_chg.map(|x| format!("{x:+.2}%")).unwrap_or_else(|| "—".into()),
+                    sr.wtd_chg.map(|x| format!("{x:+.2}%")).unwrap_or_else(|| crate::ui::fmt::missing()),
                     88.0,
                     sr.wtd_chg.map_or(crate::ui::pal::dim(), sign),
                     true
@@ -2484,7 +2490,7 @@ fn equity_view<'a>(p: &EquityPanorama, v: ViewState, fetched: i64) -> Element<'a
                     true
                 ),
                 cell(
-                    sr.median_chg.map(|x| format!("{x:+.2}%")).unwrap_or_else(|| "—".into()),
+                    sr.median_chg.map(|x| format!("{x:+.2}%")).unwrap_or_else(|| crate::ui::fmt::missing()),
                     80.0,
                     sr.median_chg.map_or(crate::ui::pal::dim(), sign),
                     true
@@ -2508,7 +2514,7 @@ fn equity_ipos<'a>(p: &EquityPanorama) -> Element<'a, RadarMsg> {
     // 换月的那一两轮里两者不一样，显示请求值会让人以为已经换好了
     let want = super::radar::ipo_month();
     super::radar_readout::set_ipo_month(&want);
-    let got = if p.month.is_empty() { "—" } else { p.month.as_str() };
+    let got = if p.month.is_empty() { crate::ui::fmt::UNKNOWN } else { p.month.as_str() };
     let mut mr = row![text("月份 ").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(3);
     mr = mr.push(chip("‹ 上一月", false, RadarMsg::IpoMonth(-1)));
     mr = mr.push(
@@ -2671,7 +2677,7 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState, fetched: i64) -> Element<'a, Rad
                 cell(format!("{:.3}", r.value), 128.0, crate::ui::pal::txt(), true),
                 cell(r.unit.clone(), 60.0, crate::ui::pal::dim(), false),
                 cell(
-                    r.chg.map(|x| format!("{x:+.3}")).unwrap_or_else(|| "—".into()),
+                    r.chg.map(|x| format!("{x:+.3}")).unwrap_or_else(|| crate::ui::fmt::missing()),
                     96.0,
                     r.chg.map_or(crate::ui::pal::dim(), |x| if x >= 0.0 { up } else { dn }),
                     true
@@ -2723,7 +2729,7 @@ fn macro_view<'a>(m: &MacroBoard, v: ViewState, fetched: i64) -> Element<'a, Rad
 
 /// 空串显示成「—」。新股日历里发行价/募资额常年为空，留白会让人以为是渲染坏了。
 fn dash(s: &str) -> String {
-    if s.trim().is_empty() { "—".into() } else { s.to_string() }
+    if s.trim().is_empty() { crate::ui::fmt::missing() } else { s.to_string() }
 }
 
 /// 小节标题 + 一句口径说明。口径写在标题旁边而不是文档里——
@@ -2740,13 +2746,13 @@ fn section<'a>(title: &str, note: &str) -> Element<'a, RadarMsg> {
 fn day_cell(ms: i64) -> String {
     use chrono::TimeZone;
     if ms <= 0 {
-        return "—".into();
+        return crate::ui::fmt::missing();
     }
     chrono::Local
         .timestamp_millis_opt(ms)
         .single()
         .map(|t| t.format("%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "—".into())
+        .unwrap_or_else(|| crate::ui::fmt::missing())
 }
 
 /// 按**字符数**截断（不是字节）：中文标题按字节切会切出半个字。
@@ -2863,7 +2869,7 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState, fetched: i64) -> Element<
         let ratio = b
             .ad_ratio
             .map(|x| format!("{x:.2}"))
-            .unwrap_or_else(|| "—".into());
+            .unwrap_or_else(|| crate::ui::fmt::missing());
         let net_c = if b.net_new_high > 0 {
             up
         } else if b.net_new_high < 0 {
@@ -2993,9 +2999,9 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     tr = tr.push(
         text(format!(
             "加密层 {}{} · 股票层 {}{}",
-            if st.stamp.is_empty() { "—" } else { &st.stamp },
+            if st.stamp.is_empty() { crate::ui::fmt::UNKNOWN } else { &st.stamp },
             super::staleness::suffix(&st.stamp),
-            if st.slow_stamp.is_empty() { "—" } else { &st.slow_stamp },
+            if st.slow_stamp.is_empty() { crate::ui::fmt::UNKNOWN } else { &st.slow_stamp },
             super::staleness::suffix(&st.slow_stamp),
         ))
         .size(crate::ui::text::s_meta())
@@ -3091,7 +3097,7 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
         body = body.push(
             text(format!(
                 "慢层快照 {}{}",
-                if st.slow_stamp.is_empty() { "—" } else { &st.slow_stamp },
+                if st.slow_stamp.is_empty() { crate::ui::fmt::UNKNOWN } else { &st.slow_stamp },
                 super::staleness::suffix(&st.slow_stamp),
             ))
             .size(crate::ui::text::s_meta())
@@ -3410,16 +3416,16 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
             label: base_asset(&r.symbol).to_string(),
             // 百分数类带 %，z/倍数类不带
             value: if crate::ws::radar::scale_kind(v.color.key) == ScaleKind::AroundOne {
-                m.map(|x| format!("{x:.2}×")).unwrap_or_else(|| "—".into())
+                m.map(|x| format!("{x:.2}×")).unwrap_or_else(|| crate::ui::fmt::missing())
             } else if v.color.key.starts_with("own:") && v.color.key != "own:ret_pct" {
                 opt_z(m)
             } else {
-                m.map(|x| format!("{x:+.2}%")).unwrap_or_else(|| "—".into())
+                m.map(|x| format!("{x:+.2}%")).unwrap_or_else(|| crate::ui::fmt::missing())
             },
             value_compact: if v.color.key.starts_with("own:") && v.color.key != "own:ret_pct" {
                 opt_z_compact(m)
             } else {
-                m.map(|x| format!("{x:+.1}")).unwrap_or_else(|| "—".into())
+                m.map(|x| format!("{x:+.1}")).unwrap_or_else(|| crate::ui::fmt::missing())
             },
             weight: area_weight(r, v),
             color: scale_color(m, v.color.key, row_scale(&st.catalog, r), v.palette, r.trustworthy()),
@@ -3599,7 +3605,11 @@ fn screener_grid<'a>(cols: &[Col], ev: ViewState, idx: &[usize], st: &super::rad
                     .iter()
                     .map(|c| {
                         let (s, col) = cell_text(r, c.key, &st.catalog, ev.palette);
-                        Cell::Colored(s, col)
+                        // 缩写过的大数（1.2B）：带上完整值，悬停与复制给完整值（docs/35 §7.3）
+                        match super::radar::key_value(r, c.key) {
+                            Some(v) if grid::abbreviated(&s) => Cell::ColoredNum(v, s, col),
+                            _ => Cell::Colored(s, col),
+                        }
                     })
                     .collect();
                 let flag = if !r.sigma_ok && r.z_provisional {
@@ -3970,8 +3980,8 @@ mod tests {
         assert_eq!(ymd_cell(20261015.0), "2026-10-15");
         // 明显不是日期的值不能硬凑出一个
         assert_eq!(ymd_cell(0.0), "—");
-        assert_eq!(ymd_cell(1785456000.0), "—", "Unix 秒不是 YYYYMMDD");
-        assert_eq!(ymd_cell(20291345.0), "—", "13 月 45 日");
+        assert_eq!(ymd_cell(1785456000.0), "!", "Unix 秒不是 YYYYMMDD：出错，不是缺失");
+        assert_eq!(ymd_cell(20291345.0), "!", "13 月 45 日：出错");
     }
 
     fn memo_row(sym: &str, tv: f64) -> RadarRow {
@@ -4275,6 +4285,8 @@ mod tests {
         assert_eq!(usd(2.9e9), "2.9B");
         assert_eq!(usd(1.5e6), "1.5M");
         assert_eq!(usd(-3.1e12), "-3.10T", "负值也要走 T 档");
+        assert_eq!(usd(-2.5e9), "-2.5B", "负值也要走 B 档");
+        assert_eq!(usd(842_110.0), "842 110", "10⁶ 以下不缩写");
     }
 
     #[test]

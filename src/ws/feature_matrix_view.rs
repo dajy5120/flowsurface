@@ -75,7 +75,7 @@ fn vtext(s: &Slot) -> String {
 
 fn num(v: Option<f64>) -> String {
     match v {
-        None => "—".into(),
+        None => crate::ui::fmt::missing(),
         // `x == 0.0` 而不是 `x.abs() < eps`：0 与 1e-30 是两个不同的数，
         // 后者要走科学计数法那一支。
         Some(0.0) => "0".into(),
@@ -287,11 +287,11 @@ fn reason_cn(r: &str) -> &str {
 }
 
 fn pct_text(p: Option<f64>) -> String {
-    p.map_or_else(|| "—".into(), |p| format!("{:.0}%", p * 100.0))
+    p.map_or_else(|| crate::ui::fmt::missing(), |p| format!("{:.0}%", p * 100.0))
 }
 
 fn z_text(z: Option<f64>) -> String {
-    z.map_or_else(|| "—".into(), |z| format!("{z:+.2}"))
+    z.map_or_else(|| crate::ui::fmt::missing(), |z| format!("{z:+.2}"))
 }
 
 /// 透视「质量」格里的字。
@@ -614,7 +614,7 @@ fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, w: &Width
                         _ => None,
                     };
                     (
-                        dz.map_or_else(|| "—".into(), |d| format!("{a} {d:+.2}").trim().to_string()),
+                        dz.map_or_else(|| crate::ui::fmt::missing(), |d| format!("{a} {d:+.2}").trim().to_string()),
                         bg,
                         if level == 0 { crate::ui::pal::dim() } else { c },
                     )

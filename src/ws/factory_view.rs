@@ -26,7 +26,9 @@ fn sec<'a, M: 'a>(title: &str, c: Color) -> Element<'a, M> {
 fn opt_f(v: Option<f64>, prec: usize) -> String {
     match v {
         Some(x) if x.is_finite() => format!("{x:+.prec$}"),
-        _ => "—".to_string(),
+        // NaN / ∞：算出来了但不是数，是「出错」
+        Some(x) => crate::ui::fmt::invalid_at(&format!("Alpha Factory 读数不是有限数（{x}）")),
+        None => crate::ui::fmt::missing(),
     }
 }
 
@@ -71,7 +73,7 @@ fn fmt_bp(v: f64) -> String {
     if v.is_finite() {
         format!("{v:+.2}")
     } else {
-        "—".into()
+        crate::ui::fmt::missing()
     }
 }
 
@@ -387,7 +389,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
                 l.symbol,
                 opt_f(l.realized_ic_1s, 3),
                 opt_f(l.pnl, 2),
-                l.n_trades.map_or_else(|| "—".to_string(), |n| n.to_string()),
+                l.n_trades.map_or_else(|| crate::ui::fmt::missing(), |n| n.to_string()),
                 l.age
             ))
             .size(crate::ui::text::s_small())

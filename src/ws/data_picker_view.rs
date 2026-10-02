@@ -313,7 +313,7 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
             "扫到 {} 个市场、{n_sym} 个标的、{} 个「标的 × 日」；数据类型：{}",
             sc.markets().len(),
             sc.items.len(),
-            if all_types.is_empty() { "—".to_string() } else { all_types.join(" · ") }
+            if all_types.is_empty() { crate::ui::fmt::missing() } else { all_types.join(" · ") }
         )),
     ]));
     if sc.items.is_empty() {

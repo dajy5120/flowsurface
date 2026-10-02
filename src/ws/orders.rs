@@ -213,7 +213,7 @@ impl OrderState {
                 let fee = map_get(&m, "commission").and_then(as_f64).unwrap_or(0.0);
                 let gross = map_get(&m, "trade_pnl").and_then(as_f64).unwrap_or(0.0);
                 let order_type =
-                    map_get(&m, "order_type").and_then(as_str).unwrap_or_else(|| "—".into());
+                    map_get(&m, "order_type").and_then(as_str).unwrap_or_else(|| crate::ui::fmt::missing());
                 let instrument =
                     map_get(&m, "instrument_id").and_then(as_str).unwrap_or_default();
                 let filled_pct = map_get(&m, "filled_pct").and_then(as_f64).unwrap_or(100.0);

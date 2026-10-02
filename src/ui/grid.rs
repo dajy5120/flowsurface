@@ -198,6 +198,8 @@ pub enum Cell {
     Badge(String, Tone),
     /// 带颜色的文字（涨跌之类）。**同时要有非颜色的区分**（符号或正负号）
     Colored(String, Color),
+    /// 带颜色、显示文字是缩写的数（`1.2B`）：`f64` 是完整值，排序、合计、复制、悬停都用它
+    ColoredNum(f64, String, Color),
     /// 操作按钮（启动 / 停止 / 更新…）：点了发 `GridMsg::Action(行, 列)`，由宿主决定做什么。
     /// 文字为空 = 这一行没有这个操作（不画按钮）
     Action(String, Tone),
@@ -211,7 +213,7 @@ impl Cell {
     fn sort_text(&self) -> Option<&str> {
         match self {
             Self::Text(s) | Self::Id(s) | Self::Colored(s, _) | Self::Badge(s, _) | Self::Action(s, _) => Some(s),
-            Self::Num { s, .. } => Some(s),
+            Self::Num { s, .. } | Self::ColoredNum(_, s, _) => Some(s),
             Self::Absent(_) => None,
         }
     }
@@ -219,6 +221,7 @@ impl Cell {
     fn sort_num(&self) -> Option<f64> {
         match self {
             Self::Num { v, .. } => *v,
+            Self::ColoredNum(v, ..) => Some(*v),
             // 只取数字部分再解析：来源前缀（~ ≈ ^ ·）、方向符号（▲ ▼）、单位（%）、千分位空格都去掉，
             // 否则「▲ +4.97%」这类格子既排不了序也过滤不了（曾经整列当缺失）
             Self::Text(s) | Self::Colored(s, _) => {
@@ -238,7 +241,7 @@ impl Cell {
     fn plain(&self) -> String {
         match self {
             Self::Text(s) | Self::Id(s) | Self::Colored(s, _) | Self::Badge(s, _) | Self::Action(s, _) => s.clone(),
-            Self::Num { v: Some(v), .. } => format!("{v}"),
+            Self::Num { v: Some(v), .. } | Self::ColoredNum(v, ..) => format!("{v}"),
             Self::Num { v: None, s, .. } => s.clone(),
             Self::Absent(a) => a.glyph().to_string(),
         }
@@ -865,6 +868,30 @@ pub fn group_title(key: &str, count: usize, collapsed: bool) -> String {
     format!("{} {key} · {count} 行", if collapsed { "▸" } else { "▾" })
 }
 
+/// 显示文字是缩写过的大数吗（`1.2B`、`5.24T`、`3.1 万`）——是的话悬停给完整值。
+pub fn abbreviated(s: &str) -> bool {
+    let t = s.trim_end_matches(['%', ' ']);
+    let Some(last) = t.chars().last() else { return false };
+    // 单位前面（允许隔一个空格）必须是数字：「12 万」算，单独一个「M」不算
+    matches!(last, 'K' | 'M' | 'B' | 'T' | '万' | '亿')
+        && t[..t.len() - last.len_utf8()].trim_end().chars().last().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// 缩写数的完整值（悬停提示里）。
+fn full_value(v: f64) -> String {
+    format!("完整值 {}", fmt::number(v, if v.abs() >= 1e6 { 0 } else { 2 }, fmt::Rounding::Money))
+}
+
+fn with_full<'a, M: 'a>(el: Element<'a, M>, v: f64) -> Element<'a, M> {
+    iced::widget::tooltip(
+        el,
+        container(t::caption(full_value(v))).padding(metrics::space(2)).style(crate::style::tooltip),
+        iced::widget::tooltip::Position::Top,
+    )
+    .delay(std::time::Duration::from_millis(450))
+    .into()
+}
+
 fn cell_view<'a, M: 'a>(cell: &Cell, align: Align, w: f32) -> Element<'a, M> {
     let body: Element<'a, M> = match cell {
         // 单行不折行：行高固定，折到第二行会被裁掉半截（200% 缩放测试矩阵里看到的）；
@@ -875,7 +902,14 @@ fn cell_view<'a, M: 'a>(cell: &Cell, align: Align, w: f32) -> Element<'a, M> {
             let max = ((w - 8.0) / (t::size(super::Role::Code) * 0.6)).max(6.0) as usize;
             t::code(fmt::elide_middle(s, max)).into()
         }
-        Cell::Num { s, prov, .. } => widgets::value(s.clone(), *prov).into(),
+        Cell::Num { s, prov, v } => {
+            let el: Element<'a, M> = widgets::value(s.clone(), *prov).into();
+            match v {
+                Some(v) if abbreviated(s) => with_full(el, *v),
+                _ => el,
+            }
+        }
+        Cell::ColoredNum(v, s, fg) => with_full(t::numeric(s.clone()).color(*fg).wrapping(iced::widget::text::Wrapping::None).into(), *v),
         Cell::Absent(a) => widgets::absent(*a).into(),
         Cell::Badge(s, tone) => widgets::badge(s.clone(), *tone),
         Cell::Colored(s, fg) => t::numeric(s.clone()).color(*fg).wrapping(iced::widget::text::Wrapping::None).into(),
@@ -1507,5 +1541,20 @@ mod tests {
         st.update(GridMsg::DragMove(Point::new(-200.0, 0.0)), &cols, &rows);
         assert_eq!(st.widths[0], 40.0);
         st.update(GridMsg::DragEnd, &cols, &rows);
+    }
+}
+
+#[cfg(test)]
+mod abbrev_tests {
+    use super::{Cell, abbreviated};
+
+    #[test]
+    fn 缩写判定与完整值() {
+        assert!(abbreviated("1.2B") && abbreviated("5.24T") && abbreviated("3.1M") && abbreviated("12 万"));
+        assert!(!abbreviated("842 110") && !abbreviated("+4.97%") && !abbreviated("BTC") && !abbreviated("M"));
+        // 复制给完整值、排序按完整值
+        let c = Cell::ColoredNum(1_234_567_890.0, "1.2B".into(), iced::Color::WHITE);
+        assert_eq!(c.plain(), "1234567890");
+        assert_eq!(c.sort_num(), Some(1_234_567_890.0));
     }
 }

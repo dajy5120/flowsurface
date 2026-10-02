@@ -28,7 +28,7 @@ fn sec<'a, M: 'a>(t: String) -> Element<'a, M> {
 }
 fn num(v: Option<f64>) -> String {
     match v {
-        None => "—".into(),
+        None => crate::ui::fmt::missing(),
         Some(x) if x == 0.0 => "0".into(),
         Some(x) if x.abs() >= 1e4 || x.abs() < 1e-3 => format!("{x:.2e}"),
         Some(x) => format!("{x:.4}"),
@@ -141,7 +141,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         } else if r.naive_sig {
             ("仅朴素显著", crate::ui::pal::warn())
         } else {
-            ("—", crate::ui::pal::dim())
+            (crate::ui::fmt::MISSING, crate::ui::pal::dim())
         };
         b = b.push(row![
             cell(r.feature.clone(), 130.0, crate::ui::pal::txt()),
@@ -214,7 +214,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         b = b.push(row![
             cell(r.name.clone(), 130.0, crate::ui::pal::txt()),
             cell(
-                r.window_s.map(|w| format!("{w}s")).unwrap_or_else(|| "—".into()),
+                r.window_s.map(|w| format!("{w}s")).unwrap_or_else(|| crate::ui::fmt::missing()),
                 55.0,
                 crate::ui::pal::dim()
             ),

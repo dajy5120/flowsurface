@@ -48,8 +48,9 @@ pub(super) fn usd(v: f64) -> String {
 
 /// 倒计时。轮次只有 5 分钟，秒级精度是必要的。
 pub(super) fn countdown(s: i64) -> (String, Color) {
+    // 已过结算时刻：倒计时不适用
     if s < 0 {
-        return ("—".into(), crate::ui::pal::dim());
+        return (crate::ui::fmt::na(), crate::ui::pal::dim());
     }
     let c = if s <= 30 {
         crate::ui::pal::down() // 快结算了：此时便宜一侧的彩票挂单最猖狂，失衡度最容易读错
@@ -122,7 +123,7 @@ pub(super) fn ladder_block<'a, M: 'a>(title: &str, sub: &str, l: &Ladder, tint: 
 fn spread(l: &Ladder) -> String {
     match (l.bids.first(), l.asks.first()) {
         (Some((b, _)), Some((a, _))) => format!("{:.3}", a - b),
-        _ => "—".into(),
+        _ => crate::ui::fmt::missing(),
     }
 }
 
@@ -152,7 +153,7 @@ fn round_block<'a, M: 'a>(r: &RoundView) -> Element<'a, M> {
 /// 实测两者会反号：临近结算时便宜一侧（0.01–0.05）用很少的钱就能堆出大量份额，
 /// 那是彩票式挂单不是共识。只显示一个数字的话，看的人没法察觉这件事。
 pub(super) fn imbalance_block<'a, M: 'a>(b: &BookView) -> Element<'a, M> {
-    let fmt = |v: Option<f64>| v.map(|x| format!("{x:+.3}")).unwrap_or_else(|| "—".into());
+    let fmt = |v: Option<f64>| v.map(|x| format!("{x:+.3}")).unwrap_or_else(|| crate::ui::fmt::missing());
     let dir = |v: Option<f64>| match v {
         Some(x) if x > 0.0 => ("押涨占优", crate::ui::pal::up()),
         Some(x) if x < 0.0 => ("押跌占优", crate::ui::pal::down()),
@@ -353,7 +354,7 @@ mod tests {
 
     #[test]
     fn 倒计时在临近结算时变色() {
-        assert_eq!(countdown(-1).0, "—");
+        assert_eq!(countdown(-1).0, "n/a", "结算后倒计时不适用");
         assert_eq!(countdown(125).0, "2:05");
         assert_eq!(countdown(9).0, "0:09");
         // 最后 30 秒标红：便宜一侧的彩票挂单此时最猖狂，失衡度最容易读错。

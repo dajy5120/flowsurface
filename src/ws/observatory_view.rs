@@ -129,7 +129,7 @@ fn ns(v: Option<f64>) -> String {
     match v {
         // 负值原样显示：对端时钟比我们快。clamp 掉就再也发现不了（docs/23 §4.2 ①）
         Some(x) => format!("{:+.2}ms", x / 1e6),
-        None => "—".into(),
+        None => crate::ui::fmt::missing(),
     }
 }
 
@@ -468,9 +468,9 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
             s,
             chrono::DateTime::from_timestamp_millis(from)
                 .map(|t| t.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
-                .unwrap_or_else(|| "—".into())
+                .unwrap_or_else(|| crate::ui::fmt::missing())
         ),
-        _ => "—".into(),
+        _ => crate::ui::fmt::missing(),
     };
     body = body.push(
         row![
@@ -1082,7 +1082,7 @@ fn cov_from(r: &ro::RingStat) -> String {
     r.coverage_from_ms
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|t| t.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
-        .unwrap_or_else(|| "—".into())
+        .unwrap_or_else(|| crate::ui::fmt::missing())
 }
 
 thread_local! {

@@ -494,7 +494,8 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
             // 一个好源看起来像没通
             (None, true, Some(t)) => format!("源无时间·{}", ago(t, st.now_ms)),
             (None, true, None) => "源无时间".into(),
-            _ => "—".into(),
+            // 还没抓到过：未取到
+            _ => crate::ui::fmt::unknown(),
         };
         let mut r = row![
             cell(lamp.into(), 20.0, lc, false),

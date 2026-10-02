@@ -203,7 +203,7 @@ impl<M> canvas::Program<M> for TailTable {
                 };
                 let clock = chrono::DateTime::from_timestamp_millis(row.recv_ms)
                     .map(|t| t.with_timezone(&chrono::Local).format("%H:%M:%S%.3f").to_string())
-                    .unwrap_or_else(|| "—".into());
+                    .unwrap_or_else(|| crate::ui::fmt::missing());
                 let body = payload_text(row, self.parsed_view);
 
                 let cells: [(&str, Color); 6] = [
@@ -219,7 +219,7 @@ impl<M> canvas::Program<M> for TailTable {
                     clock,
                     row.stream_id.to_string(),
                     row.len.to_string(),
-                    if row.flags.is_empty() { "—".into() } else { row.flags.clone() },
+                    if row.flags.is_empty() { crate::ui::fmt::missing() } else { row.flags.clone() },
                     body,
                 ];
                 let mut x = PAD;

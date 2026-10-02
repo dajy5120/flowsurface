@@ -180,7 +180,7 @@ fn card_view<'a>(
             }
             Cell::Pending => ("待实现".to_string(), crate::ui::pal::pend()),
             Cell::Disabled => ("未启用".to_string(), crate::ui::pal::pend()),
-            Cell::Missing(_) => ("—".to_string(), crate::ui::pal::dim()),
+            Cell::Missing(_) => (crate::ui::fmt::missing(), crate::ui::pal::dim()),
         };
         let trend = tr.of(r, idx, &cl);
         let (arr, arr_c) = arrow(trend.map_or(0, |t| t.0));
