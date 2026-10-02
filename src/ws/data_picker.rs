@@ -448,6 +448,8 @@ pub enum DataPickMsg {
     Date(String),
     Start(String),
     Minutes(u32),
+    /// 常用时段一键选：起始（UTC）+ 时长（ui::widgets::time_range）
+    Window(String, u32),
     /// 勾 / 取消某数据类型。
     ToggleType(String),
     Search(String),
@@ -634,6 +636,10 @@ impl DataPick {
             DataPickMsg::Date(d) => self.date = Some(d),
             DataPickMsg::Start(s) => self.start = s,
             DataPickMsg::Minutes(n) => self.minutes = n,
+            DataPickMsg::Window(s, n) => {
+                self.start = s;
+                self.minutes = n;
+            }
             DataPickMsg::ToggleType(t) => {
                 if !self.excluded.remove(&t) {
                     self.excluded.insert(t);

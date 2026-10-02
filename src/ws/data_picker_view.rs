@@ -373,6 +373,10 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
         }));
     }
     b = b.push(line(v));
+    // 常用时段 + 换算后的绝对范围（UTC 与北京时间）
+    if opts.time == TimeMode::Window {
+        b = b.push(crate::ui::widgets::time_range(p.date.as_deref(), &p.start, p.minutes, DataPickMsg::Window));
+    }
 
     // 数据类型：当天有的全部列出，可勾选；没选日期时列出该标的出现过的类型（各几天）
     if opts.hide_types {

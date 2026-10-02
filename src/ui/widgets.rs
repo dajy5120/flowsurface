@@ -350,3 +350,65 @@ pub fn stale_bar<'a, M: 'a>(age: impl Into<String>, why: impl Into<String>) -> E
 pub fn unavailable<'a, M: 'a>(what: impl Into<String>, reason: impl Into<String>) -> Element<'a, M> {
     empty(format!("{} 不可用", what.into()), reason)
 }
+
+
+/// 历史数据的常用时段（相对于选中的那一天，UTC）：(名字, 起始 HH:MM, 分钟数)。
+pub const TIME_PRESETS: [(&str, &str, u32); 5] = [
+    ("整日", "00:00", 1440),
+    ("亚洲时段", "00:00", 480),
+    ("欧洲时段", "07:00", 510),
+    ("美股常规时段", "13:30", 390),
+    ("当日最后 1 小时", "23:00", 60),
+];
+
+/// 把「日期 + 起始（UTC）+ 时长」换算成人读的绝对范围：
+/// `2026-09-01 13:30 → 20:00 UTC · 北京时间 21:30 → 次日 04:00`（UPDS V6 §48：相对范围要同时给出解析后的绝对范围与时区）。
+pub fn resolve_window(date: &str, start: &str, minutes: u32) -> Option<String> {
+    let d = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let t = chrono::NaiveTime::parse_from_str(start.trim(), "%H:%M").ok()?;
+    let from = d.and_time(t);
+    let to = from + chrono::Duration::minutes(i64::from(minutes));
+    let bj = chrono::Duration::hours(8);
+    let span = |a: chrono::NaiveDateTime, b: chrono::NaiveDateTime| {
+        let next = if b.date() > a.date() { "次日 " } else { "" };
+        format!("{} → {next}{}", a.format("%H:%M"), b.format("%H:%M"))
+    };
+    Some(format!("{} {} UTC · 北京时间 {}", d.format("%Y-%m-%d"), span(from, to), span(from + bj, to + bj)))
+}
+
+/// 时间范围选择（docs/35 §6.1，UPDS V6 §48）：常用时段一键选 + 解析后的绝对范围。
+/// `on(start, minutes)` 把选中的时段交回宿主。
+pub fn time_range<'a, M: Clone + 'a>(date: Option<&str>, start: &str, minutes: u32, on: impl Fn(String, u32) -> M) -> Element<'a, M> {
+    let mut presets = row![].spacing(metrics::space(1)).align_y(Alignment::Center);
+    for (name, st, m) in TIME_PRESETS {
+        let active = st == start && m == minutes;
+        presets = presets.push(
+            button(t::caption(name.to_string()))
+                .padding(Padding::from([1.0, metrics::space(2)]))
+                .on_press(on(st.to_string(), m))
+                .style(move |th, s| button_style(if active { Kind::Standard } else { Kind::Ghost }, th, s)),
+        );
+    }
+    let resolved = date
+        .and_then(|d| resolve_window(d, start, minutes))
+        .unwrap_or_else(|| "先选日期；起始填 HH:MM（UTC）".to_string());
+    column![presets, t::caption(resolved)].spacing(metrics::space(1)).into()
+}
+
+#[cfg(test)]
+mod time_range_tests {
+    use super::*;
+
+    #[test]
+    fn 时段换算_跨日标次日() {
+        assert_eq!(
+            resolve_window("2026-09-01", "13:30", 390).as_deref(),
+            Some("2026-09-01 13:30 → 20:00 UTC · 北京时间 21:30 → 次日 04:00")
+        );
+        assert_eq!(
+            resolve_window("2026-09-01", "00:00", 1440).as_deref(),
+            Some("2026-09-01 00:00 → 次日 00:00 UTC · 北京时间 08:00 → 次日 08:00")
+        );
+        assert_eq!(resolve_window("2026-09-01", "25:00", 60), None, "非法起始不硬猜");
+    }
+}

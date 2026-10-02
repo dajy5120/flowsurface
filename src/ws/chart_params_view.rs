@@ -355,6 +355,8 @@ fn editor<'a>(m: &Matrix, d: &cp::Draft) -> Element<'a, Msg> {
     let c = &m.chart;
     let mut b = column![text("口径设置（写配置文件 chart 段，重启特征引擎生效；重启后当日累计从头开始，上一交易日存档保留）").size(crate::ui::text::s_small()).color(crate::ui::pal::head())]
         .spacing(4);
+    // 每项标出值从哪来：配置里改过 = 覆盖；没改 = 继承引擎缺省（UPDS V6 §46）
+    let overridden = cp::overridden_keys();
     for e in &c.editable {
         let cur = d.text.get(&e.key).cloned().unwrap_or_default();
         let label = cp::param_label(&e.key);
@@ -379,10 +381,16 @@ fn editor<'a>(m: &Matrix, d: &cp::Draft) -> Element<'a, Msg> {
                 .width(Length::Fixed(140.0))
                 .into()
         };
+        let (mark, mc) = if overridden.contains(&e.key) { ("覆盖", crate::ui::pal::warn()) } else { ("继承缺省", crate::ui::pal::dim()) };
         b = b.push(
-            row![fixed(text(label).size(crate::ui::text::s_small()).color(crate::ui::pal::txt()), W_LABEL, false), input, text(hint).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())]
-                .spacing(8)
-                .align_y(Alignment::Center),
+            row![
+                fixed(text(label).size(crate::ui::text::s_small()).color(crate::ui::pal::txt()), W_LABEL, false),
+                input,
+                text(mark).size(crate::ui::text::s_meta()).color(mc),
+                text(hint).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
         );
     }
     if !c.read_only.is_empty() {

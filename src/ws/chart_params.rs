@@ -605,6 +605,17 @@ fn draft_cell() -> &'static std::sync::Mutex<Option<Draft>> {
     DRAFT.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+/// 配置文件里被覆盖的口径参数（`chart` 段里出现的键）。检查器表单据此标「覆盖 / 继承缺省」
+/// （docs/35 §6.1，UPDS V6 §46）。文件很小，编辑器显示时才读。
+#[must_use]
+pub fn overridden_keys() -> std::collections::HashSet<String> {
+    std::fs::read_to_string(super::feature_matrix::config_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("chart").and_then(|c| c.as_object()).map(|o| o.keys().cloned().collect()))
+        .unwrap_or_default()
+}
+
 /// 当前的草稿（没在编辑是 `None`）。
 #[must_use]
 pub fn draft() -> Option<Draft> {
