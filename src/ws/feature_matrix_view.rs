@@ -59,6 +59,20 @@ fn chip<'a>(label: String, active: bool, msg: Msg) -> Element<'a, Msg> {
 ///
 /// **`None` 必须显示成「—」而不是 0。** 这是整个面板最容易出错的一处：
 /// 一个「不可用」的 slot 显示成 `0.0000` 看起来完全正常，而它其实什么都不知道。
+/// 一个 slot 的值文字，带 UPDS 来源标记（docs/35 §7.2）：质量 DEGRADED 的是「估算」→ 前缀 `≈`；
+/// INVALID 是「错误」→ 前缀 `!`（V8 六种「无」里的错误符号）。原先只靠颜色区分，灰度 / 色弱下看不出。
+fn vtext(s: &Slot) -> String {
+    let v = num(s.value);
+    if s.value.is_none() {
+        return v;
+    }
+    match s.quality.as_str() {
+        "DEGRADED" => format!("≈ {v}"),
+        "INVALID" => format!("{} {v}", crate::ui::fmt::Absence::Invalid.glyph()),
+        _ => v,
+    }
+}
+
 fn num(v: Option<f64>) -> String {
     match v {
         None => "—".into(),
@@ -498,7 +512,7 @@ fn widths(rows: &[FeatureRow<'_>], wins: &[u32], v: &ViewState) -> Widths {
     let slots = || rows.iter().flat_map(|r| r.slots.iter().copied());
     let name = mx(&mut rows.iter().map(|r| est(&r.head().name_cn, 11.0) + pad), 60.0, 280.0);
     let key = mx(&mut rows.iter().map(|r| est(&r.head().key, 10.0) + pad), 60.0, 300.0);
-    let mut val = mx(&mut slots().map(|s| est(&num(s.value), 11.0) + pad), 36.0, 170.0);
+    let mut val = mx(&mut slots().map(|s| est(&vtext(s), 11.0) + pad), 36.0, 170.0);
     let z = mx(&mut slots().map(|s| est(&num(s.z), 11.0) + pad), 34.0, 110.0);
     let pct = est("100%", 11.0) + pad;
     // 窗口组要装得下它的标题
@@ -568,7 +582,7 @@ fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, w: &Width
             tinted(text(""), Some(bar_color(s)))
                 .width(Length::Fixed(BAR))
                 .height(Length::Fill),
-            fcell(nowrap(num(s.value), 11.0, value_color(s)), w.val, true),
+            fcell(nowrap(vtext(s), 11.0, value_color(s)), w.val, true),
             {
                 let (a, c) = arrow(level);
                 fcell(nowrap(a, 10.0, c), w.arrow, false)
@@ -588,7 +602,7 @@ fn window_group<'a>(s: Option<&Slot>, mode: TableMode, metric: Metric, w: &Width
                     s.percentile.and_then(|p| heat((p - 0.5) * 2.0)),
                     crate::ui::pal::txt(),
                 ),
-                Metric::Value => (num(s.value), None, value_color(s)),
+                Metric::Value => (vtext(s), None, value_color(s)),
                 Metric::Quality => (quality_word(s), Some(bar_color(s).scale_alpha(0.28)), crate::ui::pal::txt()),
                 Metric::Change => {
                     let (a, c) = arrow(level);
@@ -813,7 +827,7 @@ fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
             ] {
                 l = l.push(text(format!("■{name}")).size(crate::ui::text::s_meta()).color(qcolor(q)));
             }
-            l.push(text("　悬停看原因").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())).into()
+            l.push(text("　值前 ≈ = 降级（估算）、! = 无效　悬停看原因").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())).into()
         }
         (TableMode::Pivot, Metric::Z) => dim("蓝 = 低于常态，红 = 高于常态，颜色越深偏离越大（|z| ≥ 3 封顶）".into()),
         (TableMode::Pivot, Metric::Pct) => dim("蓝 = 处在历史低位，红 = 处在历史高位，50% 附近不着色".into()),

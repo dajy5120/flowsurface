@@ -144,6 +144,8 @@ pub enum Event {
     KlineTable(crate::ui::grid::GridMsg),
     /// 期权面板策略表的网格交互
     OptionsGrid(crate::ui::grid::GridMsg),
+    /// 回测结果两张统计表的网格交互（0 = 运行信息，1 = 绩效统计）
+    BacktestGrid(u8, crate::ui::grid::GridMsg),
 }
 
 pub struct State {
@@ -1040,7 +1042,9 @@ impl State {
                 // 顶上是「发起回测」（选策略 + 共用数据选择组件 → 起 runner）。
                 let launch = crate::ws::backtest_launch_view::view(crate::ws::inspector_props::hosted(id))
                     .map(move |m| Message::PaneEvent(id, Event::BacktestLaunchInteraction(m)));
-                let base = column![launch, crate::ws::backtest_view::pane_body()].into();
+                let body = crate::ws::backtest_view::pane_body()
+                    .map(move |(w, m)| Message::PaneEvent(id, Event::BacktestGrid(w, m)));
+                let base = column![launch, body].into();
                 self.compose_stack_view(
                     base,
                     id,
@@ -1648,6 +1652,7 @@ impl State {
             Event::ToggleFreeze => self.frozen = !self.frozen,
             Event::KlineTable(m) => crate::ws::kline_table::handle(self.id, m),
             Event::OptionsGrid(m) => crate::ws::options_view::grid_update(m),
+            Event::BacktestGrid(w, m) => crate::ws::backtest_view::grid_update(w, m),
             Event::FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg::Source(m)) => {
                 // 特征数据源：选择 / 开始 / 停止回放。换了图表流就请上层清图。
                 if crate::ws::feature_source::handle(m) {

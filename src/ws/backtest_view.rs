@@ -10,11 +10,12 @@ use iced::widget::{column, container, row, scrollable, text};
 use iced::{Alignment, Background, Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
 
 use super::backtest_readout::BacktestResult;
+use crate::ui::grid::{self, Cell, Column, GridMsg, GridState};
 // 溯源横幅：高可信（Tardis + 体检过 + 队列位置撮合）绿底，其余琥珀。
 
 const ML: f32 = 46.0; // 左边距（y 轴标签）
 const MB: f32 = 16.0; // 下边距（x 轴标签）
-const MT: f32 = 6.0;
+const MT: f32 = 14.0; // 上边距：留出纵轴单位那一行
 const MR: f32 = 8.0;
 
 fn fmt_num(v: f64) -> String {
@@ -82,12 +83,36 @@ struct LineChart {
     fill: bool,
     /// 纵轴是金额（资金曲线）：隐藏数值模式下不写刻度值
     money: bool,
+    /// 纵轴单位（图表规范 docs/35 §6.3：坐标轴写单位）
+    unit: &'static str,
     cache: Cache,
+}
+
+/// 时间序列里的缺口：相邻两点间隔超过中位间隔 3 倍的位置（返回缺口后那一点的下标）。
+/// 回测资金曲线按 bar 采样，休市、数据空洞处会跳一大段——**不插值**，断开画并标出来（docs/35 §6.3）。
+fn gaps(xt: &[i64]) -> Vec<usize> {
+    // 点太少时「正常间隔」本身就不可靠（4 个点的资金曲线曾把最后一段误判成缺口）
+    if xt.len() < 10 {
+        return Vec::new();
+    }
+    let mut d: Vec<i64> = xt.windows(2).map(|w| w[1] - w[0]).filter(|x| *x > 0).collect();
+    if d.is_empty() {
+        return Vec::new();
+    }
+    d.sort_unstable();
+    let med = d[d.len() / 2].max(1);
+    xt.windows(2).enumerate().filter(|(_, w)| w[1] - w[0] > med * 3).map(|(i, _)| i + 1).collect()
+}
+
+fn fmt_time(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_default()
 }
 
 impl<M> canvas::Program<M> for LineChart {
     type State = ();
-    fn draw(&self, _s: &(), r: &Renderer, _t: &Theme, b: Rectangle, _c: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(&self, _s: &(), r: &Renderer, _t: &Theme, b: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
         let geo = self.cache.draw(r, b.size(), |frame: &mut Frame| {
             let (w, h) = (frame.width(), frame.height());
             if self.pts.len() < 2 {
@@ -129,13 +154,40 @@ impl<M> canvas::Program<M> for LineChart {
                 });
                 frame.fill(&area, Color { a: 0.16, ..self.color });
             }
+            // 缺口：断开不连线，并画淡色带 + 「缺口」字样
+            let gap_at = if self.xt.len() == n { gaps(&self.xt) } else { Vec::new() };
+            for &g in &gap_at {
+                let (x0, x1) = (mx(g - 1), mx(g));
+                frame.fill_rectangle(Point::new(x0, MT), iced::Size::new((x1 - x0).max(2.0), ph), crate::ui::pal::alpha(crate::ui::pal::warn(), 0.12));
+                frame.fill_text(Text {
+                    content: "缺口".into(),
+                    position: Point::new(x0 + 2.0, MT + 1.0),
+                    color: crate::ui::pal::warn(),
+                    size: iced::Pixels(9.0),
+                    ..Default::default()
+                });
+            }
             let line = Path::new(|p| {
                 p.move_to(Point::new(mx(0), my(self.pts[0])));
                 for (i, v) in self.pts.iter().enumerate().skip(1) {
-                    p.line_to(Point::new(mx(i), my(*v)));
+                    if gap_at.contains(&i) {
+                        p.move_to(Point::new(mx(i), my(*v)));
+                    } else {
+                        p.line_to(Point::new(mx(i), my(*v)));
+                    }
                 }
             });
             frame.stroke(&line, Stroke::default().with_width(1.6).with_color(self.color));
+            // 纵轴单位写在左上角刻度上方
+            if !self.unit.is_empty() {
+                frame.fill_text(Text {
+                    content: self.unit.to_string(),
+                    position: Point::new(2.0, 0.0),
+                    color: crate::ui::pal::axis(),
+                    size: iced::Pixels(9.0),
+                    ..Default::default()
+                });
+            }
 
             // x 轴日期刻度（4 个）
             if self.xt.len() == n {
@@ -151,7 +203,44 @@ impl<M> canvas::Program<M> for LineChart {
                 }
             }
         });
-        vec![geo]
+        // 十字线读数（图表规范 §6.3）：最近的一点的时间与值，等宽数字；不进缓存，跟着光标每帧画
+        let mut out = vec![geo];
+        if let Some(p) = cursor.position_in(b)
+            && self.pts.len() >= 2
+        {
+            let mut hair = Frame::new(r, b.size());
+            let (w, h) = (b.width, b.height);
+            let pw = (w - ML - MR).max(1.0);
+            let n = self.pts.len();
+            let i = (((p.x - ML) / pw) * (n - 1) as f32).round().clamp(0.0, (n - 1) as f32) as usize;
+            let x = ML + (i as f32) / ((n - 1) as f32) * pw;
+            hair.stroke(
+                &Path::line(Point::new(x, MT), Point::new(x, h - MB)),
+                Stroke::default().with_width(1.0).with_color(crate::ui::pal::axis()),
+            );
+            let v = self.pts[i];
+            let val = if self.money && crate::ui::hide_values() {
+                crate::ui::fmt::Absence::Withheld.glyph().to_string()
+            } else if self.money {
+                crate::ui::fmt::sim(fmt_num(v))
+            } else {
+                fmt_num(v)
+            };
+            let when = self.xt.get(i).map(|t| fmt_time(*t)).unwrap_or_else(|| format!("第 {i} 点"));
+            let gap = if self.xt.len() == n && gaps(&self.xt).contains(&i) { " · 缺口后第一点" } else { "" };
+            let label = format!("{when}  {val}{}{gap}", if self.unit.is_empty() { String::new() } else { format!(" {}", self.unit) });
+            let lx = if x > w / 2.0 { (x - 6.0 - label.chars().count() as f32 * 5.6).max(0.0) } else { x + 6.0 };
+            hair.fill_text(Text {
+                content: label,
+                position: Point::new(lx, MT + 10.0),
+                color: crate::ui::pal::txt(),
+                size: iced::Pixels(10.0),
+                font: crate::style::AZERET_MONO,
+                ..Default::default()
+            });
+            out.push(hair.into_geometry());
+        }
+        out
     }
 }
 
@@ -290,13 +379,14 @@ impl<M> canvas::Program<M> for PriceChart {
 
 // ───────────────────────── 组装小部件 ─────────────────────────
 
-fn line_chart<'a, M: 'a>(pts: Vec<f64>, xt: Vec<i64>, color: Color, baseline: Option<f64>, fill: bool, h: f32) -> Element<'a, M> {
-    chart_line(pts, xt, color, baseline, fill, false, h)
+fn line_chart<'a, M: 'a>(pts: Vec<f64>, xt: Vec<i64>, color: Color, baseline: Option<f64>, fill: bool, unit: &'static str, h: f32) -> Element<'a, M> {
+    chart_line(pts, xt, color, baseline, fill, false, unit, h)
 }
 
 /// 同 [`line_chart`]，`money = true` 表示纵轴是金额。
-fn chart_line<'a, M: 'a>(pts: Vec<f64>, xt: Vec<i64>, color: Color, baseline: Option<f64>, fill: bool, money: bool, h: f32) -> Element<'a, M> {
-    Canvas::new(LineChart { pts, xt, color, baseline, fill, money, cache: Cache::new() })
+#[allow(clippy::too_many_arguments)]
+fn chart_line<'a, M: 'a>(pts: Vec<f64>, xt: Vec<i64>, color: Color, baseline: Option<f64>, fill: bool, money: bool, unit: &'static str, h: f32) -> Element<'a, M> {
+    Canvas::new(LineChart { pts, xt, color, baseline, fill, money, unit, cache: Cache::new() })
         .width(Length::Fill)
         .height(Length::Fixed(h))
         .into()
@@ -318,55 +408,144 @@ fn section<'a, M: 'a>(title: &str, c: Color, body: impl Into<Element<'a, M>>) ->
     .into()
 }
 
-/// 表里的子节标题（分层：浅蓝底 + 粗体感）。
-fn subheader<'a, M: 'a>(s: &str) -> Element<'a, M> {
-    container(text(s.to_string()).size(crate::ui::text::s_small()).color(crate::ui::pal::head()))
-        .width(Length::Fill)
-        .padding(crate::ui::metrics::pad2(0, 2))
-        .style(|_t: &Theme| container::Style {
-            background: Some(Background::Color(crate::ui::pal::band())),
-            ..Default::default()
-        })
-        .into()
-}
-
-fn kv<'a, M: 'a>(k: &str, v: &str) -> Element<'a, M> {
-    row![
-        container(text(k.to_string()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())).width(Length::FillPortion(5)),
-        text(v.to_string()).size(crate::ui::text::s_meta()).font(crate::style::AZERET_MONO),
-    ]
-    .spacing(8)
-    .padding(crate::ui::metrics::pad2(0, 2))
-    .into()
-}
-
-/// 一张「表」：标题 + 若干分节（每节子标题 + 行）。
-/// 一行「名称 · 值…」：值都标成模拟金额。
-fn sim_row(row: &[String]) -> Vec<String> {
-    row.iter().enumerate().map(|(i, v)| if i == 0 { v.clone() } else { crate::ui::fmt::sim(v.clone()) }).collect()
-}
-
 /// 绩效统计里哪些行是金额：带币种的那一节（`PnL Statistics (USDT)`）里，
 /// 名称不含 `%` / `Rate` 的行（PnL、盈亏单笔、期望）。比率、胜率、夏普不是金额。
 fn is_money_stat(section: &str, label: &str) -> bool {
     section.contains("PnL") && !label.contains('%') && !label.contains("Rate")
 }
 
-fn table_card<'a, M: 'a>(title: &str, sections: Vec<(String, &Vec<Vec<String>>)>) -> Element<'a, M> {
-    let mut col = column![].spacing(2);
-    for (name, rows) in sections {
-        if rows.is_empty() {
-            continue;
-        }
-        col = col.push(subheader(&name));
-        for kvp in rows {
-            col = col.push(kv(
-                kvp.first().map(String::as_str).unwrap_or(""),
-                kvp.get(1).map(String::as_str).unwrap_or(""),
-            ));
+// ───────────────────────── 统计表（ui::grid，docs/35 §16.15 第 8 项）─────────────────────────
+
+thread_local! {
+    /// 两张表各自的网格状态（排序、列宽、折叠的分节）
+    static GRIDS: std::cell::RefCell<[Option<GridState>; 2]> = const { std::cell::RefCell::new([None, None]) };
+}
+
+/// 列：分节（分组用，隐藏）· 项目 · 值 · 来源。
+fn stat_cols() -> Vec<Column> {
+    vec![
+        Column::text("分节", 160.0).groupable(),
+        Column::text("项目", 260.0).key().pinned(),
+        Column::num("值", None, 220.0),
+        Column::text("来源", 200.0),
+    ]
+}
+
+fn fresh_state(cols: &[Column]) -> GridState {
+    let mut s = GridState::new(cols);
+    // 按分节分组，分节列本身不再单独占一列（组头就是分节名）
+    s.group_by = Some(0);
+    s.hidden.insert(0);
+    s
+}
+
+/// 表格交互（经 pane 事件 BacktestGrid 回到这里）。`0` = 运行信息，`1` = 绩效统计。
+pub fn grid_update(which: u8, m: GridMsg) {
+    let cols = stat_cols();
+    GRIDS.with(|g| {
+        let mut g = g.borrow_mut();
+        g[usize::from(which.min(1))].get_or_insert_with(|| fresh_state(&cols)).update(m, &cols, &[]);
+    });
+}
+
+/// 这次回测的数据成色落成的来源标记（UPDS V8 §72，docs/35 §7.2）：
+/// 强制跑（体检判 C 仍照跑）→ 人工覆盖 `^`；体检 C 或没有体检 → 估算 `≈`。
+/// 金额另带模拟 `~`（由 `fmt::sim` 加）。**三个标记并列显示**，不按「取最弱」合并——
+/// 模拟永远最弱，合并后强制跑与体检等级就看不见了。
+struct RunMarks {
+    forced: bool,
+    estimated: bool,
+}
+
+impl RunMarks {
+    fn of(r: &BacktestResult) -> Self {
+        match &r.data_provenance {
+            Some(p) => Self {
+                forced: p.quality_flags.iter().any(|f| f.starts_with("forced")),
+                estimated: matches!(p.grade.as_deref(), Some("C") | None),
+            },
+            None => Self { forced: false, estimated: true },
         }
     }
-    section(title, crate::ui::pal::head(), col)
+
+    fn prefix(&self) -> String {
+        let mut s = String::new();
+        if self.forced {
+            s.push_str(crate::ui::fmt::Provenance::Overridden.prefix());
+        }
+        if self.estimated {
+            s.push_str("≈ ");
+        }
+        s
+    }
+
+    fn words(&self, money: bool) -> String {
+        let mut w: Vec<&str> = Vec::new();
+        if money {
+            w.push("~ 模拟");
+        }
+        if self.forced {
+            w.push("^ 强制跑");
+        }
+        if self.estimated {
+            w.push("≈ 体检 C / 未体检");
+        }
+        w.join(" · ")
+    }
+}
+
+/// 一行统计 → 网格行。`money`：金额（带 `~`，隐藏数值时为 •••）；`marks`：成色标记（只给结果值，不给运行元数据）。
+fn stat_row(section: &str, row: &[String], money: bool, marks: Option<&RunMarks>) -> Vec<Cell> {
+    let label = row.first().cloned().unwrap_or_default();
+    let raw = row.get(1).cloned().unwrap_or_default();
+    // Nautilus 算不出的统计写 nan（没有亏损单时的「最小亏损」等）：是「不适用」，不是一个数，
+    // 也不带来源标记（docs/35 §7.1 六种「无」）
+    if matches!(raw.trim().to_ascii_lowercase().as_str(), "nan" | "none" | "") {
+        return vec![
+            Cell::Text(section.to_string()),
+            Cell::Text(label),
+            Cell::Absent(crate::ui::fmt::Absence::NotApplicable),
+            Cell::Colored("算不出（样本不足或没有对应的交易）".into(), crate::ui::pal::dim()),
+        ];
+    }
+    let v = if money { crate::ui::fmt::sim(raw.clone()) } else { raw.clone() };
+    let v = match marks {
+        Some(m) => format!("{}{v}", m.prefix()),
+        None => v,
+    };
+    let src = marks.map(|m| m.words(money)).unwrap_or_default();
+    let num = raw.replace([',', ' ', '%'], "").parse::<f64>().ok();
+    vec![
+        Cell::Text(section.to_string()),
+        Cell::Text(label),
+        match num {
+            Some(x) => Cell::num(x, v),
+            None => Cell::Text(v),
+        },
+        Cell::Colored(src, crate::ui::pal::dim()),
+    ]
+}
+
+/// 面板消息：（哪张表, 网格消息）。
+pub type BtMsg = (u8, GridMsg);
+
+fn stat_grid<'a>(which: u8, title: &str, rows: Vec<Vec<Cell>>) -> Element<'a, BtMsg> {
+    let cols = stat_cols();
+    let n = rows.len();
+    let state = GRIDS.with(|g| {
+        let mut g = g.borrow_mut();
+        let s = g[usize::from(which.min(1))].get_or_insert_with(|| fresh_state(&cols));
+        s.resort(&cols, &rows);
+        s.clone()
+    });
+    let groups = rows.iter().map(|r| match &r[0] { Cell::Text(s) => s.clone(), _ => String::new() }).collect::<std::collections::BTreeSet<_>>().len();
+    // 外层是滚动容器：网格要定高（行 + 组头 + 表头 + 页脚）
+    let h = crate::ui::metrics::row_height() * (n + groups + 1) as f32 + crate::ui::metrics::panel_header() + 40.0;
+    section(
+        title,
+        crate::ui::pal::head(),
+        container(grid::view(cols, rows, state, None, move |m| (which, m))).height(Length::Fixed(h)),
+    )
 }
 
 /// 月度收益热力图：年×月 网格，红负绿正、强度按幅值，格内显 %。
@@ -499,7 +678,7 @@ fn provenance_banner<'a, M: 'a>(r: &BacktestResult) -> Element<'a, M> {
         .into()
 }
 
-pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
+pub fn pane_body<'a>() -> Element<'a, BtMsg> {
     let r: BacktestResult = super::backtest_readout::snapshot();
 
     // 正在跑、而手上这份结果属于**别的**运行 → 明说「进行中」，不要把上一次的结论当本次。
@@ -513,12 +692,12 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         let run = super::active_run::current().map(|a| a.run_id).unwrap_or_default();
         let p = super::backtest_readout::progress_snapshot();
         // 进度属于**本次** run 才画——上一次残留的百分比比不画更误导。
-        let bar: Element<'a, M> = if p.run_id == run && !run.is_empty() {
+        let bar: Element<'a, BtMsg> = if p.run_id == run && !run.is_empty() {
             let clock = chrono::DateTime::from_timestamp((p.clock_ms / 1000) as i64, 0)
                 .map(|d| d.format("%m-%d %H:%M:%S").to_string())
                 .unwrap_or_else(|| "—".into());
             column![
-                progress_bar::<M>(p.pct),
+                progress_bar::<BtMsg>(p.pct),
                 text(format!(
                     "{:.1}%   回测时钟 {clock}   已处理 {} 笔成交",
                     p.pct, p.ticks
@@ -586,34 +765,25 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         },
     ]
     .spacing(2);
-    let header = column![header, provenance_banner::<M>(&r)].spacing(6);
+    let header = column![header, provenance_banner::<BtMsg>(&r)].spacing(6);
 
     // —— 上方两表 —— Run Information（+ Account Summary）/ Performance Statistics（分节）
-    // 回测里的金额一律是模拟出来的：带 `~`，隐藏数值模式下为 `•••`（docs/35 §7.2 / §9.3）
-    let account: Vec<Vec<String>> = r.account.iter().map(|row| sim_row(row)).collect();
-    let stats: Vec<(String, Vec<Vec<String>>)> = r
+    // 换成 ui::grid（docs/35 §16.15 第 8 项）：按分节分组、可排序、可复制、可多选求和。
+    // 回测里的金额一律是模拟出来的：带 `~`，隐藏数值模式下为 `•••`（docs/35 §7.2 / §9.3）；
+    // 结果值另带这次运行的成色标记（强制跑 `^`、体检 C / 未体检 `≈`）
+    let marks = RunMarks::of(&r);
+    let mut run_rows: Vec<Vec<Cell>> = r.run_info.iter().map(|row| stat_row("Run Information", row, false, None)).collect();
+    run_rows.extend(r.account.iter().map(|row| stat_row("Account Summary", row, true, Some(&marks))));
+    let stat_rows: Vec<Vec<Cell>> = r
         .stats_sections
         .iter()
-        .map(|s| {
-            let rows = s
-                .rows
-                .iter()
-                .map(|row| if is_money_stat(&s.name, row.first().map_or("", String::as_str)) { sim_row(row) } else { row.clone() })
-                .collect();
-            (s.name.clone(), rows)
+        .flat_map(|s| {
+            let marks = &marks;
+            s.rows.iter().map(move |row| stat_row(&s.name, row, is_money_stat(&s.name, row.first().map_or("", String::as_str)), Some(marks)))
         })
         .collect();
-    let run_table = table_card(
-        "运行信息 / Run Information",
-        vec![
-            ("Run Information".to_string(), &r.run_info),
-            ("Account Summary".to_string(), &account),
-        ],
-    );
-    let stats_table = table_card(
-        "绩效统计 / Performance Statistics",
-        stats.iter().map(|(n, rows)| (n.clone(), rows)).collect(),
-    );
+    let run_table = stat_grid(0, "运行信息 / Run Information", run_rows);
+    let stats_table = stat_grid(1, "绩效统计 / Performance Statistics", stat_rows);
 
     let equity_base = r.equity.v.first().copied();
     let yearly_labels: Vec<String> = r.yearly.years.clone();
@@ -622,11 +792,11 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
 
     let charts = column![
         // 报告顺序：equity → drawdown → monthly → distribution → rolling_sharpe → yearly
-        section("收益曲线 Equity（资金 · ~ 模拟）", crate::ui::pal::up(), chart_line(r.equity.v.clone(), r.equity.t.clone(), crate::ui::pal::up(), equity_base, false, true, 200.0)),
-        section("回撤 Drawdown %", crate::ui::pal::down(), line_chart(r.drawdown.v.clone(), r.drawdown.t.clone(), crate::ui::pal::down(), Some(0.0), true, 130.0)),
+        section("收益曲线 Equity（资金 · ~ 模拟）", crate::ui::pal::up(), chart_line(r.equity.v.clone(), r.equity.t.clone(), crate::ui::pal::up(), equity_base, false, true, "资金（账户币种）", 200.0)),
+        section("回撤 Drawdown %", crate::ui::pal::down(), line_chart(r.drawdown.v.clone(), r.drawdown.t.clone(), crate::ui::pal::down(), Some(0.0), true, "%", 130.0)),
         section("月度收益 Monthly Returns %（年×月）", crate::ui::pal::head(), heatmap(&r.monthly)),
         section("收益分布 Distribution", crate::ui::pal::head(), bar_chart(r.distribution.counts.iter().map(|c| *c as f64).collect(), dist_labels, Some(crate::ui::pal::info()), 120.0)),
-        section("滚动夏普 Rolling Sharpe（60 期）", crate::ui::pal::info(), line_chart(r.rolling_sharpe.v.clone(), r.rolling_sharpe.t.clone(), crate::ui::pal::info(), Some(0.0), false, 120.0)),
+        section("滚动夏普 Rolling Sharpe（60 期）", crate::ui::pal::info(), line_chart(r.rolling_sharpe.v.clone(), r.rolling_sharpe.t.clone(), crate::ui::pal::info(), Some(0.0), false, "夏普（无量纲）", 120.0)),
         section("年度收益 Yearly Returns %", crate::ui::pal::up(), bar_chart(r.yearly.v.iter().map(|o| o.unwrap_or(0.0)).collect(), yearly_labels, None, 120.0)),
         // 附加（官方默认报告无此图，cockpit 额外提供）
         section(
@@ -646,6 +816,21 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
 
     let body = column![header, run_table, stats_table, charts].spacing(12).padding(crate::ui::metrics::space(1));
     container(scrollable(body)).padding(crate::ui::metrics::space(4)).width(Length::Fill).height(Length::Fill).into()
+}
+
+#[cfg(test)]
+mod gap_tests {
+    use super::gaps;
+
+    #[test]
+    fn 间隔超过中位数三倍才算缺口() {
+        // 1 分钟一根，中间断了 10 分钟
+        let t: Vec<i64> = [0, 1, 2, 3, 4, 5, 15, 16, 17, 18, 19].iter().map(|m| m * 60_000).collect();
+        assert_eq!(gaps(&t), vec![6]);
+        // 均匀的没有缺口；点太少不判
+        assert!(gaps(&(0..20).map(|m| m * 60_000).collect::<Vec<i64>>()).is_empty());
+        assert!(gaps(&[0, 60_000, 120_000, 900_000]).is_empty());
+    }
 }
 
 #[cfg(test)]
