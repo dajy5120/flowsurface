@@ -1217,7 +1217,7 @@ impl Flowsurface {
 
             let sidebar_view = self
                 .sidebar
-                .view(self.audio_stream.volume(), &workspaces)
+                .view(&workspaces)
                 .map(Message::Sidebar);
 
             let dashboard_view: Element<'_, Message> = match &self.gallery {
@@ -1920,6 +1920,11 @@ impl Flowsurface {
                         )),
                     ));
 
+                    // 声音面板从侧栏移到这里（侧栏只留工作区 + 搜索标的 / 布局 / 设置）
+                    let toggle_audio_editor = button(text("声音与成交提示音…")).on_press(Message::Sidebar(
+                        dashboard::sidebar::Message::ToggleSidebarMenu(Some(sidebar::Menu::Audio)),
+                    ));
+
                     let timezone_picklist = pick_list(
                         [data::UserTimezone::Utc, data::UserTimezone::Local],
                         Some(self.timezone),
@@ -2113,6 +2118,7 @@ impl Flowsurface {
                         ("量的计价单位", "size quote base usd 成交额", self.volume_size_unit != exchange::SizeUnit::default(), "本机状态", None, size_in_quote_currency_checkbox.into()),
                         ("补拉逐笔成交（实验）", "trades fetch footprint 足迹 实验", connector::fetcher::is_trade_fetch_enabled(), "本机状态",
                             Some(Message::ToggleTradeFetch(false)), trade_fetch_checkbox.into()),
+                        ("声音", "audio sound 声音 音量 提示音 成交", false, "", None, toggle_audio_editor.into()),
                         ("网络与代理", "network proxy 代理 网络", false, "", None, toggle_network_editor.into()),
                         ("数据文件夹", "data folder 文件夹 配置", false, "", None, open_data_folder.into()),
                     ];
@@ -2289,8 +2295,8 @@ impl Flowsurface {
                 };
 
                 let (align_x, padding) = match sidebar_pos {
-                    sidebar::Position::Left => (Alignment::Start, padding::left(44).top(40)),
-                    sidebar::Position::Right => (Alignment::End, padding::right(44).top(40)),
+                    sidebar::Position::Left => (Alignment::Start, padding::left(44).bottom(4)),
+                    sidebar::Position::Right => (Alignment::End, padding::right(44).bottom(4)),
                 };
 
                 dashboard_modal(
@@ -2298,14 +2304,14 @@ impl Flowsurface {
                     manage_layout_modal,
                     Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None)),
                     padding,
-                    Alignment::Start,
+                    Alignment::End,
                     align_x,
                 )
             }
             sidebar::Menu::Audio => {
                 let (align_x, padding) = match sidebar_pos {
-                    sidebar::Position::Left => (Alignment::Start, padding::left(44).top(76)),
-                    sidebar::Position::Right => (Alignment::End, padding::right(44).top(76)),
+                    sidebar::Position::Left => (Alignment::Start, padding::left(44).bottom(4)),
+                    sidebar::Position::Right => (Alignment::End, padding::right(44).bottom(4)),
                 };
 
                 let trade_streams_list = dashboard.streams.trade_streams(None);
@@ -2317,7 +2323,7 @@ impl Flowsurface {
                         .map(Message::AudioStream),
                     Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(None)),
                     padding,
-                    Alignment::Start,
+                    Alignment::End,
                     align_x,
                 )
             }

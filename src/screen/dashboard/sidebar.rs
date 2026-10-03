@@ -10,7 +10,7 @@ use data::sidebar;
 use iced::{
     Alignment, Element, Subscription, Task,
     widget::responsive,
-    widget::{column, row, space},
+    widget::{column, row, scrollable, space},
 };
 use rustc_hash::FxHashMap;
 
@@ -99,7 +99,6 @@ impl Sidebar {
 
     pub fn view<'a>(
         &'a self,
-        audio_volume: Option<f32>,
         workspaces: &[(uuid::Uuid, &'static str, bool)],
     ) -> Element<'a, Message> {
         let state = &self.state;
@@ -112,8 +111,7 @@ impl Sidebar {
 
         let is_table_open = self.tickers_table.is_shown;
 
-        let nav_buttons =
-            self.nav_buttons(is_table_open, audio_volume, tooltip_position, workspaces);
+        let nav_buttons = self.nav_buttons(is_table_open, tooltip_position, workspaces);
 
         let tickers_table = if is_table_open {
             column![responsive(move |size| self
@@ -140,14 +138,14 @@ impl Sidebar {
     fn nav_buttons<'a>(
         &'a self,
         is_table_open: bool,
-        audio_volume: Option<f32>,
         tooltip_position: TooltipPosition,
         workspaces: &[(uuid::Uuid, &'static str, bool)],
     ) -> iced::widget::Column<'a, Message> {
         let settings_modal_button = {
             let is_active = self.is_menu_active(sidebar::Menu::Settings)
                 || self.is_menu_active(sidebar::Menu::ThemeEditor)
-                || self.is_menu_active(sidebar::Menu::Network);
+                || self.is_menu_active(sidebar::Menu::Network)
+                || self.is_menu_active(sidebar::Menu::Audio);
 
             button_with_tooltip(
                 icon_text(Icon::Cog, 14)
@@ -188,24 +186,6 @@ impl Sidebar {
             )
         };
 
-        let audio_btn = {
-            let is_active = self.is_menu_active(sidebar::Menu::Audio);
-
-            let icon = match audio_volume.unwrap_or(0.0) {
-                v if v >= 40.0 => Icon::SpeakerHigh,
-                v if v > 0.0 => Icon::SpeakerLow,
-                _ => Icon::SpeakerOff,
-            };
-
-            button_with_tooltip(
-                icon_text(icon, 14).width(24).align_x(Alignment::Center),
-                Message::ToggleSidebarMenu(Some(sidebar::Menu::Audio)),
-                None,
-                tooltip_position,
-                move |theme, status| crate::style::button::transparent(theme, status, is_active),
-            )
-        };
-
         // WealthSpring 工作区切换（docs/08 F6 — P1）：合并进侧边栏顶部的图标按钮组。
         let mut col = column![].width(32).spacing(8).align_x(Alignment::Center);
         for &(uid, name, is_active) in workspaces {
@@ -230,16 +210,24 @@ impl Sidebar {
                 move |theme, status| crate::style::button::transparent(theme, status, is_active),
             ));
         }
-        if !workspaces.is_empty() {
-            // 工作区组 与 工具组 之间的分隔间距。
-            col = col.push(space::vertical().height(12));
-        }
+        // 工作区组放进可滚动区：小屏幕高度不够时滚轮翻动，不再把下方工具组挤出状态栏以上的可见区。
+        // 声音设置已移进设置窗口；搜索标的 / 布局 / 设置固定在底部。
+        let workspaces_area = scrollable::Scrollable::with_direction(
+            col,
+            scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(2).scroller_width(2)),
+        )
+        .height(iced::Length::Fill);
 
-        col.push(ticker_search_button)
-            .push(layout_modal_button)
-            .push(audio_btn)
-            .push(space::vertical())
-            .push(settings_modal_button)
+        column![
+            workspaces_area,
+            space::vertical().height(8),
+            ticker_search_button,
+            layout_modal_button,
+            settings_modal_button,
+        ]
+        .width(32)
+        .spacing(8)
+        .align_x(Alignment::Center)
     }
 
     pub fn hide_tickers_table(&mut self) -> bool {
