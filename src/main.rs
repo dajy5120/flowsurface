@@ -223,6 +223,10 @@ struct Flowsurface {
     /// 上游每秒重试一次、只记 INFO，界面上只有「Waiting for data…」——离线时看不出为什么
     /// （docs/35 §16.14 测试矩阵 offline 场景查出来的）。
     stream_down: std::collections::BTreeMap<String, (std::time::Instant, String)>,
+    /// 上一次写到磁盘的状态（序列化后的文本）：内容没变就不重写
+    last_saved: String,
+    /// 上一次自动存盘的时刻
+    last_autosave: std::time::Instant,
     /// 主窗口宽度（逻辑像素）：窄于 [`NARROW_PX`] 时检查器变浮层抽屉
     main_width: f32,
     /// 命令面板实际列的条目 = 注册表 + 当前工作区的面板（打开面板时刷新）
@@ -248,6 +252,12 @@ enum Message {
     ExitRequested(HashMap<window::Id, WindowSpec>),
     RestartRequested(Option<HashMap<window::Id, WindowSpec>>),
     SaveStateRequested(HashMap<window::Id, WindowSpec>),
+    /// systemd 停服务（SIGTERM）：先存盘再退出。原先直接被杀，布局从 9 月 25 日起一直没落过盘
+    TermSignal,
+    /// 收到 SIGTERM 后取完窗口位置：存盘、收掉自己的子进程、退出（守护由 systemd 管，不在这里停）
+    SaveAndQuit(HashMap<window::Id, WindowSpec>),
+    /// 定时自动存盘（内容没变不写）：崩溃、断电也最多丢一分钟的界面调整
+    AutoSave(HashMap<window::Id, WindowSpec>),
     GoBack,
     DataFolderRequested,
     OpenUrlRequested(Cow<'static, str>),
@@ -332,6 +342,8 @@ impl Flowsurface {
             main_width: f32::MAX,
             settings_query: String::new(),
             stream_down: std::collections::BTreeMap::new(),
+            last_saved: String::new(),
+            last_autosave: std::time::Instant::now(),
             gallery: if ws::specimen::enabled() { ui::gallery::Gallery::from_env() } else { None },
         };
 
@@ -533,6 +545,11 @@ impl Flowsurface {
                 }
             }
             Message::Tick(now) => {
+                // 定时自动存盘（每分钟；内容没变不写，见 save_state_to_disk）。样张模式不存
+                if self.specimen.is_none() && now.duration_since(self.last_autosave) >= std::time::Duration::from_secs(60) {
+                    self.last_autosave = now;
+                    return window::collect_window_specs(self.all_window_ids(), Message::AutoSave);
+                }
                 // 网格右键菜单复制出来的文字（网格自己发不了剪贴板 Task）
                 if let Some(t) = ui::grid::take_clipboard() {
                     self.notifications.push(Toast::info(format!("已复制 {} 行", t.lines().count().saturating_sub(1))));
@@ -699,6 +716,21 @@ impl Flowsurface {
                 return iced::exit();
             }
             Message::SaveStateRequested(windows) => {
+                self.save_state_to_disk(&windows);
+            }
+            Message::TermSignal => {
+                log::info!("收到 SIGTERM：存盘后退出");
+                return window::collect_window_specs(self.all_window_ids(), Message::SaveAndQuit);
+            }
+            Message::SaveAndQuit(windows) => {
+                self.save_state_to_disk(&windows);
+                // 自己起的子进程（特征回放、回测）一起收掉；后台守护由 systemd 管（ws-stack.target），
+                // 这里不停——否则 `systemctl restart ws-cockpit` 会连整套守护一起停
+                ws::feature_source::shutdown();
+                ws::backtest_launch::shutdown();
+                return iced::exit();
+            }
+            Message::AutoSave(windows) => {
                 self.save_state_to_disk(&windows);
             }
             Message::RestartRequested(Some(windows)) => {
@@ -1476,6 +1508,29 @@ impl Flowsurface {
 
         let hotkeys = iced::event::listen_with(shortcut);
 
+        // systemd 停服务发的是 SIGTERM：收到后先存盘再退出（样张模式不需要）
+        // （样张模式另可用 WS_UI_SPECIMEN_SIGTERM=1 打开，在隔离实例里验证这条路径）
+        let sigterm = if self.specimen.is_none() || std::env::var_os("WS_UI_SPECIMEN_SIGTERM").is_some() {
+            Subscription::run(|| {
+                iced::stream::channel(1, |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
+                    use iced::futures::SinkExt;
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                        Ok(mut s) => {
+                            while s.recv().await.is_some() {
+                                let _ = out.send(Message::TermSignal).await;
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("监听 SIGTERM 失败（被 systemd 停时不会存盘）：{e}");
+                            std::future::pending::<()>().await;
+                        }
+                    }
+                })
+            })
+        } else {
+            Subscription::none()
+        };
+
         Subscription::batch(vec![
             specimen,
             exchange_streams,
@@ -1490,6 +1545,7 @@ impl Flowsurface {
             window_events,
             tick,
             hotkeys,
+            sigterm,
         ])
     }
 
@@ -2369,8 +2425,10 @@ impl Flowsurface {
         );
 
         match serde_json::to_string(&state).map(ws::feature_source::scrub_saved) {
+            Ok(layout_str) if layout_str == self.last_saved => {}
             Ok(layout_str) => {
                 let file_name = data::SAVED_STATE_PATH;
+                self.last_saved = layout_str.clone();
                 if let Err(e) = data::write_json_to_file(&layout_str, file_name) {
                     log::error!("Failed to write layout state to file: {}", e);
                 } else {
@@ -2379,6 +2437,13 @@ impl Flowsurface {
             }
             Err(e) => log::error!("Failed to serialize layout: {}", e),
         }
+    }
+
+    /// 主窗口 + 当前工作区的全部弹出窗口（存盘要取它们的位置）。
+    fn all_window_ids(&self) -> Vec<window::Id> {
+        let mut v: Vec<window::Id> = self.active_dashboard().popout.keys().copied().collect();
+        v.push(self.main_window.id);
+        v
     }
 
     fn restart(&mut self) -> Task<Message> {
