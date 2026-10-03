@@ -187,7 +187,7 @@ impl Sidebar {
         };
 
         // WealthSpring 工作区切换（docs/08 F6 — P1）：合并进侧边栏顶部的图标按钮组。
-        let mut col = column![].width(32).spacing(8).align_x(Alignment::Center);
+        let mut col = column![].width(32).spacing(2).align_x(Alignment::Center);
         for &(uid, name, is_active) in workspaces {
             // 分组标题（docs/35 §5.3）：组首工作区前放组名，组与组之间留一点空
             if let Some((i, (group, _))) = crate::ws::workspace::GROUPS
@@ -211,22 +211,21 @@ impl Sidebar {
             ));
         }
         // 工作区组放进可滚动区：小屏幕高度不够时滚轮翻动，不再把下方工具组挤出状态栏以上的可见区。
-        // 声音设置已移进设置窗口；搜索标的 / 布局 / 设置固定在底部。
+        // 不画滚动条（宽 0），滚轮直接翻；声音设置已移进设置窗口；搜索标的 / 布局 / 设置固定在底部、紧接滚动区。
         let workspaces_area = scrollable::Scrollable::with_direction(
             col,
-            scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(2).scroller_width(2)),
+            scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(0).scroller_width(0)),
         )
         .height(iced::Length::Fill);
 
         column![
             workspaces_area,
-            space::vertical().height(8),
             ticker_search_button,
             layout_modal_button,
             settings_modal_button,
         ]
         .width(32)
-        .spacing(8)
+        .spacing(2)
         .align_x(Alignment::Center)
     }
 
