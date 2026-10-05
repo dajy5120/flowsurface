@@ -72,10 +72,13 @@ pub fn init_form(params: &[Param]) -> OptForm {
         .filter(|p| searchable(p))
         .map(|p| {
             let int = p.kind == "integer";
+            // 标了 x-optimize 但注解缺上下限的（如只有下限的阈值）默认不勾：
+            // 勾上就得先填范围，否则一点「开始优化」就失败，而且不容易看出为什么
+            let bounded = p.choices.is_some() || p.kind == "boolean" || (p.minimum.is_some() && p.maximum.is_some());
             (
                 p.name.clone(),
                 OptField {
-                    on: p.optimize,
+                    on: p.optimize && bounded,
                     low: num_text(p.minimum, int),
                     high: num_text(p.maximum, int),
                     step: num_text(p.step, int),
@@ -319,6 +322,13 @@ mod tests {
         let f = init_form(&entry().params);
         assert!(f.fields["risk_level"].on && !f.fields["preset"].on);
         assert_eq!((f.fields["risk_level"].low.as_str(), f.fields["risk_level"].high.as_str()), ("0", "6"));
+    }
+
+    #[test]
+    fn starred_param_without_full_range_starts_unchecked() {
+        // dd_value 这类只有下限的阈值：勾上就会因为没有上限而发不出去，所以缺省不勾
+        let ps = vec![Param { maximum: None, ..p("dd_value", "number", 0.0, 0.0, Some(5.0), true) }];
+        assert!(!init_form(&ps).fields["dd_value"].on);
     }
 
     #[test]

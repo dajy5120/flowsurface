@@ -8,6 +8,7 @@ use iced::{Alignment, Element, Length};
 
 use super::strategy_center::{Entry, Param, RunRow, ScMsg, Summary, Tab, View, default_text};
 use super::strategy_center_opt::{self as so, Gate, Heat, StudyRow};
+use super::strategy_center_val::{self as sv, ExpRow, ValRow};
 use crate::ui::fmt::{Rounding, opt};
 use crate::ui::metrics::space;
 use crate::ui::pal;
@@ -401,16 +402,20 @@ fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
     let pinned = super::backtest_readout::pinned().is_some();
     let n_active = v.studies.iter().filter(|s| s.active()).count();
     let study_tab = if n_active > 0 { "优化 ●" } else { "优化" };
+    let check_tab = if v.validations.iter().any(ValRow::active) { "验证 ●" } else { "验证" };
     let mut col = column![
         w::panel_header(
             "",
-            Some(w::tabs(&[("运行记录", Tab::Runs), (study_tab, Tab::Studies)], &v.tab, ScMsg::Tab)),
+            Some(w::tabs(&[("运行记录", Tab::Runs), (study_tab, Tab::Studies), (check_tab, Tab::Checks)], &v.tab, ScMsg::Tab)),
             vec![w::btn("跟随最新结果", if pinned { Kind::Standard } else { Kind::Ghost }, pinned.then_some(ScMsg::FollowLatest))],
         )
     ]
     .spacing(space(2));
     if v.tab == Tab::Studies {
         return container(col.push(studies(v))).width(Length::FillPortion(5)).height(Length::Fill).into();
+    }
+    if v.tab == Tab::Checks {
+        return container(col.push(scrollable(checks(v)).height(Length::Fill))).width(Length::FillPortion(5)).height(Length::Fill).into();
     }
     if !v.db_err.is_empty() {
         col = col.push(t::metadata(v.db_err.clone()).color(pal::dim()));
@@ -476,6 +481,9 @@ fn opt_section<'a>(v: &View, e: &Entry) -> Element<'a, ScMsg> {
         ]
         .spacing(space(1))
         .align_y(Alignment::Center);
+        if !of.on && p.optimize && p.choices.is_none() && p.kind != "boolean" && (p.minimum.is_none() || p.maximum.is_none()) {
+            r = r.push(t::metadata("★ 注解没给完整范围，勾上后要自己填").color(pal::dim()));
+        }
         if of.on {
             if let Some(ch) = &p.choices {
                 r = r.push(t::metadata(format!("全部 {} 个取值", ch.len())).color(pal::dim()));
@@ -530,12 +538,19 @@ fn opt_section<'a>(v: &View, e: &Entry) -> Element<'a, ScMsg> {
         );
     }
     col = col.push(sizes);
-    let ok = v.field_errors.is_empty() && !v.sending;
-    col = col.push(if ok {
-        w::btn("🔬 开始优化", Kind::Standard, Some(ScMsg::StartStudy))
-    } else {
-        w::btn_why("🔬 开始优化", Kind::Standard, None::<ScMsg>, if v.sending { "正在发送…" } else { "先改正标红的参数" })
+    // 能不能发：与真正发送走同一个校验（study_from_form）；不能发就把原因写在按钮正下方
+    let why = if v.sending { Some("正在发送…".to_string()) } else { v.opt_error.clone() };
+    col = col.push(match &why {
+        None => w::btn("🔬 开始优化", Kind::Standard, Some(ScMsg::StartStudy)),
+        Some(r) => w::btn_why("🔬 开始优化", Kind::Standard, None::<ScMsg>, r.clone()),
     });
+    if let Some(r) = &v.opt_error {
+        col = col.push(t::caption(format!("还不能开始：{r}")).color(pal::warn()));
+    }
+    // 发起 / 停止优化的结果写在这里（中栏顶部那行离这儿太远，滚到下面看不见）
+    if v.msg.contains("优化") {
+        col = col.push(t::caption(v.msg.clone()).color(if v.msg.contains("失败") { pal::bad() } else { pal::ok() }));
+    }
     col = col.push(
         t::metadata("每次尝试都是一次完整回测，独立进程、不打扰图表；全部计入多重检验——试得越多，DSR 打折越狠。固定参数取上面表单里改过的值。")
             .color(pal::dim()),
@@ -706,7 +721,10 @@ fn studies<'a>(v: &View) -> Element<'a, ScMsg> {
         return Space::new().into();
     }
     let mut col = column![].spacing(space(2));
-    if v.studies.is_empty() {
+    if v.msg.contains("优化") {
+        col = col.push(t::caption(v.msg.clone()).color(if v.msg.contains("失败") { pal::bad() } else { pal::ok() }));
+    }
+    if v.studies.is_empty() && !v.msg.contains("发起优化") {
         return w::empty("这个策略还没做过优化", "在中栏「参数优化」里勾参数、点「🔬 开始优化」");
     }
     let mut list = column![].spacing(space(1));
@@ -718,6 +736,202 @@ fn studies<'a>(v: &View) -> Element<'a, ScMsg> {
     if let Some(s) = focus {
         col = col.push(scrollable(study_detail(s, v)).height(Length::FillPortion(5)));
     }
+    col.into()
+}
+
+// ── 右栏「验证」页：闸门 · 验证任务 · 实验 ─────────────────────────────
+
+fn gate_row<'a>(g: &sv::Gate) -> Element<'a, ScMsg> {
+    let (tone, mark) = match g.status.as_str() {
+        "pass" => (Tone::Success, "过"),
+        "fail" => (Tone::Danger, "不过"),
+        _ => (Tone::Neutral, "算不了"),
+    };
+    let val = match &g.value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Number(n) => n.as_f64().map(|x| format!("{x:.3}")).unwrap_or_default(),
+        other => other.as_str().map(str::to_string).unwrap_or_else(|| other.to_string()),
+    };
+    let mut c = column![
+        row![
+            container(w::badge(format!("{} {}", g.id, mark), tone)).width(Length::Fixed(92.0)),
+            container(t::caption(g.name.clone())).width(Length::Fixed(80.0)),
+            t::numeric(val),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center),
+    ]
+    .spacing(0);
+    let mut sub = g.why.clone();
+    if let Some(src) = &g.source {
+        sub = format!("{sub}  [{src}]");
+    }
+    if !sub.trim().is_empty() {
+        c = c.push(row![Space::new().width(Length::Fixed(92.0 + space(2))), t::metadata(sub).color(pal::dim())]);
+    }
+    c.into()
+}
+
+fn val_item<'a>(r: &ValRow) -> Element<'a, ScMsg> {
+    let (label, tone) = match (r.status.as_str(), r.passed) {
+        ("running", _) => ("运行中", Tone::Info),
+        ("done", Some(true)) => ("过", Tone::Success),
+        ("done", Some(false)) => ("不过", Tone::Danger),
+        ("done", None) => ("算不了", Tone::Neutral),
+        ("cancelled", _) => ("已取消", Tone::Neutral),
+        _ => ("失败", Tone::Danger),
+    };
+    let mut head = row![t::metadata(when(r.created_ts)), w::badge(label, tone), t::caption(sv::kind_label(&r.kind))]
+        .spacing(space(2))
+        .align_y(Alignment::Center);
+    head = head.push(Space::new().width(Length::Fill));
+    if r.active() {
+        head = head.push(w::btn("■ 停止", Kind::Destructive, Some(ScMsg::StopValidation(r.val_id.clone()))));
+    }
+    let mut c = column![head].spacing(0);
+    let why = r.why();
+    if !why.is_empty() {
+        c = c.push(t::metadata(why).color(if r.status == "failed" { pal::bad() } else { pal::dim() }));
+    }
+    // 成本压力 / 参数扰动：逐行列出；WFO：逐窗列出
+    if let Some(rows) = r.result.get("rows").and_then(|x| x.as_array()) {
+        for x in rows {
+            let pnl = x.get("pnl").and_then(|v| v.as_f64());
+            let (txt, col) = signed(pnl, 2);
+            c = c.push(row![
+                container(t::metadata(x.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string())).width(Length::Fixed(160.0)),
+                t::numeric(txt).color(col),
+                t::metadata(format!("回撤 {}%", opt(x.get("max_dd_pct").and_then(|v| v.as_f64()), 2, Rounding::Measurement))).color(pal::dim()),
+            ].spacing(space(2)));
+        }
+    }
+    if let Some(ws) = r.result.get("windows").and_then(|x| x.as_array()) {
+        for (i, x) in ws.iter().enumerate() {
+            let te = x.get("test").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|d| d.as_str()).collect::<Vec<_>>().join("…")).unwrap_or_default();
+            let (txt, col) = signed(x.get("oos_pnl").and_then(|v| v.as_f64()), 2);
+            let mut rr = row![
+                container(t::metadata(format!("#{i} 测试 {te}"))).width(Length::Fixed(200.0)),
+                t::numeric(txt).color(col),
+                t::metadata(format!("参数 {}", x.get("params").cloned().unwrap_or_default())).color(pal::dim()),
+            ].spacing(space(2));
+            if let Some(e) = x.get("error").and_then(|v| v.as_str()) {
+                rr = rr.push(t::metadata(e.to_string()).color(pal::bad()));
+            }
+            c = c.push(rr);
+        }
+    }
+    container(c).width(Length::Fill).into()
+}
+
+fn experiment_block<'a>(v: &View) -> Element<'a, ScMsg> {
+    const KW: f32 = 110.0;
+    let f = &v.eform;
+    let mut col = column![w::section("实验（预注册：假设与规则先于数据锁死，留出数据只许跑一次）")].spacing(space(2));
+    let current: Option<&ExpRow> = v.experiments.iter().find(|x| x.locked());
+    match current {
+        Some(x) => {
+            col = col.push(w::kv("实验", t::body(x.exp_id.clone()).into(), KW));
+            col = col.push(w::kv("假设", t::caption(x.hypothesis.clone()).into(), KW));
+            col = col.push(w::kv("回撤上限", t::numeric(x.dd_limit.map(|d| format!("{d}%")).unwrap_or_else(|| "未声明（G7 算不了）".into())).into(), KW));
+            col = col.push(w::kv(
+                "留出窗口",
+                t::caption(match &x.holdout {
+                    Some((a, b)) => format!("{a} → {b}{}", x.holdout_run_id.as_ref().map(|r| format!("（已跑：{r}）")).unwrap_or_else(|| "（未跑）".into())),
+                    None => "无".into(),
+                })
+                .into(),
+                KW,
+            ));
+            col = col.push(t::metadata("这个实验下发起的优化 / 验证会自动挂上实验号；它们的数据窗口碰到留出窗口会被拒。").color(pal::dim()));
+            if x.holdout.is_some() && x.holdout_run_id.is_none() {
+                col = col.push(w::btn(
+                    if f.holdout_armed { "⚠ 再点一次：确认跑留出数据" } else { "跑留出数据（只此一次）" },
+                    if f.holdout_armed { Kind::Destructive } else { Kind::Standard },
+                    Some(ScMsg::HoldoutRun),
+                ));
+                col = col.push(t::metadata("用的参数 = 上面详情表单里当前的值。跑完就不能再改参数重跑。").color(pal::dim()));
+            }
+            let verdicts = [("alive", "存活"), ("falsified", "证伪"), ("inconclusive", "不确定")].iter().map(|(k, l)| {
+                w::btn(*l, if f.verdict == *k { Kind::Standard } else { Kind::Ghost }, Some(ScMsg::ConcludeVerdict((*k).to_string())))
+            });
+            col = col.push(row![container(t::caption("结论")).width(Length::Fixed(KW)), row(verdicts).spacing(space(1))].spacing(space(2)).align_y(Alignment::Center));
+            col = col.push(row![
+                container(t::caption("说明")).width(Length::Fixed(KW)),
+                text_input("依据哪些闸门 / 留出结果", &f.conclusion).on_input(ScMsg::ConcludeText).size(t::s_small()),
+            ].spacing(space(2)).align_y(Alignment::Center));
+            col = col.push(w::btn("下结论并关闭实验", Kind::Standard, (!v.sending).then_some(ScMsg::Conclude)));
+        }
+        None => {
+            col = col.push(t::metadata("当前没有进行中的实验。先写下假设与回撤上限、留出一段数据，再开始研究。").color(pal::dim()));
+            col = col.push(row![container(t::caption("假设")).width(Length::Fixed(KW)),
+                text_input("如：风险等级 1 下费后为正且回撤 < 40%", &f.hypothesis).on_input(ScMsg::ExpHypothesis).size(t::s_small())]
+                .spacing(space(2)).align_y(Alignment::Center));
+            col = col.push(row![container(t::caption("回撤上限 %")).width(Length::Fixed(KW)),
+                text_input("40", &f.dd_limit).on_input(ScMsg::ExpDdLimit).size(t::s_small()).width(Length::Fixed(80.0))]
+                .spacing(space(2)).align_y(Alignment::Center));
+            col = col.push(row![container(t::caption("留出窗口")).width(Length::Fixed(KW)),
+                text_input("YYYY-MM-DD", &f.holdout_start).on_input(ScMsg::ExpHoldoutStart).size(t::s_small()).width(Length::Fixed(104.0)),
+                t::caption("→"),
+                text_input("YYYY-MM-DD", &f.holdout_end).on_input(ScMsg::ExpHoldoutEnd).size(t::s_small()).width(Length::Fixed(104.0))]
+                .spacing(space(2)).align_y(Alignment::Center));
+            col = col.push(w::btn("锁定实验", Kind::Standard, (!v.sending).then_some(ScMsg::ExpCreate)));
+        }
+    }
+    for x in v.experiments.iter().filter(|x| !x.locked()).take(5) {
+        col = col.push(t::metadata(format!(
+            "{} · {} · {}：{}",
+            when(x.created_ts),
+            x.exp_id,
+            match x.verdict.as_deref() { Some("alive") => "存活", Some("falsified") => "证伪", _ => "不确定" },
+            if x.conclusion.is_empty() { x.hypothesis.clone() } else { x.conclusion.clone() }
+        )).color(pal::dim()));
+    }
+    col.into()
+}
+
+fn checks<'a>(v: &View) -> Element<'a, ScMsg> {
+    if v.selected.is_none() {
+        return Space::new().into();
+    }
+    let mut col = column![].spacing(space(2));
+    if v.msg.contains("验证") || v.msg.contains("实验") || v.msg.contains("留出") || v.msg.contains("结论") {
+        col = col.push(t::caption(v.msg.clone()).color(if v.msg.contains("失败") || v.msg.contains("没") { pal::bad() } else { pal::ok() }));
+    }
+    // 闸门
+    col = col.push(row![w::section("闸门清单（不打总分：每道过 / 不过 / 算不了）"), Space::new().width(Length::Fill),
+        w::btn_busy("重算", Kind::Ghost, Some(ScMsg::GatesRefresh), v.gates_loading)].align_y(Alignment::Center));
+    if !v.gates_err.is_empty() {
+        col = col.push(t::metadata(v.gates_err.clone()).color(pal::bad()));
+    }
+    match &v.gates {
+        Some(g) => {
+            for x in &g.gates {
+                col = col.push(gate_row(x));
+            }
+            if let Some(h) = &g.holdout {
+                col = col.push(gate_row(h));
+            }
+            col = col.push(t::caption(g.verdict.clone()).color(if g.verdict.starts_with("七道全过") { pal::ok() } else { pal::warn() }));
+        }
+        None => col = col.push(if v.gates_loading { w::loading("闸门") } else { t::metadata("（切到本页时计算）").color(pal::dim()).into() }),
+    }
+    // 发起验证
+    col = col.push(w::section("发起验证（参数取详情表单当前值；WFO 的搜索空间取「参数优化」表单）"));
+    let kinds = sv::KINDS.iter().map(|(k, l)| w::btn(*l, Kind::Standard, (!v.sending).then(|| ScMsg::StartValidation((*k).to_string()))));
+    col = col.push(row(kinds).spacing(space(2)));
+    col = col.push(row![
+        t::caption("WFO 训练 / 测试天数"),
+        text_input("60", &v.vform.train_days).on_input(ScMsg::WfoTrain).size(t::s_small()).width(Length::Fixed(60.0)),
+        t::caption("/"),
+        text_input("30", &v.vform.test_days).on_input(ScMsg::WfoTest).size(t::s_small()).width(Length::Fixed(60.0)),
+        t::metadata("整体区间 = 详情里的回测窗口").color(pal::dim()),
+    ].spacing(space(2)).align_y(Alignment::Center));
+    // 验证任务
+    col = col.push(w::section(format!("验证记录（{}）", v.validations.len())));
+    for r in v.validations.iter().take(12) {
+        col = col.push(val_item(r));
+    }
+    col = col.push(experiment_block(v));
     col.into()
 }
 

@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::strategy_center_opt::{self as opt, OptForm, StudyRow};
+use super::strategy_center_val::{self as val, ExpForm, ExpRow, Gates, ValForm, ValRow};
 
 // ── 数据形状（与 factory/lab 的 JSON 一致）─────────────────────────────
 
@@ -176,6 +177,21 @@ pub enum ScMsg {
     StartStudy,
     StopStudy(String),
     PickStudy(String),
+    // ── 验证 / 实验 ──
+    StartValidation(String),
+    StopValidation(String),
+    WfoTrain(String),
+    WfoTest(String),
+    ExpHypothesis(String),
+    ExpDdLimit(String),
+    ExpHoldoutStart(String),
+    ExpHoldoutEnd(String),
+    ExpCreate,
+    HoldoutRun,
+    ConcludeVerdict(String),
+    ConcludeText(String),
+    Conclude,
+    GatesRefresh,
 }
 
 /// 右栏页签。
@@ -184,6 +200,7 @@ pub enum Tab {
     #[default]
     Runs,
     Studies,
+    Checks,
 }
 
 // ── 状态 ────────────────────────────────────────────────────────────────
@@ -213,12 +230,24 @@ struct St {
     opt: OptForm,
     studies: Vec<StudyRow>,
     picked_study: Option<String>,
+    validations: Vec<ValRow>,
+    experiments: Vec<ExpRow>,
+    gates: Option<Gates>,
+    gates_loading: bool,
+    gates_err: String,
+    /// 研究库里本策略的「指纹」（各表行数 + 最近完成时间）：变了才重算闸门
+    gates_key: String,
+    vform: ValForm,
+    eform: ExpForm,
 }
 
 static ST: OnceLock<Mutex<St>> = OnceLock::new();
 static POLLER: OnceLock<()> = OnceLock::new();
 /// 选择变了 / 刚发起运行 → 让轮询线程马上读一次，不等满周期。
 static KICK: AtomicBool = AtomicBool::new(false);
+/// 刚发起运行 / 优化：Python 那边要几秒才在研究库里建出记录，这段时间按「忙」的节奏（2 秒）轮询，
+/// 否则新任务要等满 10 秒才出现在列表里，看起来像没反应。
+static FAST_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn cell() -> &'static Mutex<St> {
     ST.get_or_init(|| Mutex::new(St::default()))
@@ -263,8 +292,17 @@ pub struct View {
     pub tab: Tab,
     pub opt: OptForm,
     pub grid_estimate: Option<usize>,
+    /// 优化表单现在发得出去吗——不行就是原因（显示在「开始优化」按钮下，按钮置灰）
+    pub opt_error: Option<String>,
     pub studies: Vec<StudyRow>,
     pub picked_study: Option<String>,
+    pub validations: Vec<ValRow>,
+    pub experiments: Vec<ExpRow>,
+    pub gates: Option<Gates>,
+    pub gates_loading: bool,
+    pub gates_err: String,
+    pub vform: ValForm,
+    pub eform: ExpForm,
 }
 
 pub fn view() -> View {
@@ -303,9 +341,21 @@ pub fn view() -> View {
             .as_ref()
             .and_then(|id| g.catalog.iter().find(|e| &e.id == id))
             .and_then(|e| opt::grid_estimate(e, &g.opt)),
+        opt_error: g
+            .selected
+            .as_ref()
+            .and_then(|id| g.catalog.iter().find(|e| &e.id == id))
+            .and_then(|e| study_from_form(e, &g.form, &g.opt, &g.start, &g.end, &g.note).err()),
         opt: g.opt.clone(),
         studies: g.studies.clone(),
         picked_study: g.picked_study.clone(),
+        validations: g.validations.clone(),
+        experiments: g.experiments.clone(),
+        gates: g.gates.clone(),
+        gates_loading: g.gates_loading,
+        gates_err: g.gates_err.clone(),
+        vform: g.vform.clone(),
+        eform: g.eform.clone(),
     }
 }
 
@@ -315,7 +365,14 @@ fn ensure_started() {
         super::spawn_named("ws-strategyctr", || {
             let mut last = Instant::now() - Duration::from_secs(3600);
             loop {
-                let busy = with(|g| g.runs.iter().any(RunRow::active) || g.studies.iter().any(StudyRow::active)).unwrap_or(false);
+                let fast = FAST_UNTIL.lock().ok().and_then(|g| *g).is_some_and(|t| Instant::now() < t);
+                let busy = fast
+                    || with(|g| {
+                        g.runs.iter().any(RunRow::active)
+                            || g.studies.iter().any(StudyRow::active)
+                            || g.validations.iter().any(ValRow::active)
+                    })
+                    .unwrap_or(false);
                 let period = Duration::from_secs(if busy { 2 } else { 10 });
                 if KICK.swap(false, Ordering::Relaxed) || last.elapsed() >= period {
                     poll_db();
@@ -451,15 +508,123 @@ fn poll_db() {
             .unwrap_or_default(),
         None => vec![],
     };
+    let validations: Vec<ValRow> = match &selected {
+        Some(id) => conn
+            .prepare("SELECT * FROM validations WHERE strategy_id=? ORDER BY created_ts DESC LIMIT 30")
+            .and_then(|mut st| st.query_map([id], val::parse_val)?.collect())
+            .unwrap_or_default(),
+        None => vec![],
+    };
+    let experiments: Vec<ExpRow> = match &selected {
+        Some(id) => conn
+            .prepare("SELECT * FROM experiments WHERE strategy_id=? ORDER BY created_ts DESC LIMIT 20")
+            .and_then(|mut st| st.query_map([id], val::parse_exp)?.collect())
+            .unwrap_or_default(),
+        None => vec![],
+    };
+    // 闸门要不要重算：研究库里本策略的东西有变化，且正停在「验证」页
+    let key = format!(
+        "{}|{}|{}|{}|{}",
+        runs.iter().filter(|r| r.status == "done").count(),
+        studies.iter().filter(|s| s.status == "done").count(),
+        validations.iter().filter(|v| v.status == "done").count(),
+        experiments.len(),
+        experiments.iter().filter(|e| e.holdout_run_id.is_some() || !e.locked()).count()
+    );
+    let mut refresh_gates = false;
     with(|g| {
         // 用户在轮询期间换了策略：这批结果作废
         if g.selected == selected {
             g.runs = runs;
             g.studies = studies;
+            g.validations = validations;
+            g.experiments = experiments;
+            if g.tab == Tab::Checks && g.gates_key != key && !g.gates_loading {
+                g.gates_key = key;
+                refresh_gates = true;
+            }
         }
         g.latest = latest;
         g.db_err.clear();
     });
+    if refresh_gates {
+        load_gates();
+    }
+}
+
+/// 闸门清单：判定规则只在 Python（factory.lab.gates）一处，这里只跑它、读 JSON。
+fn load_gates() {
+    let Some((id, exp)) = with(|g| {
+        let id = g.selected.clone()?;
+        if g.gates_loading {
+            return None;
+        }
+        g.gates_loading = true;
+        let exp = g.experiments.iter().find(|e| e.locked()).map(|e| e.exp_id.clone());
+        Some((id, exp))
+    })
+    .flatten() else {
+        return;
+    };
+    super::spawn_named("ws-stratgates", move || {
+        let mut args = vec!["-m".to_string(), "factory.lab".into(), "gates".into(), id.clone(), "--json".into()];
+        if let Some(x) = exp {
+            args.extend(["--exp".into(), x]);
+        }
+        let out = std::process::Command::new(super::paths::python()).args(&args).current_dir(super::paths::repo_root()).output();
+        let parsed: Result<Gates, String> = match out {
+            Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).map_err(|e| format!("闸门 JSON 解析失败：{e}")),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("闸门计算失败").to_string()),
+            Err(e) => Err(format!("起不来 Python：{e}")),
+        };
+        with(|g| {
+            g.gates_loading = false;
+            if g.selected.as_deref() == Some(id.as_str()) {
+                match parsed {
+                    Ok(x) => {
+                        g.gates = Some(x);
+                        g.gates_err.clear();
+                    }
+                    Err(e) => g.gates_err = e,
+                }
+            }
+        });
+    });
+}
+
+/// 跑一条 `python -m factory.lab …` 命令（新建实验、下结论这类轻量写操作），结果写进 msg。
+fn lab_cli_async(args: Vec<String>, what: &'static str) {
+    with(|g| {
+        g.sending = true;
+        g.msg = format!("{what}…");
+    });
+    super::spawn_named("ws-stratcli", move || {
+        let out = std::process::Command::new(super::paths::python())
+            .args(["-m", "factory.lab"])
+            .args(&args)
+            .current_dir(super::paths::repo_root())
+            .output();
+        with(|g| {
+            g.sending = false;
+            g.msg = match out {
+                Ok(o) if o.status.success() => {
+                    format!("{what}：{}", String::from_utf8_lossy(&o.stdout).lines().last().unwrap_or("完成"))
+                }
+                Ok(o) => format!("{what}失败：{}", String::from_utf8_lossy(&o.stderr).trim().trim_start_matches("✗ ")),
+                Err(e) => format!("{what}失败：{e}"),
+            };
+        });
+        KICK.store(true, Ordering::Relaxed);
+    });
+}
+
+/// 详情表单 + 优化表单 → 优化规格（发起与实时校验共用一处，二者不会说法不一）。
+fn study_from_form(e: &Entry, form: &BTreeMap<String, String>, o: &OptForm, start: &str, end: &str, note: &str) -> Result<Value, String> {
+    let (fixed, errs, _) = build_params(&e.params, form);
+    if !errs.is_empty() {
+        return Err("上面参数表里有标红的值，先改正".to_string());
+    }
+    window_override(e, start, end).and_then(|d| opt::study_spec(e, o, &fixed, d, note))
 }
 
 /// 优化试验不在运行记录列表里：点它时直接查研究库（只读、单行）。
@@ -559,6 +724,11 @@ fn select_in(g: &mut St, id: &str) {
     g.selected = Some(id.to_string());
     g.runs.clear();
     g.studies.clear();
+    g.validations.clear();
+    g.experiments.clear();
+    g.gates = None;
+    g.gates_err.clear();
+    g.gates_key.clear();
     g.picked_study = None;
     g.picked_run = None;
     g.msg.clear();
@@ -641,6 +811,9 @@ fn send_async(cmd: Value, what: &'static str) {
             g.sending = false;
             g.msg = match r {
                 Ok(v) if v.get("status").and_then(Value::as_str) == Some("ok") => {
+                    if let Ok(mut f) = FAST_UNTIL.lock() {
+                        *f = Some(Instant::now() + Duration::from_secs(30));
+                    }
                     let id = v.get("run_id").and_then(Value::as_str).unwrap_or_default();
                     if id.is_empty() { format!("{what}：完成") } else { format!("{what}：{id}") }
                 }
@@ -719,7 +892,117 @@ pub fn handle(m: ScMsg) {
             super::backtest_readout::pin(None);
         }
         ScMsg::Tab(t) => {
-            with(|g| g.tab = t);
+            with(|g| {
+                g.tab = t;
+                if t == Tab::Checks {
+                    g.gates_key.clear(); // 切进「验证」页就重算一次闸门
+                }
+            });
+            KICK.store(true, Ordering::Relaxed);
+        }
+        ScMsg::GatesRefresh => {
+            with(|g| g.gates_key.clear());
+            KICK.store(true, Ordering::Relaxed);
+        }
+        ScMsg::WfoTrain(v) => {
+            with(|g| g.vform.train_days = v);
+        }
+        ScMsg::WfoTest(v) => {
+            with(|g| g.vform.test_days = v);
+        }
+        ScMsg::ExpHypothesis(v) => {
+            with(|g| g.eform.hypothesis = v);
+        }
+        ScMsg::ExpDdLimit(v) => {
+            with(|g| g.eform.dd_limit = v);
+        }
+        ScMsg::ExpHoldoutStart(v) => {
+            with(|g| g.eform.holdout_start = v);
+        }
+        ScMsg::ExpHoldoutEnd(v) => {
+            with(|g| g.eform.holdout_end = v);
+        }
+        ScMsg::ConcludeVerdict(v) => {
+            with(|g| g.eform.verdict = v);
+        }
+        ScMsg::ConcludeText(v) => {
+            with(|g| g.eform.conclusion = v);
+        }
+        ScMsg::StartValidation(kind) => {
+            let spec = with(|g| {
+                let e = g.selected.as_ref().and_then(|id| g.catalog.iter().find(|e| &e.id == id)).cloned()?;
+                let (fixed, errs, _) = build_params(&e.params, &g.form);
+                if !errs.is_empty() {
+                    return Some(Err("上面参数表里有标红的值，先改正".to_string()));
+                }
+                let study = if kind == "wfo" { study_from_form(&e, &g.form, &g.opt, &g.start, &g.end, &g.note).ok() } else { None };
+                let exp = g.experiments.iter().find(|x| x.locked()).map(|x| x.exp_id.clone());
+                Some(val::validation_spec(&e, &kind, &fixed, &g.start, &g.end, study.as_ref(), &g.vform, &g.opt.workers,
+                                          &g.opt.objective, exp.as_deref(), &g.note))
+            })
+            .flatten();
+            match spec {
+                Some(Ok(spec)) => send_async(json!({"cmd": "run_validation", "spec": spec}), "发起验证"),
+                Some(Err(e)) => {
+                    with(|g| g.msg = format!("验证没发出去：{e}"));
+                }
+                None => {}
+            }
+        }
+        ScMsg::StopValidation(id) => send_async(json!({"cmd": "stop", "run_id": id}), "停止验证"),
+        ScMsg::ExpCreate => {
+            let spec = with(|g| {
+                let e = g.selected.as_ref().and_then(|id| g.catalog.iter().find(|e| &e.id == id)).cloned()?;
+                Some(val::experiment_spec(&e, &g.eform))
+            })
+            .flatten();
+            match spec {
+                Some(Ok(spec)) => lab_cli_async(vec!["exp".into(), "new".into(), "--spec-json".into(), spec.to_string()], "锁定实验"),
+                Some(Err(e)) => {
+                    with(|g| g.msg = format!("实验没建成：{e}"));
+                }
+                None => {}
+            }
+        }
+        ScMsg::HoldoutRun => {
+            // 只许一次的事：第一下只是「上膛」，第二下才发
+            let go = with(|g| {
+                if !g.eform.holdout_armed {
+                    g.eform.holdout_armed = true;
+                    g.msg = "留出数据只许跑一次，跑完结论不能再改参数——确定就再点一次".into();
+                    return None;
+                }
+                g.eform.holdout_armed = false;
+                let e = g.selected.as_ref().and_then(|id| g.catalog.iter().find(|e| &e.id == id)).cloned()?;
+                let x = g.experiments.iter().find(|x| x.locked())?.clone();
+                let (h0, h1) = x.holdout.clone()?;
+                let (fixed, errs, _) = build_params(&e.params, &g.form);
+                if !errs.is_empty() {
+                    g.msg = "上面参数表里有标红的值，先改正".into();
+                    return None;
+                }
+                Some(json!({"strategy": e.id, "params": fixed, "data": {"start": h0, "end": h1},
+                            "experiment_id": x.exp_id, "note": format!("{} 留出数据（只此一次）", x.exp_id)}))
+            })
+            .flatten();
+            if let Some(spec) = go {
+                send_async(json!({"cmd": "run_spec", "spec": spec}), "跑留出数据");
+            }
+        }
+        ScMsg::Conclude => {
+            let args = with(|g| {
+                let x = g.experiments.iter().find(|x| x.locked())?.clone();
+                if g.eform.verdict.is_empty() {
+                    g.msg = "先选结论：存活 / 证伪 / 不确定".into();
+                    return None;
+                }
+                Some(vec!["exp".into(), "conclude".into(), x.exp_id, "--verdict".into(), g.eform.verdict.clone(),
+                          "--text".into(), g.eform.conclusion.clone()])
+            })
+            .flatten();
+            if let Some(a) = args {
+                lab_cli_async(a, "下结论");
+            }
         }
         ScMsg::OptToggle(k) => {
             with(|g| {
@@ -764,11 +1047,7 @@ pub fn handle(m: ScMsg) {
         ScMsg::StartStudy => {
             let spec = with(|g| {
                 let e = g.selected.as_ref().and_then(|id| g.catalog.iter().find(|e| &e.id == id)).cloned()?;
-                let (fixed, errs, _) = build_params(&e.params, &g.form);
-                if !errs.is_empty() {
-                    return Some(Err("先改正标红的参数".to_string()));
-                }
-                Some(window_override(&e, &g.start, &g.end).and_then(|d| opt::study_spec(&e, &g.opt, &fixed, d, &g.note)))
+                Some(study_from_form(&e, &g.form, &g.opt, &g.start, &g.end, &g.note))
             })
             .flatten();
             match spec {

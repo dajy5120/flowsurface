@@ -11,6 +11,7 @@ pub mod backtest_readout;
 pub mod backtest_view;
 pub mod strategy_center;
 pub mod strategy_center_opt;
+pub mod strategy_center_val;
 pub mod strategy_center_view;
 pub mod c4;
 pub mod chart_kit;
