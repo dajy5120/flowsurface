@@ -6,7 +6,8 @@
 use iced::widget::{Space, button, column, container, pick_list, row, scrollable, text_input};
 use iced::{Alignment, Element, Length};
 
-use super::strategy_center::{Entry, Param, RunRow, ScMsg, Summary, View, default_text};
+use super::strategy_center::{Entry, Param, RunRow, ScMsg, Summary, Tab, View, default_text};
+use super::strategy_center_opt::{self as so, Gate, Heat, StudyRow};
 use crate::ui::fmt::{Rounding, opt};
 use crate::ui::metrics::space;
 use crate::ui::pal;
@@ -320,6 +321,9 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
         col = col.push(t::caption(v.msg.clone()).color(if v.msg.contains("失败") || v.msg.contains("有误") { pal::bad() } else { pal::dim() }));
     }
     col = col.push(t::metadata("完整回测走 ws-control → factory.lab：入口体检、真实撮合、记进研究库。进度看底部进度条与 K 线，结果在右侧「回测结果」。").color(pal::dim()));
+    if can_full {
+        col = col.push(opt_section(v, e));
+    }
     container(scrollable(col)).width(Length::FillPortion(5)).height(Length::Fill).into()
 }
 
@@ -395,12 +399,19 @@ fn summary_card<'a>(r: &RunRow, s: &Summary) -> Element<'a, ScMsg> {
 
 fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
     let pinned = super::backtest_readout::pinned().is_some();
-    let mut col = column![w::panel_header(
-        "运行记录",
-        Some(t::metadata(format!("{} 次", v.runs.len())).into()),
-        vec![w::btn("跟随最新结果", if pinned { Kind::Standard } else { Kind::Ghost }, pinned.then_some(ScMsg::FollowLatest))],
-    )]
+    let n_active = v.studies.iter().filter(|s| s.active()).count();
+    let study_tab = if n_active > 0 { "优化 ●" } else { "优化" };
+    let mut col = column![
+        w::panel_header(
+            "",
+            Some(w::tabs(&[("运行记录", Tab::Runs), (study_tab, Tab::Studies)], &v.tab, ScMsg::Tab)),
+            vec![w::btn("跟随最新结果", if pinned { Kind::Standard } else { Kind::Ghost }, pinned.then_some(ScMsg::FollowLatest))],
+        )
+    ]
     .spacing(space(2));
+    if v.tab == Tab::Studies {
+        return container(col.push(studies(v))).width(Length::FillPortion(5)).height(Length::Fill).into();
+    }
     if !v.db_err.is_empty() {
         col = col.push(t::metadata(v.db_err.clone()).color(pal::dim()));
     }
@@ -440,3 +451,273 @@ pub fn pane_body<'a>() -> Element<'a, ScMsg> {
         .height(Length::Fill)
         .into()
 }
+
+// ── 中栏：参数优化表单 ─────────────────────────────────────────────────
+
+fn opt_section<'a>(v: &View, e: &Entry) -> Element<'a, ScMsg> {
+    let f = &v.opt;
+    let mut col = column![
+        w::section("参数优化（Optuna）"),
+        t::metadata("☑ = 参与搜索；数值参数填 下限 ~ 上限 · 步长（网格必须有步长）").color(pal::dim()),
+    ]
+    .spacing(space(2));
+    let mut ps: Vec<&Param> = e.params.iter().filter(|p| so::searchable(p)).collect();
+    ps.sort_by_key(|p| !p.optimize);
+    for p in ps {
+        let Some(of) = f.fields.get(&p.name) else { continue };
+        let name = p.name.clone();
+        let mut r = row![
+            container(w::btn(
+                format!("{} {}", if of.on { "☑" } else { "☐" }, p.name),
+                if of.on { Kind::Standard } else { Kind::Ghost },
+                Some(ScMsg::OptToggle(name.clone())),
+            ))
+            .width(Length::Fixed(112.0)),
+        ]
+        .spacing(space(1))
+        .align_y(Alignment::Center);
+        if of.on {
+            if let Some(ch) = &p.choices {
+                r = r.push(t::metadata(format!("全部 {} 个取值", ch.len())).color(pal::dim()));
+            } else if p.kind == "boolean" {
+                r = r.push(t::metadata("true / false").color(pal::dim()));
+            } else {
+                let (n1, n2, n3) = (name.clone(), name.clone(), name.clone());
+                r = r
+                    .push(text_input("下限", &of.low).on_input(move |s| ScMsg::OptLow(n1.clone(), s)).size(t::s_small()).width(Length::Fixed(58.0)))
+                    .push(t::caption("~"))
+                    .push(text_input("上限", &of.high).on_input(move |s| ScMsg::OptHigh(n2.clone(), s)).size(t::s_small()).width(Length::Fixed(58.0)))
+                    .push(text_input("步长", &of.step).on_input(move |s| ScMsg::OptStep(n3.clone(), s)).size(t::s_small()).width(Length::Fixed(50.0)));
+            }
+        }
+        col = col.push(r);
+    }
+    let samplers = so::SAMPLERS.iter().map(|(k, label)| {
+        w::btn(*label, if f.sampler == *k { Kind::Standard } else { Kind::Ghost }, Some(ScMsg::OptSampler((*k).to_string())))
+    });
+    col = col.push(
+        row![container(t::caption("搜索方式")).width(Length::Fixed(LABEL_W)), row(samplers).spacing(space(1))]
+            .spacing(space(2))
+            .align_y(Alignment::Center),
+    );
+    let objs: Vec<String> = so::OBJECTIVES.iter().map(|(k, _)| (*k).to_string()).collect();
+    let obj_desc = so::OBJECTIVES.iter().find(|(k, _)| *k == f.objective).map(|(_, d)| *d).unwrap_or("");
+    col = col.push(
+        row![
+            container(t::caption("目标（求最大）")).width(Length::Fixed(LABEL_W)),
+            pick_list(objs, Some(f.objective.clone()), ScMsg::OptObjective).text_size(t::s_small()),
+            t::metadata(obj_desc).color(pal::dim()),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center),
+    );
+    let mut sizes = row![
+        container(t::caption("尝试次数 / 并发")).width(Length::Fixed(LABEL_W)),
+        text_input("20", &f.trials).on_input(ScMsg::OptTrials).size(t::s_small()).width(Length::Fixed(64.0)),
+        t::caption("/"),
+        text_input("2", &f.workers).on_input(ScMsg::OptWorkers).size(t::s_small()).width(Length::Fixed(44.0)),
+    ]
+    .spacing(space(2))
+    .align_y(Alignment::Center);
+    if f.sampler == "grid" {
+        sizes = sizes.push(
+            t::metadata(match v.grid_estimate {
+                Some(n) if n > so::MAX_GRID => format!("网格 {n} 组，超过上限 {}", so::MAX_GRID),
+                Some(n) => format!("网格共 {n} 组"),
+                None => "网格要每个数值参数都填步长".into(),
+            })
+            .color(if v.grid_estimate.is_some_and(|n| n <= so::MAX_GRID) { pal::dim() } else { pal::warn() }),
+        );
+    }
+    col = col.push(sizes);
+    let ok = v.field_errors.is_empty() && !v.sending;
+    col = col.push(if ok {
+        w::btn("🔬 开始优化", Kind::Standard, Some(ScMsg::StartStudy))
+    } else {
+        w::btn_why("🔬 开始优化", Kind::Standard, None::<ScMsg>, if v.sending { "正在发送…" } else { "先改正标红的参数" })
+    });
+    col = col.push(
+        t::metadata("每次尝试都是一次完整回测，独立进程、不打扰图表；全部计入多重检验——试得越多，DSR 打折越狠。固定参数取上面表单里改过的值。")
+            .color(pal::dim()),
+    );
+    col.into()
+}
+
+// ── 右栏「优化」页 ─────────────────────────────────────────────────────
+
+fn gate_badge<'a>(name: &str, g: &Option<Gate>, val: Option<String>) -> Element<'a, ScMsg> {
+    let (tone, mark) = match g.as_ref().and_then(|g| g.passed) {
+        Some(true) => (Tone::Success, "过"),
+        Some(false) => (Tone::Danger, "不过"),
+        None => (Tone::Neutral, "算不了"),
+    };
+    w::badge(format!("{name} {mark}{}", val.map(|x| format!(" {x}")).unwrap_or_default()), tone)
+}
+
+fn study_item<'a>(s: &StudyRow, picked: bool) -> Element<'a, ScMsg> {
+    let (label, tone) = match s.status.as_str() {
+        "running" => ("运行中", Tone::Info),
+        "done" => ("完成", Tone::Success),
+        "cancelled" => ("已取消", Tone::Neutral),
+        _ => ("失败", Tone::Danger),
+    };
+    let sampler = so::SAMPLERS.iter().find(|(k, _)| *k == s.sampler).map(|(_, l)| *l).unwrap_or("?");
+    let mut head = row![
+        t::metadata(when(s.created_ts)),
+        w::badge(label, tone),
+        t::metadata(format!("{sampler} · {} · {}/{}（失败 {}）", s.objective, s.n_done, s.n_trials, s.n_failed)).color(pal::dim()),
+    ]
+    .spacing(space(2))
+    .align_y(Alignment::Center);
+    if let Some(b) = s.best_value {
+        head = head.push(t::numeric(format!("最优 {b:.4}")));
+    }
+    head = head.push(Space::new().width(Length::Fill));
+    if s.active() {
+        head = head.push(w::btn("■ 停止", Kind::Destructive, Some(ScMsg::StopStudy(s.study_id.clone()))));
+    }
+    let mut c = column![head].spacing(0);
+    if !s.note.is_empty() {
+        c = c.push(t::metadata(format!("备注：{}", s.note)).color(pal::dim()));
+    }
+    button(c)
+        .width(Length::Fill)
+        .on_press(ScMsg::PickStudy(s.study_id.clone()))
+        .style(move |th, st| w::button_style(if picked { Kind::Standard } else { Kind::Ghost }, th, st))
+        .into()
+}
+
+fn heat_view<'a>(h: &Heat) -> Element<'a, ScMsg> {
+    const CW: f32 = 58.0;
+    const CH: f32 = 22.0;
+    let vals: Vec<f64> = h.z.iter().flatten().flatten().copied().collect();
+    let hi = vals.iter().copied().fold(f64::MIN, f64::max).max(1e-12);
+    let lo = vals.iter().copied().fold(f64::MAX, f64::min).min(-1e-12);
+    let lbl = |v: &serde_json::Value| -> String {
+        match v {
+            serde_json::Value::Number(n) => n.as_f64().map(|x| if x.fract() == 0.0 { format!("{x:.0}") } else { format!("{x:.3}") }).unwrap_or_default(),
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
+    };
+    let mut grid = column![
+        row(std::iter::once(container(t::metadata(format!("{} ↓  {} →", h.y, h.x)).color(pal::dim())).width(Length::Fixed(CW * 1.6)).into())
+            .chain(h.xs.iter().map(|x| container(t::metadata(lbl(x))).width(Length::Fixed(CW)).into())))
+    ]
+    .spacing(1);
+    for (i, y) in h.ys.iter().enumerate() {
+        let mut r = row![container(t::metadata(lbl(y))).width(Length::Fixed(CW * 1.6))].spacing(1);
+        for z in h.z.get(i).cloned().unwrap_or_default() {
+            let cell: Element<'a, ScMsg> = match z {
+                Some(v) => {
+                    // 正值按 up 色、负值按 down 色，深浅 = 相对最大 / 最小（颜色不单独承载意义：格子里有数）
+                    let (base, k) = if v >= 0.0 { (pal::up(), v / hi) } else { (pal::down(), v / lo) };
+                    let bg = iced::Color { a: (0.12 + 0.55 * k.clamp(0.0, 1.0)) as f32, ..base };
+                    container(t::metadata(format!("{v:.2}")))
+                        .width(Length::Fixed(CW))
+                        .height(Length::Fixed(CH))
+                        .center_x(Length::Fixed(CW))
+                        .center_y(Length::Fixed(CH))
+                        .style(move |_| iced::widget::container::Style { background: Some(iced::Background::Color(bg)), ..Default::default() })
+                        .into()
+                }
+                None => container(t::metadata("·").color(pal::dim())).width(Length::Fixed(CW)).height(Length::Fixed(CH)).center_x(Length::Fixed(CW)).into(),
+            };
+            r = r.push(cell);
+        }
+        grid = grid.push(r);
+    }
+    scrollable(grid).direction(iced::widget::scrollable::Direction::Horizontal(Default::default())).into()
+}
+
+fn study_detail<'a>(s: &StudyRow, v: &View) -> Element<'a, ScMsg> {
+    let mut col = column![w::section(format!("优化 · {}", s.study_id))].spacing(space(2));
+    if !s.error.is_empty() {
+        col = col.push(t::metadata(s.error.clone()).color(pal::bad()));
+    }
+    let Some(a) = &s.analysis else {
+        col = col.push(t::caption(if s.active() {
+            format!("进行中：已完成 {}/{}，失败 {}。全部跑完后出 DSR / PBO / 高原分析。", s.n_done, s.n_trials, s.n_failed)
+        } else {
+            "没有分析结果".into()
+        }));
+        if let (Some(b), Some(rid)) = (s.best_value, &s.best_run_id) {
+            col = col.push(row![t::caption(format!("目前最优 {b:.4} · {}", s.best_params)), w::btn("查看", Kind::Ghost, Some(ScMsg::PickRun(rid.clone())))].spacing(space(2)));
+        }
+        return col.into();
+    };
+    if !a.why.is_empty() {
+        col = col.push(t::caption(a.why.clone()));
+    }
+    let dsr_v = a.dsr.as_ref().and_then(|g| g.dsr).map(|x| format!("{x:.2}"));
+    let pbo_v = a.pbo.as_ref().and_then(|g| g.pbo).map(|x| format!("{x:.2}"));
+    let pl_v = a.plateau.as_ref().and_then(|g| g.mean_ratio).map(|x| format!("{:.0}%", x * 100.0));
+    col = col.push(row![gate_badge("DSR", &a.dsr, dsr_v), gate_badge("PBO", &a.pbo, pbo_v), gate_badge("高原", &a.plateau, pl_v)].spacing(space(2)));
+    for (name, g) in [("DSR", &a.dsr), ("PBO", &a.pbo), ("高原", &a.plateau)] {
+        if let Some(g) = g
+            && !g.why.is_empty()
+        {
+            col = col.push(t::metadata(format!("{name}：{}", g.why)).color(if g.passed == Some(false) { pal::warn() } else { pal::dim() }));
+        }
+    }
+    if let Some(d) = &a.dsr
+        && let (Some(n), Some(sr)) = (d.n_trials, d.sr_annual)
+    {
+        col = col.push(t::metadata(format!("DSR 按 {n:.0} 次尝试打折（这个策略全部完成的回测都算）；最优年化夏普 {sr:.2}；收益口径 {}", a.returns_basis.join("、"))).color(pal::dim()));
+    }
+    if let (Some(b), Some(rid)) = (s.best_value, &s.best_run_id) {
+        col = col.push(
+            row![t::caption(format!("最优 {b:.4} · {}", s.best_params)), w::btn("查看这次", Kind::Ghost, Some(ScMsg::PickRun(rid.clone())))]
+                .spacing(space(2))
+                .align_y(Alignment::Center),
+        );
+    }
+    if !a.importance.is_empty() {
+        col = col.push(w::section("参数重要性（fANOVA）"));
+        let mut imp: Vec<(&String, &f64)> = a.importance.iter().collect();
+        imp.sort_by(|x, y| y.1.total_cmp(x.1));
+        for (k, val) in imp {
+            col = col.push(row![
+                container(t::metadata(k.clone())).width(Length::Fixed(LABEL_W)),
+                t::metadata("█".repeat(((val * 20.0).round() as usize).max(1))).color(pal::accent()),
+                t::metadata(format!("{val:.2}")).color(pal::dim()),
+            ].spacing(space(2)));
+        }
+    }
+    if let Some(h) = &a.heatmap {
+        col = col.push(w::section("热力图（每格 = 该组合能达到的最好目标值；找成片的高值，不找孤立的一格）"));
+        col = col.push(heat_view(h));
+    }
+    col = col.push(w::section(format!("试验（共 {}，按目标值排序，点一条看结果）", a.trials.len())));
+    for tr in a.trials.iter().take(15) {
+        let picked = tr.run_id.is_some() && tr.run_id == v.picked_run;
+        let label = format!("#{:<3} {:>10}  {}", tr.number, tr.value.map(|x| format!("{x:.4}")).unwrap_or_default(), tr.params);
+        let b = button(t::metadata(label)).width(Length::Fill).style(move |th, st| w::button_style(if picked { Kind::Standard } else { Kind::Ghost }, th, st));
+        col = col.push(match &tr.run_id {
+            Some(rid) => b.on_press(ScMsg::PickRun(rid.clone())),
+            None => b,
+        });
+    }
+    col.into()
+}
+
+fn studies<'a>(v: &View) -> Element<'a, ScMsg> {
+    if v.selected.is_none() {
+        return Space::new().into();
+    }
+    let mut col = column![].spacing(space(2));
+    if v.studies.is_empty() {
+        return w::empty("这个策略还没做过优化", "在中栏「参数优化」里勾参数、点「🔬 开始优化」");
+    }
+    let mut list = column![].spacing(space(1));
+    for s in &v.studies {
+        list = list.push(study_item(s, v.picked_study.as_deref() == Some(s.study_id.as_str())));
+    }
+    col = col.push(scrollable(list).height(Length::FillPortion(2)));
+    let focus = v.picked_study.as_ref().and_then(|id| v.studies.iter().find(|s| &s.study_id == id)).or(v.studies.first());
+    if let Some(s) = focus {
+        col = col.push(scrollable(study_detail(s, v)).height(Length::FillPortion(5)));
+    }
+    col.into()
+}
+

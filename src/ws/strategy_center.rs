@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::strategy_center_opt::{self as opt, OptForm, StudyRow};
+
 // ── 数据形状（与 factory/lab 的 JSON 一致）─────────────────────────────
 
 #[derive(Deserialize, Clone, Default, Debug)]
@@ -133,6 +135,8 @@ pub struct RunRow {
     pub error: String,
     pub result_dir: Option<String>,
     pub summary: Option<Summary>,
+    /// 优化试验带 study_id（运行记录页不列它们，在「优化」页看）
+    pub study_id: Option<String>,
 }
 
 impl RunRow {
@@ -159,6 +163,27 @@ pub enum ScMsg {
     PickRun(String),
     FollowLatest,
     OpenSource,
+    // ── 右栏页签 / 参数优化 ──
+    Tab(Tab),
+    OptToggle(String),
+    OptLow(String, String),
+    OptHigh(String, String),
+    OptStep(String, String),
+    OptSampler(String),
+    OptTrials(String),
+    OptWorkers(String),
+    OptObjective(String),
+    StartStudy,
+    StopStudy(String),
+    PickStudy(String),
+}
+
+/// 右栏页签。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Runs,
+    Studies,
 }
 
 // ── 状态 ────────────────────────────────────────────────────────────────
@@ -184,6 +209,10 @@ struct St {
     picked_run: Option<String>,
     msg: String,
     sending: bool,
+    tab: Tab,
+    opt: OptForm,
+    studies: Vec<StudyRow>,
+    picked_study: Option<String>,
 }
 
 static ST: OnceLock<Mutex<St>> = OnceLock::new();
@@ -231,6 +260,11 @@ pub struct View {
     pub picked_run: Option<String>,
     pub msg: String,
     pub sending: bool,
+    pub tab: Tab,
+    pub opt: OptForm,
+    pub grid_estimate: Option<usize>,
+    pub studies: Vec<StudyRow>,
+    pub picked_study: Option<String>,
 }
 
 pub fn view() -> View {
@@ -263,6 +297,15 @@ pub fn view() -> View {
         picked_run: g.picked_run.clone(),
         msg: g.msg.clone(),
         sending: g.sending,
+        tab: g.tab,
+        grid_estimate: g
+            .selected
+            .as_ref()
+            .and_then(|id| g.catalog.iter().find(|e| &e.id == id))
+            .and_then(|e| opt::grid_estimate(e, &g.opt)),
+        opt: g.opt.clone(),
+        studies: g.studies.clone(),
+        picked_study: g.picked_study.clone(),
     }
 }
 
@@ -272,7 +315,7 @@ fn ensure_started() {
         super::spawn_named("ws-strategyctr", || {
             let mut last = Instant::now() - Duration::from_secs(3600);
             loop {
-                let busy = with(|g| g.runs.iter().any(RunRow::active)).unwrap_or(false);
+                let busy = with(|g| g.runs.iter().any(RunRow::active) || g.studies.iter().any(StudyRow::active)).unwrap_or(false);
                 let period = Duration::from_secs(if busy { 2 } else { 10 });
                 if KICK.swap(false, Ordering::Relaxed) || last.elapsed() >= period {
                     poll_db();
@@ -356,10 +399,12 @@ fn parse_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         error: r.get::<_, Option<String>>("error")?.unwrap_or_default(),
         result_dir: r.get("result_dir")?,
         summary: summary.and_then(|s| serde_json::from_str(&s).ok()),
+        study_id: r.get("study_id")?,
     })
 }
 
-const COLS: &str = "run_id, strategy_id, status, created_ts, finished_ts, spec_json, note, dirty, error, result_dir, summary_json";
+const COLS: &str =
+    "run_id, strategy_id, status, created_ts, finished_ts, spec_json, note, dirty, error, result_dir, summary_json, study_id";
 
 fn poll_db() {
     let selected = with(|g| g.selected.clone()).flatten();
@@ -380,7 +425,9 @@ fn poll_db() {
     };
     let runs: Vec<RunRow> = match &selected {
         Some(id) => conn
-            .prepare(&format!("SELECT {COLS} FROM runs WHERE strategy_id=? ORDER BY created_ts DESC LIMIT 50"))
+            .prepare(&format!(
+                "SELECT {COLS} FROM runs WHERE strategy_id=? AND study_id IS NULL ORDER BY created_ts DESC LIMIT 50"
+            ))
             .and_then(|mut st| st.query_map([id], parse_row)?.collect())
             .unwrap_or_default(),
         None => vec![],
@@ -388,22 +435,37 @@ fn poll_db() {
     // 每个策略最近一次完成的运行（策略库列表用）
     let latest: HashMap<String, RunRow> = conn
         .prepare(&format!(
-            "SELECT {COLS} FROM runs r WHERE status='done' AND created_ts = \
-             (SELECT MAX(created_ts) FROM runs x WHERE x.strategy_id=r.strategy_id AND x.status='done')"
+            "SELECT {COLS} FROM runs r WHERE status='done' AND study_id IS NULL AND created_ts = \
+             (SELECT MAX(created_ts) FROM runs x WHERE x.strategy_id=r.strategy_id AND x.status='done' AND x.study_id IS NULL)"
         ))
         .and_then(|mut st| st.query_map([], parse_row)?.collect::<rusqlite::Result<Vec<_>>>())
         .unwrap_or_default()
         .into_iter()
         .map(|r| (r.strategy_id.clone(), r))
         .collect();
+    // 优化任务（studies 表在第一次优化之前不存在：查不到就当空）
+    let studies: Vec<StudyRow> = match &selected {
+        Some(id) => conn
+            .prepare("SELECT * FROM studies WHERE strategy_id=? ORDER BY created_ts DESC LIMIT 30")
+            .and_then(|mut st| st.query_map([id], opt::parse_study)?.collect())
+            .unwrap_or_default(),
+        None => vec![],
+    };
     with(|g| {
         // 用户在轮询期间换了策略：这批结果作废
         if g.selected == selected {
             g.runs = runs;
+            g.studies = studies;
         }
         g.latest = latest;
         g.db_err.clear();
     });
+}
+
+/// 优化试验不在运行记录列表里：点它时直接查研究库（只读、单行）。
+fn result_dir_of(run_id: &str) -> Option<String> {
+    let conn = rusqlite::Connection::open_with_flags(db_path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.query_row("SELECT result_dir FROM runs WHERE run_id=?", [run_id], |r| r.get::<_, Option<String>>(0)).ok().flatten()
 }
 
 // ── 参数表单 → RunSpec.params ──────────────────────────────────────────
@@ -496,6 +558,8 @@ fn same_value(a: &Value, b: &Value) -> bool {
 fn select_in(g: &mut St, id: &str) {
     g.selected = Some(id.to_string());
     g.runs.clear();
+    g.studies.clear();
+    g.picked_study = None;
     g.picked_run = None;
     g.msg.clear();
     reset_form_in(g);
@@ -506,6 +570,7 @@ fn reset_form_in(g: &mut St) {
         return;
     };
     g.form = e.params.iter().map(|p| (p.name.clone(), default_text(p))).collect();
+    g.opt = opt::init_form(&e.params);
     g.start = e.bt("start");
     g.end = e.bt("end");
     g.note.clear();
@@ -517,6 +582,19 @@ pub fn spec_from(e: &Entry, form: &BTreeMap<String, String>, start: &str, end: &
     if !errs.is_empty() {
         return Err(format!("参数有误：{}", errs.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join("；")));
     }
+    let data = window_override(e, start, end)?;
+    let mut spec = json!({ "strategy": e.id, "params": params });
+    if let Some(d) = data {
+        spec["data"] = d;
+    }
+    if !note.trim().is_empty() {
+        spec["note"] = Value::String(note.trim().into());
+    }
+    Ok(spec)
+}
+
+/// 回测窗口覆盖：与策略 BACKTEST 声明相同的不下发；全相同返回 None。
+pub fn window_override(e: &Entry, start: &str, end: &str) -> Result<Option<Value>, String> {
     let mut data = serde_json::Map::new();
     for (k, v) in [("start", start.trim()), ("end", end.trim())] {
         if v.is_empty() {
@@ -532,14 +610,7 @@ pub fn spec_from(e: &Entry, form: &BTreeMap<String, String>, start: &str, end: &
     if !start.trim().is_empty() && !end.trim().is_empty() && end.trim() < start.trim() {
         return Err("结束日期早于开始日期".into());
     }
-    let mut spec = json!({ "strategy": e.id, "params": params });
-    if !data.is_empty() {
-        spec["data"] = Value::Object(data);
-    }
-    if !note.trim().is_empty() {
-        spec["note"] = Value::String(note.trim().into());
-    }
-    Ok(spec)
+    Ok((!data.is_empty()).then_some(Value::Object(data)))
 }
 
 // ── 控制通道：一行 JSON 进、一行 JSON 出 ───────────────────────────────
@@ -636,7 +707,8 @@ pub fn handle(m: ScMsg) {
                 g.picked_run = Some(run_id.clone());
                 g.runs.iter().find(|r| r.run_id == run_id).and_then(|r| r.result_dir.clone())
             })
-            .flatten();
+            .flatten()
+            .or_else(|| result_dir_of(&run_id));
             // 右侧「回测结果」面板钉在这次运行上（没有结果目录的运行——失败 / 进行中——不钉）
             if let Some(d) = dir {
                 super::backtest_readout::pin(Some(PathBuf::from(d)));
@@ -645,6 +717,74 @@ pub fn handle(m: ScMsg) {
         ScMsg::FollowLatest => {
             with(|g| g.picked_run = None);
             super::backtest_readout::pin(None);
+        }
+        ScMsg::Tab(t) => {
+            with(|g| g.tab = t);
+        }
+        ScMsg::OptToggle(k) => {
+            with(|g| {
+                if let Some(f) = g.opt.fields.get_mut(&k) {
+                    f.on = !f.on;
+                }
+            });
+        }
+        ScMsg::OptLow(k, v) => {
+            with(|g| {
+                if let Some(f) = g.opt.fields.get_mut(&k) {
+                    f.low = v;
+                }
+            });
+        }
+        ScMsg::OptHigh(k, v) => {
+            with(|g| {
+                if let Some(f) = g.opt.fields.get_mut(&k) {
+                    f.high = v;
+                }
+            });
+        }
+        ScMsg::OptStep(k, v) => {
+            with(|g| {
+                if let Some(f) = g.opt.fields.get_mut(&k) {
+                    f.step = v;
+                }
+            });
+        }
+        ScMsg::OptSampler(v) => {
+            with(|g| g.opt.sampler = v);
+        }
+        ScMsg::OptTrials(v) => {
+            with(|g| g.opt.trials = v);
+        }
+        ScMsg::OptWorkers(v) => {
+            with(|g| g.opt.workers = v);
+        }
+        ScMsg::OptObjective(v) => {
+            with(|g| g.opt.objective = v);
+        }
+        ScMsg::StartStudy => {
+            let spec = with(|g| {
+                let e = g.selected.as_ref().and_then(|id| g.catalog.iter().find(|e| &e.id == id)).cloned()?;
+                let (fixed, errs, _) = build_params(&e.params, &g.form);
+                if !errs.is_empty() {
+                    return Some(Err("先改正标红的参数".to_string()));
+                }
+                Some(window_override(&e, &g.start, &g.end).and_then(|d| opt::study_spec(&e, &g.opt, &fixed, d, &g.note)))
+            })
+            .flatten();
+            match spec {
+                Some(Ok(spec)) => {
+                    with(|g| g.tab = Tab::Studies);
+                    send_async(json!({"cmd": "run_study", "spec": spec}), "发起优化");
+                }
+                Some(Err(e)) => {
+                    with(|g| g.msg = e);
+                }
+                None => {}
+            }
+        }
+        ScMsg::StopStudy(id) => send_async(json!({"cmd": "stop", "run_id": id}), "停止优化"),
+        ScMsg::PickStudy(id) => {
+            with(|g| g.picked_study = Some(id));
         }
         ScMsg::OpenSource => {
             let path = with(|g| {
