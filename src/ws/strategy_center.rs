@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::strategy_center_ai::{self as ai, Assist};
 use super::strategy_center_cmp::{self as cmp, BasketItem, Cmp};
 use super::strategy_center_opt::{self as opt, OptForm, StudyRow};
 use super::strategy_center_val::{self as val, ExpForm, ExpRow, Gates, ValForm, ValRow};
@@ -218,6 +219,10 @@ pub enum ScMsg {
     CmpClear,
     CmpFreq(String),
     CmpRun,
+    // ── AI 研究助理（只起草，不发起）──
+    AiText(String),
+    AiDraft,
+    AiApply,
 }
 
 /// 右栏页签。
@@ -274,6 +279,10 @@ struct St {
     cmp_err: String,
     /// 上次算的对比篮指纹（篮子 / 分桶变了才重算）
     cmp_key: String,
+    ai_text: String,
+    ai: Option<Assist>,
+    ai_loading: bool,
+    ai_err: String,
 }
 
 static ST: OnceLock<Mutex<St>> = OnceLock::new();
@@ -343,6 +352,10 @@ pub struct View {
     pub cmp: Option<Cmp>,
     pub cmp_loading: bool,
     pub cmp_err: String,
+    pub ai_text: String,
+    pub ai: Option<Assist>,
+    pub ai_loading: bool,
+    pub ai_err: String,
 }
 
 pub fn view() -> View {
@@ -401,6 +414,10 @@ pub fn view() -> View {
         cmp: g.cmp.clone(),
         cmp_loading: g.cmp_loading,
         cmp_err: g.cmp_err.clone(),
+        ai_text: g.ai_text.clone(),
+        ai: g.ai.clone(),
+        ai_loading: g.ai_loading,
+        ai_err: g.ai_err.clone(),
     }
 }
 
@@ -684,6 +701,42 @@ fn load_compare() {
     });
 }
 
+/// AI 研究助理：起草在 Python（factory.lab.assistant）——它只回草稿与校验结果，什么都不发起。
+fn load_assist() {
+    let Some((id, text)) = with(|g| {
+        if g.ai_loading || g.ai_text.trim().is_empty() {
+            return None;
+        }
+        g.ai_loading = true;
+        g.ai_err.clear();
+        Some((g.selected.clone()?, g.ai_text.trim().to_string()))
+    })
+    .flatten() else {
+        return;
+    };
+    super::spawn_named("ws-stratai", move || {
+        let out = std::process::Command::new(super::paths::python())
+            .args(["-m", "factory.lab", "assist", &id, "--text", &text, "--json"])
+            .current_dir(super::paths::repo_root())
+            .output();
+        let parsed: Result<Assist, String> = match out {
+            Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).map_err(|e| format!("AI 助理结果解析失败：{e}")),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("AI 助理失败").trim_start_matches("✗ ").to_string()),
+            Err(e) => Err(format!("起不来 Python：{e}")),
+        };
+        with(|g| {
+            g.ai_loading = false;
+            if g.selected.as_deref() != Some(id.as_str()) {
+                return; // 等的时候换了策略：草稿作废（研究库里仍有记录）
+            }
+            match parsed {
+                Ok(a) => g.ai = Some(a),
+                Err(e) => g.ai_err = e,
+            }
+        });
+    });
+}
+
 /// 篮子或分桶变了且够 2 个 → 重算。
 fn maybe_compare() {
     let need = with(|g| {
@@ -836,6 +889,8 @@ fn select_in(g: &mut St, id: &str) {
     g.picked_study = None;
     g.picked_run = None;
     g.msg.clear();
+    g.ai = None;
+    g.ai_err.clear();
     reset_form_in(g);
 }
 
@@ -1046,6 +1101,32 @@ pub fn handle(m: ScMsg) {
             with(|g| g.cmp_freq = f);
             maybe_compare();
         }
+        ScMsg::AiText(s) => {
+            with(|g| g.ai_text = s);
+        }
+        ScMsg::AiDraft => load_assist(),
+        ScMsg::AiApply => {
+            with(|g| {
+                let Some(a) = g.ai.clone() else { return };
+                let (Some(spec), true) = (a.spec.as_ref(), a.ready) else {
+                    g.msg = "这份草稿没过校验，不能填表".into();
+                    return;
+                };
+                let Some(e) = g.selected.as_ref().and_then(|id| g.catalog.iter().find(|e| &e.id == id)).cloned() else { return };
+                let (mut form, mut of, mut s, mut t) = (g.form.clone(), g.opt.clone(), g.start.clone(), g.end.clone());
+                match ai::apply(spec, &a.assist_id, &e, &mut form, &mut of, &mut s, &mut t) {
+                    Ok(notes) => {
+                        (g.form, g.opt, g.start, g.end) = (form, of, s, t);
+                        g.msg = if notes.is_empty() {
+                            format!("已按 AI 草稿 {} 填好表单——检查后点「开始优化」", a.assist_id)
+                        } else {
+                            format!("已按 AI 草稿填好表单，但有几处填不进：{}", notes.join("；"))
+                        };
+                    }
+                    Err(err) => g.msg = format!("草稿填不进表单：{err}"),
+                }
+            });
+        }
         ScMsg::CmpRun => {
             with(|g| g.cmp_key.clear());
             load_compare();
@@ -1211,12 +1292,22 @@ pub fn handle(m: ScMsg) {
         ScMsg::StartStudy => {
             let spec = with(|g| {
                 let e = g.selected.as_ref().and_then(|id| g.catalog.iter().find(|e| &e.id == id)).cloned()?;
-                Some(study_from_form(&e, &g.form, &g.opt, &g.start, &g.end, &g.note))
+                let exp = g.experiments.iter().find(|x| x.locked()).map(|x| x.exp_id.clone());
+                Some(study_from_form(&e, &g.form, &g.opt, &g.start, &g.end, &g.note).map(|mut s| {
+                    // 有锁定的实验：优化挂在它下面，数据窗口由 Python 拦住不许碰留出窗口
+                    if let Some(x) = exp {
+                        s["experiment_id"] = Value::String(x);
+                    }
+                    s
+                }))
             })
             .flatten();
             match spec {
                 Some(Ok(spec)) => {
-                    with(|g| g.tab = Tab::Studies);
+                    with(|g| {
+                        g.tab = Tab::Studies;
+                        g.opt.assist_id = None; // 这份草稿已经用掉：再发起一次就不算它的了
+                    });
                     send_async(json!({"cmd": "run_study", "spec": spec}), "发起优化");
                 }
                 Some(Err(e)) => {

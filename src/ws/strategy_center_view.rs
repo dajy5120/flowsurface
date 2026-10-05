@@ -530,9 +530,69 @@ pub fn pane_body<'a>() -> Element<'a, ScMsg> {
 
 // ── 中栏：参数优化表单 ─────────────────────────────────────────────────
 
+/// AI 研究助理：一句话 → 草稿（只起草；填进下面的表单后仍由人点「开始优化」）。
+fn ai_box<'a>(v: &View) -> Element<'a, ScMsg> {
+    let mut col = column![
+        w::section("🤖 AI 研究助理（只起草，不发起）"),
+        row![
+            text_input("一句话说想怎么调，例如：用快速回测在 6 月前 20 天扫入场阈值和最长持仓", &v.ai_text)
+                .on_input(ScMsg::AiText)
+                .on_submit(ScMsg::AiDraft)
+                .size(t::s_small()),
+            w::btn_busy("起草", Kind::Standard, (!v.ai_text.trim().is_empty()).then_some(ScMsg::AiDraft), v.ai_loading),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center),
+    ]
+    .spacing(space(2));
+    if v.ai_loading {
+        col = col.push(t::metadata("AI 在看策略的参数表、历史优化与试验数…（半分钟左右）").color(pal::dim()));
+    }
+    if !v.ai_err.is_empty() {
+        col = col.push(t::caption(v.ai_err.clone()).color(pal::bad()));
+    }
+    if let Some(a) = &v.ai {
+        col = col.push(t::body(if a.reply.is_empty() { "（AI 没有回答）".to_string() } else { a.reply.clone() }));
+        for c in &a.cautions {
+            col = col.push(t::metadata(format!("⚠ {c}")).color(pal::warn()));
+        }
+        for e in &a.errors {
+            col = col.push(t::metadata(format!("✗ {e}")).color(pal::bad()));
+        }
+        if let Some(b) = a.brief() {
+            col = col.push(t::metadata(format!("草稿：{b}")).color(pal::dim()));
+        }
+        let mut foot = row![t::metadata(format!(
+            "{} · AI 调用 {} 次{} · 本策略已有 {} 次运行，全局试验 {}——据此发起的每次试验都会再计入",
+            a.assist_id,
+            a.n_calls,
+            a.cost_usd.map(|c| format!("（${c:.3}）")).unwrap_or_default(),
+            a.trials.strategy_runs,
+            a.trials.global.map(|n| n.to_string()).unwrap_or_else(|| "未知".into()),
+        ))
+        .color(pal::dim())]
+        .spacing(space(2))
+        .align_y(Alignment::Center);
+        if a.spec.is_some() {
+            foot = foot.push(Space::new().width(Length::Fill));
+            foot = foot.push(if a.ready {
+                w::btn("填入表单", Kind::Standard, Some(ScMsg::AiApply))
+            } else {
+                w::btn_why("填入表单", Kind::Standard, None::<ScMsg>, "草稿没过校验（见上面的 ✗），改一下说法再起草")
+            });
+        }
+        col = col.push(foot);
+    }
+    if v.msg.contains("草稿") {
+        col = col.push(t::caption(v.msg.clone()).color(if v.msg.contains("填不进") { pal::warn() } else { pal::ok() }));
+    }
+    col.into()
+}
+
 fn opt_section<'a>(v: &View, e: &Entry) -> Element<'a, ScMsg> {
     let f = &v.opt;
     let mut col = column![
+        ai_box(v),
         w::section("参数优化（Optuna）"),
         t::metadata("☑ = 参与搜索；数值参数填 下限 ~ 上限 · 步长（网格必须有步长）").color(pal::dim()),
     ]
@@ -628,8 +688,11 @@ fn opt_section<'a>(v: &View, e: &Entry) -> Element<'a, ScMsg> {
     if let Some(r) = &v.opt_error {
         col = col.push(t::caption(format!("还不能开始：{r}")).color(pal::warn()));
     }
+    if let Some(a) = &f.assist_id {
+        col = col.push(t::metadata(format!("表单来自 AI 草稿 {a}：发起后研究库会记下这次优化出自它")).color(pal::dim()));
+    }
     // 发起 / 停止优化的结果写在这里（中栏顶部那行离这儿太远，滚到下面看不见）
-    if v.msg.contains("优化") {
+    if v.msg.contains("优化") && !v.msg.contains("草稿") {
         col = col.push(t::caption(v.msg.clone()).color(if v.msg.contains("失败") { pal::bad() } else { pal::ok() }));
     }
     col = col.push(
@@ -802,7 +865,7 @@ fn studies<'a>(v: &View) -> Element<'a, ScMsg> {
         return Space::new().into();
     }
     let mut col = column![].spacing(space(2));
-    if v.msg.contains("优化") {
+    if v.msg.contains("优化") && !v.msg.contains("草稿") {
         col = col.push(t::caption(v.msg.clone()).color(if v.msg.contains("失败") { pal::bad() } else { pal::ok() }));
     }
     if v.studies.is_empty() && !v.msg.contains("发起优化") {

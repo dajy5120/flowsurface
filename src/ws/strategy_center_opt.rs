@@ -41,6 +41,8 @@ pub struct OptForm {
     pub objective: String,
     /// full / quick（策略支持 quick 时可选；快速回测几秒一次，适合大范围扫）
     pub engine: String,
+    /// 表单是按哪次 AI 研究助理的草稿填的（发起时带上，研究库能追溯）
+    pub assist_id: Option<String>,
 }
 
 impl Default for OptForm {
@@ -52,6 +54,7 @@ impl Default for OptForm {
             workers: "2".into(),
             objective: "calmar".into(),
             engine: "full".into(),
+            assist_id: None,
         }
     }
 }
@@ -175,6 +178,9 @@ pub fn study_spec(e: &Entry, form: &OptForm, fixed: &serde_json::Map<String, Val
     }
     if !note.trim().is_empty() {
         spec["note"] = Value::String(note.trim().into());
+    }
+    if let Some(a) = &form.assist_id {
+        spec["assist_id"] = Value::String(a.clone());
     }
     Ok(spec)
 }

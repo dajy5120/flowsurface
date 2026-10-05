@@ -10,6 +10,7 @@ pub mod active_run;
 pub mod backtest_readout;
 pub mod backtest_view;
 pub mod strategy_center;
+pub mod strategy_center_ai;
 pub mod strategy_center_cmp;
 pub mod strategy_center_opt;
 pub mod strategy_center_val;
