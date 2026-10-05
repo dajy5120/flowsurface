@@ -7,6 +7,7 @@ use iced::widget::{Space, button, column, container, pick_list, row, scrollable,
 use iced::{Alignment, Element, Length};
 
 use super::strategy_center::{Entry, Param, RunRow, ScMsg, Summary, Tab, View, default_text};
+use super::strategy_center_cmp::{self as sc, Cmp};
 use super::strategy_center_opt::{self as so, Gate, Heat, StudyRow};
 use super::strategy_center_val::{self as sv, ExpRow, ValRow};
 use crate::ui::fmt::{Rounding, opt};
@@ -58,6 +59,8 @@ fn basis(b: &Option<String>) -> &'static str {
         Some("quick_bp_daily") => "快速·日 bp",
         Some("mark_to_market_1m") => "盯市·分钟",
         Some("mark_to_market_daily") => "盯市·日",
+        Some("mark_to_market") => "盯市",
+        Some("quick_bp") => "快速 bp",
         Some(_) => "其他口径",
         None => "口径未知",
     }
@@ -360,7 +363,7 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
 
 // ── 右栏：运行记录 + 概况 ──────────────────────────────────────────────
 
-fn run_item<'a>(r: &RunRow, picked: bool) -> Element<'a, ScMsg> {
+fn run_item<'a>(r: &RunRow, picked: bool, in_basket: bool) -> Element<'a, ScMsg> {
     let mut head = row![t::metadata(when(r.created_ts)), status_badge(&r.status)].spacing(space(2)).align_y(Alignment::Center);
     if let Some(s) = &r.summary {
         if s.is_bp() {
@@ -380,6 +383,10 @@ fn run_item<'a>(r: &RunRow, picked: bool) -> Element<'a, ScMsg> {
     head = head.push(Space::new().width(Length::Fill));
     if r.active() {
         head = head.push(w::btn("■ 停止", Kind::Destructive, Some(ScMsg::Stop(r.run_id.clone()))));
+    }
+    if r.status == "done" && r.result_dir.is_some() {
+        head = head.push(w::btn(if in_basket { "✓ 对比" } else { "＋对比" }, if in_basket { Kind::Standard } else { Kind::Ghost },
+                                Some(ScMsg::CmpToggle(r.run_id.clone()))));
     }
     let mut c = column![head, t::metadata(params_brief(r)).color(pal::dim())].spacing(0);
     if !r.note.is_empty() {
@@ -460,16 +467,22 @@ fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
     let n_active = v.studies.iter().filter(|s| s.active()).count();
     let study_tab = if n_active > 0 { "优化 ●" } else { "优化" };
     let check_tab = if v.validations.iter().any(ValRow::active) { "验证 ●" } else { "验证" };
+    // 标签页文字要 'static：篮子里几个就显示几（最多 MAX_BASKET）
+    const CMP_TABS: [&str; 9] = ["对比", "对比 1", "对比 2", "对比 3", "对比 4", "对比 5", "对比 6", "对比 7", "对比 8"];
+    let cmp_tab = CMP_TABS[v.basket.len().min(CMP_TABS.len() - 1)];
     let mut col = column![
         w::panel_header(
             "",
-            Some(w::tabs(&[("运行记录", Tab::Runs), (study_tab, Tab::Studies), (check_tab, Tab::Checks)], &v.tab, ScMsg::Tab)),
+            Some(w::tabs(&[("运行记录", Tab::Runs), (study_tab, Tab::Studies), (check_tab, Tab::Checks), (cmp_tab, Tab::Compare)], &v.tab, ScMsg::Tab)),
             vec![w::btn("跟随最新结果", if pinned { Kind::Standard } else { Kind::Ghost }, pinned.then_some(ScMsg::FollowLatest))],
         )
     ]
     .spacing(space(2));
     if v.tab == Tab::Studies {
         return container(col.push(studies(v))).width(Length::FillPortion(5)).height(Length::Fill).into();
+    }
+    if v.tab == Tab::Compare {
+        return container(col.push(scrollable(compare(v)).height(Length::Fill))).width(Length::FillPortion(5)).height(Length::Fill).into();
     }
     if v.tab == Tab::Checks {
         return container(col.push(scrollable(checks(v)).height(Length::Fill))).width(Length::FillPortion(5)).height(Length::Fill).into();
@@ -485,7 +498,8 @@ fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
     }
     let mut list = column![].spacing(space(1));
     for r in &v.runs {
-        list = list.push(run_item(r, v.picked_run.as_deref() == Some(r.run_id.as_str())));
+        let in_basket = v.basket.iter().any(|b| b.run_id == r.run_id);
+        list = list.push(run_item(r, v.picked_run.as_deref() == Some(r.run_id.as_str()), in_basket));
     }
     col = col.push(scrollable(list).height(Length::FillPortion(3)));
 
@@ -1000,5 +1014,176 @@ fn checks<'a>(v: &View) -> Element<'a, ScMsg> {
     }
     col = col.push(experiment_block(v));
     col.into()
+}
+
+// ── 右栏：对比与组合（docs/37 P5）────────────────────────────────────
+
+/// 一格定宽文字（对比表用）。
+fn cellw<'a>(e: impl Into<Element<'a, ScMsg>>, wd: f32) -> Element<'a, ScMsg> {
+    container(e).width(Length::Fixed(wd)).into()
+}
+
+fn short_id(id: &str) -> String {
+    id.rsplit('-').next().unwrap_or(id).to_string()
+}
+
+fn compare<'a>(v: &View) -> Element<'a, ScMsg> {
+    let mut col = column![w::section(format!("对比篮（可跨策略，最多 {} 个；切策略不清空）", sc::MAX_BASKET))].spacing(space(2));
+    if v.basket.is_empty() {
+        col = col.push(w::empty("对比篮是空的", "在「运行记录」里点运行旁边的「＋对比」——换个策略再点，就能跨策略比"));
+        return col.into();
+    }
+    for (i, b) in v.basket.iter().enumerate() {
+        col = col.push(
+            row![
+                t::label("■").color(pal::series(i)),
+                t::numeric(format!("[{i}]")),
+                t::body(b.strategy.clone()),
+                t::metadata(format!("{} · {}", when(b.created_ts), if b.brief.is_empty() { "缺省参数".into() } else { b.brief.clone() })).color(pal::dim()),
+                Space::new().width(Length::Fill),
+                w::btn("✕", Kind::Ghost, Some(ScMsg::CmpToggle(b.run_id.clone()))),
+            ]
+            .spacing(space(2))
+            .align_y(Alignment::Center),
+        );
+    }
+    let freq = v.cmp_freq.clone();
+    col = col.push(
+        row![
+            w::segmented(&sc::FREQS.iter().map(|(k, l)| (*l, k.to_string())).collect::<Vec<_>>(), &freq, ScMsg::CmpFreq),
+            Space::new().width(Length::Fill),
+            w::btn("清空", Kind::Ghost, Some(ScMsg::CmpClear)),
+            w::btn_busy("重新计算", Kind::Primary, (v.basket.len() >= 2).then_some(ScMsg::CmpRun), v.cmp_loading),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center),
+    );
+    if v.basket.len() < 2 {
+        col = col.push(t::metadata("至少放 2 次运行才能比").color(pal::dim()));
+        return col.into();
+    }
+    if !v.cmp_err.is_empty() {
+        col = col.push(w::error("对比没算出来", v.cmp_err.clone(), "常见原因：几次运行的时间段没有交集", None));
+    }
+    match &v.cmp {
+        Some(c) => col = col.push(compare_result(c)),
+        None if v.cmp_loading => col = col.push(w::loading("对齐收益序列")),
+        None => {}
+    }
+    col.into()
+}
+
+fn compare_result<'a>(c: &Cmp) -> Element<'a, ScMsg> {
+    let mut col = column![].spacing(space(2));
+    for wn in &c.warnings {
+        col = col.push(t::metadata(format!("⚠ {wn}")).color(pal::warn()));
+    }
+    // 统计并排
+    col = col.push(w::section(format!("统计并排（{}；累计 / 回撤 / 夏普按分桶算，「运行回撤」是运行自己的）", c.freq_label)));
+    const C0: f32 = 34.0;
+    const C1: f32 = 170.0;
+    const CN: f32 = 84.0;
+    let head = |s: &'static str, wd: f32| cellw(t::metadata(s).color(pal::dim()), wd);
+    col = col.push(row![head("", C0), head("策略 · 时段", C1), head("累计", CN), head("分桶回撤", CN), head("运行回撤", CN),
+                        head("年化波动", CN), head("夏普", CN), head("口径", CN)].spacing(space(1)));
+    for (i, r) in c.runs.iter().enumerate() {
+        let u = r.unit_label();
+        let (tot, tc) = signed(r.total, 2);
+        col = col.push(
+            row![
+                cellw(t::numeric(format!("[{i}]")).color(pal::series(i)), C0),
+                cellw(column![t::body(r.strategy.clone()), t::metadata(format!("{} → {}", &r.start[..r.start.len().min(10)], &r.end[..r.end.len().min(10)])).color(pal::dim())], C1),
+                cellw(t::numeric(format!("{tot} {u}")).color(tc), CN),
+                cellw(t::numeric(format!("{} {u}", opt(r.max_dd, 2, Rounding::Measurement))), CN),
+                cellw(t::numeric(match r.run_dd_pct() { Some(x) => format!("{x:.2} %"), None => crate::ui::fmt::na() }), CN),
+                cellw(t::numeric(format!("{} {u}", opt(r.vol_ann, 1, Rounding::Measurement))), CN),
+                cellw(t::numeric(opt(r.sharpe, 2, Rounding::Measurement)), CN),
+                cellw(t::metadata(basis(&Some(r.basis.clone()))).color(pal::dim()), CN),
+            ]
+            .spacing(space(1))
+            .align_y(Alignment::Center),
+        );
+    }
+    // 收益曲线叠加
+    let units: std::collections::BTreeSet<&str> = c.runs.iter().map(|r| r.unit.as_str()).collect();
+    let unit = if units.len() > 1 { "累计（% / bp 混合）" } else if units.contains("bp") { "累计 bp" } else { "累计 %" };
+    col = col.push(w::section("收益曲线（各自从 0 起算，窗口外不画）"));
+    let series = c.curves.series.iter().enumerate().map(|(i, s)| (s.clone(), pal::series(i), format!("[{i}]"))).collect();
+    col = col.push(iced::widget::Canvas::new(sc::MultiLine { t: c.curves.t.clone(), series, unit: unit.into(), cache: Default::default() })
+        .width(Length::Fill).height(Length::Fixed(200.0)));
+    // 相关矩阵
+    col = col.push(w::section("收益相关矩阵（两两只用重叠期；格子下方小字 = 重叠期数）"));
+    col = col.push(corr_view(c));
+    // 组合
+    let p = &c.portfolio;
+    col = col.push(w::section(format!("组合（共同区间 {} 期{}）", p.periods,
+        match (&p.start, &p.end) { (Some(a), Some(b)) => format!("，{} → {}", &a[..a.len().min(16)], &b[..b.len().min(16)]), _ => String::new() })));
+    if !p.why.is_empty() {
+        col = col.push(t::metadata(p.why.clone()).color(pal::dim()));
+    }
+    if !p.methods.is_empty() {
+        let pu = if p.methods[0].unit == "bp" { "bp" } else { "%" };
+        col = col.push(row![head("配权", 90.0), head("权重", 200.0), head("累计", CN), head("回撤", CN), head("夏普", CN), head("分散比", CN)].spacing(space(1)));
+        for (k, m) in p.methods.iter().enumerate() {
+            let (tot, tc) = signed(m.total, 2);
+            let ws = m.weights.iter().enumerate().map(|(i, x)| format!("[{i}]{x:.2}")).collect::<Vec<_>>().join(" ");
+            col = col.push(
+                row![
+                    cellw(t::body(m.label.clone()).color(pal::series(c.runs.len() + k)), 90.0),
+                    cellw(t::metadata(ws), 200.0),
+                    cellw(t::numeric(format!("{tot} {pu}")).color(tc), CN),
+                    cellw(t::numeric(format!("{} {pu}", opt(m.max_dd, 2, Rounding::Measurement))), CN),
+                    cellw(t::numeric(opt(m.sharpe, 2, Rounding::Measurement)), CN),
+                    cellw(t::numeric(opt(m.diversification, 2, Rounding::Measurement)), CN),
+                ]
+                .spacing(space(1))
+                .align_y(Alignment::Center),
+            );
+        }
+        let series = p.methods.iter().enumerate()
+            .map(|(k, m)| (m.curve.iter().map(|x| Some(*x)).collect(), pal::series(c.runs.len() + k), m.label.clone()))
+            .collect();
+        col = col.push(iced::widget::Canvas::new(sc::MultiLine { t: p.t.clone(), series, unit: format!("组合累计 {pu}"), cache: Default::default() })
+            .width(Length::Fill).height(Length::Fixed(180.0)));
+    }
+    col = col.push(
+        t::metadata("权重按整段共同区间事后估计（等权 / 逆波动 / 等风险贡献，复用 classic.risk_parity），读作「这几条放一起的风险结构」，\
+                     不是可交易的配权回测；分散比 = 加权单体波动之和 ÷ 组合波动（1 = 没分散）。对比只读，不进闸门。")
+            .color(pal::dim()),
+    );
+    col.into()
+}
+
+fn corr_view<'a>(c: &Cmp) -> Element<'a, ScMsg> {
+    const CW: f32 = 64.0;
+    const CH: f32 = 34.0;
+    let n = c.runs.len();
+    let mut grid = column![row(std::iter::once(cellw(t::metadata(""), CW))
+        .chain((0..n).map(|j| cellw(t::numeric(format!("[{j}]")).color(pal::series(j)), CW))))]
+    .spacing(1);
+    for i in 0..n {
+        let mut r = row![cellw(t::numeric(format!("[{i}] {}", short_id(&c.runs[i].run_id))).color(pal::series(i)), CW)].spacing(1);
+        for j in 0..n {
+            let rho = c.corr.matrix.get(i).and_then(|x| x.get(j)).copied().flatten();
+            let ov = c.corr.overlap.get(i).and_then(|x| x.get(j)).copied().unwrap_or(0);
+            // 相关不是涨跌：用强调色，深浅 = |ρ|（格子里有数，颜色不单独承载意义）
+            let bg = rho.map(|x| pal::alpha(pal::accent(), (0.08 + 0.6 * x.abs()) as f32));
+            let body = column![
+                t::numeric(rho.map(|x| format!("{x:+.2}")).unwrap_or_else(|| "—".into())),
+                t::metadata(format!("{ov}")).color(pal::dim()),
+            ]
+            .align_x(Alignment::Center);
+            r = r.push(
+                container(body)
+                    .width(Length::Fixed(CW))
+                    .height(Length::Fixed(CH))
+                    .center_x(Length::Fixed(CW))
+                    .center_y(Length::Fixed(CH))
+                    .style(move |_| iced::widget::container::Style { background: bg.map(iced::Background::Color), ..Default::default() }),
+            );
+        }
+        grid = grid.push(r);
+    }
+    scrollable(grid).direction(iced::widget::scrollable::Direction::Horizontal(Default::default())).into()
 }
 

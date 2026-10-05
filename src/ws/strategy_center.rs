@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::strategy_center_cmp::{self as cmp, BasketItem, Cmp};
 use super::strategy_center_opt::{self as opt, OptForm, StudyRow};
 use super::strategy_center_val::{self as val, ExpForm, ExpRow, Gates, ValForm, ValRow};
 
@@ -211,6 +212,12 @@ pub enum ScMsg {
     ConcludeText(String),
     Conclude,
     GatesRefresh,
+    // ── 对比与组合 ──
+    /// 放进 / 拿出对比篮（可跨策略）
+    CmpToggle(String),
+    CmpClear,
+    CmpFreq(String),
+    CmpRun,
 }
 
 /// 右栏页签。
@@ -220,6 +227,7 @@ pub enum Tab {
     Runs,
     Studies,
     Checks,
+    Compare,
 }
 
 // ── 状态 ────────────────────────────────────────────────────────────────
@@ -258,6 +266,14 @@ struct St {
     gates_key: String,
     vform: ValForm,
     eform: ExpForm,
+    /// 对比篮：跨策略、切策略不清空
+    basket: Vec<BasketItem>,
+    cmp_freq: String,
+    cmp: Option<Cmp>,
+    cmp_loading: bool,
+    cmp_err: String,
+    /// 上次算的对比篮指纹（篮子 / 分桶变了才重算）
+    cmp_key: String,
 }
 
 static ST: OnceLock<Mutex<St>> = OnceLock::new();
@@ -322,6 +338,11 @@ pub struct View {
     pub gates_err: String,
     pub vform: ValForm,
     pub eform: ExpForm,
+    pub basket: Vec<BasketItem>,
+    pub cmp_freq: String,
+    pub cmp: Option<Cmp>,
+    pub cmp_loading: bool,
+    pub cmp_err: String,
 }
 
 pub fn view() -> View {
@@ -375,6 +396,11 @@ pub fn view() -> View {
         gates_err: g.gates_err.clone(),
         vform: g.vform.clone(),
         eform: g.eform.clone(),
+        basket: g.basket.clone(),
+        cmp_freq: if g.cmp_freq.is_empty() { "auto".into() } else { g.cmp_freq.clone() },
+        cmp: g.cmp.clone(),
+        cmp_loading: g.cmp_loading,
+        cmp_err: g.cmp_err.clone(),
     }
 }
 
@@ -609,6 +635,65 @@ fn load_gates() {
             }
         });
     });
+}
+
+/// 对比与组合：计算只在 Python（factory.lab.compare）一处，这里只跑它、读 JSON。
+fn load_compare() {
+    let Some((ids, freq, key)) = with(|g| {
+        if g.cmp_loading || g.basket.len() < 2 {
+            return None;
+        }
+        let freq = if g.cmp_freq.is_empty() { "auto".to_string() } else { g.cmp_freq.clone() };
+        let key = cmp::basket_key(&g.basket, &freq);
+        g.cmp_loading = true;
+        g.cmp_key = key.clone();
+        Some((g.basket.iter().map(|b| b.run_id.clone()).collect::<Vec<_>>(), freq, key))
+    })
+    .flatten() else {
+        return;
+    };
+    super::spawn_named("ws-stratcmp", move || {
+        let out = std::process::Command::new(super::paths::python())
+            .args(["-m", "factory.lab", "compare"])
+            .args(&ids)
+            .args(["--freq", &freq, "--json"])
+            .current_dir(super::paths::repo_root())
+            .output();
+        let parsed: Result<Cmp, String> = match out {
+            Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).map_err(|e| format!("对比 JSON 解析失败：{e}")),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("对比计算失败").trim_start_matches("✗ ").to_string()),
+            Err(e) => Err(format!("起不来 Python：{e}")),
+        };
+        with(|g| {
+            g.cmp_loading = false;
+            // 算的过程中篮子变了：结果作废（下次进页 / 点「计算」再算）
+            if g.cmp_key != key {
+                return;
+            }
+            match parsed {
+                Ok(c) => {
+                    g.cmp = Some(c);
+                    g.cmp_err.clear();
+                }
+                Err(e) => {
+                    g.cmp = None;
+                    g.cmp_err = e;
+                }
+            }
+        });
+    });
+}
+
+/// 篮子或分桶变了且够 2 个 → 重算。
+fn maybe_compare() {
+    let need = with(|g| {
+        let freq = if g.cmp_freq.is_empty() { "auto" } else { g.cmp_freq.as_str() };
+        g.basket.len() >= 2 && cmp::basket_key(&g.basket, freq) != g.cmp_key
+    })
+    .unwrap_or(false);
+    if need {
+        load_compare();
+    }
 }
 
 /// 跑一条 `python -m factory.lab …` 命令（新建实验、下结论这类轻量写操作），结果写进 msg。
@@ -923,7 +1008,47 @@ pub fn handle(m: ScMsg) {
                     g.gates_key.clear(); // 切进「验证」页就重算一次闸门
                 }
             });
+            if t == Tab::Compare {
+                maybe_compare();
+            }
             KICK.store(true, Ordering::Relaxed);
+        }
+        ScMsg::CmpToggle(run_id) => {
+            with(|g| {
+                let item = g.runs.iter().find(|r| r.run_id == run_id).map(|r| BasketItem {
+                    run_id: r.run_id.clone(),
+                    strategy: r.strategy_id.clone(),
+                    created_ts: r.created_ts,
+                    brief: r.params.as_object().map(|o| o.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ")).unwrap_or_default(),
+                });
+                // 篮子里有、但已不在当前策略的运行列表里：照样能拿出来
+                let item = item.or_else(|| g.basket.iter().find(|b| b.run_id == run_id).cloned());
+                if let Some(it) = item {
+                    if let Some(m) = cmp::toggle(&mut g.basket, it) {
+                        g.msg = m;
+                    }
+                }
+            });
+            let on_tab = with(|g| g.tab == Tab::Compare).unwrap_or(false);
+            if on_tab {
+                maybe_compare();
+            }
+        }
+        ScMsg::CmpClear => {
+            with(|g| {
+                g.basket.clear();
+                g.cmp = None;
+                g.cmp_err.clear();
+                g.cmp_key.clear();
+            });
+        }
+        ScMsg::CmpFreq(f) => {
+            with(|g| g.cmp_freq = f);
+            maybe_compare();
+        }
+        ScMsg::CmpRun => {
+            with(|g| g.cmp_key.clear());
+            load_compare();
         }
         ScMsg::GatesRefresh => {
             with(|g| g.gates_key.clear());
