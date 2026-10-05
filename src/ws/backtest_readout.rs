@@ -88,6 +88,9 @@ pub struct ProvExec {
 pub struct ProvStrategy {
     #[serde(default)]
     pub file: String,
+    /// 仓库相对路径（2026-10-05 起写；strategies/ 分了子目录后只有文件名找不到文件）。
+    #[serde(default)]
+    pub path: String,
     #[serde(default)]
     pub sha256: String,
 }
