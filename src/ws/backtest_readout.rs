@@ -233,6 +233,28 @@ pub struct BacktestResult {
 
 static STATE: OnceLock<Mutex<BacktestResult>> = OnceLock::new();
 static POLLER: OnceLock<()> = OnceLock::new();
+/// 钉住的结果目录（策略中心里点了某次运行）。`None` = 跟随最新（latest.json）。
+static PINNED: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// 让本面板显示指定那次运行（`None` 恢复跟随最新）。立即读一次，不等轮询周期。
+pub fn pin(dir: Option<PathBuf>) {
+    if let Ok(mut g) = PINNED.lock() {
+        g.clone_from(&dir);
+    }
+    let snap = match &dir {
+        Some(d) => load_dir(d),
+        None => load_latest(),
+    };
+    let lock = STATE.get_or_init(|| Mutex::new(BacktestResult::default()));
+    if let Ok(mut g) = lock.lock() {
+        *g = snap;
+    }
+}
+
+/// 当前是否钉在某次运行上（面板顶上提示「已钉住 · 跟随最新」用）。
+pub fn pinned() -> Option<PathBuf> {
+    PINNED.lock().ok().and_then(|g| g.clone())
+}
 
 fn out_dir() -> PathBuf {
     if let Ok(p) = std::env::var("WS_BACKTEST_OUT") {
@@ -263,6 +285,11 @@ fn ensure_poller() {
             // 没有 latest.json（旧结果目录，靠扫子目录）时照旧每轮全量读。
             let mut last_mtime = None;
             loop {
+                // 钉住某次运行时不跟随最新：那次的结果目录不会再变，pin() 时已读过
+                if pinned().is_some() {
+                    std::thread::sleep(Duration::from_secs(3));
+                    continue;
+                }
                 let running = super::active_run::backtest_running();
                 let mt = std::fs::metadata(out_dir().join("latest.json")).ok().and_then(|m| m.modified().ok());
                 if running || mt.is_none() || mt != last_mtime {
@@ -324,6 +351,11 @@ fn load_latest_from(base: &std::path::Path) -> BacktestResult {
     let Some(dir) = run_dir else {
         return BacktestResult::default();
     };
+    load_dir(&dir)
+}
+
+/// 读指定结果目录里的 result.json。
+fn load_dir(dir: &std::path::Path) -> BacktestResult {
     let Ok(txt) = std::fs::read_to_string(dir.join("result.json")) else {
         return BacktestResult::default();
     };

@@ -131,6 +131,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    StrategyCenter {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     MarketMap {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -366,6 +372,10 @@ pub enum ContentKind {
     /// （样本量/多重比较/FDR）。合成一页会让人把「93 个 slot 质量良好」
     /// 读成「93 个有效信号」。
     FeatureMatrix,
+    /// 策略中心（docs/37）：策略库 · 参数表单 · 一键回测 · 运行记录与概况。
+    /// 策略目录来自 `python -m factory.lab catalog`，运行记录只读 `~/ws-data/research.sqlite`，
+    /// 回测经 ws-control 的 `RunSpec` 发起——**面板不跑回测、不算指标**。
+    StrategyCenter,
     /// 全市场雷达（docs/22 P0）：加密全市场树图 + 涨跌速度/量异常排行。
     /// 只读 radar_board.json 旁路，**零交易所流**（数据来自独立的 ws-radar 守护）。
     MarketMap,
@@ -411,7 +421,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 28] = [
+    pub const ALL: [ContentKind; 29] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -430,6 +440,7 @@ impl ContentKind {
         ContentKind::PmReplay,
         ContentKind::FeatureLab,
         ContentKind::FeatureMatrix,
+        ContentKind::StrategyCenter,
         ContentKind::MarketMap,
         ContentKind::Observatory,
         ContentKind::NetEgress,
@@ -464,6 +475,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::PmReplay => "预测市场回放",
             ContentKind::FeatureLab => "特征库",
             ContentKind::FeatureMatrix => "特征矩阵",
+            ContentKind::StrategyCenter => "策略中心",
             ContentKind::MarketMap => "全市场雷达",
             ContentKind::Observatory => "接口观察终端",
             ContentKind::NetEgress => "网络出口",
@@ -553,6 +565,7 @@ impl PaneSetup {
                 | ContentKind::PmReplay
                 | ContentKind::FeatureLab
                 | ContentKind::FeatureMatrix
+                | ContentKind::StrategyCenter
                 | ContentKind::MarketMap
                 | ContentKind::Observatory
                 | ContentKind::NetEgress
@@ -594,6 +607,7 @@ impl PaneSetup {
             | ContentKind::PmReplay
             | ContentKind::FeatureLab
             | ContentKind::FeatureMatrix
+            | ContentKind::StrategyCenter
             | ContentKind::MarketMap
             | ContentKind::Observatory
             | ContentKind::NetEgress

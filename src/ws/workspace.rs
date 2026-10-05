@@ -27,6 +27,9 @@ pub const WS_LIVE: &str = "实时数据回测"; // 实时 Binance 行情 + Sandb
 /// tearsheet，布局也几乎一样。当前用的是哪个源由图表上的**来源徽标**显示（docs/28 §4.2），
 /// 比用工作区名字区分可信——徽标说的是本次运行**实际用的**源与体检等级。
 pub const WS_BACKTEST: &str = "回测";
+/// 策略中心（docs/37 P1）：策略库 · 参数表单 · 一键回测 · 运行记录与概况 ∣ 回测结果。
+/// 放在「回测」组首位：`Ctrl Shift 2` 直达。
+pub const WS_STRATEGY: &str = "策略中心";
 pub const WS_RECORDER: &str = "数据录制";
 pub const WS_FACTORY: &str = "Alpha Factory";
 pub const WS_C4: &str = "C4 影子"; // maker 影子守护实时/影子日/活体vs重放（docs/14 §2）
@@ -51,7 +54,7 @@ pub const WS_RESOURCES: &str = "资源";
 /// | 组 | 工作区 | UPDS 模式 |
 /// |---|---|---|
 /// | 实时 | 官方原生 · 订单流特征 · 实时数据回测 · 全球市场 | 监控终端 |
-/// | 回测 | 回测 · Tardis 历史回放 | 数据分析 |
+/// | 回测 | 策略中心 · 回测 · Tardis 历史回放 | 数据分析 |
 /// | 研究 | Alpha Factory · C4 影子 · 期权/0DTE · 预测市场 | 数据分析 / 仪表盘 |
 /// | 数据 | 数据录制 · 接口观察终端 | 仪表盘 |
 /// | 系统 | 资源（进程 + 网络出口）· 新闻资讯 | 设置 / 仪表盘 |
@@ -59,7 +62,7 @@ pub const WS_RESOURCES: &str = "资源";
 /// 改分组只改这里；[`WORKSPACES`] 必须是它按顺序摊平的结果（有测试钉住）。
 pub const GROUPS: [(&str, &[&str]); 5] = [
     ("实时", &[WS_OFFICIAL, WS_FEATURES, WS_LIVE, WS_GLOBAL]),
-    ("回测", &[WS_BACKTEST, WS_TARDIS]),
+    ("回测", &[WS_STRATEGY, WS_BACKTEST, WS_TARDIS]),
     ("研究", &[WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]),
     ("数据", &[WS_RECORDER, WS_OBSERVATORY]),
     ("系统", &[WS_RESOURCES, WS_NEWS]),
@@ -69,11 +72,12 @@ pub const GROUPS: [(&str, &[&str]); 5] = [
 ///
 /// **加/删项要同时改 `GROUPS`、`icon()` 与 `pane_template()` 的 match 臂**，
 /// 漏了会落到 `_ => Starter` 兜底（有测试钉住）。
-pub const WORKSPACES: [&str; 14] = [
+pub const WORKSPACES: [&str; 15] = [
     WS_OFFICIAL,
     WS_FEATURES,
     WS_LIVE,
     WS_GLOBAL,
+    WS_STRATEGY,
     WS_BACKTEST,
     WS_TARDIS,
     WS_FACTORY,
@@ -112,6 +116,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
     match name {
         WS_OFFICIAL => Icon::BinanceLogo, // 官方直连 Binance
         WS_LIVE => Icon::ChartOutline,    // 实时图表 + 交易
+        WS_STRATEGY => Icon::Layout,      // 策略中心（docs/37）
         WS_BACKTEST => Icon::Return,      // 回放/重放（两个数据源合一）
         WS_RECORDER => Icon::Folder,      // 数据湖
         WS_FACTORY => Icon::Star,         // alpha 因子
@@ -157,6 +162,10 @@ fn pane_template(name: &str) -> &'static str {
             r#"{"Split":{"axis":"Vertical","ratio":0.42,"a":{"Factory":{"settings":{},"link_group":null}},"b":{"FeatureLab":{"settings":{},"link_group":null}}}}"#
         }
         // C4 活体影子（docs/14 §2）：守护实时 + 影子日 + 活体vs重放 + 判定进度。
+        // 策略中心：左 策略库/详情/运行记录，右 回测结果（点运行记录会把它钉在那次运行上）
+        WS_STRATEGY => {
+            r#"{"Split":{"axis":"Vertical","ratio":0.64,"a":{"StrategyCenter":{"settings":{},"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}"#
+        }
         WS_C4 => r#"{"C4Shadow":{"settings":{},"link_group":null}}"#,
         // 录制驾驶舱（docs/08 F6-P3）。
         WS_RECORDER => r#"{"Recorder":{"settings":{},"link_group":null}}"#,
@@ -347,7 +356,7 @@ mod tests {
         let templates: String = WORKSPACES.iter().map(|n| pane_template(n)).collect();
         // 只读面板类：没有 ticker、不吃行情流，各自是一个独立用途的页面。
         for kind in [
-            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "FeatureMatrix", "TardisBoard",
+            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "FeatureMatrix", "StrategyCenter", "TardisBoard",
             "MarketMap", "Observatory", "NetEgress", "Procs", "News",
         ] {
             assert!(
