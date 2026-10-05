@@ -13,12 +13,13 @@ use super::strategy_center::{Entry, Param};
 /// 搜索方式（与 factory.lab.optimize.SAMPLERS 一致）。
 pub const SAMPLERS: [(&str, &str); 4] = [("grid", "网格"), ("random", "随机"), ("tpe", "TPE"), ("cmaes", "CMA-ES")];
 /// 目标函数（全部求最大；与 factory.lab.optimize.OBJECTIVES 一致）。
-pub const OBJECTIVES: [(&str, &str); 5] = [
+pub const OBJECTIVES: [(&str, &str); 6] = [
     ("calmar", "收益率 ÷ 最大回撤"),
     ("pnl", "费后盈亏"),
     ("pnl_pct", "费后收益率"),
     ("sharpe", "夏普"),
     ("sortino", "Sortino"),
+    ("net_bp_mean", "每笔净 bp（快速回测）"),
 ];
 pub const MAX_GRID: usize = 2000;
 
@@ -38,6 +39,8 @@ pub struct OptForm {
     pub trials: String,
     pub workers: String,
     pub objective: String,
+    /// full / quick（策略支持 quick 时可选；快速回测几秒一次，适合大范围扫）
+    pub engine: String,
 }
 
 impl Default for OptForm {
@@ -48,6 +51,7 @@ impl Default for OptForm {
             trials: "20".into(),
             workers: "2".into(),
             objective: "calmar".into(),
+            engine: "full".into(),
         }
     }
 }
@@ -164,7 +168,7 @@ pub fn study_spec(e: &Entry, form: &OptForm, fixed: &serde_json::Map<String, Val
     let mut spec = json!({
         "strategy": e.id, "space": space, "params": params,
         "sampler": form.sampler, "n_trials": if form.sampler == "grid" { grid.min(trials) } else { trials },
-        "workers": workers, "objective": form.objective,
+        "workers": workers, "objective": form.objective, "engine": form.engine,
     });
     if let Some(d) = data {
         spec["data"] = d;

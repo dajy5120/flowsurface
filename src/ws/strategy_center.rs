@@ -65,6 +65,9 @@ pub struct Meta {
     pub verdict_note: String,
     #[serde(default)]
     pub docs: Vec<String>,
+    /// 专用引擎（harness）条目的运行方式
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Deserialize, Clone, Default, Debug)]
@@ -100,6 +103,14 @@ impl Entry {
 #[derive(Deserialize, Clone, Default, Debug)]
 pub struct Summary {
     pub pnl: Option<f64>,
+    /// 快速回测：盈亏单位是 bp（每笔 1 倍名义仓位），不是账户金额
+    #[serde(default)]
+    pub pnl_unit: Option<String>,
+    pub max_dd_bp: Option<f64>,
+    pub net_bp_mean: Option<f64>,
+    pub gross_bp_mean: Option<f64>,
+    pub cost_bp_mean: Option<f64>,
+    pub days: Option<f64>,
     pub pnl_pct: Option<f64>,
     pub max_dd_pct: Option<f64>,
     #[serde(default)]
@@ -140,6 +151,12 @@ pub struct RunRow {
     pub study_id: Option<String>,
 }
 
+impl Summary {
+    pub fn is_bp(&self) -> bool {
+        self.pnl_unit.as_deref() == Some("bp")
+    }
+}
+
 impl RunRow {
     pub fn active(&self) -> bool {
         matches!(self.status.as_str(), "queued" | "running")
@@ -160,6 +177,8 @@ pub enum ScMsg {
     Note(String),
     ResetParams,
     RunFull,
+    RunQuick,
+    OptEngine(String),
     Stop(String),
     PickRun(String),
     FollowLatest,
@@ -860,10 +879,16 @@ pub fn handle(m: ScMsg) {
         ScMsg::ResetParams => {
             with(reset_form_in);
         }
-        ScMsg::RunFull => {
+        ScMsg::RunFull | ScMsg::RunQuick => {
+            let quick = matches!(m, ScMsg::RunQuick);
             let spec = with(|g| {
                 let e = g.selected.as_ref().and_then(|id| g.catalog.iter().find(|e| &e.id == id)).cloned()?;
-                Some(spec_from(&e, &g.form, &g.start, &g.end, &g.note))
+                Some(spec_from(&e, &g.form, &g.start, &g.end, &g.note).map(|mut s| {
+                    if quick {
+                        s["engine"] = Value::String("quick".into());
+                    }
+                    s
+                }))
             })
             .flatten();
             match spec {
@@ -938,7 +963,12 @@ pub fn handle(m: ScMsg) {
                 let study = if kind == "wfo" { study_from_form(&e, &g.form, &g.opt, &g.start, &g.end, &g.note).ok() } else { None };
                 let exp = g.experiments.iter().find(|x| x.locked()).map(|x| x.exp_id.clone());
                 Some(val::validation_spec(&e, &kind, &fixed, &g.start, &g.end, study.as_ref(), &g.vform, &g.opt.workers,
-                                          &g.opt.objective, exp.as_deref(), &g.note))
+                                          &g.opt.objective, exp.as_deref(), &g.note).map(|mut s| {
+                    if kind != "stress" {
+                        s["engine"] = Value::String(g.opt.engine.clone());
+                    }
+                    s
+                }))
             })
             .flatten();
             match spec {
@@ -1043,6 +1073,15 @@ pub fn handle(m: ScMsg) {
         }
         ScMsg::OptObjective(v) => {
             with(|g| g.opt.objective = v);
+        }
+        ScMsg::OptEngine(v) => {
+            with(|g| {
+                // 快速回测没有账户收益率 / 回撤百分比：切过去时目标换成每笔净 bp
+                if v == "quick" && matches!(g.opt.objective.as_str(), "calmar" | "pnl_pct") {
+                    g.opt.objective = "net_bp_mean".into();
+                }
+                g.opt.engine = v;
+            });
         }
         ScMsg::StartStudy => {
             let spec = with(|g| {

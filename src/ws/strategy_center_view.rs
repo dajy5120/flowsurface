@@ -51,6 +51,11 @@ fn signed(v: Option<f64>, dp: usize) -> (String, iced::Color) {
 fn basis(b: &Option<String>) -> &'static str {
     match b.as_deref() {
         Some("realized") => "已实现",
+        Some("realized_balance") => "已实现余额",
+        Some("realized_daily") => "已实现·日",
+        Some("position_returns") => "⚠ 按持仓收益",
+        Some("trade_bp_cumulative") => "逐笔 bp 累计",
+        Some("quick_bp_daily") => "快速·日 bp",
         Some("mark_to_market_1m") => "盯市·分钟",
         Some("mark_to_market_daily") => "盯市·日",
         Some(_) => "其他口径",
@@ -148,6 +153,12 @@ fn library_item<'a>(e: &Entry, v: &View) -> Element<'a, ScMsg> {
             head = head.push(t::body(m.name.clone())).push(Space::new().width(Length::Fill)).push(verdict_badge(&m.verdict));
             sub = sub.push(t::metadata(m.id.clone()).color(pal::dim()));
             if let Some(r) = v.latest.get(&e.id)
+                && let Some(s) = &r.summary
+                && s.is_bp()
+            {
+                let (per, c) = signed(s.net_bp_mean, 2);
+                sub = sub.push(row![t::metadata("最近 ⚡").color(pal::dim()), t::numeric(format!("{per} bp/笔")).color(c)].spacing(space(2)));
+            } else if let Some(r) = v.latest.get(&e.id)
                 && let Some(s) = &r.summary
             {
                 let (pnl, c) = signed(s.pnl, 2);
@@ -258,6 +269,16 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
     if !m.docs.is_empty() {
         col = col.push(t::metadata(format!("文档：{}", m.docs.join("、"))).color(pal::dim()));
     }
+    // 专用引擎：没有统一回测入口，只给结论与运行方式
+    if m.engines.iter().all(|x| x == "harness") {
+        col = col.push(w::section("运行方式（专用引擎）"));
+        col = col.push(t::caption(if m.description.is_empty() { "见策略文件说明".to_string() } else { m.description.clone() }));
+        col = col.push(
+            t::metadata("这类研究没有统一的回测入口（数据形态 / 回测方式与订单流策略不同），策略中心只列结论；在 Studio 终端里按上面的命令运行。")
+                .color(pal::dim()),
+        );
+        return container(scrollable(col)).width(Length::FillPortion(5)).height(Length::Fill).into();
+    }
 
     // 参数：★ = 值得优化（x-optimize）；● = 改过（只下发改过的）
     col = col.push(w::section(format!("参数（{} 个，★ 值得优化，● 已改）", e.params.len())));
@@ -301,10 +322,16 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
 
     let can_full = m.engines.iter().any(|x| x == "full");
     let ok = v.field_errors.is_empty() && !v.sending && can_full;
-    let quick_why = if m.engines.iter().any(|x| x == "quick") { "快速回测（向量化）在 P4 接入" } else { "这个策略没有快速回测引擎" };
+    let can_quick = m.engines.iter().any(|x| x == "quick");
+    let quick_ok = can_quick && v.field_errors.is_empty() && !v.sending;
     col = col.push(
         row![
-            w::btn_why("⚡ 快速回测", Kind::Standard, None::<ScMsg>, quick_why),
+            if quick_ok {
+                w::btn("⚡ 快速回测", Kind::Standard, Some(ScMsg::RunQuick))
+            } else {
+                w::btn_why("⚡ 快速回测", Kind::Standard, None::<ScMsg>,
+                           if !can_quick { "这个策略没有快速回测引擎" } else if v.sending { "正在发送…" } else { "先改正标红的参数" })
+            },
             if ok {
                 w::btn("▶ 完整回测", Kind::Primary, Some(ScMsg::RunFull))
             } else {
@@ -322,7 +349,10 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
         col = col.push(t::caption(v.msg.clone()).color(if v.msg.contains("失败") || v.msg.contains("有误") { pal::bad() } else { pal::dim() }));
     }
     col = col.push(t::metadata("完整回测走 ws-control → factory.lab：入口体检、真实撮合、记进研究库。进度看底部进度条与 K 线，结果在右侧「回测结果」。").color(pal::dim()));
-    if can_full {
+    if can_quick {
+        col = col.push(t::metadata("⚡ 快速回测 = 100ms 特征帧向量回测，秒级、按「每笔 1 倍名义」的 bp 计，不建模排队与延迟——只用来筛，结论以完整回测为准。").color(pal::dim()));
+    }
+    if can_full || can_quick {
         col = col.push(opt_section(v, e));
     }
     container(scrollable(col)).width(Length::FillPortion(5)).height(Length::Fill).into()
@@ -333,9 +363,15 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
 fn run_item<'a>(r: &RunRow, picked: bool) -> Element<'a, ScMsg> {
     let mut head = row![t::metadata(when(r.created_ts)), status_badge(&r.status)].spacing(space(2)).align_y(Alignment::Center);
     if let Some(s) = &r.summary {
-        let (pnl, c) = signed(s.pnl, 2);
-        head = head.push(t::numeric(pnl).color(c));
-        head = head.push(t::metadata(format!("回撤 {}%", opt(s.max_dd_pct, 2, Rounding::Measurement))).color(pal::dim()));
+        if s.is_bp() {
+            let (per, c) = signed(s.net_bp_mean, 2);
+            head = head.push(w::badge("⚡ 快速", Tone::Neutral));
+            head = head.push(t::numeric(format!("{per} bp/笔")).color(c));
+        } else {
+            let (pnl, c) = signed(s.pnl, 2);
+            head = head.push(t::numeric(pnl).color(c));
+            head = head.push(t::metadata(format!("回撤 {}%", opt(s.max_dd_pct, 2, Rounding::Measurement))).color(pal::dim()));
+        }
         head = head.push(t::metadata(format!("成交 {}", opt(s.fills, 0, Rounding::Measurement))).color(pal::dim()));
     }
     if r.dirty {
@@ -361,6 +397,21 @@ fn run_item<'a>(r: &RunRow, picked: bool) -> Element<'a, ScMsg> {
 
 fn summary_card<'a>(r: &RunRow, s: &Summary) -> Element<'a, ScMsg> {
     const KW: f32 = 150.0;
+    if s.is_bp() {
+        let (tot, c) = signed(s.pnl, 1);
+        let (per, c2) = signed(s.net_bp_mean, 3);
+        return column![
+            w::section(format!("概况 · {} · ⚡ 快速回测", r.run_id)),
+            w::kv("每笔净值", row![t::numeric(per).color(c2), t::metadata("bp").color(pal::dim())].spacing(space(1)).into(), KW),
+            w::kv("毛 / 成本", t::numeric(format!("{} / {} bp", opt(s.gross_bp_mean, 3, Rounding::Measurement), opt(s.cost_bp_mean, 3, Rounding::Measurement))).into(), KW),
+            w::kv("累计 / 回撤", row![t::numeric(tot).color(c), t::metadata(format!("bp · 回撤 {} bp", opt(s.max_dd_bp, 1, Rounding::Measurement))).color(pal::dim())].spacing(space(1)).into(), KW),
+            w::kv("笔数 / 胜率", t::numeric(format!("{} 笔 · {}%", opt(s.fills.map(|x| x / 2.0), 0, Rounding::Measurement), opt(s.win_rate.map(|x| x * 100.0), 1, Rounding::Measurement))).into(), KW),
+            w::kv("天数 / 用时", t::numeric(format!("{} 天 · {} 秒", opt(s.days, 0, Rounding::Measurement), opt(s.elapsed_s, 0, Rounding::Measurement))).into(), KW),
+            t::metadata("按「每笔 1 倍名义仓位」计 bp，不是账户金额；不建模排队、逆选择与延迟。只用来筛——结论以完整回测为准。").color(pal::warn()),
+        ]
+        .spacing(space(1))
+        .into();
+    }
     let num = |v: Option<f64>, dp: usize| -> Element<'a, ScMsg> { t::numeric(opt(v, dp, Rounding::Measurement)).into() };
     let (pnl, c) = signed(s.pnl, 2);
     let mut col = column![
@@ -386,7 +437,13 @@ fn summary_card<'a>(r: &RunRow, s: &Summary) -> Element<'a, ScMsg> {
     if !s.quality_flags.is_empty() {
         col = col.push(t::metadata(format!("质量标记：{}", s.quality_flags.join("、"))).color(pal::dim()));
     }
-    if s.dd_basis.as_deref() == Some("realized") {
+    if s.returns_basis.as_deref() == Some("position_returns") {
+        col = col.push(
+            t::metadata("⚠ 这次回测不到两个自然日，Nautilus 的夏普 / Sortino 退回按「每笔持仓收益」算，与账户无关，别拿来比较。")
+                .color(pal::warn()),
+        );
+    }
+    if s.dd_basis.as_deref().is_some_and(|b| b.starts_with("realized")) {
         col = col.push(
             t::metadata("⚠ 回撤与夏普按已实现收益算（Nautilus 口径），不含持仓浮亏——挂单 / 网格 / 库存类策略会显著偏好看。")
                 .color(pal::warn()),
@@ -499,6 +556,16 @@ fn opt_section<'a>(v: &View, e: &Entry) -> Element<'a, ScMsg> {
             }
         }
         col = col.push(r);
+    }
+    if e.meta.as_ref().is_some_and(|m| m.engines.iter().any(|x| x == "quick")) {
+        let engines = [("full", "完整回测"), ("quick", "快速回测")].iter().map(|(k, l)| {
+            w::btn(*l, if f.engine == *k { Kind::Standard } else { Kind::Ghost }, Some(ScMsg::OptEngine((*k).to_string())))
+        });
+        col = col.push(
+            row![container(t::caption("每次试验用")).width(Length::Fixed(LABEL_W)), row(engines).spacing(space(1))]
+                .spacing(space(2))
+                .align_y(Alignment::Center),
+        );
     }
     let samplers = so::SAMPLERS.iter().map(|(k, label)| {
         w::btn(*label, if f.sampler == *k { Kind::Standard } else { Kind::Ghost }, Some(ScMsg::OptSampler((*k).to_string())))
