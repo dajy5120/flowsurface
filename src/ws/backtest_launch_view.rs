@@ -19,8 +19,14 @@ struct Strat(String);
 
 impl std::fmt::Display for Strat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let p = std::path::Path::new(&self.0);
-        f.write_str(&p.file_name().map_or_else(|| self.0.clone(), |n| n.to_string_lossy().into_owned()))
+        // strategies/ 之下的相对路径（子目录即分类，如 orderflow/orderflow_confluence.py）
+        match self.0.rfind("strategies/") {
+            Some(i) => f.write_str(&self.0[i + "strategies/".len()..]),
+            None => {
+                let p = std::path::Path::new(&self.0);
+                f.write_str(&p.file_name().map_or_else(|| self.0.clone(), |n| n.to_string_lossy().into_owned()))
+            }
+        }
     }
 }
 

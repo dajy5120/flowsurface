@@ -761,7 +761,7 @@ pub fn pane_body<'a>() -> Element<'a, BtMsg> {
             column![
                 text("回测结果").size(crate::ui::text::s_section()).color(crate::ui::pal::head()),
                 text("暂无回测结果").size(crate::ui::text::s_emph()),
-                text("先跑一次回测：python strategies/quickstart.py").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
+                text("先跑一次回测：python strategies/examples/quickstart.py").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
                 text(format!("读取目录：{}", super::backtest_readout::out_dir_display()))
                     .size(crate::ui::text::s_small())
                     .color(crate::ui::pal::dim()),

@@ -78,20 +78,29 @@ fn repo() -> PathBuf {
     super::paths::repo_root()
 }
 
-/// 主仓 `strategies/` 下可回测的策略（顶层 `.py`，定义了 `build(`）。
+/// 主仓 `strategies/` 下可回测的策略（含按主题分的子目录；定义了 `build(` 的 `.py`）。
+/// 结果、数据、日志与原件目录不扫。
 #[must_use]
 pub fn strategies() -> Vec<String> {
-    let dir = repo().join("strategies");
-    let mut v: Vec<String> = std::fs::read_dir(&dir)
-        .map(|rd| {
-            rd.flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "py"))
-                .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains("def build(")))
-                .map(|p| p.display().to_string())
-                .collect()
-        })
-        .unwrap_or_default();
+    fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for p in rd.flatten().map(|e| e.path()) {
+            if p.is_dir() {
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if !matches!(name.as_str(), "backtest_results" | "data" | "pm_flow_log" | "mt5" | "__pycache__")
+                    && !name.starts_with('.')
+                {
+                    walk(&p, out);
+                }
+            } else if p.extension().is_some_and(|x| x == "py")
+                && std::fs::read_to_string(&p).is_ok_and(|t| t.contains("def build("))
+            {
+                out.push(p.display().to_string());
+            }
+        }
+    }
+    let mut v = Vec::new();
+    walk(&repo().join("strategies"), &mut v);
     v.sort();
     v
 }
