@@ -78,7 +78,13 @@ fn repo() -> PathBuf {
     super::paths::repo_root()
 }
 
-/// 主仓 `strategies/` 下可回测的策略（含按主题分的子目录；定义了 `build(` 的 `.py`）。
+/// 策略入口契约（docs/27 §8.3）：模块级 `build(ctx)` 或旧契约 `build(instrument_id, …)`。
+/// 只认这两种——研究脚本里同名的 `build(sym, …)`（如特征构建）不是策略。
+fn is_strategy_entry(src: &str) -> bool {
+    src.lines().any(|l| l.starts_with("def build(ctx") || l.starts_with("def build(instrument_id"))
+}
+
+/// 主仓 `strategies/` 下可回测的策略（含 `research/<主题>/` 等子目录）。
 /// 结果、数据、日志与原件目录不扫。
 #[must_use]
 pub fn strategies() -> Vec<String> {
@@ -93,7 +99,7 @@ pub fn strategies() -> Vec<String> {
                     walk(&p, out);
                 }
             } else if p.extension().is_some_and(|x| x == "py")
-                && std::fs::read_to_string(&p).is_ok_and(|t| t.contains("def build("))
+                && std::fs::read_to_string(&p).is_ok_and(|t| is_strategy_entry(&t))
             {
                 out.push(p.display().to_string());
             }
@@ -307,5 +313,18 @@ pub fn shutdown() {
 pub fn open_picker() {
     if let Ok(mut g) = cell().lock() {
         g.open = true;
+    }
+}
+
+#[cfg(test)]
+mod strategy_entry_tests {
+    use super::is_strategy_entry;
+
+    #[test]
+    fn only_strategy_build_contracts_count() {
+        assert!(is_strategy_entry("x = 1\ndef build(ctx) -> S:\n    ..."));
+        assert!(is_strategy_entry("def build(instrument_id, trader_id, redis_url):"));
+        assert!(!is_strategy_entry("def build(sym: str, days: list) -> Path:"));
+        assert!(!is_strategy_entry("    def build(ctx):  # 缩进的方法不算"));
     }
 }

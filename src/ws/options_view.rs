@@ -82,7 +82,7 @@ pub fn pane_body<'a>() -> Element<'a, GridMsg> {
 
     if !st.present || st.rows.is_empty() {
         body = body.push(
-            text("暂无回测快照——运行 `python -m factory.options.run_backtest --strategy all` 生成")
+            text("暂无回测快照——运行 `python -m strategies.research.options.run_backtest --strategy all` 生成")
                 .size(crate::ui::text::s_small())
                 .color(crate::ui::pal::dim()),
         );

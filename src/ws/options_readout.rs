@@ -1,7 +1,7 @@
 //! 期权/0DTE 回测面板只读快照（docs/18 P2）。
 //!
 //! **独立新增面板**（`Content::OptionsBoard`）——不改任何既有面板/readout。数据源（全只读）：
-//! `~/ws-data/live/options_board.json`（`factory.options.run_backtest` 产出：逐策略净 PnL +
+//! `~/ws-data/live/options_board.json`（`strategies.research.options.run_backtest` 产出：逐策略净 PnL +
 //! 摩擦分解 + 探针 go/no-go）。沿用 c4_readout 的旁路 poller 模式（惰性 10s 刷新，pane 只读快照）。
 
 use std::path::PathBuf;
