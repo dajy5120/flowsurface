@@ -162,9 +162,10 @@ fn pane_template(name: &str) -> &'static str {
             r#"{"Split":{"axis":"Vertical","ratio":0.42,"a":{"Factory":{"settings":{},"link_group":null}},"b":{"FeatureLab":{"settings":{},"link_group":null}}}}"#
         }
         // C4 活体影子（docs/14 §2）：守护实时 + 影子日 + 活体vs重放 + 判定进度。
-        // 策略中心：左 策略库/详情/运行记录，右 回测结果（点运行记录会把它钉在那次运行上）
+        // 策略中心：上 = 左 策略库/详情/运行记录 · 右 回测结果（点运行记录会把它钉在那次运行上）；
+        // 下 = 七层（docs/39，跟随选中的策略与运行）
         WS_STRATEGY => {
-            r#"{"Split":{"axis":"Vertical","ratio":0.64,"a":{"StrategyCenter":{"settings":{},"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}"#
+            r#"{"Split":{"axis":"Horizontal","ratio":0.62,"a":{"Split":{"axis":"Vertical","ratio":0.64,"a":{"StrategyCenter":{"settings":{},"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}},"b":{"StrategyLayers":{"settings":{},"link_group":null}}}}"#
         }
         WS_C4 => r#"{"C4Shadow":{"settings":{},"link_group":null}}"#,
         // 录制驾驶舱（docs/08 F6-P3）。
@@ -356,7 +357,7 @@ mod tests {
         let templates: String = WORKSPACES.iter().map(|n| pane_template(n)).collect();
         // 只读面板类：没有 ticker、不吃行情流，各自是一个独立用途的页面。
         for kind in [
-            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "FeatureMatrix", "StrategyCenter", "TardisBoard",
+            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "FeatureMatrix", "StrategyCenter", "StrategyLayers", "TardisBoard",
             "MarketMap", "Observatory", "NetEgress", "Procs", "News",
         ] {
             assert!(

@@ -17,17 +17,28 @@ use crate::ui::text as t;
 use crate::ui::widgets::{self as w, Kind, Tone};
 
 /// 研究结论 → 徽标（这是**研究结论**，不是绩效分）。
+pub fn verdict_label(v: &str) -> &'static str {
+    match v {
+        "alive" => "存活",
+        "candidate" => "候选",
+        "paper" => "模拟盘",
+        "live" => "实盘",
+        "falsified" => "已证伪",
+        "retired" => "已退役",
+        _ => "未验证",
+    }
+}
+
 fn verdict_badge<'a>(v: &str) -> Element<'a, ScMsg> {
-    let (label, tone) = match v {
-        "alive" => ("存活", Tone::Success),
-        "candidate" => ("候选", Tone::Accent),
-        "paper" => ("模拟盘", Tone::Info),
-        "live" => ("实盘", Tone::Accent),
-        "falsified" => ("已证伪", Tone::Danger),
-        "retired" => ("已退役", Tone::Neutral),
-        _ => ("未验证", Tone::Warning),
+    let tone = match v {
+        "alive" => Tone::Success,
+        "candidate" | "live" => Tone::Accent,
+        "paper" => Tone::Info,
+        "falsified" => Tone::Danger,
+        "retired" => Tone::Neutral,
+        _ => Tone::Warning,
     };
-    w::badge(label, tone)
+    w::badge(verdict_label(v), tone)
 }
 
 fn status_badge<'a>(s: &str) -> Element<'a, ScMsg> {
@@ -86,6 +97,8 @@ const VERDICT_FILTERS: [(&str, Option<&str>); 4] =
     [("全部", None), ("存活", Some("alive")), ("未验证", Some("untested")), ("已证伪", Some("falsified"))];
 
 fn library<'a>(v: &View) -> Element<'a, ScMsg> {
+    use super::strategy_center_lib as lb;
+    let f = &v.lib;
     let mut col = column![w::panel_header(
         "策略库",
         Some(t::metadata(format!("{} 个", v.catalog.len())).into()),
@@ -93,14 +106,60 @@ fn library<'a>(v: &View) -> Element<'a, ScMsg> {
     )]
     .spacing(space(2));
 
-    col = col.push(
-        text_input("搜索名称 / id / 标签", &v.search).on_input(ScMsg::Search).size(t::s_small()),
-    );
+    col = col.push(text_input("搜索名称 / id / 标签 / 大师", &v.search).on_input(ScMsg::Search).size(t::s_small()));
+    // 分组方式 + 结论
+    col = col.push(w::segmented(&lb::GROUPS, &f.group_by, ScMsg::LibGroup));
     let filters = VERDICT_FILTERS.iter().map(|(label, val)| {
         let on = v.verdict.as_deref() == *val;
         w::btn(*label, if on { Kind::Standard } else { Kind::Ghost }, Some(ScMsg::Verdict(val.map(str::to_string))))
     });
     col = col.push(row(filters).spacing(space(1)));
+    // 策略类型（多选，取「或」）
+    let mut chips = row![w::btn("全部类型", if f.styles.is_empty() { Kind::Standard } else { Kind::Ghost }, Some(ScMsg::LibStylesClear))]
+        .spacing(space(1));
+    for (k, label) in lb::STYLES {
+        let on = f.styles.contains(k);
+        chips = chips.push(w::btn(label, if on { Kind::Standard } else { Kind::Ghost }, Some(ScMsg::LibStyle(k.to_string()))));
+    }
+    col = col.push(chips.wrap());
+
+    // 目录树
+    let q = v.search.clone();
+    let verdict = v.verdict.as_deref();
+    let mut head = row![
+        w::btn(if f.tree_hidden { "▸ 目录" } else { "▾ 目录" }, Kind::Ghost, Some(ScMsg::LibTreeHidden)),
+        w::btn("全部", if f.dir.is_none() { Kind::Standard } else { Kind::Ghost }, Some(ScMsg::LibDir(None))),
+    ]
+    .spacing(space(1))
+    .align_y(Alignment::Center);
+    if let Some(d) = &f.dir {
+        for (label, path) in lb::breadcrumb(d) {
+            head = head.push(t::metadata("›").color(pal::dim()));
+            head = head.push(w::btn(label, if f.dir.as_deref() == Some(path.as_str()) { Kind::Standard } else { Kind::Ghost },
+                                    Some(ScMsg::LibDir(Some(path)))));
+        }
+    }
+    col = col.push(head.wrap());
+    if !f.tree_hidden {
+        let mut tree = column![].spacing(0);
+        for n in lb::tree(&v.catalog, f, verdict, &q) {
+            let toggle: Element<'a, ScMsg> = if n.has_children {
+                w::btn(if n.open { "▾" } else { "▸" }, Kind::Ghost, Some(ScMsg::LibOpen(n.path.clone())))
+            } else {
+                container(t::metadata("·").color(pal::dim())).width(Length::Fixed(space(6))).center_x(Length::Fixed(space(6))).into()
+            };
+            let sel = f.dir.as_deref() == Some(n.path.as_str());
+            let label = button(row![t::label(n.label.clone()), t::metadata(format!("({})", n.count)).color(pal::dim())].spacing(space(1)))
+                .on_press(ScMsg::LibDir(Some(n.path.clone())))
+                .style(move |th, st| w::button_style(if sel { Kind::Standard } else { Kind::Ghost }, th, st));
+            tree = tree.push(
+                row![Space::new().width(Length::Fixed(space(4) * n.depth as f32)), toggle, label]
+                    .spacing(space(1))
+                    .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(scrollable(tree).height(Length::Shrink));
+    }
 
     if !v.catalog_err.is_empty() {
         col = col.push(w::error("策略目录读不出来", v.catalog_err.clone(), "确认 ~/ws-venv 可用后点「刷新」", None));
@@ -112,31 +171,16 @@ fn library<'a>(v: &View) -> Element<'a, ScMsg> {
         });
     }
 
-    let q = v.search.to_lowercase();
-    let mut items: Vec<&Entry> = v
-        .catalog
-        .iter()
-        .filter(|e| match &e.meta {
-            Some(m) => {
-                v.verdict.as_ref().is_none_or(|f| &m.verdict == f)
-                    && (q.is_empty()
-                        || m.name.to_lowercase().contains(&q)
-                        || m.id.contains(&q)
-                        || m.tags.iter().any(|t| t.contains(&q)))
-            }
-            None => q.is_empty() && v.verdict.is_none(), // 元数据写错的条目只在不筛选时露出
-        })
-        .collect();
-    items.sort_by(|a, b| {
-        let fa = a.meta.as_ref().map(|m| m.family.as_str()).unwrap_or("~");
-        let fb = b.meta.as_ref().map(|m| m.family.as_str()).unwrap_or("~");
-        fa.cmp(fb).then(a.id.cmp(&b.id))
-    });
-
+    let mut items = lb::visible(&v.catalog, f, verdict, &q);
+    let key = |e: &Entry| lb::group_of(e, f.group_by);
+    items.sort_by(|a, b| key(a).0.cmp(&key(b).0).then(a.id.cmp(&b.id)));
+    if items.is_empty() && !v.catalog.is_empty() {
+        col = col.push(w::empty("没有符合条件的策略", "放宽类型 / 目录 / 结论过滤"));
+    }
     let mut list = column![].spacing(space(1));
     let mut family = String::new();
     for e in items {
-        let fam = e.meta.as_ref().map(|m| m.family.clone()).unwrap_or_else(|| "（元数据有误）".into());
+        let (_, fam) = key(e);
         if fam != family {
             list = list.push(w::section(fam.clone()));
             family = fam;
@@ -144,7 +188,7 @@ fn library<'a>(v: &View) -> Element<'a, ScMsg> {
         list = list.push(library_item(e, v));
     }
     col = col.push(scrollable(list).height(Length::Fill));
-    container(col).width(Length::Fixed(260.0)).height(Length::Fill).into()
+    container(col).width(Length::Fixed(330.0)).height(Length::Fill).into()
 }
 
 fn library_item<'a>(e: &Entry, v: &View) -> Element<'a, ScMsg> {
@@ -155,6 +199,13 @@ fn library_item<'a>(e: &Entry, v: &View) -> Element<'a, ScMsg> {
         Some(m) => {
             head = head.push(t::body(m.name.clone())).push(Space::new().width(Length::Fill)).push(verdict_badge(&m.verdict));
             sub = sub.push(t::metadata(m.id.clone()).color(pal::dim()));
+            if !m.styles.is_empty() {
+                let st: Vec<&str> = m.styles.iter().map(|s| super::strategy_center_lib::style_label(s)).collect();
+                sub = sub.push(t::metadata(st.join(" · ")).color(pal::accent()));
+            }
+            if let Some(mi) = &m.master {
+                sub = sub.push(t::metadata(format!("{} · {} · {}", mi.name, stars(mi.openness), delivery_label(&mi.delivery))).color(pal::dim()));
+            }
             if let Some(r) = v.latest.get(&e.id)
                 && let Some(s) = &r.summary
                 && s.is_bp()
@@ -272,8 +323,17 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
     if !m.docs.is_empty() {
         col = col.push(t::metadata(format!("文档：{}", m.docs.join("、"))).color(pal::dim()));
     }
+    if let Some(mi) = &m.master {
+        col = col.push(master_card(mi));
+    }
+    // 百科卡片：不可程序化，只有卡片与规则文档
+    if m.is_card() {
+        col = col.push(t::caption("百科卡片：这位大师的方法主要靠判断 / 专有信息 / 单次事件，不可程序化或缺数据，没有回测入口。").color(pal::dim()));
+        col = col.push(doc_section(e));
+        return container(scrollable(col)).width(Length::FillPortion(5)).height(Length::Fill).into();
+    }
     // 专用引擎：没有统一回测入口，只给结论与运行方式
-    if m.engines.iter().all(|x| x == "harness") {
+    if !m.engines.is_empty() && m.engines.iter().all(|x| x == "harness") {
         col = col.push(w::section("运行方式（专用引擎）"));
         col = col.push(t::caption(if m.description.is_empty() { "见策略文件说明".to_string() } else { m.description.clone() }));
         col = col.push(
@@ -353,10 +413,17 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
     }
     col = col.push(t::metadata("完整回测走 ws-control → factory.lab：入口体检、真实撮合、记进研究库。进度看底部进度条与 K 线，结果在右侧「回测结果」。").color(pal::dim()));
     if can_quick {
-        col = col.push(t::metadata("⚡ 快速回测 = 100ms 特征帧向量回测，秒级、按「每笔 1 倍名义」的 bp 计，不建模排队与延迟——只用来筛，结论以完整回测为准。").color(pal::dim()));
+        col = col.push(t::metadata(if m.quick.as_deref() == Some("bars") {
+            "⚡ 快速回测 = 大师日线七层引擎：组合级、逐根推进、下一根成交、真实合约乘数与费用、逐日盯市；日线看不到盘中先后，当根进出多的策略会自动并列最坏情况。"
+        } else {
+            "⚡ 快速回测 = 100ms 特征帧向量回测，秒级、按「每笔 1 倍名义」的 bp 计，不建模排队与延迟——只用来筛，结论以完整回测为准。"
+        }).color(pal::dim()));
     }
     if can_full || can_quick {
         col = col.push(opt_section(v, e));
+    }
+    if m.master.is_some() {
+        col = col.push(doc_section(e));
     }
     container(scrollable(col)).width(Length::FillPortion(5)).height(Length::Fill).into()
 }
@@ -443,6 +510,9 @@ fn summary_card<'a>(r: &RunRow, s: &Summary) -> Element<'a, ScMsg> {
     }
     if !s.quality_flags.is_empty() {
         col = col.push(t::metadata(format!("质量标记：{}", s.quality_flags.join("、"))).color(pal::dim()));
+    }
+    if let Some(n) = &s.note {
+        col = col.push(t::metadata(format!("⚠ {n}")).color(pal::warn()));
     }
     if s.returns_basis.as_deref() == Some("position_returns") {
         col = col.push(
@@ -1248,5 +1318,75 @@ fn corr_view<'a>(c: &Cmp) -> Element<'a, ScMsg> {
         grid = grid.push(r);
     }
     scrollable(grid).direction(iced::widget::scrollable::Direction::Horizontal(Default::default())).into()
+}
+
+// ── 交易大师百科卡（docs/38）─────────────────────────────────────────
+
+fn stars(n: u8) -> String {
+    let n = n.min(5) as usize;
+    format!("{}{}", "★".repeat(n), "☆".repeat(5 - n))
+}
+
+fn delivery_label(d: &str) -> &'static str {
+    match d {
+        "code" => "完整代码",
+        "proxy" => "代理",
+        "card" => "卡片",
+        _ => "—",
+    }
+}
+
+fn origin_tone(o: &str) -> Tone {
+    match o {
+        "原文" => Tone::Success,
+        "解读" => Tone::Info,
+        "代理" => Tone::Warning,
+        _ => Tone::Neutral,
+    }
+}
+
+fn master_card<'a>(mi: &super::strategy_center::MasterInfo) -> Element<'a, ScMsg> {
+    const KW: f32 = 96.0;
+    let mut col = column![w::section(format!("百科卡 · {}", super::strategy_center::school_label(&mi.school)))].spacing(space(1));
+    col = col.push(w::kv("大师", t::body(if mi.era.is_empty() { mi.name.clone() } else { format!("{}（{}）", mi.name, mi.era) }).into(), KW));
+    col = col.push(w::kv(
+        "公开度 / 交付",
+        row![t::body(stars(mi.openness)), w::badge(delivery_label(&mi.delivery), if mi.delivery == "code" { Tone::Success } else { Tone::Warning })]
+            .spacing(space(2))
+            .align_y(Alignment::Center)
+            .into(),
+        KW,
+    ));
+    if !mi.verification.is_empty() {
+        col = col.push(w::kv("调研核验", t::body(mi.verification.clone()).into(), KW));
+    }
+    if !mi.markets.is_empty() || !mi.timeframe.is_empty() {
+        col = col.push(w::kv("市场 / 周期", t::body(format!("{} · {}", mi.markets, mi.timeframe)).into(), KW));
+    }
+    let mut layers = row![].spacing(space(1));
+    for (k, label) in super::strategy_center::LAYERS {
+        if let Some(o) = mi.rules.get(k) {
+            layers = layers.push(w::badge(format!("{label} {o}"), origin_tone(o)));
+        }
+    }
+    col = col.push(w::kv("七层规则", layers.into(), KW));
+    for (i, s) in mi.sources.iter().enumerate() {
+        col = col.push(w::kv(if i == 0 { "出处" } else { "" }, t::caption(s.clone()).into(), KW));
+    }
+    if !mi.decay.is_empty() {
+        col = col.push(w::kv("衰减 / 反证", t::caption(mi.decay.clone()).color(pal::warn()).into(), KW));
+    }
+    if let Some(of) = mi.orderflow_value {
+        col = col.push(w::kv("订单流价值", t::body(stars(of)).into(), KW));
+    }
+    col = col.push(t::metadata("七层规则：原文 = 出自大师本人著作 / 论文；解读 = 原文有思想、数值是我们定的；代理 = 原方法不可得，用可证伪的近似；不可得 = 专有。").color(pal::dim()));
+    col.into()
+}
+
+fn doc_section<'a>(e: &Entry) -> Element<'a, ScMsg> {
+    if e.doc.is_empty() {
+        return Space::new().into();
+    }
+    column![w::section("规则与出处（策略模块文档）"), t::code(e.doc.clone()).size(t::s_small())].spacing(space(1)).into()
 }
 

@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 
 use super::strategy_center_ai::{self as ai, Assist};
 use super::strategy_center_cmp::{self as cmp, BasketItem, Cmp};
+use super::strategy_center_lib::{self as lib, LibFilter};
 use super::strategy_center_opt::{self as opt, OptForm, StudyRow};
 use super::strategy_center_val::{self as val, ExpForm, ExpRow, Gates, ValForm, ValRow};
 
@@ -70,6 +71,78 @@ pub struct Meta {
     /// 专用引擎（harness）条目的运行方式
     #[serde(default)]
     pub description: String,
+    /// 快速回测适配器：zexpr（每笔 bp）/ bars（大师日线引擎，按账户记账）
+    #[serde(default)]
+    pub quick: Option<String>,
+    /// 交易大师百科块（docs/38）
+    #[serde(default)]
+    pub master: Option<MasterInfo>,
+    /// 策略类型（docs/39），第一个是主类型
+    #[serde(default)]
+    pub styles: Vec<String>,
+}
+
+/// `STRATEGY["master"]`（字段与 factory.lab.contract.parse_master 一致）。
+#[derive(Deserialize, Clone, Default, Debug)]
+pub struct MasterInfo {
+    pub name: String,
+    pub school: String,
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub openness: u8,
+    #[serde(default)]
+    pub delivery: String,
+    #[serde(default)]
+    pub era: String,
+    #[serde(default)]
+    pub markets: String,
+    #[serde(default)]
+    pub timeframe: String,
+    #[serde(default)]
+    pub verification: String,
+    #[serde(default)]
+    pub rules: BTreeMap<String, String>,
+    #[serde(default)]
+    pub decay: String,
+    #[serde(default)]
+    pub orderflow_value: Option<u8>,
+    /// 各层用到的共用件（docs/39 第 3 期，键 = core/components.py 的登记名）
+    #[serde(default)]
+    pub layers: BTreeMap<String, Vec<String>>,
+}
+
+/// 流派（顺序 = 策略库里的排列；与 factory.lab.contract.MASTER_SCHOOLS 一致）。
+pub const MASTER_SCHOOLS: [(&str, &str); 13] = [
+    ("trend", "趋势跟踪"), ("breakout", "突破"), ("momentum", "动量"), ("short_term", "短线形态"),
+    ("structure", "市场结构"), ("mean_reversion", "均值回归"), ("stat_arb", "统计套利"), ("macro", "宏观与反身性"),
+    ("allocation", "资产配置"), ("value", "价值"), ("event", "事件与信用"), ("multi", "多策略"), ("orderflow_x", "大师 × 订单流"),
+];
+
+pub fn school_label(s: &str) -> &'static str {
+    MASTER_SCHOOLS.iter().find(|(k, _)| *k == s).map(|(_, l)| *l).unwrap_or("其他")
+}
+
+/// 七层（顺序 = 卡片上的排列）。
+pub const LAYERS: [(&str, &str); 7] = [
+    ("regime", "体制"), ("setup", "形态"), ("confirm", "确认"), ("entry", "入场"), ("stop", "止损"), ("sizing", "仓位"), ("exit", "出场"),
+];
+
+impl Meta {
+    /// 百科卡片：不可程序化，没有任何回测引擎。
+    pub fn is_card(&self) -> bool {
+        self.engines.is_empty() && self.master.as_ref().is_some_and(|m| m.delivery == "card")
+    }
+    /// 策略库的分组键（排序用）与显示名。大师条目按流派分组。
+    pub fn group(&self) -> (String, String) {
+        match &self.master {
+            Some(m) => {
+                let k = MASTER_SCHOOLS.iter().position(|(x, _)| *x == m.school).unwrap_or(99);
+                (format!("masters.{k:02}"), format!("交易大师 · {}", school_label(&m.school)))
+            }
+            None => (self.family.clone(), self.family.clone()),
+        }
+    }
 }
 
 #[derive(Deserialize, Clone, Default, Debug)]
@@ -84,6 +157,9 @@ pub struct Entry {
     pub error: String,
     #[serde(default)]
     pub params: Vec<Param>,
+    /// 模块文档（大师百科的规则表与出处）
+    #[serde(default)]
+    pub doc: String,
 }
 
 impl Entry {
@@ -133,6 +209,11 @@ pub struct Summary {
     pub quality_flags: Vec<String>,
     pub stop_outs: Option<f64>,
     pub min_margin_level_pct: Option<f64>,
+    /// 运行器的提示（大师日线引擎：「当根进出多、对盘中路径敏感」）
+    #[serde(default)]
+    pub note: Option<String>,
+    pub cagr_pct: Option<f64>,
+    pub trades: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -219,6 +300,13 @@ pub enum ScMsg {
     CmpClear,
     CmpFreq(String),
     CmpRun,
+    // ── 策略库过滤（docs/39）──
+    LibStyle(String),
+    LibStylesClear,
+    LibDir(Option<String>),
+    LibOpen(String),
+    LibGroup(lib::GroupBy),
+    LibTreeHidden,
     // ── AI 研究助理（只起草，不发起）──
     AiText(String),
     AiDraft,
@@ -283,6 +371,8 @@ struct St {
     ai: Option<Assist>,
     ai_loading: bool,
     ai_err: String,
+    /// 策略库过滤（存本机）
+    lib: Option<LibFilter>,
 }
 
 static ST: OnceLock<Mutex<St>> = OnceLock::new();
@@ -356,6 +446,7 @@ pub struct View {
     pub ai: Option<Assist>,
     pub ai_loading: bool,
     pub ai_err: String,
+    pub lib: LibFilter,
 }
 
 pub fn view() -> View {
@@ -418,11 +509,51 @@ pub fn view() -> View {
         ai: g.ai.clone(),
         ai_loading: g.ai_loading,
         ai_err: g.ai_err.clone(),
+        lib: g.lib.clone().unwrap_or_default(),
     }
+}
+
+/// 「七层」面板跟随的对象（docs/39）：策略中心选中的策略 + 钉住的那次运行（没钉就用最近一次完成的）。
+#[derive(Clone, Debug, Default)]
+pub struct LayersTarget {
+    pub strategy: String,
+    pub name: String,
+    pub run_id: String,
+    pub dir: Option<PathBuf>,
+    pub master: Option<MasterInfo>,
+    pub engine_ok: bool,
+}
+
+pub fn layers_target() -> Option<LayersTarget> {
+    ensure_started();
+    let g = cell().lock().ok()?;
+    let id = g.selected.clone()?;
+    let e = g.catalog.iter().find(|e| e.id == id)?;
+    let m = e.meta.as_ref()?;
+    let run = g
+        .picked_run
+        .as_ref()
+        .and_then(|r| g.runs.iter().find(|x| &x.run_id == r))
+        .or_else(|| g.runs.iter().find(|r| r.status == "done" && r.result_dir.is_some()));
+    Some(LayersTarget {
+        strategy: id.clone(),
+        name: m.name.clone(),
+        run_id: run.map(|r| r.run_id.clone()).unwrap_or_default(),
+        dir: run.and_then(|r| r.result_dir.clone()).map(PathBuf::from),
+        master: m.master.clone(),
+        engine_ok: m.quick.as_deref() == Some("bars"),
+    })
 }
 
 fn ensure_started() {
     POLLER.get_or_init(|| {
+        with(|g| {
+            g.lib = Some(lib::load());
+            // 截图 / 演示用：启动时直接选中一个策略（如 WS_STRATEGY_SELECT=masters.turtle）
+            if let Ok(id) = std::env::var("WS_STRATEGY_SELECT") {
+                g.selected = Some(id);
+            }
+        });
         load_catalog();
         super::spawn_named("ws-strategyctr", || {
             let mut last = Instant::now() - Duration::from_secs(3600);
@@ -1101,6 +1232,35 @@ pub fn handle(m: ScMsg) {
             with(|g| g.cmp_freq = f);
             maybe_compare();
         }
+        ScMsg::LibStyle(_) | ScMsg::LibStylesClear | ScMsg::LibDir(_) | ScMsg::LibOpen(_) | ScMsg::LibGroup(_) | ScMsg::LibTreeHidden => {
+            with(|g| {
+                let f = g.lib.get_or_insert_with(lib::load);
+                match m {
+                    ScMsg::LibStyle(s) => {
+                        if !f.styles.remove(&s) {
+                            f.styles.insert(s);
+                        }
+                    }
+                    ScMsg::LibStylesClear => f.styles.clear(),
+                    ScMsg::LibDir(d) => {
+                        // 选中一个目录时顺手展开它（看得到下一级）
+                        if let Some(x) = &d {
+                            f.open.insert(x.clone());
+                        }
+                        f.dir = d;
+                    }
+                    ScMsg::LibOpen(p) => {
+                        if !f.open.remove(&p) {
+                            f.open.insert(p);
+                        }
+                    }
+                    ScMsg::LibGroup(gb) => f.group_by = gb,
+                    ScMsg::LibTreeHidden => f.tree_hidden = !f.tree_hidden,
+                    _ => {}
+                }
+                lib::save(f);
+            });
+        }
         ScMsg::AiText(s) => {
             with(|g| g.ai_text = s);
         }
@@ -1334,6 +1494,30 @@ pub fn handle(m: ScMsg) {
                 with(|g| g.msg = r.unwrap_or_else(|e| format!("打开失败：{e}")));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod master_tests {
+    use super::*;
+
+    #[test]
+    fn masters_group_by_school_and_cards_have_no_engines() {
+        let j = r#"[{"id":"masters.turtle","path":"p","doc":"规则表","meta":{"id":"masters.turtle","name":"海龟","version":"2","family":"masters",
+                    "engines":["quick"],"quick":"bars","verdict":"untested","master":{"name":"Dennis","school":"trend","sources":["书"],
+                    "openness":5,"delivery":"code","rules":{"setup":"原文","sizing":"原文"}}}},
+                   {"id":"masters.paulson","path":"q","meta":{"id":"masters.paulson","name":"Paulson","version":"1","family":"masters",
+                    "engines":[],"verdict":"untested","master":{"name":"Paulson","school":"event","sources":[],"openness":1,"delivery":"card"}}},
+                   {"id":"orderflow.x","path":"r","meta":{"id":"orderflow.x","name":"X","version":"1","family":"orderflow","engines":["full"],"verdict":"falsified"}}]"#;
+        let es: Vec<Entry> = serde_json::from_str(j).unwrap();
+        let g: Vec<(String, String)> = es.iter().map(|e| e.meta.as_ref().unwrap().group()).collect();
+        assert_eq!(g[0].1, "交易大师 · 趋势跟踪");
+        assert_eq!(g[1].1, "交易大师 · 事件与信用");
+        assert!(g[0].0 < g[1].0, "流派按百科顺序排列");
+        assert_eq!(g[2].0, "orderflow");
+        assert!(!es[0].meta.as_ref().unwrap().is_card() && es[1].meta.as_ref().unwrap().is_card());
+        assert_eq!(es[0].meta.as_ref().unwrap().master.as_ref().unwrap().rules["setup"], "原文");
+        assert_eq!(es[0].doc, "规则表");
     }
 }
 
