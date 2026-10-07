@@ -365,7 +365,36 @@ fn is_leftover_default(name: &str, d: &Dashboard) -> bool {
         && d.panes.iter().all(|(_, st)| matches!(st.content, crate::screen::dashboard::pane::Content::Starter))
 }
 
+/// 测试与旧调用用：不带页面元数据（等于全新安装）。
 pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
+    seed_pages(manager, &mut super::pages::PagesState::default()).added
+}
+
+/// 播种结果：新建了几页；哪些模板页的模板与上次应用时不同（页签上提示「↻」）。
+#[derive(Debug, Default)]
+pub struct SeedReport {
+    pub added: usize,
+    pub outdated: Vec<String>,
+}
+
+/// 当前模板的指纹（判断模板有没有更新）。
+pub fn template_fingerprint(name: &str) -> String {
+    super::pages::fingerprint(&pane_template(name))
+}
+
+/// 空白页（一个起始面板，用户自己往里放）。
+pub fn blank_dashboard() -> Dashboard {
+    dashboard_from_template("Layout 1").unwrap_or_else(|| Dashboard::from_config(configuration(data::Pane::default()), vec![], Uuid::new_v4()))
+}
+
+/// 用模板重建一页的内容（「恢复默认」）。
+pub fn template_dashboard(name: &str) -> Option<Dashboard> {
+    dashboard_from_template(name)
+}
+
+/// docs/41 B 期：**缺页才按模板建，已有的页一律不动**（用户改过的布局活过重启）；
+/// 用户关掉的模板页不补；用户自建的页不清理；模板与上次应用时不同的只记下来提示。
+pub fn seed_pages(manager: &mut LayoutManager, pages: &mut super::pages::PagesState) -> SeedReport {
     // 遗留的上游缺省布局（docs/35 §5.3）：空的就删；正在用的不删（删了会没有活动工作区）
     let active = manager.active_layout_id().map(|l| l.unique);
     let before = manager.layouts.len();
@@ -406,7 +435,7 @@ pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
     let stale: Vec<(Uuid, String)> = manager
         .layouts
         .iter()
-        .filter(|l| l.id.name.contains(PAGE_SEP) && !keep.contains(&l.id.name))
+        .filter(|l| l.id.name.contains(PAGE_SEP) && !keep.contains(&l.id.name) && !pages.user.contains(&l.id.name))
         .map(|l| (l.id.unique, l.id.name.clone()))
         .collect();
     if !stale.is_empty() {
@@ -420,22 +449,33 @@ pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
         }
         log::info!("WS workspaces: 去掉旧页面 {:?}", stale.iter().map(|(_, n)| n).collect::<Vec<_>>());
     }
-    let mut added = 0;
+    let mut report = SeedReport::default();
     for name in all_layouts() {
-        let name = name.as_str();
-        let Some(dashboard) = dashboard_from_template(name) else {
+        if pages.closed.contains(&name) {
+            continue;
+        }
+        let fp = template_fingerprint(&name);
+        if manager.layouts.iter().any(|l| l.id.name == name) {
+            // 已有：不覆盖。第一次见到（B 期之前 A 期每次启动都按模板刷新，内容就是当前模板）→ 记下指纹
+            match pages.applied.get(&name) {
+                None => {
+                    pages.applied.insert(name.clone(), fp);
+                }
+                Some(f) if *f != fp => report.outdated.push(name.clone()),
+                Some(_) => {}
+            }
+            continue;
+        }
+        let Some(dashboard) = dashboard_from_template(&name) else {
             continue;
         };
-        if let Some(l) = manager.layouts.iter_mut().find(|l| l.id.name == name) {
-            l.dashboard = dashboard; // 刷新到当前模板（覆盖旧内容）
-        } else {
-            let id = LayoutId { unique: Uuid::new_v4(), name: name.to_string() };
-            manager.insert_layout(id, dashboard);
-            added += 1;
-        }
+        let id = LayoutId { unique: Uuid::new_v4(), name: name.clone() };
+        manager.insert_layout(id, dashboard);
+        pages.applied.insert(name, fp);
+        report.added += 1;
     }
-    log::info!("WS workspaces: 已刷新模板（新建 {added}）");
-    added
+    log::info!("WS workspaces: 补建 {} 页；模板有更新 {} 页（不覆盖，页签上提示）", report.added, report.outdated.len());
+    report
 }
 
 #[cfg(test)]
@@ -497,6 +537,36 @@ mod tests {
         dedup.sort();
         dedup.dedup();
         assert_eq!(all.len(), dedup.len(), "页面布局名重复");
+    }
+
+    /// docs/41 B 期：已有的页不按模板覆盖；关掉的模板页不补；模板变了只标记；自建页不清理。
+    #[test]
+    fn 播种不覆盖用户布局() {
+        use super::super::pages::PagesState;
+        let mut m = LayoutManager::new();
+        let mut p = PagesState::default();
+        let r = seed_pages(&mut m, &mut p);
+        assert!(r.added > 0 && r.outdated.is_empty());
+        // 用户把「资源」第一页换成了别的内容
+        let custom = dashboard_from_template(WS_NEWS).unwrap();
+        let n_before = custom.panes.len();
+        m.layouts.iter_mut().find(|l| l.id.name == WS_RESOURCES).unwrap().dashboard = custom;
+        // 关掉一个模板页、建一个自建页
+        m.layouts.retain(|l| l.id.name != "资源｜网络出口");
+        p.closed.insert("资源｜网络出口".into());
+        let mine = "资源｜我的页".to_string();
+        m.insert_layout(LayoutId { unique: Uuid::new_v4(), name: mine.clone() }, dashboard_from_template(WS_NEWS).unwrap());
+        p.user.insert(mine.clone());
+        // 模板「变了」：把上次应用的指纹改掉
+        p.applied.insert(WS_NEWS.into(), "old".into());
+        let r = seed_pages(&mut m, &mut p);
+        let names: Vec<&str> = m.layouts.iter().map(|l| l.id.name.as_str()).collect();
+        assert!(!names.contains(&"资源｜网络出口"), "关掉的模板页不该被补回来");
+        assert!(names.contains(&mine.as_str()), "自建页不该被清理");
+        let res = m.layouts.iter().find(|l| l.id.name == WS_RESOURCES).unwrap();
+        assert_eq!(res.dashboard.panes.len(), n_before, "用户改过的页不该被模板覆盖");
+        assert_eq!(r.outdated, vec![WS_NEWS.to_string()], "模板有更新的页只标记");
+        assert_eq!(r.added, 0);
     }
 
     /// 页面表改动后，旧的页面布局被清掉（「资源｜总览」之类不会残留在页签栏上）。

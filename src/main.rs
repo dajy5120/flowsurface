@@ -184,6 +184,7 @@ fn shortcut(
                 (true, false, "m") => Some(Cmd::ToggleMaximize),
                 (true, false, "d") => Some(Cmd::ToggleDataTable),
                 (false, true, "t") => Some(Cmd::CycleTheme),
+                (true, false, "t") => Some(Cmd::PageUndo),
                 (false, true, "d") => Some(Cmd::CycleDensity),
                 // Ctrl Shift 1–6：各组的第一个工作区（docs/41 §2）
                 (true, false, d @ ("1" | "2" | "3" | "4" | "5" | "6")) => {
@@ -218,6 +219,15 @@ struct Flowsurface {
     ws_active: Option<ws::active_run::ActiveRun>, // WealthSpring 三态：当前活动 run（None=实时看盘）
     /// 每个工作区上次停留的页面（docs/41 §1）：侧栏点工作区回到这一页
     last_page: std::collections::HashMap<String, uuid::Uuid>,
+    /// 页面元数据（顺序、自建页、关掉的模板页、锁定、模板指纹；`pages.json`）
+    pages: ws::pages::PagesState,
+    /// 模板与上次应用时不同的页（页签上「↻」，用户点「恢复默认」才覆盖）
+    outdated: std::collections::BTreeSet<String>,
+    /// 页签栏下面的页面工具条是否展开；改名输入框
+    page_menu: bool,
+    page_rename: String,
+    /// 本次运行里关掉的页（Ctrl Shift T 找回；不落盘）
+    closed_pages: Vec<(String, data::Dashboard)>,
     ws_orders: ws::orders::OrderState,            // WealthSpring 订单/PnL（events.* 聚合，F3）
     ws_flow: ws::flow::FlowState,                 // WealthSpring 订单流：CVD/不平衡/背离（F4a）
     ws_factory: ws::factory::FactoryPool,         // WealthSpring Factory 现役池（F4c）
@@ -244,6 +254,8 @@ struct Flowsurface {
 
 #[derive(Debug, Clone)]
 enum Message {
+    /// 页面操作（docs/41 B 期）：新建 / 复制 / 改名 / 排序 / 关闭 / 模板 / 锁定
+    Page(ws::pages::PageMsg),
     Sidebar(dashboard::sidebar::Message),
     MarketWsEvent(exchange::Event),
     WsActiveRun(Option<ws::active_run::ActiveRun>), // WealthSpring 三态切换
@@ -340,6 +352,11 @@ impl Flowsurface {
             network: NetworkManager::new(saved_state.proxy_cfg),
             ws_active: None,
             last_page: std::collections::HashMap::new(),
+            pages: ws::pages::PagesState::default(),
+            outdated: std::collections::BTreeSet::new(),
+            page_menu: false,
+            page_rename: String::new(),
+            closed_pages: Vec::new(),
             ws_orders: ws::orders::OrderState::default(),
             ws_flow: ws::flow::FlowState::default(),
             ws_factory: ws::factory::FactoryPool::default(),
@@ -369,7 +386,13 @@ impl Flowsurface {
 
         // WealthSpring 工作区（docs/08 F6 — P1）：幂等播种 5 个固定工作区
         // （官方原生 / 实盘 / 回测 / 数据录制 / Alpha Factory），不动用户已有 layout。
-        ws::workspace::ensure_seeded(&mut state.layout_manager);
+        // docs/41 B 期：缺页才按模板建，已有的页不动；模板有更新的只记下来在页签上提示
+        state.pages = ws::pages::load();
+        let report = ws::workspace::seed_pages(&mut state.layout_manager, &mut state.pages);
+        state.outdated = report.outdated.into_iter().collect();
+        if state.specimen.is_none() {
+            ws::pages::save(&state.pages);
+        }
 
         // 样张模式下可把外壳的三个浮动区全打开，截图验证它们（docs/35 批 3）
         // 跨进程命令（Studio「在 Cockpit 中查看本次回测」）。样张模式不监听：不和正在用的实例抢
@@ -696,6 +719,7 @@ impl Flowsurface {
                     ws::specimen::Step::Nothing => {}
                 }
             }
+            Message::Page(m) => return self.page_action(m),
             Message::SpecimenShot(shot) => {
                 // 焦点顺序表（docs/35 §13.3「每个工作区一份焦点顺序表」）：F6 / Ctrl 1–9 走的面板次序
                 if let Some(sp) = &self.specimen {
@@ -1205,6 +1229,7 @@ impl Flowsurface {
             ws::readout::publish(r);
         }
 
+        ws::pages::set_active_locked(self.pages.locked.contains(&self.active_name()));
         let dashboard = self.active_dashboard();
         let sidebar_pos = self.sidebar.position();
 
@@ -1251,34 +1276,52 @@ impl Flowsurface {
                     }),
             };
 
-            // 页签栏（docs/41 §3）：当前工作区的页面；只有一页的工作区不显示
+            // 页签栏（docs/41 §3）：当前工作区的页面；只有一页的工作区不显示（除非打开了页面工具条）
             let pages = self.pages_of(&active_ws);
-            let dashboard_view: Element<'_, Message> = if self.gallery.is_some() || pages.len() <= 1 {
+            let dashboard_view: Element<'_, Message> = if self.gallery.is_some() || (pages.len() <= 1 && !self.page_menu) {
                 dashboard_view
             } else {
                 let cur = self.layout_manager.active_layout_id().map(|l| l.unique).unwrap_or_default();
                 let bt = self.backtest_running();
                 let tabs: Vec<ui::shell::PageTab<uuid::Uuid>> = pages
                     .into_iter()
-                    .map(|(uid, n)| ui::shell::PageTab {
-                        label: ws::workspace::page_title(&n),
-                        badge: self
-                            .layout_manager
-                            .layouts
-                            .iter()
-                            .find(|l| l.id.unique == uid)
-                            .and_then(|l| ws::page_status::of(&l.dashboard, bt))
-                            .map(|b| b.glyph()),
-                        value: uid,
+                    .map(|(uid, n)| {
+                        let mut label = ws::workspace::page_title(&n);
+                        if self.pages.locked.contains(&n) {
+                            label.push_str(" 🔒");
+                        }
+                        if self.outdated.contains(&n) {
+                            label.push_str(" ↻");
+                        }
+                        ui::shell::PageTab {
+                            label,
+                            badge: self
+                                .layout_manager
+                                .layouts
+                                .iter()
+                                .find(|l| l.id.unique == uid)
+                                .and_then(|l| ws::page_status::of(&l.dashboard, bt))
+                                .map(|b| b.glyph()),
+                            value: uid,
+                        }
                     })
                     .collect();
-                column![
-                    ui::shell::page_bar(tabs, &cur, |uid| Message::Layouts(
-                        modal::layout_manager::Message::SelectActive(uid)
-                    )),
-                    dashboard_view,
-                ]
-                .into()
+                let more = ui::widgets::btn(
+                    if self.page_menu { "⋯ 页面 ▴" } else { "⋯ 页面" },
+                    ui::widgets::Kind::Ghost,
+                    Some(Message::Page(ws::pages::PageMsg::ToggleMenu)),
+                );
+                let bar = ui::shell::page_bar(
+                    tabs,
+                    &cur,
+                    |uid| Message::Layouts(modal::layout_manager::Message::SelectActive(uid)),
+                    vec![more],
+                );
+                let mut col = column![bar];
+                if self.page_menu {
+                    col = col.push(self.page_toolbar());
+                }
+                col.push(dashboard_view).into()
             };
 
             let header_title = {
@@ -1605,7 +1648,14 @@ impl Flowsurface {
 
     /// 一个工作区的全部页面 (uid, 布局名)：先模板顺序，再是模板外的（以后用户自建的页）。
     fn pages_of(&self, wsn: &str) -> Vec<(uuid::Uuid, String)> {
-        let mut out: Vec<(uuid::Uuid, String)> = ws::workspace::page_layouts(wsn)
+        // 用户排过的顺序优先，其次模板顺序，最后是其余属于这个工作区的页
+        let mut names: Vec<String> = self.pages.order.get(wsn).cloned().unwrap_or_default();
+        for n in ws::workspace::page_layouts(wsn) {
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+        let mut out: Vec<(uuid::Uuid, String)> = names
             .into_iter()
             .filter_map(|n| self.layout_manager.layouts.iter().find(|l| l.id.name == n).map(|l| (l.id.unique, n)))
             .collect();
@@ -1620,6 +1670,253 @@ impl Flowsurface {
     fn current_pages(&self) -> Vec<(uuid::Uuid, String)> {
         let name = self.layout_manager.active_layout_id().map(|l| l.name.clone()).unwrap_or_default();
         self.pages_of(ws::workspace::workspace_of(&name))
+    }
+
+    fn active_name(&self) -> String {
+        self.layout_manager.active_layout_id().map(|l| l.name.clone()).unwrap_or_default()
+    }
+
+    /// 工作区里一个没被占用的页面布局名：「工作区｜标题」，与布局名或本工作区任一页的**页签名**重了都加序号
+    /// （第一页的布局名是工作区名、页签名另有，比如「资源」的页签名是「进程」）。
+    fn free_page_name(&self, wsn: &str, title: &str) -> String {
+        let base = format!("{wsn}{}{}", ws::workspace::PAGE_SEP, title.trim().replace(ws::workspace::PAGE_SEP, " "));
+        let titles: Vec<String> = self.pages_of(wsn).iter().map(|(_, n)| ws::workspace::page_title(n)).collect();
+        let taken = |n: &str| {
+            self.layout_manager.layouts.iter().any(|l| l.id.name == n) || titles.contains(&ws::workspace::page_title(n))
+        };
+        if !taken(&base) {
+            return base;
+        }
+        (2..).map(|i| format!("{base} {i}")).find(|n| !taken(n)).unwrap_or(base)
+    }
+
+    /// 把新页插进布局表、记进页面顺序（放在当前页后面），然后切过去。
+    fn add_page(&mut self, name: String, dashboard: Dashboard, user: bool) -> Task<Message> {
+        let wsn = ws::workspace::workspace_of(&name).to_string();
+        let mut order: Vec<String> = self.pages_of(&wsn).into_iter().map(|(_, n)| n).collect();
+        let at = order.iter().position(|n| *n == self.active_name()).map_or(order.len(), |i| i + 1);
+        order.insert(at.min(order.len()), name.clone());
+        self.pages.order.insert(wsn, order);
+        if user {
+            self.pages.user.insert(name.clone());
+        }
+        let uid = uuid::Uuid::new_v4();
+        self.layout_manager.insert_layout(layout::LayoutId { unique: uid, name }, dashboard);
+        ws::pages::save(&self.pages);
+        self.update(Message::Layouts(modal::layout_manager::Message::SelectActive(uid)))
+    }
+
+    /// 页签栏下面的页面工具条（docs/41 B 期）。
+    fn page_toolbar(&self) -> Element<'_, Message> {
+        use ui::widgets::{self as w, Kind};
+        use ws::pages::PageMsg as P;
+        let name = self.active_name();
+        let wsn = ws::workspace::workspace_of(&name).to_string();
+        let first = name == wsn;
+        let is_template = ws::workspace::all_layouts().contains(&name);
+        let locked = self.pages.locked.contains(&name);
+        let pm = |m: P| Some(Message::Page(m));
+        let mut r1 = row![
+            w::btn("＋ 新建空白页", Kind::Standard, pm(P::NewBlank)),
+            w::btn("复制本页", Kind::Ghost, pm(P::Duplicate)),
+            iced::widget::text_input("页名", &self.page_rename)
+                .on_input(|t| Message::Page(P::RenameInput(t)))
+                .on_submit(Message::Page(P::RenameApply))
+                .width(iced::Length::Fixed(140.0))
+                .size(ui::text::s_small()),
+            w::btn("改名", Kind::Ghost, (!first).then_some(Message::Page(P::RenameApply))),
+            w::btn("◀ 左移", Kind::Ghost, (!first).then_some(Message::Page(P::Move(-1)))),
+            w::btn("右移 ▶", Kind::Ghost, (!first).then_some(Message::Page(P::Move(1)))),
+            w::btn("关闭本页", Kind::Ghost, (!first).then_some(Message::Page(P::Close))),
+            w::btn(
+                if self.outdated.contains(&name) { "恢复默认（模板有更新）" } else { "恢复默认" },
+                Kind::Ghost,
+                is_template.then_some(Message::Page(P::ResetDefault)),
+            ),
+            w::btn("存为模板", Kind::Ghost, pm(P::SaveTemplate)),
+            w::btn(if locked { "🔒 已锁定（点击解锁）" } else { "锁定布局" }, if locked { Kind::Standard } else { Kind::Ghost }, pm(P::ToggleLock)),
+        ]
+        .spacing(ui::metrics::space(1))
+        .align_y(Alignment::Center);
+        if !self.closed_pages.is_empty() {
+            r1 = r1.push(w::btn(format!("找回刚关的页（{}）", self.closed_pages.len()), Kind::Ghost, pm(P::Undo)));
+        }
+        // 第二行：关掉的模板页 + 模板库
+        let mut r2 = row![ui::text::metadata("从模板新建：").color(ui::pal::dim())].spacing(ui::metrics::space(1)).align_y(Alignment::Center);
+        let mut any = false;
+        for n in ws::workspace::page_layouts(&wsn).into_iter().filter(|n| self.pages.closed.contains(n)) {
+            any = true;
+            r2 = r2.push(w::btn(format!("↺ {}", ws::workspace::page_title(&n)), Kind::Ghost, pm(P::Reopen(n))));
+        }
+        for (p, t) in ws::pages::templates() {
+            any = true;
+            let label = if t.workspace == wsn { t.title.clone() } else { format!("{} · {}", t.workspace, t.title) };
+            r2 = r2.push(w::btn(label, Kind::Ghost, pm(P::FromFile(p))));
+        }
+        if !any {
+            r2 = r2.push(
+                ui::text::metadata(format!("还没有模板——「存为模板」会存到 {}；别的机器拷进同名目录即导入", ws::pages::template_dir().display()))
+                    .color(ui::pal::dim()),
+            );
+        }
+        column![r1.wrap(), r2.wrap()].spacing(ui::metrics::space(1)).padding(ui::metrics::pad2(1, 3)).into()
+    }
+
+    /// 页面操作（docs/41 B 期）。
+    fn page_action(&mut self, m: ws::pages::PageMsg) -> Task<Message> {
+        use ws::pages::PageMsg as P;
+        let name = self.active_name();
+        let wsn = ws::workspace::workspace_of(&name).to_string();
+        let first = name == wsn;
+        let note = |s: &mut Self, t: String| s.notifications.push(Toast::info(t));
+        match m {
+            P::ToggleMenu => {
+                self.page_menu = !self.page_menu;
+                self.page_rename = ws::workspace::page_title(&name);
+            }
+            P::NewBlank => {
+                let n = self.free_page_name(&wsn, "新页面");
+                let d = ws::workspace::blank_dashboard();
+                return self.add_page(n, d, true);
+            }
+            P::Duplicate => {
+                let Some(l) = self.layout_manager.layouts.iter().find(|l| l.id.name == name) else { return Task::none() };
+                let data = data::Dashboard::from(&l.dashboard);
+                let n = self.free_page_name(&wsn, &format!("{} 副本", ws::workspace::page_title(&name)));
+                return self.add_page(n, layout::dashboard_from_data(data), true);
+            }
+            P::Reopen(n) => {
+                if let Some(d) = ws::workspace::template_dashboard(&n) {
+                    self.pages.closed.remove(&n);
+                    // 从模板找回了，就不再算在「刚关的页」里（不然再点「找回」会多出一个重复页）
+                    self.closed_pages.retain(|(c, _)| *c != n);
+                    self.pages.applied.insert(n.clone(), ws::workspace::template_fingerprint(&n));
+                    return self.add_page(n, d, false);
+                }
+            }
+            P::FromFile(p) => {
+                match std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str::<ws::pages::PageTemplate>(&t).ok()) {
+                    Some(t) => {
+                        let n = self.free_page_name(&wsn, &t.title);
+                        return self.add_page(n, layout::dashboard_from_data(t.dashboard), true);
+                    }
+                    None => self.notifications.push(Toast::warn(format!("模板读不了：{}", p.display()))),
+                }
+            }
+            P::RenameInput(t) => self.page_rename = t,
+            P::RenameApply => {
+                let title = self.page_rename.trim().to_string();
+                if first {
+                    note(self, "第一页的名字跟着工作区（它是这个工作区的入口）；其余页可以改名".into());
+                } else if !title.is_empty() && title != ws::workspace::page_title(&name) {
+                    let new = self.free_page_name(&wsn, &title);
+                    if let Some(l) = self.layout_manager.layouts.iter_mut().find(|l| l.id.name == name) {
+                        l.id.name = new.clone();
+                    }
+                    self.pages.rename(&name, &new);
+                    // 改了名的模板页就是用户的页了：模板不再管它，原模板页算「关掉」，可从工具条找回
+                    if ws::workspace::all_layouts().contains(&name) {
+                        self.pages.closed.insert(name.clone());
+                        self.pages.user.insert(new.clone());
+                    }
+                    self.outdated.remove(&name);
+                    ws::pages::save(&self.pages);
+                }
+            }
+            P::Move(d) => {
+                let mut order: Vec<String> = self.pages_of(&wsn).into_iter().map(|(_, n)| n).collect();
+                if let Some(i) = order.iter().position(|n| *n == name) {
+                    let j = i as i64 + i64::from(d);
+                    // 第一页固定在最前（它是工作区的入口）
+                    if j >= 1 && (j as usize) < order.len() && i >= 1 {
+                        order.swap(i, j as usize);
+                        self.pages.order.insert(wsn, order);
+                        ws::pages::save(&self.pages);
+                    }
+                }
+            }
+            P::Close => {
+                if first {
+                    note(self, "第一页不能关（它是这个工作区的入口）；可以「恢复默认」或改它的内容".into());
+                    return Task::none();
+                }
+                let pages = self.pages_of(&wsn);
+                let Some(i) = pages.iter().position(|(_, n)| *n == name) else { return Task::none() };
+                let (uid, _) = pages[i].clone();
+                let next = pages.get(i + 1).or_else(|| i.checked_sub(1).and_then(|k| pages.get(k))).map(|(u, _)| *u);
+                if let Some(l) = self.layout_manager.layouts.iter().find(|l| l.id.unique == uid) {
+                    self.closed_pages.push((name.clone(), data::Dashboard::from(&l.dashboard)));
+                }
+                if ws::workspace::all_layouts().contains(&name) {
+                    self.pages.closed.insert(name.clone());
+                }
+                if let Some(n) = next {
+                    return self
+                        .update(Message::Layouts(modal::layout_manager::Message::SelectActive(n)))
+                        .chain(Task::done(Message::Page(P::Remove(uid))));
+                }
+            }
+            P::Remove(uid) => {
+                if self.layout_manager.active_layout_id().map(|l| l.unique) != Some(uid) {
+                    if let Some(n) = self.layout_manager.layouts.iter().find(|l| l.id.unique == uid).map(|l| l.id.name.clone()) {
+                        self.layout_manager.layouts.retain(|l| l.id.unique != uid);
+                        let keep_closed = self.pages.closed.contains(&n);
+                        self.pages.forget(&n);
+                        if keep_closed {
+                            self.pages.closed.insert(n);
+                        }
+                        ws::pages::save(&self.pages);
+                    }
+                }
+            }
+            P::Undo => {
+                if let Some((n, d)) = self.closed_pages.pop() {
+                    self.pages.closed.remove(&n);
+                    let is_user = !ws::workspace::all_layouts().contains(&n);
+                    let n = if self.layout_manager.layouts.iter().any(|l| l.id.name == n) {
+                        self.free_page_name(ws::workspace::workspace_of(&n), &ws::workspace::page_title(&n))
+                    } else {
+                        n
+                    };
+                    return self.add_page(n, layout::dashboard_from_data(d), is_user);
+                }
+                note(self, "本次运行里没有关掉的页".into());
+            }
+            P::ResetDefault => match ws::workspace::template_dashboard(&name).filter(|_| ws::workspace::all_layouts().contains(&name)) {
+                Some(d) => {
+                    let uid = self.layout_manager.active_layout_id().map(|l| l.unique);
+                    if let Some(l) = self.layout_manager.layouts.iter_mut().find(|l| Some(l.id.unique) == uid) {
+                        l.dashboard = d;
+                    }
+                    self.pages.applied.insert(name.clone(), ws::workspace::template_fingerprint(&name));
+                    self.outdated.remove(&name);
+                    ws::pages::save(&self.pages);
+                    if let Some(u) = uid {
+                        return self.load_layout(u, self.main_window.id);
+                    }
+                }
+                None => note(self, "这一页是自建的，没有默认模板".into()),
+            },
+            P::SaveTemplate => {
+                let Some(l) = self.layout_manager.layouts.iter().find(|l| l.id.name == name) else { return Task::none() };
+                let t = ws::pages::PageTemplate {
+                    title: ws::workspace::page_title(&name),
+                    workspace: wsn.clone(),
+                    dashboard: data::Dashboard::from(&l.dashboard),
+                };
+                match ws::pages::save_template(&t) {
+                    Ok(p) => note(self, format!("已存为模板：{}（拷到别的机器同名目录即导入）", p.display())),
+                    Err(e) => self.notifications.push(Toast::warn(format!("存模板失败：{e}"))),
+                }
+            }
+            P::ToggleLock => {
+                if !self.pages.locked.remove(&name) {
+                    self.pages.locked.insert(name.clone());
+                }
+                ws::pages::save(&self.pages);
+            }
+        }
+        Task::none()
     }
 
     /// 侧栏点工作区去哪一页：上次停留的（还在的话），否则第一页。
@@ -1712,6 +2009,14 @@ impl Flowsurface {
                     return self.update(Message::Layouts(modal::layout_manager::Message::SelectActive(*uid)));
                 }
             }
+            Cmd::PageMenu => return self.page_action(ws::pages::PageMsg::ToggleMenu),
+            Cmd::PageNew => return self.page_action(ws::pages::PageMsg::NewBlank),
+            Cmd::PageDuplicate => return self.page_action(ws::pages::PageMsg::Duplicate),
+            Cmd::PageClose => return self.page_action(ws::pages::PageMsg::Close),
+            Cmd::PageUndo => return self.page_action(ws::pages::PageMsg::Undo),
+            Cmd::PageReset => return self.page_action(ws::pages::PageMsg::ResetDefault),
+            Cmd::PageSaveTemplate => return self.page_action(ws::pages::PageMsg::SaveTemplate),
+            Cmd::PageLock => return self.page_action(ws::pages::PageMsg::ToggleLock),
             Cmd::NextPage | Cmd::PrevPage => {
                 let pages = self.current_pages();
                 let cur = self.layout_manager.active_layout_id().map(|l| l.unique);
@@ -1981,6 +2286,8 @@ impl Flowsurface {
             // 工作区缺省密度（docs/35 §5.3）：「系统」组在紧凑下改用舒适
             let wsn = ws::workspace::workspace_of(&l.id.name).to_string();
             let system = ws::workspace::GROUPS.iter().any(|(g, names)| *g == "系统" && names.contains(&wsn.as_str()));
+            // 改名框跟着当前页走（不然会把上一页的名字套到这一页上）
+            self.page_rename = ws::workspace::page_title(&l.id.name);
             self.last_page.insert(wsn, layout_uid);
             if ui::set_system_workspace(system) {
                 self.apply_ui_change();

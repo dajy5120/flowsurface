@@ -647,7 +647,7 @@ impl Dashboard {
         tickers_table: &'a TickersTable,
         timezone: UserTimezone,
     ) -> Element<'a, Message> {
-        let pane_grid: Element<_> = PaneGrid::new(&self.panes, |id, pane, maximized| {
+        let pane_grid = PaneGrid::new(&self.panes, |id, pane, maximized| {
             let is_focused = self.focus == Some((main_window.id, id));
             pane.view(
                 id,
@@ -661,12 +661,14 @@ impl Dashboard {
             )
         })
         .min_size(240)
-        .on_click(pane::Message::PaneClicked)
-        .on_drag(pane::Message::PaneDragged)
-        .on_resize(8, pane::Message::PaneResized)
-        .spacing(6)
-        .style(style::pane_grid)
-        .into();
+        .on_click(pane::Message::PaneClicked);
+        // 锁定布局的页（docs/41 §3.4）：不能拖动停靠、不能拖分隔条
+        let pane_grid = if crate::ws::pages::active_locked() {
+            pane_grid
+        } else {
+            pane_grid.on_drag(pane::Message::PaneDragged).on_resize(8, pane::Message::PaneResized)
+        };
+        let pane_grid: Element<_> = pane_grid.spacing(6).style(style::pane_grid).into();
 
         pane_grid.map(move |message| Message::Pane(main_window.id, message))
     }

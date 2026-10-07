@@ -52,6 +52,7 @@ pub fn page_bar<'a, M: Clone + 'a, V: PartialEq + Clone + 'a>(
     pages: Vec<PageTab<V>>,
     active: &V,
     on: impl Fn(V) -> M + 'a,
+    extra: Vec<Element<'a, M>>,
 ) -> Element<'a, M> {
     use super::widgets::{Kind, Tone, button_style};
     let c = core();
@@ -71,6 +72,9 @@ pub fn page_bar<'a, M: Clone + 'a, V: PartialEq + Clone + 'a>(
         }
         let cell = column![container(label).padding(Padding::from([metrics::space(2), metrics::space(4)])), under].width(Length::Shrink);
         r = r.push(button(cell).padding(0).on_press(on(p.value.clone())).style(|th, st| button_style(Kind::Ghost, th, st)));
+    }
+    for e in extra {
+        r = r.push(container(e).padding(Padding::from([metrics::space(1), metrics::space(1)])));
     }
     r = r.push(Space::new().width(Length::Fill));
     if !single {

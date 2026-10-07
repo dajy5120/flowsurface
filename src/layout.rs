@@ -598,6 +598,13 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
     }
 }
 
+/// 从可序列化的 `data::Dashboard` 重建运行期 Dashboard（复制页、从模板新建，docs/41 B 期）。
+/// 与读存档同一套路：主窗口 pane 树 + 弹出窗口。
+pub fn dashboard_from_data(d: data::Dashboard) -> Dashboard {
+    let popouts = d.popout.into_iter().map(|(pane, spec)| (configuration(pane), spec)).collect();
+    Dashboard::from_config(configuration(d.pane), popouts, Uuid::new_v4())
+}
+
 pub fn load_saved_state() -> SavedState {
     match data::read_from_file(data::SAVED_STATE_PATH) {
         Ok(state) => {

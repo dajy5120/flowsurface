@@ -2175,6 +2175,8 @@ impl State {
             ));
         }
 
+        // 锁定布局的页：不弹出、不关闭面板（最大化 / 还原只是临时查看，照常可用）
+        let locked = crate::ws::pages::active_locked();
         if is_popout {
             buttons.push(button_with_tooltip(
                 icon_text(Icon::Popout, 12),
@@ -2183,7 +2185,7 @@ impl State {
                 tooltip_pos,
                 control_btn_style(is_popout),
             ));
-        } else if total_panes > 1 {
+        } else if total_panes > 1 && !locked {
             buttons.push(button_with_tooltip(
                 icon_text(Icon::Popout, 12),
                 Message::Popout,
@@ -2208,13 +2210,15 @@ impl State {
                 control_btn_style(is_maximized),
             ));
 
-            primary.push(button_with_tooltip(
-                icon_text(Icon::Close, 12),
-                Message::ClosePane(pane),
-                None,
-                tooltip_pos,
-                control_btn_style(false),
-            ));
+            if !locked {
+                primary.push(button_with_tooltip(
+                    icon_text(Icon::Close, 12),
+                    Message::ClosePane(pane),
+                    None,
+                    tooltip_pos,
+                    control_btn_style(false),
+                ));
+            }
         }
 
         let mut bar = row![];
