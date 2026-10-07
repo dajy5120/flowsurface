@@ -110,6 +110,12 @@ pub enum PageMsg {
     ResetDefault,
     SaveTemplate,
     ToggleLock,
+    /// 面板库：搜索框
+    LibrarySearch(String),
+    /// 面板库：加到浮动层（只对图表类）还是平铺层
+    LibraryFloat(bool),
+    /// 面板库：加一个面板到当前页
+    AddPanel(ContentKind),
 }
 
 static ACTIVE_LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -121,6 +127,49 @@ pub fn active_locked() -> bool {
 
 pub fn set_active_locked(v: bool) {
     ACTIVE_LOCKED.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+// ── 面板库（docs/41 D 期）──────────────────────────────────────────
+
+use data::layout::pane::ContentKind;
+
+/// 单实例面板：交互状态（选中、表单、列宽、筛选）只有一份，同一页里放两个会互相牵动——
+/// 面板库加它时，本页已有就跳过去（别的页里有不算，几页不会同时显示）。
+pub const SINGLE_INSTANCE: [ContentKind; 4] =
+    [ContentKind::StrategyCenter, ContentKind::StrategyLayers, ContentKind::FeatureMatrix, ContentKind::Orders];
+
+pub fn single_instance(k: ContentKind) -> bool {
+    SINGLE_INSTANCE.contains(&k)
+}
+
+/// 能进浮动层的面板类型（与 `pane::State::is_chart_kind` 对应）。
+pub fn floatable(k: ContentKind) -> bool {
+    matches!(
+        k,
+        ContentKind::HeatmapChart
+            | ContentKind::ShaderHeatmap
+            | ContentKind::FootprintChart
+            | ContentKind::CandlestickChart
+            | ContentKind::ComparisonChart
+            | ContentKind::TimeAndSales
+            | ContentKind::Ladder
+            | ContentKind::SelfChart
+            | ContentKind::OfmsLab
+    )
+}
+
+/// 面板库的分类。
+pub fn category(k: ContentKind) -> &'static str {
+    use ContentKind as K;
+    match k {
+        K::HeatmapChart | K::ShaderHeatmap | K::FootprintChart | K::CandlestickChart | K::ComparisonChart | K::TimeAndSales | K::Ladder => "行情",
+        K::FeatureMatrix | K::OfmsLab | K::FeatureLab => "订单流",
+        K::Factory | K::C4Shadow | K::OptionsBoard | K::PredictionBoard | K::PmBinance | K::PmReplay | K::StrategyCenter | K::StrategyLayers => "研究",
+        K::WealthSpring | K::SelfChart | K::BacktestResult | K::Orders => "策略",
+        K::MarketMap | K::News | K::Recorder | K::TardisReplay | K::TardisBoard | K::Observatory => "数据与资讯",
+        K::Procs | K::NetEgress => "系统",
+        K::Starter => "其他",
+    }
 }
 
 // ── 页面模板库（存为模板 / 导出 / 导入）──────────────────────────────
@@ -184,6 +233,17 @@ mod tests {
         p.forget("回测｜乙");
         assert_eq!(p.order["回测"], ["回测"]);
         assert!(p.user.is_empty() && p.locked.is_empty());
+    }
+
+    #[test]
+    fn library_classification_covers_every_kind() {
+        for k in ContentKind::ALL {
+            assert!(!category(k).is_empty());
+        }
+        // 单实例的都不是能浮动的图表（浮动层里不会冒出第二个）
+        assert!(SINGLE_INSTANCE.iter().all(|k| !floatable(*k)));
+        // 订单流层析已改成每个面板各自的视图状态（D 期），可以多开、可以浮动
+        assert!(!single_instance(ContentKind::OfmsLab) && floatable(ContentKind::OfmsLab));
     }
 
     #[test]

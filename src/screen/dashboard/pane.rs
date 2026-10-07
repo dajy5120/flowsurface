@@ -962,7 +962,7 @@ impl State {
             }
             Content::OfmsLab => {
                 // 订单流层析（docs/40）：OFMS-10 时间轴 · 因果链 · 特征字典
-                let base = crate::ws::ofms_lab_view::pane_body(self.settings.view.as_deref())
+                let base = crate::ws::ofms_lab_view::pane_body(self.unique_id(), self.settings.view.as_deref())
                     .map(move |m| Message::PaneEvent(id, Event::OfmsLabInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -1752,7 +1752,7 @@ impl State {
             Event::OptionsGrid(m) => crate::ws::options_view::grid_update(m),
             Event::StrategyCenterInteraction(m) => crate::ws::strategy_center::handle(m),
             Event::StrategyLayersInteraction(m) => crate::ws::strategy_layers::handle(m),
-            Event::OfmsLabInteraction(m) => crate::ws::ofms_lab::handle(m),
+            Event::OfmsLabInteraction(m) => crate::ws::ofms_lab::handle(self.unique_id(), m),
             Event::BacktestGrid(w, m) => crate::ws::backtest_view::grid_update(w, m),
             Event::FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg::Source(m)) => {
                 // 特征数据源：选择 / 开始 / 停止回放。换了图表流就请上层清图。

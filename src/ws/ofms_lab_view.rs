@@ -26,11 +26,11 @@ const LANES: [(u8, &str, f32); 7] = [
     (6, "L6–L10 策略", 0.8),
 ];
 
-pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, OfMsg> {
+pub fn pane_body<'a>(pane: uuid::Uuid, lock: Option<&str>) -> Element<'a, OfMsg> {
     if let Some(l) = lock {
-        ol::lock_tab(l);
+        ol::lock_tab(pane, l);
     }
-    let v = ol::view();
+    let v = ol::view(pane);
     // 页面锁定了视图：切换在顶部页签上（docs/41），面板里不再画第二层页签
     let tabs = lock.is_none().then(|| w::tabs(&ol::TABS.map(|(t, n)| (n, t)), &v.tab, OfMsg::Tab));
     let mut col = column![w::panel_header("订单流层析", tabs, vec![])].spacing(space(2));

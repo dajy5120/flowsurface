@@ -267,9 +267,6 @@ struct St {
     running: bool,
     note: String,
     data: Option<Arc<OfData>>,
-    tab: OfTab,
-    hidden: BTreeSet<u8>,
-    selected: Option<u64>,
     dict: Option<Arc<Dict>>,
     dict_loading: bool,
     /// 打开时自动读最近一次生成的窗口（只试一次）。
@@ -277,8 +274,6 @@ struct St {
     resp: Option<Arc<Resp>>,
     resp_err: String,
     resp_loading: bool,
-    resp_kind: String,
-    resp_informative: bool,
     setups: Option<Arc<Vec<Setup>>>,
     setups_err: String,
     setups_loading: bool,
@@ -289,14 +284,33 @@ struct St {
     /// 实时 tail 线程的代号：关掉 / 重开时换代，旧线程看到不是自己的代号就退出
     live_gen: u64,
     dict_err: String,
-    dict_layer: Option<u8>,
-    dict_search: String,
 }
 
 static ST: OnceLock<Mutex<St>> = OnceLock::new();
 
 fn with<R>(f: impl FnOnce(&mut St) -> R) -> Option<R> {
-    ST.get_or_init(|| {
+    ST.get_or_init(|| Mutex::new(St::default())).lock().ok().map(|mut g| f(&mut g))
+}
+
+// ── 每个面板自己的视图状态（docs/41 D 期：面板多实例）────────────────
+//
+// 数据（选的窗口、生成结果、实时、叠加）是**共享的**——同一份数据；
+// 看哪一页、选中哪个事件、藏了哪些泳道、字典 / 响应表的筛选是**每个面板各自的**，
+// 所以浮窗里的层析时间轴和平铺层里的响应表可以同时开着、互不影响。
+
+#[derive(Debug, Clone)]
+struct PaneView {
+    tab: OfTab,
+    hidden: BTreeSet<u8>,
+    selected: Option<u64>,
+    dict_layer: Option<u8>,
+    dict_search: String,
+    resp_kind: String,
+    resp_informative: bool,
+}
+
+impl Default for PaneView {
+    fn default() -> Self {
         // 样张截图（docs/35）用：WS_OFMS_TAB=response / setups / dictionary 指定开页
         let tab = match std::env::var("WS_OFMS_TAB").as_deref() {
             Ok("response") => OfTab::Response,
@@ -304,11 +318,31 @@ fn with<R>(f: impl FnOnce(&mut St) -> R) -> Option<R> {
             Ok("dictionary") => OfTab::Dictionary,
             _ => OfTab::Timeline,
         };
-        Mutex::new(St { tab, ..St::default() })
-    })
-    .lock()
-    .ok()
-    .map(|mut g| f(&mut g))
+        Self {
+            tab,
+            hidden: BTreeSet::new(),
+            selected: None,
+            dict_layer: None,
+            dict_search: String::new(),
+            resp_kind: "event".into(),
+            resp_informative: false,
+        }
+    }
+}
+
+static VIEWS: OnceLock<Mutex<HashMap<uuid::Uuid, PaneView>>> = OnceLock::new();
+
+fn with_view<R>(pane: uuid::Uuid, f: impl FnOnce(&mut PaneView) -> R) -> Option<R> {
+    VIEWS.get_or_init(|| Mutex::new(HashMap::new())).lock().ok().map(|mut g| f(g.entry(pane).or_default()))
+}
+
+/// 换了数据：所有面板的选中事件都失效。
+fn clear_selection() {
+    if let Some(Ok(mut g)) = VIEWS.get().map(|m| m.lock()) {
+        for v in g.values_mut() {
+            v.selected = None;
+        }
+    }
 }
 
 pub fn opts() -> PickOpts {
@@ -365,17 +399,14 @@ pub fn busy() -> bool {
 pub const TABS: [(OfTab, &str); 4] =
     [(OfTab::Timeline, "层析时间轴"), (OfTab::Response, "响应表"), (OfTab::Setups, "入场形态矩阵"), (OfTab::Dictionary, "特征字典")];
 
-pub fn lock_tab(label: &str) {
+pub fn lock_tab(pane: uuid::Uuid, label: &str) {
     if let Some((t, _)) = TABS.iter().find(|(_, n)| *n == label) {
-        with(|g| {
-            if g.tab != *t {
-                g.tab = *t;
-            }
-        });
+        with_view(pane, |v| v.tab = *t);
     }
 }
 
-pub fn view() -> View {
+pub fn view(pane: uuid::Uuid) -> View {
+    let pv = with_view(pane, |v| v.clone()).unwrap_or_default();
     let need_dict = with(|g| {
         let go = g.dict.is_none() && !g.dict_loading && g.dict_err.is_empty();
         if go {
@@ -390,13 +421,13 @@ pub fn view() -> View {
     if with(|g| !std::mem::replace(&mut g.restored, true)).unwrap_or(false) {
         if std::env::var_os("WS_OFMS_LIVE").is_some() {
             // 样张截图（docs/35）用：开页即进实时模式
-            handle(OfMsg::Live(true));
+            handle(pane, OfMsg::Live(true));
         } else {
             restore_latest();
         }
     }
     let need_resp = with(|g| {
-        let go = matches!(g.tab, OfTab::Response | OfTab::Setups) && g.resp.is_none() && !g.resp_loading && g.resp_err.is_empty();
+        let go = matches!(pv.tab, OfTab::Response | OfTab::Setups) && g.resp.is_none() && !g.resp_loading && g.resp_err.is_empty();
         if go {
             g.resp_loading = true;
         }
@@ -407,7 +438,7 @@ pub fn view() -> View {
         load_resp();
     }
     let need_setups = with(|g| {
-        let go = g.tab == OfTab::Setups && g.setups.is_none() && !g.setups_loading && g.setups_err.is_empty();
+        let go = pv.tab == OfTab::Setups && g.setups.is_none() && !g.setups_loading && g.setups_err.is_empty();
         if go {
             g.setups_loading = true;
         }
@@ -425,17 +456,17 @@ pub fn view() -> View {
             running: g.running,
             note: g.note.clone(),
             data: g.data.clone(),
-            tab: g.tab,
-            hidden: g.hidden.clone(),
-            selected: g.selected,
+            tab: pv.tab,
+            hidden: pv.hidden.clone(),
+            selected: pv.selected,
             dict: g.dict.clone(),
             dict_err: g.dict_err.clone(),
-            dict_layer: g.dict_layer,
-            dict_search: g.dict_search.clone(),
+            dict_layer: pv.dict_layer,
+            dict_search: pv.dict_search.clone(),
             resp: g.resp.clone(),
             resp_err: g.resp_err.clone(),
-            resp_kind: if g.resp_kind.is_empty() { "event".into() } else { g.resp_kind.clone() },
-            resp_informative: g.resp_informative,
+            resp_kind: pv.resp_kind.clone(),
+            resp_informative: pv.resp_informative,
             setups: g.setups.clone(),
             setups_err: g.setups_err.clone(),
             overlay: g.overlay.clone(),
@@ -447,36 +478,36 @@ pub fn view() -> View {
     .unwrap_or_default()
 }
 
-pub fn handle(m: OfMsg) {
+pub fn handle(pane: uuid::Uuid, m: OfMsg) {
     match m {
         OfMsg::Pick(pm) => {
             with(|g| g.pick.get_or_insert_with(default_pick).update(pm));
         }
         OfMsg::Run => start_run(),
         OfMsg::Tab(t) => {
-            with(|g| g.tab = t);
+            with_view(pane, |v| v.tab = t);
         }
         OfMsg::ToggleLane(l) => {
-            with(|g| {
-                if !g.hidden.remove(&l) {
-                    g.hidden.insert(l);
+            with_view(pane, |v| {
+                if !v.hidden.remove(&l) {
+                    v.hidden.insert(l);
                 }
             });
         }
         OfMsg::Select(id) => {
-            with(|g| g.selected = id);
+            with_view(pane, |v| v.selected = id);
         }
         OfMsg::DictLayer(l) => {
-            with(|g| g.dict_layer = l);
+            with_view(pane, |v| v.dict_layer = l);
         }
         OfMsg::DictSearch(s) => {
-            with(|g| g.dict_search = s);
+            with_view(pane, |v| v.dict_search = s);
         }
         OfMsg::RespKind(k) => {
-            with(|g| g.resp_kind = k);
+            with_view(pane, |v| v.resp_kind = k);
         }
         OfMsg::RespInformative(b) => {
-            with(|g| g.resp_informative = b);
+            with_view(pane, |v| v.resp_informative = b);
         }
         OfMsg::RespReload => {
             with(|g| {
@@ -486,7 +517,7 @@ pub fn handle(m: OfMsg) {
                 g.setups_err.clear();
             });
         }
-        OfMsg::Overlay(id) => start_overlay(id),
+        OfMsg::Overlay(id) => start_overlay(pane, id),
         OfMsg::Live(on) => {
             let ticket = with(|g| {
                 g.live = on;
@@ -496,7 +527,7 @@ pub fn handle(m: OfMsg) {
                 }
                 if on {
                     g.overlay = None;
-                    g.selected = None;
+                    clear_selection();
                     g.note = "实时：等常驻引擎的 OFMS 输出…".into();
                 }
                 g.live_gen
@@ -562,7 +593,7 @@ fn start_run() {
             match r {
                 Ok(d) => {
                     g.note = format!("{} 个事件、{} 秒状态", d.events.len(), d.states.t.len());
-                    g.selected = None;
+                    clear_selection();
                     g.data = Some(Arc::new(d));
                     g.overlay = None;
                 }
@@ -838,7 +869,7 @@ fn load_setups() {
 }
 
 /// 把一个事件轨描述文件在当前窗口上跑一遍（快速档，逐秒），结果叠加到 L6–L10 泳道。
-fn start_overlay(id: String) {
+fn start_overlay(pane: uuid::Uuid, id: String) {
     let Some(dir) = with(|g| {
         if g.overlay_running {
             return None;
@@ -880,7 +911,8 @@ fn start_overlay(id: String) {
                     let net: f64 = o.trades.iter().map(|t| t.net_bp).sum();
                     g.note = format!("{}：本窗口 {} 笔，合计净 {net:+.1} bp（往返成本 {:.1} bp）", o.spec, o.trades.len(), o.fee_rt_bp);
                     g.overlay = Some(Arc::new(o));
-                    g.tab = OfTab::Timeline;
+                    // 发起叠加的那个面板切到时间轴（锁了页的面板不受影响，下一帧锁回自己的页）
+                    with_view(pane, |v| v.tab = OfTab::Timeline);
                 }
                 Err(e) => g.note = e,
             }

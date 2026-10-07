@@ -117,7 +117,7 @@ pub fn registry(workspaces: &[&str]) -> Vec<Entry> {
         e(Cmd::BottomTab(super::shell::BottomTab::Activity), "视图", "底部面板：活动（运行中的回测 / 回放）", ""),
         e(Cmd::BottomTab(super::shell::BottomTab::Alerts), "视图", "底部面板：告警（新闻规则命中）", ""),
         e(Cmd::BottomTab(super::shell::BottomTab::Notices), "视图", "底部面板：通知中心（弹过的全部提示）", ""),
-        e(Cmd::PageMenu, "页面", "页面工具条：新建 / 复制 / 改名 / 排序 / 模板 / 锁定", ""),
+        e(Cmd::PageMenu, "页面", "页面工具条：新建 / 复制 / 改名 / 排序 / 模板 / 锁定 / 添加面板（面板库）", ""),
         e(Cmd::PageNew, "页面", "新建空白页（当前工作区）", ""),
         e(Cmd::PageDuplicate, "页面", "复制当前页", ""),
         e(Cmd::PageClose, "页面", "关闭当前页", ""),

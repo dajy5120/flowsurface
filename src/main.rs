@@ -226,6 +226,9 @@ struct Flowsurface {
     /// 页签栏下面的页面工具条是否展开；改名输入框
     page_menu: bool,
     page_rename: String,
+    /// 面板库：搜索词、是否加到浮动层
+    lib_search: String,
+    lib_float: bool,
     /// 本次运行里关掉的页（Ctrl Shift T 找回；不落盘）
     closed_pages: Vec<(String, data::Dashboard)>,
     ws_orders: ws::orders::OrderState,            // WealthSpring 订单/PnL（events.* 聚合，F3）
@@ -356,6 +359,8 @@ impl Flowsurface {
             outdated: std::collections::BTreeSet::new(),
             page_menu: false,
             page_rename: String::new(),
+            lib_search: String::new(),
+            lib_float: false,
             closed_pages: Vec::new(),
             ws_orders: ws::orders::OrderState::default(),
             ws_flow: ws::flow::FlowState::default(),
@@ -1777,7 +1782,41 @@ impl Flowsurface {
                     .color(ui::pal::dim()),
             );
         }
-        column![r1.wrap(), r2.wrap()].spacing(ui::metrics::space(1)).padding(ui::metrics::pad2(1, 3)).into()
+        // 第三行：面板库（docs/41 D 期）——搜索 + 按分类列出；单实例的标「单」，能浮动的在「浮窗」开关下才放浮动层
+        let q = self.lib_search.trim().to_lowercase();
+        let mut r3 = row![
+            ui::text::metadata("添加面板：").color(ui::pal::dim()),
+            iced::widget::text_input("搜索面板…", &self.lib_search)
+                .on_input(|t| Message::Page(P::LibrarySearch(t)))
+                .width(iced::Length::Fixed(140.0))
+                .size(ui::text::s_small()),
+            w::btn(
+                if self.lib_float { "加到：浮动层（图表）" } else { "加到：平铺层" },
+                if self.lib_float { Kind::Standard } else { Kind::Ghost },
+                pm(P::LibraryFloat(!self.lib_float)),
+            ),
+        ]
+        .spacing(ui::metrics::space(1))
+        .align_y(Alignment::Center);
+        let mut last_cat = "";
+        let mut kinds: Vec<_> = data::layout::pane::ContentKind::ALL
+            .iter()
+            .copied()
+            .filter(|k| *k != data::layout::pane::ContentKind::Starter)
+            .filter(|k| !self.lib_float || ws::pages::floatable(*k))
+            .filter(|k| q.is_empty() || k.to_string().to_lowercase().contains(&q) || ws::pages::category(*k).contains(&q))
+            .collect();
+        kinds.sort_by_key(|k| ["行情", "订单流", "研究", "策略", "数据与资讯", "系统", "其他"].iter().position(|c| *c == ws::pages::category(*k)));
+        for k in kinds {
+            let cat = ws::pages::category(k);
+            if cat != last_cat {
+                r3 = r3.push(ui::text::metadata(format!("│ {cat}")).color(ui::pal::dim()));
+                last_cat = cat;
+            }
+            let label = if ws::pages::single_instance(k) { format!("{k} ·单") } else { k.to_string() };
+            r3 = r3.push(w::btn(label, Kind::Ghost, (!locked).then(|| Message::Page(P::AddPanel(k)))));
+        }
+        column![r1.wrap(), r2.wrap(), r3.wrap()].spacing(ui::metrics::space(1)).padding(ui::metrics::pad2(1, 3)).into()
     }
 
     /// 页面操作（docs/41 B 期）。
@@ -1926,6 +1965,14 @@ impl Flowsurface {
                     Ok(p) => note(self, format!("已存为模板：{}（拷到别的机器同名目录即导入）", p.display())),
                     Err(e) => self.notifications.push(Toast::warn(format!("存模板失败：{e}"))),
                 }
+            }
+            P::LibrarySearch(t) => self.lib_search = t,
+            P::LibraryFloat(b) => self.lib_float = b,
+            P::AddPanel(kind) => {
+                return self.update(Message::Dashboard {
+                    layout_id: None,
+                    event: dashboard::Message::AddPanel { kind, float: self.lib_float },
+                });
             }
             P::ToggleLock => {
                 if !self.pages.locked.remove(&name) {

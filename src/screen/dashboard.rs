@@ -61,6 +61,8 @@ use std::{collections::HashMap, time::Instant, vec};
 #[derive(Debug, Clone)]
 pub enum Message {
     Pane(window::Id, pane::Message),
+    /// 面板库（docs/41 D 期）：往当前页加一个面板（平铺：切在聚焦面板旁边；浮动：放到浮动层）
+    AddPanel { kind: data::layout::pane::ContentKind, float: bool },
     /// 浮动层（docs/41 §4.2）
     Float(floating::FloatMsg),
     ChangePaneStatus(uuid::Uuid, pane::Status),
@@ -260,6 +262,44 @@ impl Dashboard {
                 }
             },
             Message::Float(m) => return (self.float_update(m, main_window), None),
+            Message::AddPanel { kind, float } => {
+                // 单实例面板：本页已有就聚焦过去，不加第二个
+                if crate::ws::pages::single_instance(kind) {
+                    let found = self.iter_all_panes(main_window.id).find(|(_, _, st)| st.content.kind() == kind).map(|(w, p, _)| (w, p));
+                    if let Some(f) = found {
+                        self.focus = Some(f);
+                        return (
+                            Task::done(Message::Notification(Toast::info(format!("「{kind}」是单实例面板，本页已有一个，已聚焦到它")))),
+                            None,
+                        );
+                    }
+                }
+                if float && crate::ws::pages::floatable(kind) && !crate::ws::pages::active_locked() {
+                    let f = floating::Float::new(pane::State::new(), floating::cascade(self.floating.len()));
+                    let (fid, pid) = (f.id, f.panes.iter().next().map(|(p, _)| *p));
+                    self.floating.push(f);
+                    self.floats_hidden = false;
+                    if let Some(pid) = pid {
+                        return (Task::done(Message::Pane(fid, pane::Message::PaneEvent(pid, pane::Event::ContentSelected(kind)))), None);
+                    }
+                    return (Task::none(), None);
+                }
+                // 平铺：切在聚焦面板（主窗口里的）旁边，没有聚焦就切第一个
+                let target = self
+                    .focus
+                    .filter(|(w, _)| *w == main_window.id)
+                    .map(|(_, p)| p)
+                    .or_else(|| self.panes.iter().next().map(|(p, _)| *p));
+                if let Some(t) = target {
+                    if let Some((new, _)) = self.panes.split(pane_grid::Axis::Vertical, t, pane::State::new()) {
+                        self.focus = Some((main_window.id, new));
+                        return (
+                            Task::done(Message::Pane(main_window.id, pane::Message::PaneEvent(new, pane::Event::ContentSelected(kind)))),
+                            None,
+                        );
+                    }
+                }
+            }
             Message::Pane(window, message) => match message {
                 pane::Message::FloatPane(pane) => {
                     if window == main_window.id && !crate::ws::pages::active_locked() {
