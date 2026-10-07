@@ -1283,15 +1283,18 @@ impl Flowsurface {
                     }),
             };
 
-            // 页签栏（docs/41 §3）：当前工作区的页面；只有一页的工作区不显示（除非打开了页面工具条）
+            // 页签栏（docs/41 §3）：当前工作区的页面。只有一页的工作区不列那唯一的页签（名字与工作区重复），
+            // 但照样有「⋯ 页面」——新建 / 复制页、面板库、浮动层、联动、锁定等都从这里进（2026-10-07 用户要求）
             let pages = self.pages_of(&active_ws);
-            let dashboard_view: Element<'_, Message> = if self.gallery.is_some() || (pages.len() <= 1 && !self.page_menu) {
+            let single_page = pages.len() <= 1;
+            let dashboard_view: Element<'_, Message> = if self.gallery.is_some() {
                 dashboard_view
             } else {
                 let cur = self.layout_manager.active_layout_id().map(|l| l.unique).unwrap_or_default();
                 let bt = self.backtest_running();
                 let tabs: Vec<ui::shell::PageTab<uuid::Uuid>> = pages
                     .into_iter()
+                    .filter(|_| !single_page)
                     .map(|(uid, n)| {
                         let mut label = ws::workspace::page_title(&n);
                         if self.pages.locked.contains(&n) {
@@ -1313,8 +1316,20 @@ impl Flowsurface {
                         }
                     })
                     .collect();
+                // 只有一页时没有页签可挂「🔒 锁定 / ↻ 模板有更新」，挂在这个按钮上
+                let cur_name = self.active_name();
+                let mut more_label = String::from("⋯ 页面");
+                if single_page && self.pages.locked.contains(&cur_name) {
+                    more_label.push_str(" 🔒");
+                }
+                if single_page && self.outdated.contains(&cur_name) {
+                    more_label.push_str(" ↻");
+                }
+                if self.page_menu {
+                    more_label.push_str(" ▴");
+                }
                 let more = ui::widgets::btn(
-                    if self.page_menu { "⋯ 页面 ▴" } else { "⋯ 页面" },
+                    more_label,
                     ui::widgets::Kind::Ghost,
                     Some(Message::Page(ws::pages::PageMsg::ToggleMenu)),
                 );
