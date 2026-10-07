@@ -162,7 +162,10 @@ pub fn handle(m: ProcsMsg) -> String {
     }
 }
 
-pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
+pub fn pane_body<'a>(note: &str, lock: Option<&str>) -> Element<'a, ProcsMsg> {
+    if lock == Some("检查更新") {
+        return deps_part(column![].spacing(6).padding(crate::ui::metrics::space(3)));
+    }
     let rows = procs::rows();
     let mut body = column![].spacing(6).padding(crate::ui::metrics::space(3));
 
@@ -287,7 +290,15 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, ProcsMsg> {
         body = body.push(ptable(1, timer_cols(), rows_t));
     }
 
-    // ── 依赖版本 ──
+    // 页面「进程」只到这里；依赖版本是「检查更新」页（docs/41）
+    if lock == Some("进程") {
+        return scrollable(body).into();
+    }
+    deps_part(body)
+}
+
+/// 依赖版本与「检查更新」（docs/41：资源工作区的单独一页；不锁页时接在进程表下面）。
+fn deps_part<'a>(mut body: iced::widget::Column<'a, ProcsMsg>) -> Element<'a, ProcsMsg> {
     let drows = super::deps::rows();
     let dnote = super::deps::note();
     let checked = drows.iter().filter(|r| r.checked()).count();

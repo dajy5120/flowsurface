@@ -240,6 +240,10 @@ pub struct Settings {
     pub tick_multiply: Option<exchange::TickMultiplier>,
     pub visual_config: Option<VisualConfig>,
     pub selected_basis: Option<Basis>,
+    /// 页面锁定的面板视图（docs/41 §3.3）：如「源管理」「热图」「引擎健康」。
+    /// 有值时面板只显示这一个视图、不画自己的视图切换；`None` = 面板自己切换（原来的行为）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]

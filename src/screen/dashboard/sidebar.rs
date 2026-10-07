@@ -99,7 +99,7 @@ impl Sidebar {
 
     pub fn view<'a>(
         &'a self,
-        workspaces: &[(uuid::Uuid, &'static str, bool)],
+        workspaces: &[(uuid::Uuid, &'static str, bool, Option<&'static str>)],
     ) -> Element<'a, Message> {
         let state = &self.state;
 
@@ -139,7 +139,7 @@ impl Sidebar {
         &'a self,
         is_table_open: bool,
         tooltip_position: TooltipPosition,
-        workspaces: &[(uuid::Uuid, &'static str, bool)],
+        workspaces: &[(uuid::Uuid, &'static str, bool, Option<&'static str>)],
     ) -> iced::widget::Column<'a, Message> {
         let settings_modal_button = {
             let is_active = self.is_menu_active(sidebar::Menu::Settings)
@@ -188,7 +188,7 @@ impl Sidebar {
 
         // WealthSpring 工作区切换（docs/08 F6 — P1）：合并进侧边栏顶部的图标按钮组。
         let mut col = column![].width(32).spacing(2).align_x(Alignment::Center);
-        for &(uid, name, is_active) in workspaces {
+        for &(uid, name, is_active, badge) in workspaces {
             // 分组标题（docs/35 §5.3）：组首工作区前放组名，组与组之间留一点空
             if let Some((i, (group, _))) = crate::ws::workspace::GROUPS
                 .iter()
@@ -200,10 +200,23 @@ impl Sidebar {
                 }
                 col = col.push(crate::ui::text::metadata(*group));
             }
-            col = col.push(button_with_tooltip(
-                icon_text(crate::ws::workspace::icon(name), 14)
+            // 状态角标（docs/41 §3.4）：图标右上角一个小符号，● 后台在跑、⚠ 有问题
+            let icon: Element<'_, Message> = match badge {
+                None => icon_text(crate::ws::workspace::icon(name), 14).width(24).align_x(Alignment::Center).into(),
+                Some(g) => iced::widget::stack![
+                    icon_text(crate::ws::workspace::icon(name), 14).width(24).align_x(Alignment::Center),
+                    iced::widget::container(crate::ui::text::metadata(g).color(if g == "⚠" {
+                        crate::ui::widgets::Tone::Warning.color()
+                    } else {
+                        crate::ui::widgets::Tone::Info.color()
+                    }))
                     .width(24)
-                    .align_x(Alignment::Center),
+                    .align_x(Alignment::End),
+                ]
+                .into(),
+            };
+            col = col.push(button_with_tooltip(
+                icon,
                 Message::SelectWorkspace(uid),
                 Some(name),
                 tooltip_position,

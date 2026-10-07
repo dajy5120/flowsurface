@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use iced::widget::{
-    button, column, container, mouse_area, opaque, row, rule, scrollable, space, stack, text, text_input,
+    Space, button, column, container, mouse_area, opaque, row, rule, scrollable, space, stack, text, text_input,
 };
 use iced::{Alignment, Background, Border, Element, Length, Padding};
 
@@ -25,15 +25,67 @@ use super::{color, core, text as t};
 
 // ── 工作区分组（docs/35 §5.3）────────────────────────────────────────
 
-/// 侧栏的五组。组内第一个工作区有 Ctrl Shift n 直达。
-pub fn groups() -> [(&'static str, &'static [&'static str]); 5] {
+/// 侧栏的六组（docs/41 §2）。组内第一个工作区有 Ctrl Shift n 直达。
+pub fn groups() -> [(&'static str, &'static [&'static str]); 6] {
     crate::ws::workspace::GROUPS
 }
 
 /// 某工作区若是组首，给出它的直达快捷键文字。
 pub fn group_shortcut(name: &str) -> Option<&'static str> {
-    const KEYS: [&str; 5] = ["Ctrl Shift 1", "Ctrl Shift 2", "Ctrl Shift 3", "Ctrl Shift 4", "Ctrl Shift 5"];
+    const KEYS: [&str; 6] = ["Ctrl Shift 1", "Ctrl Shift 2", "Ctrl Shift 3", "Ctrl Shift 4", "Ctrl Shift 5", "Ctrl Shift 6"];
     groups().iter().position(|(_, ws)| ws.first() == Some(&name)).map(|i| KEYS[i])
+}
+
+// ── 页签栏（docs/41 §3）──────────────────────────────────────────────
+
+/// 页签栏上的一页。
+pub struct PageTab<V> {
+    pub label: String,
+    /// 状态角标（`page_status::Badge::glyph`）：● 后台在跑、⚠ 有问题
+    pub badge: Option<&'static str>,
+    pub value: V,
+}
+
+/// 工作区的页签栏：只有页名（工作区名在侧栏与标题栏上已有，不重复，docs/41）；激活页下缘强调色；右端是切页快捷键提示。
+/// 页签与 [`super::widgets::tabs`] 同一套样式（只有一层页签，docs/41 §1）。只有一页的工作区不显示页签栏（调用方判断）。
+pub fn page_bar<'a, M: Clone + 'a, V: PartialEq + Clone + 'a>(
+    pages: Vec<PageTab<V>>,
+    active: &V,
+    on: impl Fn(V) -> M + 'a,
+) -> Element<'a, M> {
+    use super::widgets::{Kind, Tone, button_style};
+    let c = core();
+    let mut r = row![].spacing(0).align_y(Alignment::End);
+    let single = pages.len() <= 1;
+    for p in pages {
+        let is = p.value == *active;
+        let fg = if is { color(c.text_primary) } else { color(c.text_secondary) };
+        let under = container(Space::new().width(Length::Fill).height(Length::Fixed(2.0))).style(move |_| container::Style {
+            background: is.then(|| Background::Color(color(core().accent_primary))),
+            ..Default::default()
+        });
+        let mut label = row![t::label(p.label).color(fg)].spacing(metrics::space(1)).align_y(Alignment::Center);
+        if let Some(g) = p.badge {
+            let tone = if g == "⚠" { Tone::Warning } else { Tone::Info };
+            label = label.push(t::metadata(g).color(tone.color()));
+        }
+        let cell = column![container(label).padding(Padding::from([metrics::space(2), metrics::space(4)])), under].width(Length::Shrink);
+        r = r.push(button(cell).padding(0).on_press(on(p.value.clone())).style(|th, st| button_style(Kind::Ghost, th, st)));
+    }
+    r = r.push(Space::new().width(Length::Fill));
+    if !single {
+        r = r.push(
+            container(t::metadata("Alt 1–9 · Ctrl PgUp / PgDn").color(color(c.text_tertiary)))
+                .padding(Padding::from([metrics::space(2), metrics::space(3)])),
+        );
+    }
+    container(r)
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            border: Border { width: 0.0, ..Default::default() },
+            ..Default::default()
+        })
+        .into()
 }
 
 // ── 状态 ─────────────────────────────────────────────────────────────

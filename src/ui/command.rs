@@ -9,8 +9,13 @@ use super::{Density, ThemeId};
 /// 一条命令要做的事。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
-    /// 切到某个工作区（按名字）
+    /// 切到某个工作区（按名字；回到它上次停留的页面）
     Workspace(String),
+    /// 当前工作区的第 n 页（0 起，Alt 1–9；docs/41 §3.4）
+    Page(usize),
+    /// 当前工作区的下一页 / 上一页（Ctrl PgDn / Ctrl PgUp，循环）
+    NextPage,
+    PrevPage,
     Theme(ThemeId),
     CycleTheme,
     Density(Density),
@@ -99,6 +104,8 @@ pub fn registry(workspaces: &[&str]) -> Vec<Entry> {
         e(Cmd::BottomTab(super::shell::BottomTab::Activity), "视图", "底部面板：活动（运行中的回测 / 回放）", ""),
         e(Cmd::BottomTab(super::shell::BottomTab::Alerts), "视图", "底部面板：告警（新闻规则命中）", ""),
         e(Cmd::BottomTab(super::shell::BottomTab::Notices), "视图", "底部面板：通知中心（弹过的全部提示）", ""),
+        e(Cmd::NextPage, "页面", "下一页（当前工作区）", "Ctrl PgDn"),
+        e(Cmd::PrevPage, "页面", "上一页（当前工作区）", "Ctrl PgUp"),
         e(Cmd::FocusNextPane, "面板", "聚焦下一个面板", "F6"),
         e(Cmd::FocusPrevPane, "面板", "聚焦上一个面板", "Shift F6"),
         e(Cmd::ToggleMaximize, "面板", "最大化 / 还原当前面板", "Ctrl Shift M"),

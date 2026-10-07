@@ -48,26 +48,28 @@ pub const WS_PROCS: &str = "进程"; // 常驻单元状态与启停（docs/26 S4
 /// 左右两栏——常驻单元的状态与启停、谁在往外发包与流量。两页原本各占一个工作区，
 /// 看「这台机器在花什么」要来回切；UPDS 要求资源一处看全。
 pub const WS_RESOURCES: &str = "资源";
-/// 侧栏的**五组**（docs/35 §5.3，按 UPDS 应用模式分组；2026-09-29 用户采纳方案后重排）。
+/// 侧栏的**六组**（docs/41 §2，2026-10-07 用户指定顺序）。
 ///
-/// 此前（2026-09-18 按用户指定）是「看世界 → 备数据 → 做研究 → 管机器」平铺 15 个图标；
-/// 界面重构把它们按用途分成五组，组名显示在侧栏里，组首工作区有 Ctrl Shift 1–5 直达：
+/// 此前是五组（docs/35 §5.3，按 UPDS 应用模式分组）。docs/41 引入「工作区内的多个页面」后，
+/// 用户重新指定了分组与顺序；组名显示在侧栏里，组首工作区有 Ctrl Shift 1–6 直达：
 ///
-/// | 组 | 工作区 | UPDS 模式 |
-/// |---|---|---|
-/// | 实时 | 官方原生 · 订单流特征 · 实时数据回测 · 全球市场 | 监控终端 |
-/// | 回测 | 策略中心 · 回测 · Tardis 历史回放 | 数据分析 |
-/// | 研究 | Alpha Factory · 订单流层析 · C4 影子 · 期权/0DTE · 预测市场 | 数据分析 / 仪表盘 |
-/// | 数据 | 数据录制 · 接口观察终端 | 仪表盘 |
-/// | 系统 | 资源（进程 + 网络出口）· 新闻资讯 | 设置 / 仪表盘 |
+/// | 组 | 工作区 |
+/// |---|---|
+/// | 图表 | 官方原生 |
+/// | 资讯 | 新闻资讯 · 全球市场 |
+/// | 数据 | 数据录制 · Tardis 历史回放 · 接口观察终端 |
+/// | 研究 | 订单流特征 · 订单流层析 · 策略中心 · Alpha Factory · C4 影子 · 期权/0DTE · 预测市场 |
+/// | 回测 | 回测 · 实时数据回测 |
+/// | 系统 | 资源 |
 ///
 /// 改分组只改这里；[`WORKSPACES`] 必须是它按顺序摊平的结果（有测试钉住）。
-pub const GROUPS: [(&str, &[&str]); 5] = [
-    ("实时", &[WS_OFFICIAL, WS_FEATURES, WS_LIVE, WS_GLOBAL]),
-    ("回测", &[WS_STRATEGY, WS_BACKTEST, WS_TARDIS]),
-    ("研究", &[WS_FACTORY, WS_OFMS, WS_C4, WS_OPTIONS, WS_PREDICTION]),
-    ("数据", &[WS_RECORDER, WS_OBSERVATORY]),
-    ("系统", &[WS_RESOURCES, WS_NEWS]),
+pub const GROUPS: [(&str, &[&str]); 6] = [
+    ("图表", &[WS_OFFICIAL]),
+    ("资讯", &[WS_NEWS, WS_GLOBAL]),
+    ("数据", &[WS_RECORDER, WS_TARDIS, WS_OBSERVATORY]),
+    ("研究", &[WS_FEATURES, WS_OFMS, WS_STRATEGY, WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]),
+    ("回测", &[WS_BACKTEST, WS_LIVE]),
+    ("系统", &[WS_RESOURCES]),
 ];
 
 /// **侧边栏从上到下的顺序**（`main.rs` 按它取 layout）= [`GROUPS`] 按顺序摊平。
@@ -76,22 +78,115 @@ pub const GROUPS: [(&str, &[&str]); 5] = [
 /// 漏了会落到 `_ => Starter` 兜底（有测试钉住）。
 pub const WORKSPACES: [&str; 16] = [
     WS_OFFICIAL,
-    WS_FEATURES,
-    WS_LIVE,
+    WS_NEWS,
     WS_GLOBAL,
-    WS_STRATEGY,
-    WS_BACKTEST,
+    WS_RECORDER,
     WS_TARDIS,
-    WS_FACTORY,
+    WS_OBSERVATORY,
+    WS_FEATURES,
     WS_OFMS,
+    WS_STRATEGY,
+    WS_FACTORY,
     WS_C4,
     WS_OPTIONS,
     WS_PREDICTION,
-    WS_RECORDER,
-    WS_OBSERVATORY,
+    WS_BACKTEST,
+    WS_LIVE,
     WS_RESOURCES,
-    WS_NEWS,
 ];
+
+// ── 工作区内的页面（docs/41 §3）──────────────────────────────────────
+
+/// 页面布局名的分隔符：第一页的布局名就是工作区名（旧存档原样是第一页），其余页是「工作区｜页名」。
+pub const PAGE_SEP: char = '｜';
+
+/// 每个工作区的默认页面（模板）。第一项是**第一页的页签名**（布局名仍是工作区名）。
+/// 没列的工作区只有一页（不显示页签栏）。
+///
+/// 2026-10-07 用户逐个指定（docs/41 §3.2）：面板内部原有的视图 / 分节拆成页面，去掉「总览」页。
+/// 同一面板出现在同一工作区的几页里时，靠 `Settings.view` 锁定各自显示哪个视图（§3.3）；
+/// 几页不会同时显示，共用面板的其余状态正好一致。
+pub const PAGES: [(&str, &[&str]); 11] = [
+    (WS_NEWS, &["新闻", "订阅与检索", "源管理"]),
+    (WS_GLOBAL, &["热图", "筛选器", "全球总览", "市场宽度", "加密全景", "预测市场", "股票全景", "宏观新闻"]),
+    (WS_RECORDER, &["行情录制", "录制明细", "预测市场录制"]),
+    (WS_TARDIS, &["历史面板", "预测市场回放", "自有数据图"]),
+    (WS_FEATURES, &["特征矩阵", "图表参数", "引擎健康", "图表"]),
+    (WS_OFMS, &["层析时间轴", "响应表", "入场形态矩阵", "特征字典"]),
+    (WS_STRATEGY, &["策略库", "七层"]),
+    (WS_FACTORY, &["Alpha Factory", "特征库"]),
+    (WS_PREDICTION, &["币安钱包", "Polymarket"]),
+    (WS_BACKTEST, &["运行", "结果报告", "订单明细"]),
+    (WS_RESOURCES, &["进程", "网络出口", "检查更新"]),
+];
+
+/// 一个面板锁定在某个视图（`Settings.view`）的模板。
+fn locked(kind: &str, view: &str) -> String {
+    format!(r#"{{"{kind}":{{"settings":{{"view":"{view}"}},"link_group":null}}}}"#)
+}
+
+/// 页面模板（含各工作区的第一页）。不在这里的布局名回落到 [`pane_template_base`]。
+fn page_template(layout: &str) -> Option<String> {
+    let ws = workspace_of(layout);
+    let title = page_title(layout);
+    let t = title.as_str();
+    Some(match ws {
+        WS_NEWS => locked("News", t),
+        WS_GLOBAL => locked("MarketMap", t),
+        WS_RECORDER => locked("Recorder", t),
+        WS_OFMS => locked("OfmsLab", t),
+        WS_FEATURES if t != "图表" => locked("FeatureMatrix", t),
+        WS_STRATEGY if t == "七层" => locked("StrategyLayers", t),
+        // 策略库：左策略库 / 详情 / 运行记录 ∣ 右回测结果（七层是单独一页）
+        WS_STRATEGY => r#"{"Split":{"axis":"Vertical","ratio":0.64,"a":{"StrategyCenter":{"settings":{},"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}"#.to_string(),
+        WS_FACTORY if t == "特征库" => locked("FeatureLab", t),
+        WS_FACTORY => locked("Factory", t),
+        WS_PREDICTION if t == "Polymarket" => locked("PredictionBoard", t),
+        WS_PREDICTION => locked("PmBinance", t),
+        WS_TARDIS if t == "历史面板" => locked("TardisBoard", t),
+        WS_TARDIS if t == "预测市场回放" => locked("PmReplay", t),
+        WS_TARDIS => format!(r#"{{"WealthSpring":{{"mode":"SelfChart","settings":{{"view":"{t}"}},"link_group":null}}}}"#),
+        WS_BACKTEST if t == "结果报告" => locked("BacktestResult", t),
+        WS_BACKTEST if t == "订单明细" => format!(r#"{{"WealthSpring":{{"mode":"Backtest","settings":{{"view":"{t}"}},"link_group":null}}}}"#),
+        WS_RESOURCES if t == "网络出口" => locked("NetEgress", t),
+        WS_RESOURCES => locked("Procs", t),
+        _ => return None,
+    })
+}
+
+/// 布局名属于哪个工作区（「回测｜结果报告」→「回测」）。
+pub fn workspace_of(layout_name: &str) -> &str {
+    layout_name.split(PAGE_SEP).next().unwrap_or(layout_name)
+}
+
+/// 布局在页签上显示的名字。
+pub fn page_title(layout_name: &str) -> String {
+    match layout_name.split_once(PAGE_SEP) {
+        Some((_, page)) => page.to_string(),
+        None => PAGES
+            .iter()
+            .find(|(ws, _)| *ws == layout_name)
+            .and_then(|(_, pages)| pages.first())
+            .map_or_else(|| layout_name.to_string(), |p| (*p).to_string()),
+    }
+}
+
+/// 一个工作区的全部页面布局名（模板顺序）。
+pub fn page_layouts(ws: &str) -> Vec<String> {
+    match PAGES.iter().find(|(w, _)| *w == ws) {
+        None => vec![ws.to_string()],
+        Some((_, pages)) => pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| if i == 0 { ws.to_string() } else { format!("{ws}{PAGE_SEP}{p}") })
+            .collect(),
+    }
+}
+
+/// 全部托管布局名（工作区 × 页面），播种与测试用。
+pub fn all_layouts() -> Vec<String> {
+    WORKSPACES.iter().flat_map(|w| page_layouts(w)).collect()
+}
 
 /// 旧工作区名 → 新名迁移表（重命名常量后，把用户已播种的旧 layout 就地改名，不残留孤儿）。
 ///
@@ -139,7 +234,12 @@ pub fn icon(name: &str) -> crate::style::Icon {
 
 /// 每个工作区的 pane 树模板（`data::Pane` 的 JSON）。
 /// 行情 pane 复用真实序列化形态（含 BinanceLinear:BTCUSDT 流），serde 负责解析→流解析由 FS 完成。
-fn pane_template(name: &str) -> &'static str {
+fn pane_template(name: &str) -> String {
+    page_template(name).unwrap_or_else(|| pane_template_base(name).to_string())
+}
+
+/// 各工作区原来的单页模板（页面表没覆盖到的工作区与页仍用它）。
+fn pane_template_base(name: &str) -> &'static str {
     match name {
         // 干净官方热图（无 WS 叠加）。
         WS_OFFICIAL => {
@@ -232,13 +332,18 @@ fn pane_template(name: &str) -> &'static str {
         // 和「网络出口」是邻居：一个管进程、一个管出口。
         // 新闻资讯：**零交易所连接**——全部在 ws-news 守护里，这个 pane 只读快照
         WS_NEWS => r#"{"News":{"settings":{},"link_group":null}}"#,
+        // ── 页面（docs/41 §3.2）：第一页是上面的组合布局，以下是单项放大 ──
+        // 四张图（与第一页同一组：Footprint ∣ Ladder 在上，热图 ∣ Tape 在下）
+        "订单流特征｜图表" => {
+            r#"{"Split":{"axis":"Horizontal","ratio":0.58,"a":{"Split":{"axis":"Vertical","ratio":0.62,"a":{"KlineChart":{"layout":{"splits":[0.8],"autoscale":"CenterLatest"},"kind":{"Footprint":{"clusters":"BidAsk","scaling":"VisibleRange","studies":[{"Imbalance":{"threshold":200,"color_scale":null,"ignore_zeros":true}}]}},"stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}},{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":5,"visual_config":null,"selected_basis":{"Time":"M1"}},"indicators":["Volume"],"link_group":null}},"b":{"Ladder":{"stream_type":[{"Depth":{"ticker":"BinanceLinear:BTCUSDT","depth_aggr":"Client","push_freq":"ServerDefault"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":null},"link_group":null}}}},"b":{"Split":{"axis":"Vertical","ratio":0.68,"a":{"ShaderHeatmap":{"studies":[{"VolumeProfile":"VisibleRange"}],"stream_type":[{"Depth":{"ticker":"BinanceLinear:BTCUSDT","depth_aggr":"Client","push_freq":"ServerDefault"}},{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":5,"visual_config":null,"selected_basis":{"Time":"MS100"}},"indicators":["Volume"],"link_group":null}},"b":{"TimeAndSales":{"stream_type":[{"Trades":{"ticker":"BinanceLinear:BTCUSDT"}}],"settings":{"tick_multiply":null,"visual_config":null,"selected_basis":null},"link_group":null}}}}}}"#
+        }
         _ => r#"{"Starter":{"link_group":null}}"#,
     }
 }
 
 /// 把模板 JSON 构成运行期 `Dashboard`（解析 `data::Pane` → configuration → from_config）。
 fn dashboard_from_template(name: &str) -> Option<Dashboard> {
-    let pane: data::Pane = serde_json::from_str(pane_template(name))
+    let pane: data::Pane = serde_json::from_str(&pane_template(name))
         .inspect_err(|e| log::error!("WS workspace `{name}` 模板解析失败: {e}"))
         .ok()?;
     let layout_id = Uuid::new_v4();
@@ -295,8 +400,29 @@ pub fn ensure_seeded(manager: &mut LayoutManager) -> usize {
             log::info!("WS workspaces: 迁移 `{old}` → `{new}`");
         }
     }
+    // 页面表改了（如去掉「总览」页）：旧的页面布局删掉，不留在页签栏上（docs/41）。
+    // 正在看的那一页被删时，活动布局改到它所属工作区的第一页
+    let keep = all_layouts();
+    let stale: Vec<(Uuid, String)> = manager
+        .layouts
+        .iter()
+        .filter(|l| l.id.name.contains(PAGE_SEP) && !keep.contains(&l.id.name))
+        .map(|l| (l.id.unique, l.id.name.clone()))
+        .collect();
+    if !stale.is_empty() {
+        let active = manager.active_layout_id().map(|l| l.unique);
+        manager.layouts.retain(|l| !stale.iter().any(|(u, _)| *u == l.id.unique));
+        if let Some((_, n)) = stale.iter().find(|(u, _)| Some(*u) == active) {
+            let base = workspace_of(n).to_string();
+            if let Some(u) = manager.layouts.iter().find(|l| l.id.name == base).map(|l| l.id.unique) {
+                let _ = manager.set_active_layout(u);
+            }
+        }
+        log::info!("WS workspaces: 去掉旧页面 {:?}", stale.iter().map(|(_, n)| n).collect::<Vec<_>>());
+    }
     let mut added = 0;
-    for name in WORKSPACES {
+    for name in all_layouts() {
+        let name = name.as_str();
         let Some(dashboard) = dashboard_from_template(name) else {
             continue;
         };
@@ -326,6 +452,64 @@ mod tests {
         assert!(!is_leftover_default("Layout 1", &real), "里面放过真面板的要保留");
     }
 
+    /// docs/41 §2：用户指定的分组与顺序，钉死防手滑。
+    #[test]
+    fn 侧栏按用户指定的六组排序() {
+        let names: Vec<&str> = GROUPS.iter().map(|(g, _)| *g).collect();
+        assert_eq!(names, ["图表", "资讯", "数据", "研究", "回测", "系统"]);
+        assert_eq!(GROUPS[3].1, [WS_FEATURES, WS_OFMS, WS_STRATEGY, WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]);
+    }
+
+    /// 页面：第一页的布局名就是工作区名（旧存档 = 第一页），其余页「工作区｜页名」；名字能双向还原。
+    #[test]
+    fn 页面命名与归属() {
+        assert_eq!(page_layouts(WS_RESOURCES), ["资源", "资源｜网络出口", "资源｜检查更新"]);
+        assert_eq!(page_title(WS_RESOURCES), "进程");
+        assert!(PAGES.iter().all(|(_, p)| !p.contains(&"总览")), "用户要求去掉「总览」页");
+        // 锁定视图的页面：模板里写着 view，且与面板的视图标签一致
+        assert!(pane_template("新闻资讯｜源管理").contains(r#""view":"源管理""#));
+        assert!(pane_template(WS_GLOBAL).contains(r#""view":"热图""#));
+        assert!(pane_template("订单流层析｜特征字典").contains(r#""view":"特征字典""#));
+        assert!(pane_template("资源｜检查更新").contains(r#""view":"检查更新""#));
+        // 单面板的页：面板配置里都写着页名（标题栏显示页名）；多面板组合页不写（各面板保留自己的名字）
+        for (ws, pages) in PAGES {
+            for (i, p) in pages.iter().enumerate() {
+                let name = if i == 0 { ws.to_string() } else { format!("{ws}{PAGE_SEP}{p}") };
+                let tpl = pane_template(&name);
+                if !tpl.contains("\"Split\"") {
+                    assert!(tpl.contains(&format!(r#""view":"{p}""#)), "`{name}` 的面板没写页名：{tpl}");
+                }
+            }
+        }
+        assert_eq!(page_layouts(WS_C4), [WS_C4]);
+        assert_eq!(workspace_of("回测｜结果报告"), WS_BACKTEST);
+        assert_eq!(workspace_of(WS_BACKTEST), WS_BACKTEST);
+        assert_eq!(page_title(WS_BACKTEST), "运行");
+        assert_eq!(page_title("回测｜结果报告"), "结果报告");
+        assert_eq!(page_title(WS_C4), WS_C4);
+        for (ws, pages) in PAGES {
+            assert!(WORKSPACES.contains(&ws), "页面表里的 `{ws}` 不是现役工作区");
+            assert!(pages.len() >= 2, "`{ws}` 只有一页就不必写进 PAGES");
+            assert!(!ws.contains(PAGE_SEP), "工作区名里不能有页面分隔符");
+        }
+        let all = all_layouts();
+        let mut dedup = all.clone();
+        dedup.sort();
+        dedup.dedup();
+        assert_eq!(all.len(), dedup.len(), "页面布局名重复");
+    }
+
+    /// 页面表改动后，旧的页面布局被清掉（「资源｜总览」之类不会残留在页签栏上）。
+    #[test]
+    fn 旧页面布局被清掉() {
+        let mut m = LayoutManager::new();
+        let dash = dashboard_from_template(WS_NEWS).expect("模板");
+        m.insert_layout(LayoutId { unique: Uuid::new_v4(), name: "资源｜总览".to_string() }, dash);
+        ensure_seeded(&mut m);
+        assert!(m.layouts.iter().all(|l| l.id.name != "资源｜总览"));
+        assert!(m.layouts.iter().any(|l| l.id.name == "资源｜检查更新"));
+    }
+
     #[test]
     fn 侧栏顺序等于分组摊平() {
         let flat: Vec<&str> = GROUPS.iter().flat_map(|(_, ws)| ws.iter().copied()).collect();
@@ -336,10 +520,11 @@ mod tests {
     /// （`dashboard_from_template` 只记 error 后跳过）。加 pane 时容易写错，这里锁死。
     #[test]
     fn every_workspace_template_parses() {
-        for name in WORKSPACES {
+        for name in all_layouts() {
+            let name = name.as_str();
             let raw = pane_template(name);
             assert!(
-                serde_json::from_str::<data::Pane>(raw).is_ok(),
+                serde_json::from_str::<data::Pane>(&raw).is_ok(),
                 "工作区 `{name}` 模板不是合法 data::Pane: {raw}"
             );
         }
@@ -360,7 +545,7 @@ mod tests {
     /// 它们是工作区的组成部分，不各自独占一个。
     #[test]
     fn every_panel_kind_has_a_workspace_to_reach_it() {
-        let templates: String = WORKSPACES.iter().map(|n| pane_template(n)).collect();
+        let templates: String = all_layouts().iter().map(|n| pane_template(n)).collect();
         // 只读面板类：没有 ticker、不吃行情流，各自是一个独立用途的页面。
         for kind in [
             "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "FeatureMatrix", "StrategyCenter", "StrategyLayers", "OfmsLab", "TardisBoard",
@@ -403,7 +588,8 @@ mod tests {
     /// 模板不得落到 `_ => Starter` 兜底（写错常量名/漏加 match 臂的典型症状）。
     #[test]
     fn no_workspace_falls_back_to_starter() {
-        for name in WORKSPACES {
+        for name in all_layouts() {
+            let name = name.as_str();
             assert!(
                 !pane_template(name).contains("Starter"),
                 "工作区 `{name}` 落到了 Starter 兜底模板"
@@ -580,7 +766,8 @@ mod replay_mode_tests {
         let names: Vec<&str> = m.layouts.iter().map(|l| l.id.name.as_str()).collect();
         assert_eq!(names.iter().filter(|n| **n == WS_RESOURCES).count(), 1, "{names:?}");
         assert!(!names.contains(&WS_PROCS) && !names.contains(&WS_EGRESS), "不留孤儿：{names:?}");
-        let tpl = pane_template(WS_RESOURCES);
+        // docs/41：资源拆成三页——进程、网络出口、检查更新都要能到
+        let tpl: String = page_layouts(WS_RESOURCES).iter().map(|n| pane_template(n)).collect();
         assert!(tpl.contains("\"Procs\"") && tpl.contains("\"NetEgress\""), "两个面板都要在");
     }
 
@@ -603,7 +790,7 @@ mod replay_mode_tests {
     /// （手动加了也活不过重启）。
     #[test]
     fn selfchart_仍有工作区容身() {
-        let templates: String = WORKSPACES.iter().map(|n| pane_template(n)).collect();
+        let templates: String = all_layouts().iter().map(|n| pane_template(n)).collect();
         assert!(
             templates.contains("\"SelfChart\""),
             "SelfChart 没有任何工作区模板引用它——用户加了也活不过重启"

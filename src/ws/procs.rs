@@ -314,6 +314,11 @@ pub fn start() {
     });
 }
 
+/// 只读上一轮的结果，**不**唤醒轮询（页签角标用：不能因为画角标就让进程页一直在后台查 systemctl）。
+pub fn rows_cached() -> Vec<Row> {
+    ROWS.get().and_then(|m| m.lock().ok()).map(|g| g.clone()).unwrap_or_default()
+}
+
 pub fn rows() -> Vec<Row> {
     DEMAND.touch();
     start();

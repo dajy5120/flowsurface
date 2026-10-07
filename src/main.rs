@@ -152,6 +152,12 @@ fn shortcut(
     }
     let (ctrl, shift, alt) = (modifiers.control(), modifiers.shift(), modifiers.alt());
     let cmd = match key.as_ref() {
+        // 页面（docs/41 §3.4）：Ctrl PgUp / PgDn 前后页；Alt 1–9 第 n 页（Ctrl 1–9 已是「聚焦第 n 个面板」）
+        keyboard::Key::Named(Named::PageDown) if ctrl => Some(Cmd::NextPage),
+        keyboard::Key::Named(Named::PageUp) if ctrl => Some(Cmd::PrevPage),
+        keyboard::Key::Character(c) if alt && !ctrl && !shift && matches!(c.parse::<usize>(), Ok(1..=9)) => {
+            Some(Cmd::Page(c.parse::<usize>().unwrap_or(1) - 1))
+        }
         keyboard::Key::Named(Named::F6) => Some(if shift {
             Cmd::FocusPrevPane
         } else {
@@ -179,8 +185,8 @@ fn shortcut(
                 (true, false, "d") => Some(Cmd::ToggleDataTable),
                 (false, true, "t") => Some(Cmd::CycleTheme),
                 (false, true, "d") => Some(Cmd::CycleDensity),
-                // Ctrl Shift 1–5：各组的第一个工作区
-                (true, false, d @ ("1" | "2" | "3" | "4" | "5")) => {
+                // Ctrl Shift 1–6：各组的第一个工作区（docs/41 §2）
+                (true, false, d @ ("1" | "2" | "3" | "4" | "5" | "6")) => {
                     let i = d.parse::<usize>().unwrap_or(1) - 1;
                     ws::workspace::GROUPS
                         .get(i)
@@ -210,6 +216,8 @@ struct Flowsurface {
     theme: data::Theme,
     notifications: Notifications,
     ws_active: Option<ws::active_run::ActiveRun>, // WealthSpring 三态：当前活动 run（None=实时看盘）
+    /// 每个工作区上次停留的页面（docs/41 §1）：侧栏点工作区回到这一页
+    last_page: std::collections::HashMap<String, uuid::Uuid>,
     ws_orders: ws::orders::OrderState,            // WealthSpring 订单/PnL（events.* 聚合，F3）
     ws_flow: ws::flow::FlowState,                 // WealthSpring 订单流：CVD/不平衡/背离（F4a）
     ws_factory: ws::factory::FactoryPool,         // WealthSpring Factory 现役池（F4c）
@@ -331,6 +339,7 @@ impl Flowsurface {
             notifications: Notifications::new(),
             network: NetworkManager::new(saved_state.proxy_cfg),
             ws_active: None,
+            last_page: std::collections::HashMap::new(),
             ws_orders: ws::orders::OrderState::default(),
             ws_flow: ws::flow::FlowState::default(),
             ws_factory: ws::factory::FactoryPool::default(),
@@ -380,9 +389,9 @@ impl Flowsurface {
         }
         // 样张模式：按侧栏顺序排好要截的工作区
         if let Some(sp) = state.specimen.as_mut() {
-            for name in ws::workspace::WORKSPACES {
+            for name in ws::workspace::all_layouts() {
                 if let Some(l) = state.layout_manager.layouts.iter().find(|l| l.id.name == name) {
-                    sp.queue.push((l.id.unique, name.to_string()));
+                    sp.queue.push((l.id.unique, name.clone()));
                 }
             }
             // 只截某一个工作区（性能对照等场景：WS_UI_SPECIMEN_ONLY=新闻资讯）
@@ -600,17 +609,25 @@ impl Flowsurface {
                         s.min_qty,
                         None,
                     );
-                    if let Some(l) = self
+                    for l in self
                         .layout_manager
                         .layouts
                         .iter_mut()
-                        .find(|l| l.id.name == ws::workspace::WS_FEATURES)
+                        .filter(|l| ws::workspace::workspace_of(&l.id.name) == ws::workspace::WS_FEATURES)
                     {
                         let _ = l.dashboard.reset_chart_panes_to(main_window_id, Some(ti));
                     }
                 }
                 // 订单流特征工作区的图上设置（K 线周期、Footprint 失衡阈值）发布给「图表参数」视图比对口径
-                if let Some(l) = self.layout_manager.layouts.iter().find(|l| l.id.name == ws::workspace::WS_FEATURES) {
+                // 多页时取正在看的那一页（在这个工作区里的话），否则第一页
+                let active_uid = self.layout_manager.active_layout_id().map(|l| l.unique);
+                let feat = self
+                    .layout_manager
+                    .layouts
+                    .iter()
+                    .filter(|l| ws::workspace::workspace_of(&l.id.name) == ws::workspace::WS_FEATURES)
+                    .max_by_key(|l| (Some(l.id.unique) == active_uid, l.id.name == ws::workspace::WS_FEATURES));
+                if let Some(l) = feat {
                     ws::chart_params::publish_pane_charts(l.dashboard.pane_charts(main_window_id));
                 }
 
@@ -767,6 +784,9 @@ impl Flowsurface {
 
                     if dashboard.go_back(main_window) {
                         return Task::none();
+                    } else if dashboard.panes.maximized().is_some() {
+                        // 最大化的面板先还原（docs/41 §4.1）
+                        dashboard.panes.restore();
                     } else if dashboard.focus.is_some() {
                         dashboard.focus = None;
                     } else {
@@ -1203,15 +1223,15 @@ impl Flowsurface {
         let content = if id == self.main_window.id {
             // WealthSpring 工作区（docs/08 F6 — P1）：按固定顺序取 5 个工作区的 (uuid, 名, 是否活动)，
             // 合并进 FS 原生侧边栏顶部（单一侧边栏，图标切换不同窗口）。
-            let active_layout = self.layout_manager.active_layout_id().map(|l| l.unique);
-            let workspaces: Vec<(uuid::Uuid, &'static str, bool)> = ws::workspace::WORKSPACES
+            // 页面（docs/41）：侧栏一个工作区一个图标，点了回到它上次停留的页；当前页属于它就算激活
+            let active_name = self.layout_manager.active_layout_id().map(|l| l.name.clone()).unwrap_or_default();
+            let active_ws = ws::workspace::workspace_of(&active_name).to_string();
+            let workspaces: Vec<(uuid::Uuid, &'static str, bool, Option<&'static str>)> = ws::workspace::WORKSPACES
                 .iter()
                 .filter_map(|&name| {
-                    self.layout_manager
-                        .layouts
-                        .iter()
-                        .find(|l| l.id.name == name)
-                        .map(|l| (l.id.unique, name, active_layout == Some(l.id.unique)))
+                    self.workspace_target(name).map(|uid| {
+                        (uid, name, active_ws == name, self.workspace_badge(name).map(|b| b.glyph()))
+                    })
                 })
                 .collect();
 
@@ -1229,6 +1249,36 @@ impl Flowsurface {
                         layout_id: None,
                         event: msg,
                     }),
+            };
+
+            // 页签栏（docs/41 §3）：当前工作区的页面；只有一页的工作区不显示
+            let pages = self.pages_of(&active_ws);
+            let dashboard_view: Element<'_, Message> = if self.gallery.is_some() || pages.len() <= 1 {
+                dashboard_view
+            } else {
+                let cur = self.layout_manager.active_layout_id().map(|l| l.unique).unwrap_or_default();
+                let bt = self.backtest_running();
+                let tabs: Vec<ui::shell::PageTab<uuid::Uuid>> = pages
+                    .into_iter()
+                    .map(|(uid, n)| ui::shell::PageTab {
+                        label: ws::workspace::page_title(&n),
+                        badge: self
+                            .layout_manager
+                            .layouts
+                            .iter()
+                            .find(|l| l.id.unique == uid)
+                            .and_then(|l| ws::page_status::of(&l.dashboard, bt))
+                            .map(|b| b.glyph()),
+                        value: uid,
+                    })
+                    .collect();
+                column![
+                    ui::shell::page_bar(tabs, &cur, |uid| Message::Layouts(
+                        modal::layout_manager::Message::SelectActive(uid)
+                    )),
+                    dashboard_view,
+                ]
+                .into()
             };
 
             let header_title = {
@@ -1383,7 +1433,11 @@ impl Flowsurface {
         // 故即便后台正跑回测，「实盘」工作区图表仍是实时；切到「回测」才看回测行情。
         // 数据源跟随活动工作区：回测 / Tardis 历史回放→replay；回测另加 result.json 桥；
         // 其余→实时。回放工作区共用同一条 `ws:bt:{run}:trades` 入图链路（docs/20 Phase 5）。
-        let active_ws = self.layout_manager.active_layout_id().map(|l| l.name.clone());
+        // 页面（docs/41）：「回测｜结果报告」也属于「回测」工作区
+        let active_ws = self
+            .layout_manager
+            .active_layout_id()
+            .map(|l| ws::workspace::workspace_of(&l.name).to_string());
         let is_backtest = active_ws.as_deref() == Some(ws::workspace::WS_BACKTEST);
         let is_tardis = active_ws.as_deref() == Some(ws::workspace::WS_TARDIS);
         // 回放态：开 replay 订阅 + 关实时流（否则实时行情会盖掉回放，且历史 K 线落在
@@ -1549,6 +1603,49 @@ impl Flowsurface {
         ])
     }
 
+    /// 一个工作区的全部页面 (uid, 布局名)：先模板顺序，再是模板外的（以后用户自建的页）。
+    fn pages_of(&self, wsn: &str) -> Vec<(uuid::Uuid, String)> {
+        let mut out: Vec<(uuid::Uuid, String)> = ws::workspace::page_layouts(wsn)
+            .into_iter()
+            .filter_map(|n| self.layout_manager.layouts.iter().find(|l| l.id.name == n).map(|l| (l.id.unique, n)))
+            .collect();
+        for l in &self.layout_manager.layouts {
+            if ws::workspace::workspace_of(&l.id.name) == wsn && !out.iter().any(|(u, _)| *u == l.id.unique) {
+                out.push((l.id.unique, l.id.name.clone()));
+            }
+        }
+        out
+    }
+
+    fn current_pages(&self) -> Vec<(uuid::Uuid, String)> {
+        let name = self.layout_manager.active_layout_id().map(|l| l.name.clone()).unwrap_or_default();
+        self.pages_of(ws::workspace::workspace_of(&name))
+    }
+
+    /// 侧栏点工作区去哪一页：上次停留的（还在的话），否则第一页。
+    fn workspace_target(&self, wsn: &str) -> Option<uuid::Uuid> {
+        let pages = self.pages_of(wsn);
+        self.last_page
+            .get(wsn)
+            .filter(|u| pages.iter().any(|(p, _)| p == *u))
+            .copied()
+            .or_else(|| pages.first().map(|(u, _)| *u))
+    }
+
+    fn backtest_running(&self) -> bool {
+        self.ws_active.as_ref().is_some_and(|a| a.mode == "backtest")
+    }
+
+    /// 一个工作区的角标：它所有页面里最严重的那个。
+    fn workspace_badge(&self, wsn: &str) -> Option<ws::page_status::Badge> {
+        let bt = self.backtest_running();
+        self.pages_of(wsn)
+            .iter()
+            .filter_map(|(u, _)| self.layout_manager.layouts.iter().find(|l| l.id.unique == *u))
+            .filter_map(|l| ws::page_status::of(&l.dashboard, bt))
+            .max()
+    }
+
     fn active_dashboard(&self) -> &Dashboard {
         let active_layout = self
             .layout_manager
@@ -1609,13 +1706,29 @@ impl Flowsurface {
         use ui::command::Cmd;
         let main = self.main_window.id;
         match cmd {
+            Cmd::Page(i) => {
+                let pages = self.current_pages();
+                if let Some((uid, _)) = pages.get(i) {
+                    return self.update(Message::Layouts(modal::layout_manager::Message::SelectActive(*uid)));
+                }
+            }
+            Cmd::NextPage | Cmd::PrevPage => {
+                let pages = self.current_pages();
+                let cur = self.layout_manager.active_layout_id().map(|l| l.unique);
+                if pages.len() > 1 {
+                    let at = pages.iter().position(|(u, _)| Some(*u) == cur).unwrap_or(0);
+                    let n = pages.len();
+                    let to = if matches!(cmd, Cmd::NextPage) { (at + 1) % n } else { (at + n - 1) % n };
+                    return self.update(Message::Layouts(modal::layout_manager::Message::SelectActive(pages[to].0)));
+                }
+            }
             Cmd::Workspace(name) => {
-                let uid = self
-                    .layout_manager
-                    .layouts
-                    .iter()
-                    .find(|l| l.id.name == name)
-                    .map(|l| l.id.unique);
+                // 工作区名 → 回到它上次停留的页面；也接受具体页面的布局名
+                let uid = if name.contains(ws::workspace::PAGE_SEP) {
+                    self.layout_manager.layouts.iter().find(|l| l.id.name == name).map(|l| l.id.unique)
+                } else {
+                    self.workspace_target(&name)
+                };
                 if let Some(uid) = uid {
                     return self.update(Message::Layouts(
                         modal::layout_manager::Message::SelectActive(uid),
@@ -1837,7 +1950,10 @@ impl Flowsurface {
             workspace: self
                 .layout_manager
                 .active_layout_id()
-                .map(|l| l.name.clone())
+                .map(|l| {
+                    let w = ws::workspace::workspace_of(&l.name);
+                    if w == l.name { w.to_string() } else { format!("{w} · {}", ws::workspace::page_title(&l.name)) }
+                })
                 .unwrap_or_default(),
             env: ui::shell::Env::from_badge(&badge.label),
             env_label: badge.label,
@@ -1863,7 +1979,9 @@ impl Flowsurface {
         if let Some(l) = self.layout_manager.layouts.iter().find(|l| l.id.unique == layout_uid) {
             ui::perf::switch_started(&l.id.name);
             // 工作区缺省密度（docs/35 §5.3）：「系统」组在紧凑下改用舒适
-            let system = ws::workspace::GROUPS.iter().any(|(g, names)| *g == "系统" && names.contains(&l.id.name.as_str()));
+            let wsn = ws::workspace::workspace_of(&l.id.name).to_string();
+            let system = ws::workspace::GROUPS.iter().any(|(g, names)| *g == "系统" && names.contains(&wsn.as_str()));
+            self.last_page.insert(wsn, layout_uid);
             if ui::set_system_workspace(system) {
                 self.apply_ui_change();
             }

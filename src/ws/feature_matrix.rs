@@ -673,6 +673,17 @@ pub fn state() -> ViewState {
 }
 
 /// 处理一条面板消息。返回 `Some(x)` = 请上层把表头横向滚到 `x`（与表体同步）。
+/// 页面锁定视图（docs/41 §3.3）：按标签设视图，已是这个视图就什么都不做。
+pub fn lock_view(label: &str) {
+    if let Some(v) = View::ALL.into_iter().find(|v| v.label() == label) {
+        if let Ok(mut g) = cell().lock() {
+            if g.view != v {
+                g.view = v;
+            }
+        }
+    }
+}
+
 pub fn handle(m: FeatureMatrixMsg) -> Option<f32> {
     match m {
         FeatureMatrixMsg::TableScrolled(x) => return Some(x),

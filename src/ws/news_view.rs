@@ -143,7 +143,13 @@ pub fn source_lamp(s: &SourceRow) -> (&'static str, Color, String) {
     ("●", crate::ui::pal::ok(), String::new())
 }
 
-pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
+pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, NewsMsg> {
+    // 页面锁定视图（docs/41 §3.3）：切换在顶部页签上，面板里不再画
+    if let Some(x) = lock.and_then(|l| View::ALL.into_iter().find(|v| v.label() == l)) {
+        if ro::view() != x {
+            ro::set_view(x);
+        }
+    }
     let st = ro::snapshot();
     let mut body = column![].spacing(4).padding(crate::ui::metrics::space(3));
 
@@ -180,7 +186,7 @@ pub fn pane_body<'a>() -> Element<'a, NewsMsg> {
     // 源健康和源管理放到第二个视图里——它们重要，但不是每次打开都要看的
     let v = ro::view();
     let mut vr = row![].spacing(4).align_y(iced::Alignment::Center);
-    for x in View::ALL {
+    for x in View::ALL.into_iter().filter(|_| lock.is_none()) {
         vr = vr.push(chip_on(x.label(), x == v, NewsMsg::SetView(x)));
     }
     // 有源出问题时，在「新闻」视图上也要看得见——否则一个源死了

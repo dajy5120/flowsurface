@@ -412,8 +412,17 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
     col.into()
 }
 
-pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
+pub fn pane_body<'a>(app: &'a RecorderPaneState, lock: Option<&str>) -> Element<'a, RecorderMsg> {
     let st = super::recorder_readout::snapshot();
+    // 页面锁定（docs/41）：④ 录制明细、⑥ 预测市场录制各是一页；「行情录制」页是其余各区
+    let page = |el: Element<'a, RecorderMsg>| -> Element<'a, RecorderMsg> {
+        container(scrollable(column![el].padding(crate::ui::metrics::space(4)))).width(Length::Fill).height(Length::Fill).into()
+    };
+    match lock {
+        Some("录制明细") => return page(details(app, &st)),
+        Some("预测市场录制") => return page(pm_section()),
+        _ => {}
+    }
 
     let config = column![
         text("录制驾驶舱 — 24/7 守护录制控制").size(crate::ui::text::s_title()).color(crate::ui::pal::head()),
@@ -646,11 +655,11 @@ pub fn pane_body(app: &RecorderPaneState) -> Element<'_, RecorderMsg> {
             vgap(14.0),
             body,
             vgap(14.0),
-            details(app, &st),
+            if lock.is_none() { details(app, &st) } else { column![].into() },
             vgap(14.0),
             coverage(app, &st),
             vgap(14.0),
-            pm_section(),
+            if lock.is_none() { pm_section() } else { column![].into() },
         ]
         .spacing(10)
         .padding(crate::ui::metrics::space(4)),

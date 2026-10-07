@@ -718,8 +718,9 @@ impl State {
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
         } else if !matches!(self.content, Content::Starter) {
             // WS 自研面板：统一的标题栏标题 + 状态位（docs/35 §5.1，见 ws::panel_status）
+            // 页面里的面板（docs/41）：配置里有页名（`Settings.view`）就显示页名
             top_left_buttons = top_left_buttons.push(
-                text(self.content.to_string())
+                text(self.settings.view.clone().unwrap_or_else(|| self.content.to_string()))
                     .size(crate::ui::text::s_body())
                     .color(crate::ui::pal::head())
                     .align_y(Alignment::Center)
@@ -843,7 +844,7 @@ impl State {
             Content::News => {
                 // 新闻资讯（docs/25）：渲染走 ws::news_readout 旁路快照。
                 // **面板里没有一行网络代码**——连接全在 ws-news 守护里
-                let base = crate::ws::news_view::pane_body()
+                let base = crate::ws::news_view::pane_body(self.settings.view.as_deref())
                     .map(move |m| Message::PaneEvent(id, Event::NewsInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -857,7 +858,7 @@ impl State {
             }
             Content::Procs => {
                 // 进程页：清单与状态在 ws::procs，这里只把消息包成 pane 事件
-                let base = crate::ws::procs_view::pane_body(&crate::ws::procs::note())
+                let base = crate::ws::procs_view::pane_body(&crate::ws::procs::note(), self.settings.view.as_deref())
                     .map(move |m| Message::PaneEvent(id, Event::ProcsInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -944,7 +945,7 @@ impl State {
             }
             Content::OfmsLab => {
                 // 订单流层析（docs/40）：OFMS-10 时间轴 · 因果链 · 特征字典
-                let base = crate::ws::ofms_lab_view::pane_body()
+                let base = crate::ws::ofms_lab_view::pane_body(self.settings.view.as_deref())
                     .map(move |m| Message::PaneEvent(id, Event::OfmsLabInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -987,7 +988,7 @@ impl State {
                 // 特征矩阵（docs/31 §8.1）：只读 ~/ws-data/cockpit/feature_matrix.json，
                 // 由 wealthspring-features 的引擎周期性写出。**零交易所流、零计算**。
                 // 筛选/视图切换发 FeatureMatrixMsg → 包成 pane 事件。
-                let base = crate::ws::feature_matrix_view::pane_body(crate::ws::inspector_props::hosted(id))
+                let base = crate::ws::feature_matrix_view::pane_body(crate::ws::inspector_props::hosted(id), self.settings.view.as_deref())
                     .map(move |m| Message::PaneEvent(id, Event::FeatureMatrixInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -1044,7 +1045,7 @@ impl State {
             Content::MarketMap => {
                 // 全市场雷达（docs/22 P0b）：树图 + 排行，渲染走 ws::radar_readout 旁路快照
                 // （radar_board.json）；顶部按钮发 RadarMsg → 包成 pane 事件。
-                let base = crate::ws::radar_view::pane_body()
+                let base = crate::ws::radar_view::pane_body(self.settings.view.as_deref())
                     .map(move |m| Message::PaneEvent(id, Event::RadarInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -1094,7 +1095,7 @@ impl State {
             }
             Content::Recorder(rec) => {
                 // 录制驾驶舱（docs/08 F6-P3）：交互视图发 RecorderMsg → 包成 pane 事件。
-                let base = crate::ws::recorder_view::pane_body(rec)
+                let base = crate::ws::recorder_view::pane_body(rec, self.settings.view.as_deref())
                     .map(move |m| Message::PaneEvent(id, Event::RecorderInteraction(m)));
                 self.compose_stack_view(
                     base,

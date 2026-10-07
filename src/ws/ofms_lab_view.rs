@@ -26,15 +26,14 @@ const LANES: [(u8, &str, f32); 7] = [
     (6, "L6–L10 策略", 0.8),
 ];
 
-pub fn pane_body<'a>() -> Element<'a, OfMsg> {
+pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, OfMsg> {
+    if let Some(l) = lock {
+        ol::lock_tab(l);
+    }
     let v = ol::view();
-    let mut col = column![w::panel_header(
-        "订单流层析",
-        Some(w::tabs(&[("层析时间轴", OfTab::Timeline), ("响应表", OfTab::Response), ("入场形态矩阵", OfTab::Setups),
-                       ("特征字典", OfTab::Dictionary)], &v.tab, OfMsg::Tab)),
-        vec![],
-    )]
-    .spacing(space(2));
+    // 页面锁定了视图：切换在顶部页签上（docs/41），面板里不再画第二层页签
+    let tabs = lock.is_none().then(|| w::tabs(&ol::TABS.map(|(t, n)| (n, t)), &v.tab, OfMsg::Tab));
+    let mut col = column![w::panel_header("订单流层析", tabs, vec![])].spacing(space(2));
     let body: Element<'a, OfMsg> = match v.tab {
         OfTab::Timeline => timeline_tab(&v),
         OfTab::Response => response_tab(&v),

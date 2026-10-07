@@ -356,6 +356,25 @@ pub struct View {
     pub live_minutes: u32,
 }
 
+/// 页签状态角标（docs/41 §3.4）：在生成窗口 / 叠加评估 / 实时 tail。
+pub fn busy() -> bool {
+    ST.get().and_then(|m| m.lock().ok()).is_some_and(|g| g.running || g.overlay_running || g.live)
+}
+
+/// 页面锁定视图（docs/41 §3.3）：订单流层析的四个视图各是一页。
+pub const TABS: [(OfTab, &str); 4] =
+    [(OfTab::Timeline, "层析时间轴"), (OfTab::Response, "响应表"), (OfTab::Setups, "入场形态矩阵"), (OfTab::Dictionary, "特征字典")];
+
+pub fn lock_tab(label: &str) {
+    if let Some((t, _)) = TABS.iter().find(|(_, n)| *n == label) {
+        with(|g| {
+            if g.tab != *t {
+                g.tab = *t;
+            }
+        });
+    }
+}
+
 pub fn view() -> View {
     let need_dict = with(|g| {
         let go = g.dict.is_none() && !g.dict_loading && g.dict_err.is_empty();

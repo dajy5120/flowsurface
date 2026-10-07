@@ -2935,7 +2935,25 @@ fn breadth_view<'a>(rows: &[BreadthRow], v: ViewState, fetched: i64) -> Element<
 
 // ───────────────────────── 面板体 ─────────────────────────
 
-pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
+/// 视图与页签名（docs/41：全球市场的八个视图各是一页）。
+pub const VIEWS: [(ViewMode, &str); 8] = [
+    (ViewMode::Heatmap, "热图"),
+    (ViewMode::Screener, "筛选器"),
+    (ViewMode::Overview, "全球总览"),
+    (ViewMode::Breadth, "市场宽度"),
+    (ViewMode::Crypto, "加密全景"),
+    (ViewMode::Prediction, "预测市场"),
+    (ViewMode::Equity, "股票全景"),
+    (ViewMode::Macro, "宏观新闻"),
+];
+
+pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
+    // 页面锁定视图：切换在顶部页签上，面板里不再画那一排
+    if let Some((m, _)) = lock.and_then(|l| VIEWS.iter().find(|(_, n)| *n == l)) {
+        if super::radar::view().mode != *m {
+            super::radar::handle(RadarMsg::SetMode(*m));
+        }
+    }
     // Arc：每帧只是引用计数加一，不再深拷贝整份读数（见 snapshot 的说明）
     let st = super::radar_readout::snapshot();
     let v = super::radar::view();
@@ -3077,20 +3095,13 @@ pub fn pane_body<'a>() -> Element<'a, RadarMsg> {
     }
 
     // ── 视图切换 ──
-    let mut mr = row![text("视图 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
-    for (m, l) in [
-        (ViewMode::Heatmap, "热图"),
-        (ViewMode::Screener, "筛选器"),
-        (ViewMode::Overview, "全球总览"),
-        (ViewMode::Breadth, "市场宽度"),
-        (ViewMode::Crypto, "加密全景"),
-        (ViewMode::Prediction, "预测市场"),
-        (ViewMode::Equity, "股票全景"),
-        (ViewMode::Macro, "宏观新闻"),
-    ] {
-        mr = mr.push(chip(l, m == v.mode, RadarMsg::SetMode(m)));
+    if lock.is_none() {
+        let mut mr = row![text("视图 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
+        for (m, l) in VIEWS {
+            mr = mr.push(chip(l, m == v.mode, RadarMsg::SetMode(m)));
+        }
+        body = body.push(mr.align_y(iced::Alignment::Center));
     }
-    body = body.push(mr.align_y(iced::Alignment::Center));
     // 表达形式**单独一行**（官方页面左上角那三个小图标）。热图页没有这个
     // 选择——它本来就是热图。
     if v.mode == ViewMode::Screener {

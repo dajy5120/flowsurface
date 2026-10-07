@@ -20,6 +20,7 @@ pub mod strategy_layers;
 pub mod strategy_layers_view;
 pub mod ofms_lab;
 pub mod ofms_lab_view;
+pub mod page_status;
 pub mod c4;
 pub mod chart_kit;
 pub mod series_table;

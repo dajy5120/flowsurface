@@ -1605,7 +1605,10 @@ fn engine_bar<'a>() -> Element<'a, Msg> {
 
 ///
 /// `hosted` = 这个面板的可编辑属性正显示在检查器里（见 `ws::inspector_props`）。
-pub fn pane_body<'a>(hosted: bool) -> Element<'a, Msg> {
+pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
+    if let Some(l) = lock {
+        super::feature_matrix::lock_view(l);
+    }
     let m = ro::snapshot();
     let v = super::feature_matrix::state();
     let mut b = column![sec(
@@ -1616,7 +1619,8 @@ pub fn pane_body<'a>(hosted: bool) -> Element<'a, Msg> {
 
     // 视图切换 + 收起控件
     let mut vr = row![].spacing(4);
-    for view in View::ALL {
+    // 页面锁定了视图时不画切换（切换在顶部页签上，docs/41）
+    for view in View::ALL.into_iter().filter(|_| lock.is_none()) {
         vr = vr.push(chip(view.label().into(), v.view == view, Msg::SetView(view)));
     }
     if v.view != View::Engine && v.picker.is_none() {

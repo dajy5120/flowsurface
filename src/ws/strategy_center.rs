@@ -449,6 +449,11 @@ pub struct View {
     pub lib: LibFilter,
 }
 
+/// 页签状态角标（docs/41 §3.4）：有排队 / 在跑的运行。
+pub fn any_active() -> bool {
+    ST.get().and_then(|m| m.lock().ok()).is_some_and(|g| g.runs.iter().any(RunRow::active))
+}
+
 pub fn view() -> View {
     ensure_started();
     let Ok(g) = cell().lock() else { return View::default() };
