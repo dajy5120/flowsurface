@@ -96,6 +96,12 @@ impl From<&Dashboard> for data::Dashboard {
             .collect();
 
         data::Dashboard {
+            floating: dashboard
+                .floating
+                .iter()
+                .map(|f| (from_layout(&f.panes, f.panes.layout().clone()), f.rect))
+                .collect(),
+            floats_hidden: dashboard.floats_hidden,
             pane: from_layout(&dashboard.panes, main_window_layout),
             popout: {
                 popouts_layout
@@ -602,7 +608,8 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
 /// 与读存档同一套路：主窗口 pane 树 + 弹出窗口。
 pub fn dashboard_from_data(d: data::Dashboard) -> Dashboard {
     let popouts = d.popout.into_iter().map(|(pane, spec)| (configuration(pane), spec)).collect();
-    Dashboard::from_config(configuration(d.pane), popouts, Uuid::new_v4())
+    let floats = d.floating.into_iter().map(|(pane, r)| (configuration(pane), r)).collect();
+    Dashboard::from_config(configuration(d.pane), popouts, Uuid::new_v4()).with_floating(floats, d.floats_hidden)
 }
 
 pub fn load_saved_state() -> SavedState {
@@ -620,11 +627,13 @@ pub fn load_saved_state() -> SavedState {
 
                 let layout_id = Uuid::new_v4();
 
+                let floats = layout.dashboard.floating.iter().map(|(p, r)| (configuration(p.clone()), *r)).collect();
                 let dashboard = Dashboard::from_config(
                     configuration(layout.dashboard.pane.clone()),
                     popout_windows,
                     layout_id,
-                );
+                )
+                .with_floating(floats, layout.dashboard.floats_hidden);
 
                 de_layouts.push((layout.name.clone(), layout_id, dashboard));
             }

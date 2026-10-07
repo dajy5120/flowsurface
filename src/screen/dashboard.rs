@@ -1,3 +1,4 @@
+pub mod floating;
 pub mod pane;
 pub mod panel;
 pub mod sidebar;
@@ -60,6 +61,8 @@ use std::{collections::HashMap, time::Instant, vec};
 #[derive(Debug, Clone)]
 pub enum Message {
     Pane(window::Id, pane::Message),
+    /// 浮动层（docs/41 §4.2）
+    Float(floating::FloatMsg),
     ChangePaneStatus(uuid::Uuid, pane::Status),
     SavePopoutSpecs(HashMap<window::Id, WindowSpec>),
     ErrorOccurred(Option<uuid::Uuid>, DashboardError),
@@ -78,6 +81,12 @@ pub struct Dashboard {
     pub panes: pane_grid::State<pane::State>,
     pub focus: Option<(window::Id, pane_grid::Pane)>,
     pub popout: HashMap<window::Id, (pane_grid::State<pane::State>, WindowSpec)>,
+    /// 浮动层：顺序即层次（后面的在上）
+    pub floating: Vec<floating::Float>,
+    pub floats_hidden: bool,
+    float_drag: Option<floating::Drag>,
+    float_guides: floating::Guides,
+    float_hover: Option<(window::Id, iced::Point)>,
     pub streams: UniqueStreams,
     layout_id: uuid::Uuid,
 }
@@ -89,6 +98,11 @@ impl Default for Dashboard {
             focus: None,
             streams: UniqueStreams::default(),
             popout: HashMap::new(),
+            floating: Vec::new(),
+            floats_hidden: false,
+            float_drag: None,
+            float_guides: floating::Guides::default(),
+            float_hover: None,
             layout_id: uuid::Uuid::new_v4(),
         }
     }
@@ -156,8 +170,31 @@ impl Dashboard {
             focus: None,
             streams: UniqueStreams::default(),
             popout,
+            floating: Vec::new(),
+            floats_hidden: false,
+            float_drag: None,
+            float_guides: floating::Guides::default(),
+            float_hover: None,
             layout_id,
         }
+    }
+
+    /// 读存档 / 复制页时装回浮动层。
+    pub fn with_floating(mut self, floats: Vec<(Configuration<pane::State>, data::layout::FloatRect)>, hidden: bool) -> Self {
+        self.floating = floats
+            .into_iter()
+            .map(|(c, rect)| floating::Float {
+                id: window::Id::unique(),
+                panes: pane_grid::State::with_configuration(c),
+                rect,
+            })
+            .collect();
+        self.floats_hidden = hidden;
+        self
+    }
+
+    fn float_index(&self, id: window::Id) -> Option<usize> {
+        self.floating.iter().position(|f| f.id == id)
     }
 
     pub fn load_layout(&mut self, main_window: window::Id) -> Task<Message> {
@@ -222,7 +259,13 @@ impl Dashboard {
                     );
                 }
             },
+            Message::Float(m) => return (self.float_update(m, main_window), None),
             Message::Pane(window, message) => match message {
+                pane::Message::FloatPane(pane) => {
+                    if window == main_window.id && !crate::ws::pages::active_locked() {
+                        self.float_pane(pane);
+                    }
+                }
                 pane::Message::PaneClicked(pane) => {
                     self.focus = Some((window, pane));
                 }
@@ -561,6 +604,13 @@ impl Dashboard {
     }
 
     fn merge_pane(&mut self, main_window: &Window) -> Task<Message> {
+        // 浮窗的「合并」= 停靠回平铺层
+        if let Some((window, _)) = self.focus
+            && self.float_index(window).is_some()
+        {
+            self.focus = None;
+            return self.dock_float(window, main_window);
+        }
         if let Some((window, pane)) = self.focus.take()
             && let Some(pane_state) = self
                 .popout
@@ -575,6 +625,112 @@ impl Dashboard {
         Task::none()
     }
 
+    fn dock_float(&mut self, id: window::Id, main_window: &Window) -> Task<Message> {
+        let Some(i) = self.float_index(id) else { return Task::none() };
+        let mut f = self.floating.remove(i);
+        let first = f.panes.iter().next().map(|(p, _)| *p);
+        let Some(state) = first.and_then(|p| f.panes.panes.remove(&p)) else {
+            return Task::none();
+        };
+        self.new_pane(pane_grid::Axis::Vertical, main_window, Some(state))
+    }
+
+    /// 平铺层的一个面板浮起来（平铺层至少留一个面板）。
+    fn float_pane(&mut self, pane: pane_grid::Pane) {
+        if self.panes.len() <= 1 {
+            return;
+        }
+        if let Some((state, _)) = self.panes.close(pane) {
+            let rect = floating::cascade(self.floating.len());
+            self.floating.push(floating::Float::new(state, rect));
+            self.floats_hidden = false;
+            self.focus = None;
+        }
+    }
+
+    fn float_update(&mut self, m: floating::FloatMsg, main_window: &Window) -> Task<Message> {
+        use floating::FloatMsg as F;
+        let locked = crate::ws::pages::active_locked();
+        match m {
+            F::Hover(id, p) => self.float_hover = Some((id, p)),
+            F::Grab(id, resize) => {
+                if let Some(i) = self.float_index(id) {
+                    // 点哪个哪个到最上面
+                    let f = self.floating.remove(i);
+                    self.floating.push(f);
+                    if !locked {
+                        // 拖动条上记下的光标位置就是偏移（拖起来浮窗不跳、不丢第一段距离）
+                        let offset = self.float_hover.filter(|(h, _)| *h == id && !resize).map(|(_, p)| (p.x, p.y));
+                        self.float_drag = Some(floating::Drag {
+                            id,
+                            kind: if resize { floating::DragKind::Resize } else { floating::DragKind::Move },
+                            offset,
+                        });
+                    }
+                }
+            }
+            F::Move(p, size) => {
+                if let Some(mut d) = self.float_drag {
+                    if let Some(i) = self.float_index(d.id) {
+                        let others: Vec<_> = self.floating.iter().filter(|f| f.id != d.id).map(|f| f.rect).collect();
+                        let (r, g) = floating::step(&mut d, self.floating[i].rect, p, size, &others);
+                        self.floating[i].rect = r;
+                        self.float_guides = g;
+                        self.float_drag = Some(d);
+                    }
+                }
+            }
+            F::Release => {
+                self.float_drag = None;
+                self.float_guides = floating::Guides::default();
+            }
+            F::Dock(id) if !locked => return self.dock_float(id, main_window),
+            F::Close(id) if !locked => {
+                if let Some(i) = self.float_index(id) {
+                    self.floating.remove(i);
+                    if self.focus.is_some_and(|(w, _)| w == id) {
+                        self.focus = None;
+                    }
+                }
+            }
+            F::PopOut(id) if !locked => {
+                let Some(i) = self.float_index(id) else { return Task::none() };
+                let mut f = self.floating.remove(i);
+                let first = f.panes.iter().next().map(|(p, _)| *p);
+        let Some(state) = first.and_then(|p| f.panes.panes.remove(&p)) else {
+                    return Task::none();
+                };
+                let (window, task) = window::open(window::Settings {
+                    position: main_window
+                        .position
+                        .map(|point| window::Position::Specific(point + Vector::new(40.0, 40.0)))
+                        .unwrap_or_default(),
+                    exit_on_close_request: false,
+                    min_size: Some(iced::Size::new(400.0, 300.0)),
+                    ..window::settings()
+                });
+                let (state, pid) = pane_grid::State::new(state);
+                self.popout.insert(window, (state, WindowSpec::default()));
+                return task.then(move |window| Task::done(Message::Pane(window, pane::Message::PaneClicked(pid))));
+            }
+            F::Tidy if !locked => {
+                let n = self.floating.len();
+                for (f, r) in self.floating.iter_mut().zip(floating::tidy(n)) {
+                    f.rect = r;
+                }
+                self.floats_hidden = false;
+            }
+            F::ToggleHidden => self.floats_hidden = !self.floats_hidden,
+            F::NewBlank if !locked => {
+                let rect = floating::cascade(self.floating.len());
+                self.floating.push(floating::Float::new(pane::State::new(), rect));
+                self.floats_hidden = false;
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+
     pub fn get_pane(
         &self,
         main_window: window::Id,
@@ -583,6 +739,8 @@ impl Dashboard {
     ) -> Option<&pane::State> {
         if main_window == window {
             self.panes.get(pane)
+        } else if let Some(f) = self.floating.iter().find(|f| f.id == window) {
+            f.panes.get(pane)
         } else {
             self.popout
                 .get(&window)
@@ -598,6 +756,8 @@ impl Dashboard {
     ) -> Option<&mut pane::State> {
         if main_window == window {
             self.panes.get_mut(pane)
+        } else if let Some(f) = self.floating.iter_mut().find(|f| f.id == window) {
+            f.panes.get_mut(pane)
         } else {
             self.popout
                 .get_mut(&window)
@@ -625,6 +785,7 @@ impl Dashboard {
             .chain(self.popout.iter().flat_map(|(window_id, (panes, _))| {
                 panes.iter().map(|(pane, state)| (*window_id, *pane, state))
             }))
+            .chain(self.floating.iter().flat_map(|f| f.panes.iter().map(move |(pane, state)| (f.id, *pane, state))))
     }
 
     fn iter_all_panes_mut(
@@ -638,6 +799,10 @@ impl Dashboard {
                 panes
                     .iter_mut()
                     .map(|(pane, state)| (*window_id, *pane, state))
+            }))
+            .chain(self.floating.iter_mut().flat_map(|f| {
+                let id = f.id;
+                f.panes.iter_mut().map(move |(pane, state)| (id, *pane, state))
             }))
     }
 
@@ -670,7 +835,122 @@ impl Dashboard {
         };
         let pane_grid: Element<_> = pane_grid.spacing(6).style(style::pane_grid).into();
 
-        pane_grid.map(move |message| Message::Pane(main_window.id, message))
+        let tiled = pane_grid.map(move |message| Message::Pane(main_window.id, message));
+        if self.floating.is_empty() || self.floats_hidden {
+            return tiled;
+        }
+        // 浮动层叠在平铺层上（docs/41 §4.2）；用 responsive 拿到内容区尺寸，把比例换成像素
+        let layer = iced::widget::responsive(move |size| self.float_layer(size, main_window, tickers_table, timezone));
+        iced::widget::stack![tiled, layer].into()
+    }
+
+    fn float_layer<'a>(
+        &'a self,
+        size: iced::Size,
+        main_window: &'a Window,
+        tickers_table: &'a TickersTable,
+        timezone: UserTimezone,
+    ) -> Element<'a, Message> {
+        use crate::ui::pal;
+        use iced::widget::{Space, column, mouse_area, pin, row, stack, text};
+        let locked = crate::ws::pages::active_locked();
+        let mut layer = iced::widget::Stack::new().width(Length::Fill).height(Length::Fill);
+        for f in &self.floating {
+            let fid = f.id;
+            let (x, y) = (f.rect.x * size.width, f.rect.y * size.height);
+            let (w, h) = (f.rect.w * size.width, f.rect.h * size.height);
+            let grid = PaneGrid::new(&f.panes, |id, pane, _| {
+                pane.view(id, f.panes.len(), self.focus == Some((fid, id)), false, fid, main_window, timezone, tickers_table)
+            })
+            .on_click(pane::Message::PaneClicked);
+            let grid: Element<'a, Message> = Element::from(grid).map(move |m| Message::Pane(fid, m));
+            let title = f
+                .panes
+                .iter()
+                .next()
+                .map(|(_, st)| st.settings.view.clone().unwrap_or_else(|| st.content.to_string()))
+                .unwrap_or_default();
+            let fm = |m: floating::FloatMsg| Some(Message::Float(m));
+            let mut bar = row![
+                text("⠿").size(crate::ui::text::s_small()).color(pal::dim()),
+                text(title).size(crate::ui::text::s_small()).color(pal::head()),
+                Space::new().width(Length::Fill),
+            ]
+            .spacing(crate::ui::metrics::space(1))
+            .align_y(iced::Alignment::Center);
+            if !locked {
+                for (label, m) in [
+                    ("停靠", floating::FloatMsg::Dock(fid)),
+                    ("弹出", floating::FloatMsg::PopOut(fid)),
+                    ("×", floating::FloatMsg::Close(fid)),
+                ] {
+                    bar = bar.push(crate::ui::widgets::btn(label, crate::ui::widgets::Kind::Ghost, fm(m)));
+                }
+            }
+            let grip = mouse_area(
+                container(bar)
+                    .padding(crate::ui::metrics::pad2(0, 2))
+                    .height(Length::Fixed(floating::GRIP_H))
+                    .width(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(pal::alpha(pal::card_bg(), 0.95))),
+                        ..Default::default()
+                    }),
+            )
+            .on_press(Message::Float(floating::FloatMsg::Grab(fid, false)))
+            .on_move(move |p| Message::Float(floating::FloatMsg::Hover(fid, p)))
+            .interaction(if locked { iced::mouse::Interaction::default() } else { iced::mouse::Interaction::Grab });
+            let framed = container(column![grip, grid])
+                .width(Length::Fixed(w))
+                .height(Length::Fixed(h))
+                .style(|t: &iced::Theme| container::Style {
+                    // 浮窗要不透明（盖在平铺层上）：用主题底色
+                    background: Some(iced::Background::Color(t.extended_palette().background.base.color)),
+                    border: iced::Border { color: pal::accent(), width: 1.0, radius: 4.0.into() },
+                    ..Default::default()
+                });
+            let mut one = stack![framed];
+            if !locked {
+                let handle = mouse_area(
+                    container(text("◢").size(crate::ui::text::s_small()).color(pal::dim()))
+                        .width(Length::Fixed(16.0))
+                        .height(Length::Fixed(16.0)),
+                )
+                .on_press(Message::Float(floating::FloatMsg::Grab(fid, true)))
+                .interaction(iced::mouse::Interaction::ResizingDiagonallyDown);
+                one = one.push(pin(handle).x(w - 16.0).y(h - 16.0));
+            }
+            layer = layer.push(pin(one).x(x).y(y));
+        }
+        if self.float_drag.is_some() {
+            // 拖动中：全层接住鼠标，算新位置；参考线画在吸附到的边上
+            for gx in &self.float_guides.xs {
+                layer = layer.push(
+                    pin(container(Space::new().width(Length::Fixed(1.0)).height(Length::Fixed(size.height)))
+                        .style(|_| container::Style { background: Some(iced::Background::Color(pal::accent())), ..Default::default() }))
+                    .x(*gx),
+                );
+            }
+            for gy in &self.float_guides.ys {
+                layer = layer.push(
+                    pin(container(Space::new().width(Length::Fixed(size.width)).height(Length::Fixed(1.0)))
+                        .style(|_| container::Style { background: Some(iced::Background::Color(pal::accent())), ..Default::default() }))
+                    .y(*gy),
+                );
+            }
+            let kind = self.float_drag.map(|d| d.kind);
+            layer = layer.push(
+                mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                    .on_move(move |p| Message::Float(floating::FloatMsg::Move(p, size)))
+                    .on_release(Message::Float(floating::FloatMsg::Release))
+                    .interaction(if kind == Some(floating::DragKind::Resize) {
+                        iced::mouse::Interaction::ResizingDiagonallyDown
+                    } else {
+                        iced::mouse::Interaction::Grabbing
+                    }),
+            );
+        }
+        layer.into()
     }
 
     pub fn view_window<'a>(
@@ -1238,6 +1518,13 @@ impl Dashboard {
         for (popout_state, _) in self.popout.values_mut() {
             for (_, state) in popout_state.iter_mut() {
                 tick_state(state);
+            }
+        }
+        if !self.floats_hidden {
+            for f in &mut self.floating {
+                for (_, state) in f.panes.iter_mut() {
+                    tick_state(state);
+                }
             }
         }
 

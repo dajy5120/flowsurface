@@ -82,6 +82,8 @@ pub enum Message {
     ClosePane(pane_grid::Pane),
     SplitPane(pane_grid::Axis, pane_grid::Pane),
     MaximizePane(pane_grid::Pane),
+    /// 浮起到浮动层（docs/41 §4.2；只对图表类面板）
+    FloatPane(pane_grid::Pane),
     Restore,
     ReplacePane(pane_grid::Pane),
     Popout,
@@ -592,6 +594,21 @@ impl State {
             ResolvedStream::Ready(streams) => !streams.is_empty(),
             ResolvedStream::Waiting { streams, .. } => !streams.is_empty(),
         }
+    }
+
+    /// 图表类面板（docs/41 §4.2：只有它们能进浮动层——表格、表单浮起来只会互相遮挡）。
+    pub fn is_chart_kind(&self) -> bool {
+        matches!(
+            self.content,
+            Content::Heatmap { .. }
+                | Content::ShaderHeatmap { .. }
+                | Content::Kline { .. }
+                | Content::TimeAndSales(_)
+                | Content::Ladder(_)
+                | Content::Comparison(_)
+                | Content::OfmsLab
+                | Content::WealthSpring(data::layout::pane::WsPaneMode::SelfChart)
+        )
     }
 
     pub fn view<'a>(
@@ -2186,6 +2203,16 @@ impl State {
                 control_btn_style(is_popout),
             ));
         } else if total_panes > 1 && !locked {
+            // 图表类面板可以浮到浮动层上自由组合（docs/41 §4.2）
+            if self.is_chart_kind() {
+                buttons.push(button_with_tooltip(
+                    text("◰").size(crate::ui::text::s_small()),
+                    Message::FloatPane(pane),
+                    Some("浮动：放到浮动层上，自由摆放（多图组合）"),
+                    tooltip_pos,
+                    control_btn_style(false),
+                ));
+            }
             buttons.push(button_with_tooltip(
                 icon_text(Icon::Popout, 12),
                 Message::Popout,

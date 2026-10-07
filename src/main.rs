@@ -1007,11 +1007,13 @@ impl Flowsurface {
                                 popout_windows.push((configuration, *window_spec));
                             }
 
+                            let floats = ser_dashboard.floating.iter().map(|(p, r)| (configuration(p.clone()), *r)).collect();
                             let dashboard = Dashboard::from_config(
                                 configuration(ser_dashboard.pane.clone()),
                                 popout_windows,
                                 old_id,
-                            );
+                            )
+                            .with_floating(floats, ser_dashboard.floats_hidden);
 
                             manager.insert_layout(new_layout.clone(), dashboard);
                         }
@@ -1741,6 +1743,22 @@ impl Flowsurface {
         if !self.closed_pages.is_empty() {
             r1 = r1.push(w::btn(format!("找回刚关的页（{}）", self.closed_pages.len()), Kind::Ghost, pm(P::Undo)));
         }
+        // 浮动层（docs/41 §4.2）：图表浮窗自由组合；面板标题栏的「◰」把图表浮起来
+        let (n_float, hidden) = {
+            let d = self.active_dashboard();
+            (d.floating.len(), d.floats_hidden)
+        };
+        let fl = |m: dashboard::floating::FloatMsg| Some(Message::Dashboard { layout_id: None, event: dashboard::Message::Float(m) });
+        r1 = r1.push(ui::text::metadata("│ 浮动层").color(ui::pal::dim()));
+        r1 = r1.push(w::btn("＋ 浮动窗口", Kind::Ghost, (!locked).then(|| fl(dashboard::floating::FloatMsg::NewBlank)).flatten()));
+        if n_float > 0 {
+            r1 = r1.push(w::btn("一键整理", Kind::Ghost, (!locked).then(|| fl(dashboard::floating::FloatMsg::Tidy)).flatten()));
+            r1 = r1.push(w::btn(
+                if hidden { format!("展开浮动层（{n_float}）") } else { format!("收起浮动层（{n_float}）") },
+                if hidden { Kind::Standard } else { Kind::Ghost },
+                fl(dashboard::floating::FloatMsg::ToggleHidden),
+            ));
+        }
         // 第二行：关掉的模板页 + 模板库
         let mut r2 = row![ui::text::metadata("从模板新建：").color(ui::pal::dim())].spacing(ui::metrics::space(1)).align_y(Alignment::Center);
         let mut any = false;
@@ -2008,6 +2026,15 @@ impl Flowsurface {
                 if let Some((uid, _)) = pages.get(i) {
                     return self.update(Message::Layouts(modal::layout_manager::Message::SelectActive(*uid)));
                 }
+            }
+            Cmd::FloatNew | Cmd::FloatTidy | Cmd::FloatToggle => {
+                use dashboard::floating::FloatMsg as F;
+                let m = match cmd {
+                    Cmd::FloatNew => F::NewBlank,
+                    Cmd::FloatTidy => F::Tidy,
+                    _ => F::ToggleHidden,
+                };
+                return self.update(Message::Dashboard { layout_id: None, event: dashboard::Message::Float(m) });
             }
             Cmd::PageMenu => return self.page_action(ws::pages::PageMsg::ToggleMenu),
             Cmd::PageNew => return self.page_action(ws::pages::PageMsg::NewBlank),

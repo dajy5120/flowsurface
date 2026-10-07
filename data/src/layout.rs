@@ -1,4 +1,4 @@
-pub use dashboard::Dashboard;
+pub use dashboard::{Dashboard, FloatRect};
 pub use pane::Pane;
 use serde::{Deserialize, Serialize};
 
