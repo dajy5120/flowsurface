@@ -195,6 +195,25 @@ impl Dashboard {
         self
     }
 
+    /// 本页带行情的面板（平铺 + 浮窗 + 弹出）是否都在同一个联动组里（docs/41 E 期「本页联动品种」）。
+    pub fn page_linked(&self, main_window: window::Id) -> bool {
+        let groups: Vec<_> = self
+            .iter_all_panes(main_window)
+            .filter(|(_, _, st)| st.stream_pair_kind().is_some())
+            .map(|(_, _, st)| st.link_group)
+            .collect();
+        !groups.is_empty() && groups.iter().all(|g| g.is_some() && *g == groups[0])
+    }
+
+    /// 开：本页带行情的面板全部放进联动组 A（任一张图换品种，其余跟着换）；关：全部移出联动组。
+    pub fn set_page_linked(&mut self, main_window: window::Id, on: bool) {
+        for (_, _, st) in self.iter_all_panes_mut(main_window) {
+            if st.stream_pair_kind().is_some() {
+                st.link_group = on.then_some(data::layout::pane::LinkGroup::A);
+            }
+        }
+    }
+
     fn float_index(&self, id: window::Id) -> Option<usize> {
         self.floating.iter().position(|f| f.id == id)
     }

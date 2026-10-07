@@ -660,9 +660,91 @@ pub struct ViewState {
     decimals: usize,
     ticker_info: TickerInfo,
     layout: ViewConfig,
+    /// 上次看到的联动时间版本（docs/41 E 期）；变了就重画十字线
+    linked_seen: std::sync::atomic::AtomicU64,
+}
+
+/// 同页图表的时间联动（docs/41 §4.3，E 期）：光标所在的图把它指着的时间放在这里，
+/// 同页其他按时间轴的图在那个时间画一条竖线。只有当前页（含它的浮窗与弹出窗口）在画，所以不分页存；
+/// 切页时清空。
+pub mod linked_cursor {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CUR: Mutex<Option<(u64, u64)>> = Mutex::new(None); // (来源图, 时间毫秒)
+    static VERSION: AtomicU64 = AtomicU64::new(1);
+
+    pub fn publish(src: u64, ts: Option<u64>) {
+        if let Ok(mut g) = CUR.lock() {
+            let new = ts.map(|t| (src, t));
+            let changed = match (&*g, &new) {
+                (Some(a), Some(b)) => a != b,
+                (None, None) => false,
+                // 别的图的光标离开时不能清掉当前来源的
+                (Some((s0, _)), None) => *s0 == src,
+                (None, Some(_)) => true,
+            };
+            if changed {
+                *g = new;
+                VERSION.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn clear() {
+        if let Ok(mut g) = CUR.lock() {
+            if g.take().is_some() {
+                VERSION.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn get() -> Option<(u64, u64)> {
+        CUR.lock().ok().and_then(|g| *g)
+    }
+
+    pub fn version() -> u64 {
+        VERSION.load(Ordering::Relaxed)
+    }
 }
 
 impl ViewState {
+    fn linked_id(&self) -> u64 {
+        std::ptr::from_ref(self) as usize as u64
+    }
+
+    /// 联动时间变了（别的图在动光标）→ 清掉自己的十字线缓存（在 `draw` 开头调；缓存清理只要 `&self`）。
+    pub fn sync_linked_cursor(&self) {
+        let v = linked_cursor::version();
+        if self.linked_seen.swap(v, std::sync::atomic::Ordering::Relaxed) != v {
+            self.cache.clear_crosshair();
+        }
+    }
+
+    /// 自己有光标：把指着的时间发出去（只有时间轴的图参与）。
+    pub fn publish_linked_cursor(&self, ts: Option<u64>) {
+        if matches!(self.basis, Basis::Time(_)) {
+            linked_cursor::publish(self.linked_id(), ts);
+            self.linked_seen.store(linked_cursor::version(), std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// 自己没光标：画别的图指着的时间（竖线 + 时间不在可见范围就不画）。
+    pub fn draw_linked_cursor(&self, frame: &mut canvas::Frame, theme: &Theme, bounds: Size) {
+        let Basis::Time(_) = self.basis else { return };
+        let Some((src, ts)) = linked_cursor::get() else { return };
+        if src == self.linked_id() {
+            return;
+        }
+        let region = self.visible_region(bounds);
+        let earliest = self.x_to_interval(region.x) as f64;
+        let latest = self.x_to_interval(region.x + region.width) as f64;
+        if latest <= earliest || (ts as f64) < earliest || (ts as f64) > latest {
+            return;
+        }
+        let x = ((ts as f64 - earliest) / (latest - earliest)) as f32 * bounds.width;
+        frame.stroke(&Path::line(Point::new(x, 0.0), Point::new(x, bounds.height)), style::dashed_line(theme));
+    }
     /// 复位「最新位置」与平移量，让图表重新锚定到下一批到来的数据。
     ///
     /// **清空数据时必须一起做**（docs/27 §12）：`update_latest_kline` 只在新 K 线时间
@@ -699,6 +781,7 @@ impl ViewState {
             decimals,
             ticker_info,
             layout,
+            linked_seen: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1219,5 +1302,30 @@ fn draw_volume_bar(
                 buy_color.scale_alpha(bar_color_alpha),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod linked_cursor_tests {
+    use super::linked_cursor as lc;
+
+    /// 同页时间联动（docs/41 E 期）：别的图光标离开不能清掉当前来源；来源自己离开才清；版本只在变化时加。
+    #[test]
+    fn publish_semantics() {
+        lc::clear();
+        let v0 = lc::version();
+        lc::publish(1, Some(1000));
+        assert_eq!(lc::get(), Some((1, 1000)));
+        let v1 = lc::version();
+        assert!(v1 > v0);
+        lc::publish(1, Some(1000));
+        assert_eq!(lc::version(), v1, "没变化不加版本（不然每帧都重画）");
+        lc::publish(2, None);
+        assert_eq!(lc::get(), Some((1, 1000)), "别的图光标离开不清当前来源");
+        lc::publish(1, None);
+        assert_eq!(lc::get(), None);
+        lc::publish(2, Some(5));
+        lc::clear();
+        assert_eq!(lc::get(), None);
     }
 }

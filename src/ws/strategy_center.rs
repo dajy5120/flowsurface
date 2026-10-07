@@ -454,7 +454,11 @@ pub fn any_active() -> bool {
     ST.get().and_then(|m| m.lock().ok()).is_some_and(|g| g.runs.iter().any(RunRow::active))
 }
 
+/// 面板在显示（docs/41 E 期：没人看、也没有在跑的任务时，库轮询挂起）。
+static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
+
 pub fn view() -> View {
+    DEMAND.touch();
     ensure_started();
     let Ok(g) = cell().lock() else { return View::default() };
     let selected = g.selected.as_ref().and_then(|id| g.catalog.iter().find(|e| &e.id == id).cloned());
@@ -571,6 +575,10 @@ fn ensure_started() {
                             || g.validations.iter().any(ValRow::active)
                     })
                     .unwrap_or(false);
+                // 没人看、也没有排队 / 在跑的任务：挂起到面板再出现（有任务在跑时照常轮询——页签角标靠它）
+                if !busy && !KICK.load(Ordering::Relaxed) {
+                    DEMAND.wait_viewed();
+                }
                 let period = Duration::from_secs(if busy { 2 } else { 10 });
                 if KICK.swap(false, Ordering::Relaxed) || last.elapsed() >= period {
                     poll_db();

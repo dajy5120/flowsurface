@@ -1131,6 +1131,7 @@ impl canvas::Program<Message> for KlineChart {
             chart.draw_last_price_line(frame, palette, region);
         });
 
+        chart.sync_linked_cursor();
         let crosshair = chart.cache.crosshair.draw(renderer, bounds_size, |frame| {
             let visible_region = chart.visible_region(bounds_size);
             let visible_range = chart.interval_range(&visible_region);
@@ -1138,6 +1139,8 @@ impl canvas::Program<Message> for KlineChart {
             if let Some(cursor_position) = cursor.position_in(bounds) {
                 let (_, rounded_aggregation) =
                     chart.draw_crosshair(frame, theme, bounds_size, cursor_position, interaction);
+                // 同页图表时间联动（docs/41 E 期）
+                chart.publish_linked_cursor(Some(rounded_aggregation));
 
                 draw_crosshair_tooltip(
                     &self.data_source,
@@ -1148,7 +1151,11 @@ impl canvas::Program<Message> for KlineChart {
                     Some(rounded_aggregation),
                     visible_range,
                 );
-            } else if self.visual_config.data_labels_always_visible {
+            } else {
+                chart.publish_linked_cursor(None);
+                chart.draw_linked_cursor(frame, theme, bounds_size);
+            }
+            if cursor.position_in(bounds).is_none() && self.visual_config.data_labels_always_visible {
                 draw_crosshair_tooltip(
                     &self.data_source,
                     &chart.ticker_info,

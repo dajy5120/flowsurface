@@ -774,7 +774,13 @@ impl canvas::Program<Message> for HeatmapChart {
         });
 
         if !self.is_empty() {
+            chart.sync_linked_cursor();
             let crosshair = chart.cache.crosshair.draw(renderer, bounds_size, |frame| {
+                if cursor.position_in(bounds).is_none() {
+                    // 同页图表时间联动（docs/41 E 期）：自己没光标就画别的图指着的时间
+                    chart.publish_linked_cursor(None);
+                    chart.draw_linked_cursor(frame, theme, bounds_size);
+                }
                 if let Some(cursor_position) = cursor.position_in(bounds) {
                     let (cursor_at_price, cursor_at_time) = chart.draw_crosshair(
                         frame,
@@ -783,6 +789,7 @@ impl canvas::Program<Message> for HeatmapChart {
                         cursor_position,
                         interaction,
                     );
+                    chart.publish_linked_cursor(Some(cursor_at_time));
 
                     if matches!(interaction, Interaction::Panning { .. })
                         || matches!(interaction, Interaction::Ruler { start } if start.is_some())

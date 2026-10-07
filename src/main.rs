@@ -1748,6 +1748,13 @@ impl Flowsurface {
         if !self.closed_pages.is_empty() {
             r1 = r1.push(w::btn(format!("找回刚关的页（{}）", self.closed_pages.len()), Kind::Ghost, pm(P::Undo)));
         }
+        // 联动（docs/41 §4.3，E 期）：品种走现有联动组；时间十字线同页按时间轴的图自动联动
+        let linked = self.active_dashboard().page_linked(self.main_window.id);
+        r1 = r1.push(w::btn(
+            if linked { "⛓ 联动品种：开" } else { "联动品种：关" },
+            if linked { Kind::Standard } else { Kind::Ghost },
+            pm(P::LinkSymbols(!linked)),
+        ));
         // 浮动层（docs/41 §4.2）：图表浮窗自由组合；面板标题栏的「◰」把图表浮起来
         let (n_float, hidden) = {
             let d = self.active_dashboard();
@@ -1973,6 +1980,14 @@ impl Flowsurface {
                     layout_id: None,
                     event: dashboard::Message::AddPanel { kind, float: self.lib_float },
                 });
+            }
+            P::LinkSymbols(on) => {
+                let main = self.main_window.id;
+                self.active_dashboard_mut().set_page_linked(main, on);
+                note(
+                    self,
+                    if on { "本页带行情的面板已放进同一联动组：任一张图换品种，其余跟着换".into() } else { "本页面板已移出联动组".into() },
+                );
             }
             P::ToggleLock => {
                 if !self.pages.locked.remove(&name) {
@@ -2368,6 +2383,8 @@ impl Flowsurface {
             }
         }
 
+        // 换页：同页图表的时间联动从头来（docs/41 E 期）
+        chart::linked_cursor::clear();
         if let Err(err) = self.layout_manager.set_active_layout(layout_uid) {
             log::error!("Failed to set active layout: {}", err);
             return Task::none();

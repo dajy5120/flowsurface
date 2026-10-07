@@ -405,7 +405,11 @@ pub fn lock_tab(pane: uuid::Uuid, label: &str) {
     }
 }
 
+/// 面板在显示（docs/41 E 期：实时模式的 tail 线程没人看时挂起，回来时从断点接着读）。
+static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
+
 pub fn view(pane: uuid::Uuid) -> View {
+    DEMAND.touch();
     let pv = with_view(pane, |v| v.clone()).unwrap_or_default();
     let need_dict = with(|g| {
         let go = g.dict.is_none() && !g.dict_loading && g.dict_err.is_empty();
@@ -778,6 +782,8 @@ fn start_live(ticket: u64) {
         let mut tails: [Tail; 3] = Default::default();
         let mut buf = OfData::default();
         loop {
+            // 没人看就挂起（偏移量留着，回来时一次读完这段时间新增的行）
+            DEMAND.wait_viewed();
             let Some((on, minutes)) = with(|g| (g.live && g.live_gen == ticket, g.live_minutes.max(5))) else { return };
             if !on {
                 return;

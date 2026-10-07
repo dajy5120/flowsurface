@@ -116,6 +116,8 @@ pub enum PageMsg {
     LibraryFloat(bool),
     /// 面板库：加一个面板到当前页
     AddPanel(ContentKind),
+    /// 本页图表联动品种（docs/41 E 期）
+    LinkSymbols(bool),
 }
 
 static ACTIVE_LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
