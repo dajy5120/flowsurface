@@ -255,6 +255,10 @@ pub enum OfMsg {
     /// 入场形态矩阵：把这个描述文件在当前窗口上跑一遍，叠加到 L6–L10 泳道
     Overlay(String),
     ClearOverlay,
+    /// P6 实时观察：开 / 关（只读常驻引擎落的 `ofms/live/<品种>/<日>/`）
+    Live(bool),
+    /// 实时模式显示最近多少分钟
+    LiveMinutes(u32),
 }
 
 #[derive(Default)]
@@ -280,6 +284,10 @@ struct St {
     setups_loading: bool,
     overlay: Option<Arc<Overlay>>,
     overlay_running: bool,
+    live: bool,
+    live_minutes: u32,
+    /// 实时 tail 线程的代号：关掉 / 重开时换代，旧线程看到不是自己的代号就退出
+    live_gen: u64,
     dict_err: String,
     dict_layer: Option<u8>,
     dict_search: String,
@@ -344,6 +352,8 @@ pub struct View {
     pub setups_err: String,
     pub overlay: Option<Arc<Overlay>>,
     pub overlay_running: bool,
+    pub live: bool,
+    pub live_minutes: u32,
 }
 
 pub fn view() -> View {
@@ -359,7 +369,12 @@ pub fn view() -> View {
         load_dict();
     }
     if with(|g| !std::mem::replace(&mut g.restored, true)).unwrap_or(false) {
-        restore_latest();
+        if std::env::var_os("WS_OFMS_LIVE").is_some() {
+            // 样张截图（docs/35）用：开页即进实时模式
+            handle(OfMsg::Live(true));
+        } else {
+            restore_latest();
+        }
     }
     let need_resp = with(|g| {
         let go = matches!(g.tab, OfTab::Response | OfTab::Setups) && g.resp.is_none() && !g.resp_loading && g.resp_err.is_empty();
@@ -406,6 +421,8 @@ pub fn view() -> View {
             setups_err: g.setups_err.clone(),
             overlay: g.overlay.clone(),
             overlay_running: g.overlay_running,
+            live: g.live,
+            live_minutes: if g.live_minutes == 0 { 30 } else { g.live_minutes },
         }
     })
     .unwrap_or_default()
@@ -451,6 +468,28 @@ pub fn handle(m: OfMsg) {
             });
         }
         OfMsg::Overlay(id) => start_overlay(id),
+        OfMsg::Live(on) => {
+            let ticket = with(|g| {
+                g.live = on;
+                g.live_gen += 1;
+                if g.live_minutes == 0 {
+                    g.live_minutes = 30;
+                }
+                if on {
+                    g.overlay = None;
+                    g.selected = None;
+                    g.note = "实时：等常驻引擎的 OFMS 输出…".into();
+                }
+                g.live_gen
+            })
+            .unwrap_or(0);
+            if on {
+                start_live(ticket);
+            }
+        }
+        OfMsg::LiveMinutes(m) => {
+            with(|g| g.live_minutes = m.clamp(5, 240));
+        }
         OfMsg::ClearOverlay => {
             with(|g| g.overlay = None);
         }
@@ -461,6 +500,11 @@ fn start_run() {
     let Some(sel) = with(|g| {
         if g.running {
             return None;
+        }
+        if g.live {
+            // 读历史窗口 = 离开实时模式
+            g.live = false;
+            g.live_gen += 1;
         }
         let p = g.pick.get_or_insert_with(default_pick);
         let sel = p.selection(&opts());
@@ -582,6 +626,174 @@ fn load_resp() {
                 Err(e) => g.resp_err = e,
             }
         });
+    });
+}
+
+// ── P6 实时观察：tail 常驻引擎的按日输出 ─────────────────────────────
+
+/// 增量读一个只追加的 CSV：从上次的位置读到最后一个完整行；第一次读跳过表头。
+#[derive(Default)]
+struct Tail {
+    path: PathBuf,
+    off: u64,
+}
+
+impl Tail {
+    fn read_new(&mut self) -> String {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut f) = std::fs::File::open(&self.path) else { return String::new() };
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        if len < self.off {
+            self.off = 0; // 文件被换掉了（不该发生；当作从头来）
+        }
+        if len == self.off || f.seek(SeekFrom::Start(self.off)).is_err() {
+            return String::new();
+        }
+        let mut buf = Vec::new();
+        let _ = f.take(64 << 20).read_to_end(&mut buf);
+        let Some(end) = buf.iter().rposition(|b| *b == b'\n') else { return String::new() };
+        let mut start = 0;
+        if self.off == 0 {
+            start = buf.iter().position(|b| *b == b'\n').map_or(end + 1, |i| i + 1); // 表头
+        }
+        self.off += end as u64 + 1;
+        // 解析器都会跳过第一行：补一个空行
+        format!("\n{}", String::from_utf8_lossy(&buf[start.min(end + 1)..=end]))
+    }
+}
+
+/// 常驻引擎 OFMS 输出的根：`<数据根>/ofms/live/`（与 `ws_features` 同一处）。
+pub fn live_root() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(|x| PathBuf::from(x).join("wealthspring"))
+        .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("ws-data"))
+        .join("ofms/live")
+}
+
+fn utc_day_dir(sym_dir: &Path) -> PathBuf {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let d = chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+    sym_dir.join(d)
+}
+
+/// 只保留最近 `keep_ms` 毫秒。
+fn trim(d: &mut OfData, keep_ms: i64) {
+    let Some(last) = d.states.t.last().copied() else { return };
+    let lo = last - keep_ms;
+    let k = d.states.t.partition_point(|t| *t < lo);
+    if k > 0 {
+        let s = &mut d.states;
+        for v in [&mut s.mid, &mut s.spread_bps, &mut s.depth_bid, &mut s.depth_ask, &mut s.buy, &mut s.sell, &mut s.cvd,
+                  &mut s.aggr_z, &mut s.residual_z, &mut s.rv_ratio, &mut s.vwap, &mut s.level_hi, &mut s.level_lo] {
+            v.drain(..k.min(v.len()));
+        }
+        s.t.drain(..k);
+        s.response.drain(..k.min(s.response.len()));
+        s.regime.drain(..k.min(s.regime.len()));
+        s.synced.drain(..k.min(s.synced.len()));
+    }
+    d.events.retain(|e| e.t >= lo);
+    if let Some(dp) = d.depth.as_mut() {
+        dp.rows.retain(|r| r.0 >= lo);
+        dp.max_qty = dp.rows.iter().map(|r| r.3).fold(0.0, f64::max);
+    }
+    d.by_id = d.events.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+}
+
+fn extend_states(a: &mut OfStates, b: OfStates) {
+    a.t.extend(b.t);
+    a.mid.extend(b.mid);
+    a.spread_bps.extend(b.spread_bps);
+    a.depth_bid.extend(b.depth_bid);
+    a.depth_ask.extend(b.depth_ask);
+    a.buy.extend(b.buy);
+    a.sell.extend(b.sell);
+    a.cvd.extend(b.cvd);
+    a.aggr_z.extend(b.aggr_z);
+    a.residual_z.extend(b.residual_z);
+    a.response.extend(b.response);
+    a.regime.extend(b.regime);
+    a.rv_ratio.extend(b.rv_ratio);
+    a.vwap.extend(b.vwap);
+    a.level_hi.extend(b.level_hi);
+    a.level_lo.extend(b.level_lo);
+    a.synced.extend(b.synced);
+}
+
+/// 每秒 tail 一次今天的三份文件，最近 N 分钟发布成面板数据。代号变了（关掉 / 重开）就退出。
+fn start_live(ticket: u64) {
+    super::spawn_named("ws-ofms-live", move || {
+        let root = live_root();
+        let mut day_dir = PathBuf::new();
+        let mut tails: [Tail; 3] = Default::default();
+        let mut buf = OfData::default();
+        loop {
+            let Some((on, minutes)) = with(|g| (g.live && g.live_gen == ticket, g.live_minutes.max(5))) else { return };
+            if !on {
+                return;
+            }
+            // 品种：live 下的第一个目录（常驻引擎只跑一个品种）
+            let sym = std::fs::read_dir(&root).ok().and_then(|it| it.flatten().map(|e| e.path()).filter(|p| p.is_dir()).min());
+            let note = match sym {
+                None => Some(format!("没有实时输出：{} 不存在——常驻特征引擎（ws-features）没开，或两个行情 feed 没开", root.display())),
+                Some(sym_dir) => {
+                    let dd = utc_day_dir(&sym_dir);
+                    if dd != day_dir {
+                        day_dir = dd.clone();
+                        tails = [
+                            Tail { path: dd.join("ofms_events.csv"), off: 0 },
+                            Tail { path: dd.join("ofms_states.csv"), off: 0 },
+                            Tail { path: dd.join("ofms_depth.csv"), off: 0 },
+                        ];
+                        buf = OfData {
+                            dir: dd.clone(),
+                            title: format!("{} · 实时（常驻引擎）", sym_dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
+                            depth: Some(OfDepth::default()),
+                            ..OfData::default()
+                        };
+                    }
+                    let ev = tails[0].read_new();
+                    let st = tails[1].read_new();
+                    let dp = tails[2].read_new();
+                    buf.events.extend(parse_events(&ev));
+                    extend_states(&mut buf.states, parse_states(&st));
+                    if let Some(d) = buf.depth.as_mut() {
+                        d.rows.extend(parse_depth(&dp).rows);
+                    }
+                    trim(&mut buf, i64::from(minutes) * 60_000);
+                    match buf.states.t.last() {
+                        None => Some(format!("{} 还没有今天的数据（feed 停着，或刚开）", day_dir.display())),
+                        Some(t) => {
+                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+                            let lag = (now - t) as f64 / 1000.0;
+                            Some(if lag > 15.0 {
+                                format!("实时：最新一秒是 {lag:.0} 秒前——数据停了（feed 断了？）")
+                            } else {
+                                format!("实时 · 最近 {minutes} 分钟 · {} 个事件 · 延迟 {lag:.1} 秒", buf.events.len())
+                            })
+                        }
+                    }
+                }
+            };
+            let snap = Arc::new(buf.clone());
+            let alive = with(|g| {
+                if !(g.live && g.live_gen == ticket) {
+                    return false;
+                }
+                if !snap.states.t.is_empty() {
+                    g.data = Some(snap);
+                }
+                if let Some(n) = note {
+                    g.note = n;
+                }
+                true
+            })
+            .unwrap_or(false);
+            if !alive {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     });
 }
 
@@ -853,5 +1065,26 @@ mod tests {
         )
         .expect("逐笔");
         assert_eq!(tr[0].side, -1);
+    }
+
+    /// 实时 tail：第一次跳过表头；半行留到下次；只读新增部分。
+    #[test]
+    fn tail_reads_only_complete_new_lines() {
+        let dir = std::env::temp_dir().join(format!("ofms_tail_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("ofms_events.csv");
+        std::fs::write(&p, "id,parent,chain,ts,layer,event,dir,price,size,strength,nature,detail\n1,,1,1000000000,4,SWEEP,1,1,1,1,observed,x\n2,,2,2000").unwrap();
+        let mut t = Tail { path: p.clone(), off: 0 };
+        let a = parse_events(&t.read_new());
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].key, "SWEEP");
+        assert!(parse_events(&t.read_new()).is_empty(), "半行不读");
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(b"000000,4,AGGRESSION,-1,1,1,1,observed,y\n").unwrap();
+        let b = parse_events(&t.read_new());
+        assert_eq!(b.len(), 1);
+        assert_eq!((b[0].id, b[0].t, b[0].dir), (2, 2000, -1));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

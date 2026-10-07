@@ -50,7 +50,17 @@ pub fn pane_body<'a>() -> Element<'a, OfMsg> {
 fn timeline_tab<'a>(v: &View) -> Element<'a, OfMsg> {
     let picker = super::data_picker_view::view(&v.pick, &ol::opts()).map(OfMsg::Pick);
     let mut top = column![picker].spacing(space(1));
-    let mut actions = row![w::btn_busy("生成 / 读取", Kind::Primary, Some(OfMsg::Run), v.running)].spacing(space(2)).align_y(Alignment::Center);
+    let mut actions = row![
+        w::btn_busy("生成 / 读取", Kind::Primary, Some(OfMsg::Run), v.running),
+        w::btn(if v.live { "● 实时（点击停止）" } else { "实时" }, if v.live { Kind::Standard } else { Kind::Ghost }, Some(OfMsg::Live(!v.live))),
+    ]
+    .spacing(space(2))
+    .align_y(Alignment::Center);
+    if v.live {
+        for m in [15u32, 30, 60, 120] {
+            actions = actions.push(w::btn(format!("{m} 分"), if v.live_minutes == m { Kind::Standard } else { Kind::Ghost }, Some(OfMsg::LiveMinutes(m))));
+        }
+    }
     for (l, name, _) in LANES {
         let on = !v.hidden.contains(&l);
         actions = actions.push(w::btn(name, if on { Kind::Standard } else { Kind::Ghost }, Some(OfMsg::ToggleLane(l))));
@@ -70,7 +80,12 @@ fn timeline_tab<'a>(v: &View) -> Element<'a, OfMsg> {
     let side = scrollable(side_panel(d, v.dict.as_deref(), v.selected)).width(Length::FillPortion(1)).height(Length::Fill);
     column![
         top,
-        t::metadata(format!("{} · 滚轮缩放、拖动平移、点事件看因果链", d.title)).color(pal::dim()),
+        t::metadata(format!(
+            "{} · 滚轮缩放、拖动平移、点事件看因果链{}",
+            d.title,
+            if v.live { "（缩放 / 平移后不再跟随最新；右键回到全程跟随）" } else { "" }
+        ))
+        .color(pal::dim()),
         row![chart, side].spacing(space(2)).height(Length::Fill),
     ]
     .spacing(space(2))
@@ -380,6 +395,12 @@ impl canvas::Program<OfMsg> for Tomo {
                 let (full_lo, full_hi) = TomoState::default().range(&self.d);
                 st.lo = a.max(full_lo);
                 st.hi = z.min(full_hi);
+                Some(canvas::Action::request_redraw().and_capture())
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                cursor.position_in(b)?;
+                st.lo = 0.0;
+                st.hi = 0.0;
                 Some(canvas::Action::request_redraw().and_capture())
             }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
