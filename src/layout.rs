@@ -237,6 +237,10 @@ impl From<&pane::State> for data::Pane {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
             },
+            pane::Content::OfmsLab => data::Pane::OfmsLab {
+                settings: pane.settings.clone(),
+                link_group: pane.link_group,
+            },
             pane::Content::MarketMap => data::Pane::MarketMap {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
@@ -470,6 +474,15 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             link_group,
         } => Configuration::Pane(pane::State::from_config(
             pane::Content::StrategyLayers,
+            vec![],
+            settings,
+            link_group,
+        )),
+        data::Pane::OfmsLab {
+            settings,
+            link_group,
+        } => Configuration::Pane(pane::State::from_config(
+            pane::Content::OfmsLab,
             vec![],
             settings,
             link_group,

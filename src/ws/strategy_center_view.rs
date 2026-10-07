@@ -1125,7 +1125,7 @@ fn checks<'a>(v: &View) -> Element<'a, ScMsg> {
             if let Some(h) = &g.holdout {
                 col = col.push(gate_row(h));
             }
-            col = col.push(t::caption(g.verdict.clone()).color(if g.verdict.starts_with("七道全过") { pal::ok() } else { pal::warn() }));
+            col = col.push(t::caption(g.verdict.clone()).color(if g.verdict.contains("道全过——") { pal::ok() } else { pal::warn() }));
         }
         None => col = col.push(if v.gates_loading { w::loading("闸门") } else { t::metadata("（切到本页时计算）").color(pal::dim()).into() }),
     }
