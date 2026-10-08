@@ -473,8 +473,9 @@ pub fn pane_background(theme: &Theme, is_focused: bool) -> Style {
     Style {
         text_color: Some(palette.background.base.text),
         background: Some(palette.background.weakest.color.into()),
+        // docs/42 §2.2：顶部工具栏跟随选中面板——选中态要一眼看得出：2px 强调色边框
         border: if is_focused {
-            crate::ui::metrics::strong(crate::ui::metrics::radius::NONE)
+            iced::Border { color: crate::ui::pal::accent(), width: 2.0, radius: crate::ui::metrics::radius::NONE.into() }
         } else {
             crate::ui::metrics::hairline_subtle(crate::ui::metrics::radius::NONE)
         },

@@ -444,6 +444,12 @@ fn bar_style(_: &iced::Theme) -> container::Style {
 
 /// 命令栏（UPDS V2 §9）：工作区名、环境徽标、活动运行、命令面板入口。
 pub fn command_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
+    toolbar(info, |e| e, row![].into())
+}
+
+/// 顶部工具栏（docs/42 §2）：左 = 位置与数据环境；中 = **选中面板**的上下文控件（数据源、标的、周期、主动作、联动、页面菜单，
+/// 由调用方按面板的 `ToolbarSpec` 拼好）；右 = 命令搜索、检查器、底部面板。高度同原命令栏，不多占一行。
+pub fn toolbar<'a, M: Clone + 'a>(info: &Info, on: fn(ShellEvent) -> M, ctx: Element<'a, M>) -> Element<'a, M> {
     let c = core();
     let search = button(
         row![
@@ -452,7 +458,7 @@ pub fn command_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
             t::metadata("Ctrl K"),
         ]
         .align_y(Alignment::Center)
-        .width(Length::Fixed(300.0)),
+        .width(Length::Fixed(220.0)),
     )
     .padding([3, 8])
     .on_press(ShellEvent::Run(Cmd::TogglePalette))
@@ -479,9 +485,18 @@ pub fn command_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
             "金额、持仓、账户标识显示为 •••，通知暂停；在设置或命令面板里关掉".into(),
         ));
     }
+    let left: Element<'a, ShellEvent> = left.into();
+    let right: Element<'a, ShellEvent> = row![
+        search,
+        toggle_btn("检查器", "Ctrl I", Cmd::ToggleInspector),
+        toggle_btn("底部面板", "Ctrl J", Cmd::ToggleBottom)
+    ]
+    .spacing(metrics::space(3))
+    .align_y(Alignment::Center)
+    .into();
 
     container(
-        row![left, space::horizontal(), search, toggle_btn("检查器", "Ctrl I", Cmd::ToggleInspector), toggle_btn("底部面板", "Ctrl J", Cmd::ToggleBottom)]
+        row![left.map(on), ctx, space::horizontal(), right.map(on)]
             .spacing(metrics::space(3))
             .align_y(Alignment::Center),
     )
@@ -490,6 +505,24 @@ pub fn command_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
     .align_y(Alignment::Center)
     .style(bar_style)
     .into()
+}
+
+/// 工具栏上的一个下拉式按钮：`标签 值 ▾`（值为空时只显示标签）。
+pub fn tool_pick<'a, M: Clone + 'a>(label: &str, value: String, msg: Option<M>, active: bool) -> Element<'a, M> {
+    let c = core();
+    let mut r = row![].spacing(metrics::space(1)).align_y(Alignment::Center);
+    if !label.is_empty() {
+        r = r.push(t::metadata(label.to_string()).color(color(c.text_tertiary)));
+    }
+    r = r.push(t::label(value).color(color(c.text_primary)));
+    if msg.is_some() {
+        r = r.push(t::metadata("▾").color(color(c.text_tertiary)));
+    }
+    let b = button(r).padding([2, 6]).style(move |th, st| crate::style::button::modifier(th, st, active));
+    match msg {
+        Some(m) => b.on_press(m).into(),
+        None => b.into(),
+    }
 }
 
 fn toggle_btn<'a>(label: &'static str, key: &'static str, cmd: Cmd) -> Element<'a, ShellEvent> {

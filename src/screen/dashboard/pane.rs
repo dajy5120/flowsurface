@@ -93,6 +93,19 @@ pub enum Message {
     PaneEvent(pane_grid::Pane, Event),
 }
 
+/// 顶部工具栏的面板声明（docs/42 §2.3）。没有的项不显示。
+#[derive(Default)]
+pub struct ToolbarSpec {
+    /// 标的：当前值 + 点了发的事件（弹选标的）
+    pub symbol: Option<(String, Event)>,
+    /// 周期 / 基准：当前值 + 事件（弹选周期）
+    pub basis: Option<(String, Event)>,
+    /// 数据源与窗口摘要（如 `B2 · Tardis · 永续 · BTCUSDT · 2026-06-12 14:00 起 60 分钟`）
+    pub source: Option<String>,
+    /// 主动作：文字、是否在跑 / 激活、事件
+    pub actions: Vec<(String, bool, Event)>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     ShowModal(Modal),
@@ -594,6 +607,86 @@ impl State {
             ResolvedStream::Ready(streams) => !streams.is_empty(),
             ResolvedStream::Waiting { streams, .. } => !streams.is_empty(),
         }
+    }
+
+    /// 顶部工具栏（docs/42 §2.3）：这个面板支持哪些上下文控件、当前值、点了发什么事件。
+    /// 事件就是面板标题栏上原来那几个按钮发的事件（选标的、选周期的弹窗照旧弹在面板里），不另写处理逻辑。
+    pub fn toolbar_spec(&self) -> ToolbarSpec {
+        let mut spec = ToolbarSpec::default();
+        if let Some(kind) = self.stream_pair_kind() {
+            let (ti, extra) = match kind {
+                StreamPairKind::MultiSource(list) => (list[0], list.len().saturating_sub(1)),
+                StreamPairKind::SingleSource(ti) => (ti, 0),
+            };
+            let mut label = ti.ticker.display_symbol_and_type().0;
+            if matches!(ti.ticker.market_type(), MarketKind::LinearPerps | MarketKind::InversePerps) {
+                label.push_str(" PERP");
+            }
+            if extra > 0 {
+                label = format!("{label} +{extra}");
+            }
+            spec.symbol = Some((label, Event::ShowModal(Modal::MiniTickersList(MiniPanel::new()))));
+        }
+        let basis_pick = |b: Basis, k: ModifierKind| {
+            (
+                b.to_string(),
+                Event::ShowModal(Modal::StreamModifier(
+                    modal::stream::Modifier::new(k).with_view_mode(modal::stream::ViewMode::BasisSelection),
+                )),
+            )
+        };
+        match &self.content {
+            Content::Kline { chart: Some(chart), kind, .. } => {
+                let b = chart.basis();
+                spec.basis = Some(match kind {
+                    data::chart::KlineChartKind::Footprint { .. } => {
+                        basis_pick(b, ModifierKind::Footprint(b, self.settings.tick_multiply.unwrap_or(TickMultiplier(10))))
+                    }
+                    data::chart::KlineChartKind::Candles => basis_pick(b, ModifierKind::Candlestick(b)),
+                });
+            }
+            Content::Heatmap { chart: Some(_), .. } | Content::ShaderHeatmap { chart: Some(_), .. } => {
+                let b = self.settings.selected_basis.unwrap_or(Basis::default_heatmap_time(self.stream_pair()));
+                spec.basis = Some(basis_pick(b, ModifierKind::Heatmap(b, self.settings.tick_multiply.unwrap_or(TickMultiplier(5)))));
+            }
+            Content::Comparison(Some(c)) => {
+                let b = Basis::Time(c.timeframe);
+                spec.basis = Some(basis_pick(b, ModifierKind::Comparison(b)));
+            }
+            Content::OfmsLab => {
+                let v = crate::ws::ofms_lab::view(self.unique_id());
+                spec.source = Some(if v.live {
+                    "● 实时 · 常驻引擎".to_string()
+                } else {
+                    v.pick
+                        .selection(&crate::ws::ofms_lab::opts())
+                        .map(|s| s.describe())
+                        // 选择器里没选、但已读出一个窗口（打开时自动读上次的）：显示那个窗口
+                        .or_else(|| v.data.as_ref().map(|d| d.title.clone()))
+                        .unwrap_or_else(|| "未选数据（在面板里依次选）".into())
+                });
+                spec.actions.push((
+                    if v.running { "生成中…".into() } else { "▶ 生成 / 读取".into() },
+                    v.running,
+                    Event::OfmsLabInteraction(crate::ws::ofms_lab::OfMsg::Run),
+                ));
+                spec.actions.push((
+                    if v.live { "● 实时（停止）".into() } else { "实时".into() },
+                    v.live,
+                    Event::OfmsLabInteraction(crate::ws::ofms_lab::OfMsg::Live(!v.live)),
+                ));
+            }
+            Content::TardisBoard(tb) => {
+                spec.source = Some(
+                    tb.pick
+                        .selection(&crate::ws::tardis_board::pick_opts())
+                        .map(|s| s.describe())
+                        .unwrap_or_else(|| "未选数据".into()),
+                );
+            }
+            _ => {}
+        }
+        spec
     }
 
     /// 图表类面板（docs/41 §4.2：只有它们能进浮动层——表格、表单浮起来只会互相遮挡）。

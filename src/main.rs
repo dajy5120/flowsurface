@@ -1283,10 +1283,9 @@ impl Flowsurface {
                     }),
             };
 
-            // 页签栏（docs/41 §3）：当前工作区的页面。只有一页的工作区不列那唯一的页签（名字与工作区重复），
-            // 但照样有「⋯ 页面」——新建 / 复制页、面板库、浮动层、联动、锁定等都从这里进（2026-10-07 用户要求）
+            // 页签栏（docs/41 §3，docs/42 §2 第 2 行）：当前工作区的页面，**只有一页的工作区也显示页签**、高度不变；
+            // 「⋯ 页面」移到顶部工具栏，菜单展开时盖在内容上方（不再把内容往下挤）
             let pages = self.pages_of(&active_ws);
-            let single_page = pages.len() <= 1;
             let dashboard_view: Element<'_, Message> = if self.gallery.is_some() {
                 dashboard_view
             } else {
@@ -1294,7 +1293,6 @@ impl Flowsurface {
                 let bt = self.backtest_running();
                 let tabs: Vec<ui::shell::PageTab<uuid::Uuid>> = pages
                     .into_iter()
-                    .filter(|_| !single_page)
                     .map(|(uid, n)| {
                         let mut label = ws::workspace::page_title(&n);
                         if self.pages.locked.contains(&n) {
@@ -1316,34 +1314,24 @@ impl Flowsurface {
                         }
                     })
                     .collect();
-                // 只有一页时没有页签可挂「🔒 锁定 / ↻ 模板有更新」，挂在这个按钮上
-                let cur_name = self.active_name();
-                let mut more_label = String::from("⋯ 页面");
-                if single_page && self.pages.locked.contains(&cur_name) {
-                    more_label.push_str(" 🔒");
-                }
-                if single_page && self.outdated.contains(&cur_name) {
-                    more_label.push_str(" ↻");
-                }
-                if self.page_menu {
-                    more_label.push_str(" ▴");
-                }
-                let more = ui::widgets::btn(
-                    more_label,
-                    ui::widgets::Kind::Ghost,
-                    Some(Message::Page(ws::pages::PageMsg::ToggleMenu)),
-                );
                 let bar = ui::shell::page_bar(
                     tabs,
                     &cur,
                     |uid| Message::Layouts(modal::layout_manager::Message::SelectActive(uid)),
-                    vec![more],
+                    vec![],
                 );
-                let mut col = column![bar];
-                if self.page_menu {
-                    col = col.push(self.page_toolbar());
-                }
-                col.push(dashboard_view).into()
+                let body: Element<'_, Message> = if self.page_menu {
+                    // 页面菜单：盖在内容上方的下拉卡片（不透明），点「⋯ 页面」收起
+                    let card = container(self.page_toolbar()).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
+                        background: Some(iced::Background::Color(t.extended_palette().background.weak.color)),
+                        border: iced::Border { color: ui::pal::accent(), width: 1.0, radius: 4.0.into() },
+                        ..Default::default()
+                    });
+                    iced::widget::stack![dashboard_view, column![card]].into()
+                } else {
+                    dashboard_view
+                };
+                column![bar, body].into()
             };
 
             let header_title = {
@@ -1400,7 +1388,8 @@ impl Flowsurface {
             } else {
                 work
             };
-            let command_bar = ui::shell::command_bar(&info).map(Message::Shell);
+            // 顶部工具栏（docs/42）：中段是选中面板的上下文控件
+            let command_bar = ui::shell::toolbar(&info, Message::Shell, self.toolbar_ctx());
             let status_bar = ui::shell::status_bar(&info).map(Message::Shell);
 
             let base = column![
@@ -1726,6 +1715,72 @@ impl Flowsurface {
         self.layout_manager.insert_layout(layout::LayoutId { unique: uid, name }, dashboard);
         ws::pages::save(&self.pages);
         self.update(Message::Layouts(modal::layout_manager::Message::SelectActive(uid)))
+    }
+
+    /// 工具栏作用的面板（docs/42 §2.2）：选中的那个；没有选中就取本页第一个有工具栏控件的面板。
+    fn toolbar_target(&self) -> Option<(window::Id, pane_grid::Pane)> {
+        let d = self.active_dashboard();
+        let main = self.main_window.id;
+        if let Some((w, p)) = d.focus {
+            if d.get_pane(main, w, p).is_some() {
+                return Some((w, p));
+            }
+        }
+        let has = |st: &dashboard::pane::State| {
+            let s = st.toolbar_spec();
+            s.symbol.is_some() || s.basis.is_some() || s.source.is_some() || !s.actions.is_empty()
+        };
+        d.panes
+            .iter()
+            .find(|(_, st)| has(st))
+            .or_else(|| d.panes.iter().next())
+            .map(|(p, _)| (main, *p))
+    }
+
+    /// 顶部工具栏中段（docs/42 §2.1）：当前面板 · 数据源 · 标的 · 周期 · 主动作 · ⛓ · ⋯ 页面。
+    fn toolbar_ctx(&self) -> Element<'_, Message> {
+        use ui::shell::tool_pick;
+        let mut r = row![].spacing(ui::metrics::space(2)).align_y(Alignment::Center);
+        if self.gallery.is_some() {
+            return r.into();
+        }
+        let main = self.main_window.id;
+        let d = self.active_dashboard();
+        if let Some((w, p)) = self.toolbar_target() {
+            if let Some(st) = d.get_pane(main, w, p) {
+                let ev = move |e: dashboard::pane::Event| {
+                    Message::Dashboard { layout_id: None, event: dashboard::Message::Pane(w, dashboard::pane::Message::PaneEvent(p, e)) }
+                };
+                let spec = st.toolbar_spec();
+                let name = st.settings.view.clone().unwrap_or_else(|| st.content.to_string());
+                r = r.push(ui::text::metadata(format!("│ ◉ {name}")).color(ui::pal::dim()));
+                if let Some(src) = spec.source {
+                    r = r.push(tool_pick("数据", src, None::<Message>, false));
+                }
+                if let Some((v, e)) = spec.symbol {
+                    r = r.push(tool_pick("标的", v, Some(ev(e)), false));
+                }
+                if let Some((v, e)) = spec.basis {
+                    r = r.push(tool_pick("周期", v, Some(ev(e)), false));
+                }
+                for (label, on, e) in spec.actions {
+                    r = r.push(ui::widgets::btn(label, if on { ui::widgets::Kind::Standard } else { ui::widgets::Kind::Primary }, Some(ev(e))));
+                }
+            }
+        }
+        let linked = d.page_linked(main);
+        r = r.push(tool_pick(
+            "",
+            if linked { "⛓ 联动：开".into() } else { "⛓ 联动：关".into() },
+            Some(Message::Page(ws::pages::PageMsg::LinkSymbols(!linked))),
+            linked,
+        ));
+        let mut more = String::from("⋯ 页面");
+        if self.page_menu {
+            more.push_str(" ▴");
+        }
+        r = r.push(tool_pick("", more, Some(Message::Page(ws::pages::PageMsg::ToggleMenu)), self.page_menu));
+        r.into()
     }
 
     /// 页签栏下面的页面工具条（docs/41 B 期）。
