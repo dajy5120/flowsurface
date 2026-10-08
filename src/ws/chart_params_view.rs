@@ -488,7 +488,10 @@ pub fn view<'a>(m: &std::sync::Arc<Matrix>, hosted: bool) -> Element<'a, Msg> {
     ]
     .spacing(6);
     if !c.editable.is_empty() {
-        b = b.push(if hosted { super::inspector_props::hint("口径设置") } else { edit_block(m) });
+        // 主区始终减负（docs/42）：口径编辑在检查器「属性」页
+        if !hosted {
+            b = b.push(edit_block(m));
+        }
     }
 
     // 卡片网格：按宽度自动定列数（最多 6 列），卡片固定高度、内容在卡片里滚动（docs/33 排版 A 方案）

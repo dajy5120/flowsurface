@@ -157,7 +157,7 @@ pub fn pane_body<'a>() -> Element<'a, C4Msg> {
             );
             if stale {
                 body = body.push(
-                    text("⚠ checkpoint 未更新——守护可能卡住，可点上方「↻ 重启」")
+                    text("⚠ checkpoint 未更新——守护可能卡住，可在检查器「数据」页点「↻ 重启」")
                         .size(crate::ui::text::s_small())
                         .color(crate::ui::pal::warn()),
                 );
@@ -165,7 +165,7 @@ pub fn pane_body<'a>() -> Element<'a, C4Msg> {
         }
         None => {
             body = body.push(
-                text("（无 checkpoint——守护未运行，点上方「▶ 启动」开始）")
+                text("（无 checkpoint——守护未运行，到检查器「数据」页（工具栏「⚙ 设置」）点「▶ 启动」）")
                     .size(crate::ui::text::s_small())
                     .color(crate::ui::pal::warn()),
             );

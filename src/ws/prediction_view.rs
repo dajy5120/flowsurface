@@ -246,7 +246,7 @@ pub fn pane_body<'a>() -> Element<'a, PredictionMsg> {
 
     if !st.present || st.rows.is_empty() {
         body = body.push(
-            text("暂无快照——点上方「▶ 立即运行」生成（夜跑含 AI 校准+回填结算）")
+            text("暂无快照——到检查器「数据」页（工具栏「⚙ 设置」）点「▶ 立即运行」生成（夜跑含 AI 校准+回填结算）")
                 .size(crate::ui::text::s_small())
                 .color(crate::ui::pal::dim()),
         );

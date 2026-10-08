@@ -31,6 +31,8 @@ pub enum Cmd {
     FloatToggle,
     /// 检查器 ✕：自动展开的情况下记住「这个面板先别自动开」（docs/42 第 2 期）
     InspectorDismiss,
+    /// 打开检查器并停在某一页（工具栏「⚙ 设置」，docs/42：主区始终减负，设置的入口在这里）
+    InspectorOpen(super::shell::InspTab),
     Theme(ThemeId),
     CycleTheme,
     Density(Density),

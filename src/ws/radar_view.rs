@@ -3001,11 +3001,19 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
     }
 
     if !st.present || st.rows.is_empty() {
+        if part == super::inspector_props::Part::Props {
+            // 资产 / 来源 / 筛选的可选项随快照下发，没有快照就没有东西可选——说清楚，别留一页空白
+            body = body.push(
+                text("还没有快照：资产、来源、筛选的可选项随快照下发。先到「数据」页「⇩ 抓取一次」或「▶ 启动」守护。")
+                    .size(crate::ui::text::s_small())
+                    .color(crate::ui::pal::dim()),
+            );
+        }
         if part.side() {
             return body.into();
         }
         body = body.push(
-            text("暂无快照——点上方「⇩ 抓取一次」抓一轮就停（含回填约 5–15 分钟），或「▶ 启动」常驻（首轮约 5s 出数据）")
+            text("暂无快照——到检查器「数据」页（工具栏「⚙ 设置」）点「⇩ 抓取一次」抓一轮就停（含回填约 5–15 分钟），或「▶ 启动」常驻（首轮约 5s 出数据）")
                 .size(crate::ui::text::s_small())
                 .color(crate::ui::pal::dim()),
         );
@@ -3321,7 +3329,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
         body = body.push(
             text(if nf > 0 {
                 // 空表最常见的原因就是筛选，而不是没数据——直接说，并给出清除入口
-                format!("{nf} 个筛选把 {} 行全筛掉了——点上面的「清空」恢复", st.rows.len())
+                format!("{nf} 个筛选把 {} 行全筛掉了——在检查器「属性」页点「清空」恢复", st.rows.len())
             } else if v.source.is_empty() {
                 "该资产类暂无数据——股票层需在 radar.toml 的 [equities] 里开启".to_string()
             } else {

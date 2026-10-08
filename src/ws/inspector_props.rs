@@ -1,7 +1,8 @@
-//! 检查器里的「面板可编辑属性」（docs/35 §16.5 第 3 项，UPDS V2 §11：属性在检查器里改）。
+//! 检查器里的面板设置（docs/35 §16.5 第 3 项，docs/42）。
 //!
-//! 检查器打开时，聚焦面板的可编辑属性（数据选择器、口径设置）搬到检查器里显示，面板原处
-//! 收成一行提示；检查器关着时仍在面板里内联显示——关掉检查器不会让这些设置找不到。
+//! **主区始终减负**（docs/42，用户定）：面板的设置、数据选择、守护控制与长说明一律只在检查器里——
+//! 「属性」[`view`]、「数据」[`data_view`]、「说明」[`about`]；检查器关着时，顶部工具栏有「⚙ 设置」入口，
+//! 改过设置的写「⚙ 已改 n 项」（[`changed`]）。
 //!
 //! # 消息怎么回去
 //!
@@ -9,46 +10,25 @@
 //! `Event::BacktestLaunchInteraction` ……），由 main 包成 `Dashboard → Pane → PaneEvent(聚焦的
 //! pane, 事件)` 送回原来的处理函数。所以副作用（清图、横滚表头、写配置重启引擎）完全不变，
 //! 这里不另写一套处理逻辑。
-//!
-//! # 谁托管着
-//!
-//! [`set_host`] 由 main 在每次画界面之前写入：检查器开着 → 聚焦的 pane；否则 `None`。
-//! 面板视图用 [`hosted`] 判断自己的可编辑属性是不是正被检查器托管。
 
-use std::sync::Mutex;
-
-use iced::widget::{column, pane_grid, text};
+use iced::widget::{column, text};
 use iced::{Element, Length};
 
 use crate::screen::dashboard::pane::{Content, Event, State};
 
-static HOST: Mutex<Option<pane_grid::Pane>> = Mutex::new(None);
-
-/// 检查器正在托管哪个 pane 的可编辑属性（检查器关着 = `None`）。
-pub fn set_host(p: Option<pane_grid::Pane>) {
-    if let Ok(mut g) = HOST.lock() {
-        *g = p;
-    }
-}
-
-/// 这个 pane 的可编辑属性正显示在检查器里吗。
-pub fn hosted(p: pane_grid::Pane) -> bool {
-    HOST.lock().is_ok_and(|g| *g == Some(p))
-}
-
 // ── 渲染部位（docs/42 第 4 期）──────────────────────────────────────
 //
 // 大多数面板的视图是一个函数从上往下推：标题与长说明 → 守护 / 运行控制与数据状态 → 筛选与显示设置 → 内容。
-// 检查器托管时，同一个函数按「部位」各画一遍：主区只画内容与状态，检查器「属性」页只画设置、「数据」页只画
+// 同一个函数按「部位」各画一遍：主区只画内容与状态，检查器「属性」页只画设置、「数据」页只画
 // 数据与守护——**不复制任何视图逻辑**，状态规范化（如资产类换了回退口径）只有一份。
 // 部位放在线程局部里（视图在 UI 线程里同步构建），面板视图用 [`part`] 读，不用改每个函数的签名。
 
 /// 面板视图这一次画的是哪一部分。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Part {
-    /// 检查器没托管：全部内联（原来的样子）
+    /// 全部内联（原来的样子）。主区始终减负之后，只是构建视图之前的缺省值
     Inline,
-    /// 托管时的主区：内容、状态行、与钱和结论有关的警示
+    /// 主区：内容、状态行、与钱和结论有关的警示
     Main,
     /// 检查器「属性」页：设置
     Props,
@@ -109,14 +89,6 @@ impl Drop for PartScope {
     fn drop(&mut self) {
         PART.with(|c| c.set(self.0));
     }
-}
-
-/// 面板原处的一行提示（可编辑属性已搬进检查器）。
-pub fn hint<'a, M: 'a>(what: &str) -> Element<'a, M> {
-    text(format!("{what}在右侧检查器中编辑（Ctrl I 收起检查器后回到这里）"))
-        .size(crate::ui::text::s_meta())
-        .color(crate::ui::pal::dim())
-        .into()
 }
 
 /// 检查器「属性」页：选中面板的可编辑设置。没有的面板返回 `None`。
@@ -198,20 +170,6 @@ pub fn view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn 托管只认一个_pane() {
-        let mut ids = Vec::new();
-        let (mut st, a) = pane_grid::State::new(());
-        let (b, _) = st.split(pane_grid::Axis::Vertical, a, ()).expect("split");
-        ids.push(a);
-        ids.push(b);
-        set_host(Some(a));
-        assert!(hosted(a));
-        assert!(!hosted(b));
-        set_host(None);
-        assert!(!hosted(a), "检查器关了：面板收回内联显示");
-    }
 
     #[test]
     fn 没有可编辑属性的面板不占检查器() {

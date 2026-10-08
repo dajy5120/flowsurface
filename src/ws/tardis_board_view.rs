@@ -898,7 +898,7 @@ pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoar
     }
     if !p.loaded {
         body = body.push(
-            text("尚未加载 —— 选好上面三层后点「加载」").size(crate::ui::text::s_body()).color(crate::ui::pal::dim()),
+            text("尚未加载 —— 在检查器「数据」页选好数据与类型，再点工具栏的「加载」").size(crate::ui::text::s_body()).color(crate::ui::pal::dim()),
         );
     } else if let Some(e) = p.error.clone() {
         body = body.push(text(format!("· {e}")).size(crate::ui::text::s_body()).color(crate::ui::pal::down()));

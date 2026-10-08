@@ -663,7 +663,7 @@ impl State {
                         .map(|s| s.describe())
                         // 选择器里没选、但已读出一个窗口（打开时自动读上次的）：显示那个窗口
                         .or_else(|| v.data.as_ref().map(|d| d.title.clone()))
-                        .unwrap_or_else(|| "未选数据（在面板里依次选）".into())
+                        .unwrap_or_else(|| "未选数据（在检查器「数据」页选）".into())
                 });
                 spec.actions.push((
                     if v.running { "生成中…".into() } else { "▶ 生成 / 读取".into() },
@@ -743,9 +743,10 @@ impl State {
         timezone: UserTimezone,
         tickers_table: &'a TickersTable,
     ) -> pane_grid::Content<'a, Message, Theme, Renderer> {
-        // 检查器托管着这个面板吗（docs/42）：只认主窗口平铺层里的那个 pane——浮窗与弹出窗口各有一套 pane 编号，
-        // 只比 pane 会把编号相同的浮窗面板也当成被托管
-        let hosted = window == main_window.id && crate::ws::inspector_props::hosted(id);
+        // 主区始终减负（docs/42 第 4 期后，用户定）：设置、数据选择、守护控制与长说明一律在检查器里，
+        // 不论检查器开没开——检查器关着时，顶部工具栏有「⚙ 设置」入口。`hosted` 名字沿用（各面板视图的参数）
+        let hosted = true;
+        let _ = (window, main_window);
         // 渲染部位（docs/42 第 4 期）：面板视图里读 `inspector_props::part()`，本函数返回时恢复
         let _part = crate::ws::inspector_props::scope(crate::ws::inspector_props::Part::of(hosted));
         let mut top_left_buttons = if Content::Starter == self.content {
@@ -959,6 +960,8 @@ impl State {
                 } else {
                     crate::ws::view::pane_body(*mode)
                 };
+                // 读数面板整块就是内容（没有设置区）
+                let base = crate::ui::mark::content(base);
                 self.compose_stack_view(
                     base,
                     id,
@@ -1712,9 +1715,9 @@ impl State {
             Status::Ready => {}
         }
 
-        // 非内容高度测量（docs/42 第 4 期）：只记被检查器托管的面板；图表类整块就是内容
+        // 非内容高度测量（docs/42 第 4 期）：每个面板都量；图表类整块就是内容
         let body = if self.is_chart_kind() && !matches!(self.content, Content::OfmsLab) { crate::ui::mark::content(body) } else { body };
-        let body = crate::ui::mark::body(self.settings.view.clone().unwrap_or_else(|| self.content.to_string()), hosted, body);
+        let body = crate::ui::mark::body(self.settings.view.clone().unwrap_or_else(|| self.content.to_string()), body);
         let content = pane_grid::Content::new(body)
             .style(move |theme| style::pane_background(theme, is_focused));
 

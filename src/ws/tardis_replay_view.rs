@@ -44,12 +44,11 @@ pub fn pane_body(app: &TardisReplayState, hosted: bool) -> Element<'_, TardisRep
     .spacing(4);
 
     // 数据管线 / 市场 / 标的 / 日期：共用数据选择组件（只列 Tardis）；时段 / 时长 / 倍速另起一行。
-    let picks = column![
-        if hosted {
-            super::inspector_props::hint("数据选择")
-        } else {
-            super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisReplayMsg::Data)
-        },
+    let mut picks = column![].spacing(8);
+    if !hosted {
+        picks = picks.push(super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisReplayMsg::Data));
+    }
+    let picks = picks.push(
         row![
             label("起始(UTC)"),
             pick_list(hours(), Some(app.start_hm.clone()), TardisReplayMsg::StartPick)
@@ -63,8 +62,7 @@ pub fn pane_body(app: &TardisReplayState, hosted: bool) -> Element<'_, TardisRep
         ]
         .spacing(8)
         .align_y(Alignment::Center),
-    ]
-    .spacing(8);
+    );
 
     // 起停按钮：跑着就只给「停止」，避免重复起进程。
     let actions = row![

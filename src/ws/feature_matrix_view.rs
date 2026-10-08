@@ -1702,7 +1702,7 @@ pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
                     "暂无快照（{}）。生成：\n  \
                      cargo run --release -p wealthspring-features --example replay_events_csv -- <目录>\n\
                      引擎常驻时由 sidecar::SidecarWriter 每 500ms 写一次。面板只读，不连交易所。\n\
-                     选了本地数据：点上面的「▶ 开始回放」，回放跑起来后这里就有快照。",
+                     选了本地数据：在检查器「数据」页点「▶ 开始回放」，回放跑起来后这里就有快照。",
                     ro::board_path().display()
                 ))
                 .size(crate::ui::text::s_small())

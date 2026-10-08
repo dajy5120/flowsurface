@@ -7,12 +7,14 @@
 //! - 面板在自己的内容起点（表格、图、时间线……）放一个 [`content`]；
 //! - 画的时候两者的 y 相减，就是内容之上被控件、状态、说明占掉的高度。
 //!
-//! 只记**检查器托管着的那个面板**（它是减负规则作用的对象；没托管的面板按设计会内联显示全部设置）。
-//! 样张模式每截一页取一次 [`take`]，写进 `chrome.json`，`scripts/ui_chrome_gate.py` 按阈值判定。
+//! 主区始终减负（docs/42），所以**每个面板都量**。样张模式每截一页取一次 [`take`]（最近一秒里画过的面板），
+//! 写进 `chrome.json`，`scripts/ui_chrome_gate.py` 按阈值判定。
 //! 平时不开样张也照样记一个数，代价是每帧几次比较。
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::overlay;
@@ -29,19 +31,24 @@ pub struct Measure {
 }
 
 thread_local! {
-    /// 正在画的面板主体：(面板名, 是否被托管, 主体顶 y, 已量到的高度)
-    static CUR: RefCell<Option<(String, bool, f32, Option<f32>)>> = const { RefCell::new(None) };
+    /// 正在画的面板主体：(面板名, 主体顶 y, 已量到的高度)
+    static CUR: RefCell<Option<(String, f32, Option<f32>)>> = const { RefCell::new(None) };
 }
 
-static LAST: Mutex<Option<Measure>> = Mutex::new(None);
+/// 面板名（同名面板加主体顶 y 区分）→ (测量, 画的时刻)
+static SEEN: Mutex<BTreeMap<(String, i32), (Measure, Instant)>> = Mutex::new(BTreeMap::new());
 
-/// 最近一帧被托管面板的测量（样张截图时取）。
-pub fn take() -> Option<Measure> {
-    LAST.lock().ok().and_then(|mut g| g.take())
+/// 最近一秒里画过的全部面板的测量（样张截图时取；取完清空，上一页残留的不会混进来）。
+pub fn take() -> Vec<Measure> {
+    let Ok(mut g) = SEEN.lock() else { return vec![] };
+    let now = Instant::now();
+    let out = g.values().filter(|(_, t)| now.duration_since(*t) < Duration::from_secs(1)).map(|(m, _)| m.clone()).collect();
+    g.clear();
+    out
 }
 
 enum Kind {
-    Body { panel: String, hosted: bool },
+    Body { panel: String },
     Content,
 }
 
@@ -50,9 +57,9 @@ pub struct Mark<'a, M> {
     kind: Kind,
 }
 
-/// 包住面板主体。`hosted` = 检查器正托管这个面板（只有它会被记录）。
-pub fn body<'a, M: 'a>(panel: String, hosted: bool, content: impl Into<Element<'a, M, Theme, Renderer>>) -> Element<'a, M, Theme, Renderer> {
-    Element::new(Mark { content: content.into(), kind: Kind::Body { panel, hosted } })
+/// 包住面板主体（pane 标题栏以下的整块）。
+pub fn body<'a, M: 'a>(panel: String, content: impl Into<Element<'a, M, Theme, Renderer>>) -> Element<'a, M, Theme, Renderer> {
+    Element::new(Mark { content: content.into(), kind: Kind::Body { panel } })
 }
 
 /// 标出内容起点（放在表格 / 图 / 时间线等真正的内容外面）。
@@ -117,19 +124,19 @@ impl<M> Widget<M, Theme, Renderer> for Mark<'_, M> {
     ) {
         let y = layout.bounds().y;
         match &self.kind {
-            Kind::Body { panel, hosted } => {
-                let prev = CUR.with(|c| c.replace(Some((panel.clone(), *hosted, y, None))));
+            Kind::Body { panel } => {
+                let prev = CUR.with(|c| c.replace(Some((panel.clone(), y, None))));
                 self.content.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
-                if let Some((panel, true, _, px)) = CUR.with(|c| c.replace(prev))
-                    && let Ok(mut g) = LAST.lock()
+                if let Some((panel, top, px)) = CUR.with(|c| c.replace(prev))
+                    && let Ok(mut g) = SEEN.lock()
                 {
-                    *g = Some(Measure { panel, px });
+                    g.insert((panel.clone(), top as i32), (Measure { panel, px }, Instant::now()));
                 }
             }
             Kind::Content => {
                 // 只认第一个内容标记（面板里可能有多块内容，起点是最上面那块）
                 CUR.with(|c| {
-                    if let Some((_, _, top, px @ None)) = c.borrow_mut().as_mut() {
+                    if let Some((_, top, px @ None)) = c.borrow_mut().as_mut() {
                         *px = Some((y - *top).max(0.0));
                     }
                 });

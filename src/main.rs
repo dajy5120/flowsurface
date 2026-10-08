@@ -738,7 +738,7 @@ impl Flowsurface {
                         self.active_dashboard().panes.iter().map(|(p, st)| (*p, st.content.to_string())).collect();
                     panes.sort_by_key(|(p, _)| *p);
                     ws::specimen::append_focus_order(&sp.dir, &ws_name, &panes.into_iter().map(|(_, n)| n).collect::<Vec<_>>());
-                    // 非内容高度（docs/42 第 4 期）：本页被检查器托管的面板，内容之上占了多少像素
+                    // 非内容高度（docs/42 第 4 期）：本页每个面板内容之上占了多少像素
                     ws::specimen::append_chrome(&sp.dir, &ws_name, ui::mark::take());
                 }
                 let done = self
@@ -1254,20 +1254,7 @@ impl Flowsurface {
         let main_id = self.main_window.id;
         // docs/42 第 2 期：检查器作用于工具栏同一个面板；钉住 = 常开，否则这个面板有可设置的东西才自动展开
         let insp_target = self.toolbar_target();
-        let insp_key = insp_target.map(|(w, p)| format!("{w:?}{p:?}"));
-        let target_has_props = insp_target
-            .and_then(|(w, p)| dashboard.get_pane(main_id, w, p))
-            .is_some_and(|st| ws::inspector_props::has_props(&st.content));
-        let insp_visible = self.gallery.is_none()
-            && (self.shell.inspector
-                || self.shell.insp_drag
-                || (target_has_props && self.shell.insp_dismissed != insp_key));
-        let host = if insp_visible {
-            insp_target.filter(|(w, _)| *w == main_id).map(|(_, p)| p)
-        } else {
-            None
-        };
-        ws::inspector_props::set_host(host);
+        let insp_visible = self.inspector_visible();
 
         let content = if id == self.main_window.id {
             // WealthSpring 工作区（docs/08 F6 — P1）：按固定顺序取 5 个工作区的 (uuid, 名, 是否活动)，
@@ -1775,6 +1762,17 @@ impl Flowsurface {
     }
 
     /// 工具栏作用的面板（docs/42 §2.2）：选中的那个；没有选中就取本页第一个有工具栏控件的面板。
+    /// 检查器这一帧显不显示：钉住 / 正在拖宽 / 选中面板有「属性」且没被 ✕ 掉（docs/42 第 2 期）。
+    fn inspector_visible(&self) -> bool {
+        let target = self.toolbar_target();
+        let key = target.map(|(w, p)| format!("{w:?}{p:?}"));
+        let has_props = target
+            .and_then(|(w, p)| self.active_dashboard().get_pane(self.main_window.id, w, p))
+            .is_some_and(|st| ws::inspector_props::has_props(&st.content));
+        self.gallery.is_none()
+            && (self.shell.inspector || self.shell.insp_drag || (has_props && self.shell.insp_dismissed != key))
+    }
+
     fn toolbar_target(&self) -> Option<(window::Id, pane_grid::Pane)> {
         let d = self.active_dashboard();
         let main = self.main_window.id;
@@ -1822,6 +1820,22 @@ impl Flowsurface {
                 }
                 for (label, on, e) in spec.actions {
                     r = r.push(ui::widgets::btn(label, if on { ui::widgets::Kind::Standard } else { ui::widgets::Kind::Primary }, Some(ev(e))));
+                }
+                // 主区始终减负（docs/42）：设置 / 数据选择 / 守护控制只在检查器里。检查器关着时这里给入口，
+                // 改过设置的写明「已改 n 项」——看到的不是缺省值，得一眼知道
+                if !self.inspector_visible() {
+                    let changed = ws::inspector_props::changed(st).len();
+                    let has_props = ws::inspector_props::has_props(&st.content);
+                    let has_data = ws::inspector_props::data_view(st).is_some();
+                    if has_props || has_data || changed > 0 {
+                        let tab = if has_props { ui::shell::InspTab::Props } else { ui::shell::InspTab::Data };
+                        r = r.push(tool_pick(
+                            "",
+                            if changed > 0 { format!("⚙ 已改 {changed} 项") } else { "⚙ 设置".into() },
+                            Some(Message::RunCommand(ui::command::Cmd::InspectorOpen(tab))),
+                            changed > 0,
+                        ));
+                    }
                 }
             }
         }
@@ -2339,6 +2353,14 @@ impl Flowsurface {
             Cmd::ToggleInspector => {
                 let _ = self.shell.update(ui::shell::ShellEvent::InspPin, &[]);
                 self.shell.insp_dismissed = None;
+            }
+            Cmd::InspectorOpen(tab) => {
+                self.shell.insp_dismissed = None;
+                self.shell.insp_tab = tab;
+                // 选中的面板有「属性」时检查器本来就会自动展开；只有「数据」的面板要钉住才开得了
+                if !self.inspector_visible() {
+                    let _ = self.shell.update(ui::shell::ShellEvent::InspPin, &[]);
+                }
             }
             Cmd::InspectorDismiss => {
                 self.shell.insp_dismissed = self.toolbar_target().map(|(w, p)| format!("{w:?}{p:?}"));
