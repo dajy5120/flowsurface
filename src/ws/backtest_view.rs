@@ -6,7 +6,7 @@
 //! 数据走 [`super::backtest_readout`] 旁路快照；只渲染、不发消息，对 pane 消息类型 `M` 泛型。
 
 use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke, Text};
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, text};
 use iced::{Alignment, Background, Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
 
 use super::backtest_readout::BacktestResult;
@@ -629,7 +629,7 @@ fn heatmap<'a, M: 'a>(m: &super::backtest_readout::Monthly) -> Element<'a, M> {
         }
         grid = grid.push(r);
     }
-    container(scrollable(grid)).padding(crate::ui::metrics::space(2)).into()
+    container(crate::ui::scroll(grid)).padding(crate::ui::metrics::space(2)).into()
 }
 
 /// 渲染回测结果：仿官方 tearsheet 版式（表在上、图按序在下）。
@@ -843,7 +843,7 @@ pub fn pane_body<'a>() -> Element<'a, BtMsg> {
     .spacing(10);
 
     let body = column![header, run_table, stats_table, charts].spacing(12).padding(crate::ui::metrics::space(1));
-    container(scrollable(body)).padding(crate::ui::metrics::space(4)).width(Length::Fill).height(Length::Fill).into()
+    container(crate::ui::scroll(body)).padding(crate::ui::metrics::space(4)).width(Length::Fill).height(Length::Fill).into()
 }
 
 #[cfg(test)]

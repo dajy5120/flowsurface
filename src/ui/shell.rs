@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use iced::widget::{
-    Space, button, column, container, mouse_area, opaque, row, scrollable, space, stack, text, text_input,
+    Space, button, column, container, mouse_area, opaque, row, space, stack, text, text_input,
 };
 use iced::{Alignment, Background, Border, Element, Length, Padding};
 
@@ -778,7 +778,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
             for l in shell.log.lines.iter() {
                 col = col.push(line(l));
             }
-            scrollable(col.width(Length::Fill)).anchor_bottom().width(Length::Fill).height(Length::Fill).into()
+            crate::ui::scroll(col.width(Length::Fill)).anchor_bottom().width(Length::Fill).height(Length::Fill).into()
         }
         BottomTab::Problems => {
             if n_prob == 0 {
@@ -788,7 +788,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
                 for l in shell.log.problems() {
                     col = col.push(line(l));
                 }
-                scrollable(col.width(Length::Fill)).anchor_bottom().width(Length::Fill).height(Length::Fill).into()
+                crate::ui::scroll(col.width(Length::Fill)).anchor_bottom().width(Length::Fill).height(Length::Fill).into()
             }
         }
         BottomTab::Notices => {
@@ -800,7 +800,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
                     let l = LogLine { time: time.clone(), level: *level, msg: if title.is_empty() { body.clone() } else { format!("{title}　{body}") } };
                     col = col.push(line(&l));
                 }
-                scrollable(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into()
+                crate::ui::scroll(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into()
             }
         }
         BottomTab::Alerts => {
@@ -829,7 +829,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
                             .into()
                     });
                 }
-                scrollable(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into()
+                crate::ui::scroll(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into()
             }
         }
         BottomTab::Activity => {
@@ -840,7 +840,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
                 for a in &info.activity {
                     col = col.push(t::body(a.clone()));
                 }
-                scrollable(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into()
+                crate::ui::scroll(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into()
             }
         }
     };
@@ -1006,7 +1006,7 @@ pub fn inspector<'a, M: Clone + 'a>(
     .on_press(on(ShellEvent::InspDragStart))
     .on_double_click(on(ShellEvent::InspResetWidth))
     .interaction(iced::mouse::Interaction::ResizingHorizontally);
-    let body = container(scrollable(col.padding(Padding::from([metrics::space(4), metrics::space(4)]))))
+    let body = container(crate::ui::scroll(col.padding(Padding::from([metrics::space(4), metrics::space(4)]))))
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_| container::Style {

@@ -175,3 +175,11 @@ pub fn cycle_density() {
 pub fn color(c: tokens::Rgba) -> iced::Color {
     iced::Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
+
+
+/// 竖向滚动区，滚动条**嵌入**在内容右侧（单独占一条、不盖住文字和表格）。面板里一律用它代替 `iced::widget::scrollable`。
+///
+/// 之后再调 `.direction(..)` 会换掉滚动条设置：那样的地方要自己给 `Scrollbar` 设 `.spacing(..)`。
+pub fn scroll<'a, M: 'a>(content: impl Into<iced::Element<'a, M>>) -> iced::widget::Scrollable<'a, M> {
+    iced::widget::scrollable(content).spacing(metrics::SCROLL_GAP)
+}

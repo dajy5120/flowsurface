@@ -7,7 +7,7 @@
 //! → 影子日表（UTC 日切落账）→ 活体vs重放对照
 //! → C4 进度（合格日 n/7，判定规则 docs/preregister-c4-live.md）。
 
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, text};
 use crate::ui::grid::{self, Cell, Column, GridMsg, GridState};
 use iced::{Color, Element, Length};
 
@@ -21,9 +21,9 @@ fn sign_c(v: f64) -> Color {
 fn sec<'a, M: 'a>(title: &str) -> Element<'a, M> {
     crate::ui::widgets::major(title.to_string())
 }
-/// 表格单元格：`w` 是比例（原像素宽），整行撑满面板。
+/// 状态行里的一格（「标签 数值」，定宽）。这里不是表——表用 ui::grid；按比例撑满会把一行标签拉得很散。
 fn cell<'a, M: 'a>(s: String, w: f32, c: Color) -> Element<'a, M> {
-    container(text(s).size(crate::ui::text::s_small()).color(c)).width(Length::FillPortion(w.round().max(1.0) as u16)).into()
+    container(text(s).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
 }
 fn wr_s(w: Option<f64>) -> String {
     w.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| crate::ui::fmt::missing())
@@ -248,5 +248,5 @@ pub fn pane_body<'a>() -> Element<'a, C4Msg> {
     );
     body = body.push(text(format!("刷新 {}", st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
 
-    scrollable(body).width(Length::Fill).height(Length::Fill).into()
+    crate::ui::scroll(body).width(Length::Fill).height(Length::Fill).into()
 }

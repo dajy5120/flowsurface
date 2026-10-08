@@ -4,7 +4,7 @@
 //! 网格初始就定位在中部，并把**每帧构建网格视图的耗时**显示出来——
 //! 这是「10⁶ 行照样流畅」的实测证据，不是口头保证（UPDS V5 §39）。
 
-use iced::widget::{column, container, row, scrollable};
+use iced::widget::{column, container, row};
 use iced::{Element, Length};
 
 use super::fmt::{self, Absence, Provenance, Rounding};
@@ -201,7 +201,7 @@ impl Gallery {
         ]
         .spacing(metrics::space(5));
 
-        column![scrollable(top.padding(metrics::space(5))).height(Length::Shrink), container(grid_view).width(Length::Fill).height(Length::Fill)]
+        column![crate::ui::scroll(top.padding(metrics::space(5))).height(Length::Shrink), container(grid_view).width(Length::Fill).height(Length::Fill)]
             .spacing(0)
             .into()
     }

@@ -6,7 +6,7 @@
 //! 布局：数据源横幅（合成/真实警示）→ 逐策略表（ui::grid：净 PnL、探针、摩擦分解，
 //! docs/35 §16.13 第 5 项）→ 各策略说明（逐条列在表下，不截断）。
 
-use iced::widget::{column, container, scrollable, text};
+use iced::widget::{column, container, text};
 use iced::{Color, Element, Length};
 
 use super::options_readout::{OptionsReadout, StrategyRow};
@@ -90,7 +90,7 @@ pub fn pane_body<'a>() -> Element<'a, GridMsg> {
                 .size(crate::ui::text::s_small())
                 .color(crate::ui::pal::dim()),
         );
-        return scrollable(body).width(Length::Fill).height(Length::Fill).into();
+        return crate::ui::scroll(body).width(Length::Fill).height(Length::Fill).into();
     }
 
     // 数据源横幅：合成数据显式警示（非决策依据）
@@ -145,5 +145,5 @@ pub fn pane_body<'a>() -> Element<'a, GridMsg> {
             .color(crate::ui::pal::dim()),
     );
 
-    scrollable(body).width(Length::Fill).height(Length::Fill).into()
+    crate::ui::scroll(body).width(Length::Fill).height(Length::Fill).into()
 }

@@ -9,7 +9,7 @@
 use super::factory::FactoryMsg;
 use crate::ui::grid::{self, Cell, Column, GridMsg, GridState};
 use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke, Text};
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
 
 use super::factory_readout::{FactoryReadout, HORIZONS, IcDecay};
@@ -542,11 +542,11 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
 
     // 三栏之间画竖分隔线：三件事（排行 / 组合与 IC / 数据底座与夜跑）一眼分开
     let body = row![
-        scrollable(left).height(Length::Fill),
+        crate::ui::scroll(left).height(Length::Fill),
         crate::ui::widgets::vrule(),
-        scrollable(mid).height(Length::Fill),
+        crate::ui::scroll(mid).height(Length::Fill),
         crate::ui::widgets::vrule(),
-        scrollable(right).height(Length::Fill),
+        crate::ui::scroll(right).height(Length::Fill),
     ]
     .height(Length::Fill);
 

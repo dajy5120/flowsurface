@@ -546,7 +546,7 @@ impl TickersTable {
         scrollable::Scrollable::with_direction(
             content,
             scrollable::Direction::Vertical(
-                scrollable::Scrollbar::new().width(8).scroller_width(6),
+                scrollable::Scrollbar::new().width(8).scroller_width(6).spacing(crate::ui::metrics::SCROLL_GAP),
             ),
         )
         .on_scroll(Message::Scrolled)
@@ -1273,7 +1273,7 @@ impl TickersTable {
         scrollable::Scrollable::with_direction(
             content,
             scrollable::Direction::Vertical(
-                scrollable::Scrollbar::new().width(8).scroller_width(6),
+                scrollable::Scrollbar::new().width(8).scroller_width(6).spacing(crate::ui::metrics::SCROLL_GAP),
             ),
         )
         .on_scroll(on_scroll)

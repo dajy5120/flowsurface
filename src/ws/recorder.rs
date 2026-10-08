@@ -133,6 +133,12 @@ impl RecorderPaneState {
 /// 录制 pane 的交互消息(view 发出 → pane.update 路由到 [`handle`])。
 #[derive(Debug, Clone)]
 pub enum RecorderMsg {
+    /// 录制明细表（ui::grid 命名表）的交互
+    Table(crate::ui::grid::GridMsg),
+    /// 按日覆盖表
+    Table2(crate::ui::grid::GridMsg),
+    /// 预测市场录制按日表
+    Table3(crate::ui::grid::GridMsg),
     DataDir(String),
     ToggleSym(String, bool),
     TierPick(String, TierOpt),
@@ -198,6 +204,9 @@ pub fn handle(st: &mut RecorderPaneState, msg: RecorderMsg) {
             st.det_limit = DET_PAGE;
         }
         RecorderMsg::DetailMore => st.det_limit += DET_PAGE,
+        RecorderMsg::Table(g) => crate::ui::grid::named_update("recorder.details", g),
+        RecorderMsg::Table2(g) => crate::ui::grid::named_update("recorder.coverage", g),
+        RecorderMsg::Table3(g) => crate::ui::grid::named_update("recorder.pm_days", g),
         RecorderMsg::LogFollow => {
             st.log_frozen = match st.log_frozen.take() {
                 Some(_) => None,

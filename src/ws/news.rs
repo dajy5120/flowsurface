@@ -43,6 +43,13 @@ pub fn handle(m: NewsMsg) {
         NewsMsg::SetView(v) => ro::set_view(v),
         NewsMsg::PickSource(p) => ro::set_source_pick(p.id),
         NewsMsg::ToggleSource(id, on) => ro::set_enabled(&id, on),
+        // 源管理表：操作格转成对应动作，其余交给网格
+        NewsMsg::Table(crate::ui::grid::GridMsg::Action(r, c)) => {
+            if let Some(m) = super::news_view::source_action(r, c) {
+                handle(m);
+            }
+        }
+        NewsMsg::Table(g) => crate::ui::grid::named_update("news.sources", g),
         NewsMsg::DeleteSource(id) => ro::remove_source(&id),
         NewsMsg::ProbeSource(id_or_url) => {
             // 表格里的按钮给的是源 id，加源表单给的是 URL。

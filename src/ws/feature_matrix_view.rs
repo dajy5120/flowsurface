@@ -1689,7 +1689,7 @@ pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
                 .push(chip("取消".into(), false, Msg::ClosePicker))
                 .into();
         }
-        return container(scrollable(b.push(picker_view(&m, p)).width(Length::Fill)))
+        return container(crate::ui::scroll(b.push(picker_view(&m, p)).width(Length::Fill)))
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
@@ -1729,7 +1729,7 @@ pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
     }
     if v.view == View::Engine {
         b = b.push(top(&m)).push(crate::ui::mark::content(engine_view(&m)));
-        return container(scrollable(b.width(Length::Fill)))
+        return container(crate::ui::scroll(b.width(Length::Fill)))
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
@@ -1751,15 +1751,15 @@ pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
     let w = widths(&all_rows, &wins, &v);
     let tr = Trend::new(&m, &v);
     let body = matrix_view(&m, &v, &wins, &w, &tr);
-    let head = scrollable(table_header(&wins, v.table, v.metric, &w))
+    let head = crate::ui::scroll(table_header(&wins, v.table, v.metric, &w))
         .direction(scrollable::Direction::Horizontal(
             scrollable::Scrollbar::new().width(0).scroller_width(0),
         ))
         .id(super::feature_matrix::HEAD_ID);
-    let body = scrollable(body)
+    let body = crate::ui::scroll(body)
         .direction(scrollable::Direction::Both {
-            vertical: scrollable::Scrollbar::new(),
-            horizontal: scrollable::Scrollbar::new(),
+            vertical: scrollable::Scrollbar::new().spacing(crate::ui::metrics::SCROLL_GAP),
+            horizontal: scrollable::Scrollbar::new().spacing(crate::ui::metrics::SCROLL_GAP),
         })
         .id(super::feature_matrix::BODY_ID)
         .on_scroll(|vp| Msg::TableScrolled(vp.absolute_offset().x))

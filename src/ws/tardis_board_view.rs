@@ -6,7 +6,7 @@
 
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::{
-    button, canvas as canvas_widget, column, container, pick_list, row, scrollable, slider, text,
+    button, canvas as canvas_widget, column, container, pick_list, row, slider, text,
 };
 use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
@@ -968,9 +968,9 @@ pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoar
     container(
         if hosted {
             // 托管时：提示行 + 回放条（查看器的一部分）+ 图；出图、导出在检查器「属性」页，「加载」也在工具栏
-            column![hint, crate::ui::mark::content(column![play_row, scrollable(body).height(Length::Fill)].spacing(8))]
+            column![hint, crate::ui::mark::content(column![play_row, crate::ui::scroll(body).height(Length::Fill)].spacing(8))]
         } else {
-            column![top, picks, play_row, export_row, hint, crate::ui::mark::content(scrollable(body).height(Length::Fill))]
+            column![top, picks, play_row, export_row, hint, crate::ui::mark::content(crate::ui::scroll(body).height(Length::Fill))]
         }
             .spacing(8)
             .padding(crate::ui::metrics::space(4)),

@@ -6,7 +6,7 @@
 //! 布局：夜跑控制条（启停+定时开关，[`super::prediction::PredictionMsg`]）→ 合规/非信号横幅
 //! → 市场列表（Yes 概率/成交/流动性/关注标签）+ AI 决策支持行（估计 vs 市场·edge·置信度）。
 
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Color, Element, Length};
 
 use super::prediction::PredictionMsg;
@@ -23,9 +23,9 @@ fn sign_c(v: f64) -> Color {
 fn sec<'a, M: 'a>(title: &str) -> Element<'a, M> {
     crate::ui::widgets::major(title.to_string())
 }
-/// 表格单元格：`w` 是比例（原像素宽），整行撑满面板。
+/// 状态行里的一格（「标签 数值」，定宽）。这里不是表——表用 ui::grid；按比例撑满会把一行标签拉得很散。
 fn cell<'a, M: 'a>(s: String, w: f32, c: Color) -> Element<'a, M> {
-    container(text(s).size(crate::ui::text::s_small()).color(c)).width(Length::FillPortion(w.round().max(1.0) as u16)).into()
+    container(text(s).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
 }
 fn pct(p: Option<f64>) -> String {
     p.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| crate::ui::fmt::missing())
@@ -252,7 +252,7 @@ pub fn pane_body<'a>() -> Element<'a, PredictionMsg> {
                 .size(crate::ui::text::s_small())
                 .color(crate::ui::pal::dim()),
         );
-        return scrollable(body).width(Length::Fill).height(Length::Fill).into();
+        return crate::ui::scroll(body).width(Length::Fill).height(Length::Fill).into();
     }
 
     body = body.push(crate::ui::mark::here());
@@ -318,5 +318,5 @@ pub fn pane_body<'a>() -> Element<'a, PredictionMsg> {
             .color(crate::ui::pal::dim()),
     );
 
-    scrollable(body).width(Length::Fill).height(Length::Fill).into()
+    crate::ui::scroll(body).width(Length::Fill).height(Length::Fill).into()
 }

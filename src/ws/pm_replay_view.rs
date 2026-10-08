@@ -4,7 +4,7 @@
 //! 的 `ChartCanvas`，所以这里只管选择器与播放条。
 
 use iced::widget::canvas::Cache;
-use iced::widget::{button, canvas as canvas_widget, column, container, row, scrollable, slider, text};
+use iced::widget::{button, canvas as canvas_widget, column, container, row, slider, text};
 use iced::{Alignment, Color, Element, Length};
 
 use super::pm_replay::{PmReplayMsg, PmReplayState, Speed};
@@ -153,7 +153,7 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
     } else {
         // **换行排，不用横向滚动条。**
         //
-        // 第一版是 `scrollable(row).direction(Horizontal)`，套在整页的竖向
+        // 第一版是 `crate::ui::scroll(row).direction(Horizontal)`，套在整页的竖向
         // scrollable 里 → 高度被压成一条缝，还被下面的控制行盖住。嵌套两层方向
         // 相反的滚动本来就难摆，而这里根本不需要：换行之后由外层竖向滚动统一管。
         let n_all = app.all_rounds().len();
@@ -337,7 +337,7 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
         let _ = clip_to; // 裁剪发生在 ChartCanvas 内部；这里只是把播放头传进去
     }
 
-    container(scrollable(body)).width(Length::Fill).height(Length::Fill).into()
+    container(crate::ui::scroll(body)).width(Length::Fill).height(Length::Fill).into()
 }
 
 #[cfg(test)]

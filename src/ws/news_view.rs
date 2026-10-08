@@ -6,7 +6,7 @@
 //! 是**一个源悄悄死了而列表看起来一切正常**（§3.1 的 WSJ，实测陈了
 //! 589 天仍返回 200）。把健康藏在下面等于把这件事藏起来。
 
-use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, pick_list, row, text, text_input};
 use iced::{Color, Element, Length};
 
 use super::news_readout::{self as ro, ago, NewsRow, SourcePick, SourceRow, View};
@@ -36,7 +36,7 @@ fn link_style(_t: &iced::Theme, status: iced::widget::button::Status) -> iced::w
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum NewsMsg {
     Start,
     Stop,
@@ -74,7 +74,29 @@ pub enum NewsMsg {
     AddSource,
     /// 下拉选了一个源（`None` = 全部）。
     PickSource(SourcePick),
+    /// 源管理表（ui::grid）的交互；操作格（关闭 / 测试 / 删除）按行号找回是哪个源
+    Table(crate::ui::grid::GridMsg),
 }
+
+thread_local! {
+    /// 源管理表每一行的 (id, 开着吗, 内置吗)，与表的数据行同序（操作格按行号找回）
+    static SRC_ROWS: std::cell::RefCell<Vec<(String, bool, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 源管理表的操作格：点了哪一行的哪一列 → 对应的动作。
+pub(crate) fn source_action(row: usize, col: usize) -> Option<NewsMsg> {
+    let (id, enabled, builtin) = SRC_ROWS.with(|r| r.borrow().get(row).cloned())?;
+    match col {
+        SRC_COL_TOGGLE => Some(NewsMsg::ToggleSource(id, !enabled)),
+        SRC_COL_PROBE => Some(NewsMsg::ProbeSource(id)),
+        SRC_COL_DELETE if !builtin => Some(NewsMsg::DeleteSource(id)),
+        _ => None,
+    }
+}
+
+const SRC_COL_TOGGLE: usize = 7;
+const SRC_COL_PROBE: usize = 8;
+const SRC_COL_DELETE: usize = 9;
 
 fn chip<'a>(label: &str, msg: NewsMsg) -> Element<'a, NewsMsg> {
     button(text(label.to_string()).size(crate::ui::text::s_small()))
@@ -215,12 +237,12 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, NewsMsg> {
         body = body.push(
             text("还没有快照——守护没起，或者刚起还没抓完第一轮").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
         );
-        return scrollable(body).width(Length::Fill).height(Length::Fill).into();
+        return crate::ui::scroll(body).width(Length::Fill).height(Length::Fill).into();
     }
 
     if v == View::Watch {
         body = body.push(crate::ui::mark::here()).push(watch_view(&st));
-        return scrollable(body).width(Length::Fill).height(Length::Fill).into();
+        return crate::ui::scroll(body).width(Length::Fill).height(Length::Fill).into();
     }
 
     if v == View::Sources {
@@ -228,8 +250,9 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, NewsMsg> {
         // 一度是 `return sources_view(...)`，那棵树里没有上面那行视图切换——
         // 进了源管理就再也回不去新闻页。现在头部由这里统一画，
         // 分支只能产出「内容」，结构上没有漏掉切换器的可能
-        body = body.push(crate::ui::mark::here()).push(sources_view(&st));
-        return scrollable(body).width(Length::Fill).height(Length::Fill).into();
+        // 源管理不套整页滚动：表（ui::grid）占满剩余高度、自己滚，上面的加源表单很短
+        body = body.push(crate::ui::mark::here()).push(sources_view(&st).height(Length::Fill));
+        return body.width(Length::Fill).height(Length::Fill).into();
     }
 
     // ── 时间线 ──
@@ -325,7 +348,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, NewsMsg> {
     body = body.push(
         text(format!("快照 {} · 读于 {}", st.stamp, st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
     );
-    scrollable(body).width(Length::Fill).height(Length::Fill).into()
+    crate::ui::scroll(body).width(Length::Fill).height(Length::Fill).into()
 }
 
 /// 第二个视图：**源健康 + 源管理**。
@@ -485,24 +508,26 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center));
-    let mut h = row![].spacing(4);
-    for (t, w, n) in [
-        ("", 20.0, false),
-        ("源", 118.0, false),
-        ("分级", 52.0, false),
-        ("见过的最新", 80.0, false),
-        ("窗内", 40.0, true),
-        ("拉/未变/失败", 100.0, false),
-        ("状态", 210.0, false),
-        ("", 150.0, false),
-    ] {
-        h = h.push(cell(t.into(), w, crate::ui::pal::head(), n));
-    }
-    body = body.push(h);
-
+    // 表格（ui::grid）：表头与数据共用一套列宽，撑满窗口后照样对齐；可排序、调宽、复制
+    use crate::ui::grid::{Cell, Column, Fit};
+    use crate::ui::widgets::Tone;
+    let cols = vec![
+        Column::text("", 28.0),
+        Column::text("源", 150.0),
+        Column::text("分级", 64.0),
+        Column::text("见过的最新", 110.0),
+        Column::num("窗内", None, 60.0),
+        Column::text("拉/未变/失败", 110.0),
+        Column::text("状态", 260.0),
+        Column::text("", 70.0),
+        Column::text("", 70.0),
+        Column::text("", 70.0),
+    ];
     // 有问题的排在前面：一片正常里混着一行红，很容易被翻过去
     let mut rows: Vec<&SourceRow> = st.sources.iter().collect();
     rows.sort_by_key(|s| (!(s.is_stale || s.failing()), !s.enabled, s.label.clone()));
+    let mut data = Vec::with_capacity(rows.len());
+    let mut ids = Vec::with_capacity(rows.len());
     for s in rows {
         let (lamp, lc, why) = source_lamp(s);
         // 关掉的源仍然列出来——删掉和关掉是两回事
@@ -510,49 +535,29 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
         // 三种「没有时间」要分开：源不给时间 / 还没抓到 / 真的陈了
         let newest = match (s.newest_ms, s.no_timestamps, s.last_new_ms) {
             (Some(m), _, _) => ago(m, st.now_ms),
-            // 源根本不给时间戳（实测 ESMA）。显示成「—」的话，
-            // 一个好源看起来像没通
+            // 源根本不给时间戳（实测 ESMA）。显示成「—」的话，一个好源看起来像没通
             (None, true, Some(t)) => format!("源无时间·{}", ago(t, st.now_ms)),
             (None, true, None) => "源无时间".into(),
             // 还没抓到过：未取到
             _ => crate::ui::fmt::unknown(),
         };
-        let mut r = row![
-            cell(lamp.into(), 20.0, lc, false),
-            cell(s.label.clone(), 118.0, if s.enabled { crate::ui::pal::txt() } else { crate::ui::pal::dim() }, false),
-            cell(s.tier_label.clone(), 52.0, tier_color(&s.tier), false),
-            cell(newest, 80.0, if s.is_stale { crate::ui::pal::bad() } else { crate::ui::pal::dim() }, false),
-            cell(s.in_window.to_string(), 40.0, crate::ui::pal::dim(), true),
-            cell(
-                format!("{}/{}/{}", s.ok, s.not_modified, s.fails),
-                100.0,
-                if s.fails > 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() },
-                false
-            ),
-            cell(
-                if !s.enabled {
-                    "已关闭".into()
-                } else if why.is_empty() {
-                    clip(&s.last_status, 26)
-                } else {
-                    why
-                },
-                210.0,
-                lc,
-                false
-            ),
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center);
-        r = r.push(chip(if s.enabled { "关闭" } else { "启用" }, NewsMsg::ToggleSource(s.id.clone(), !s.enabled)));
-        r = r.push(chip("测试", NewsMsg::ProbeSource(s.id.clone())));
-        // **内置的不给删按钮**：删了下次启动又被播种回来，
-        // 那种「删不掉」比不给删更让人困惑
-        if !s.builtin {
-            r = r.push(chip("删除", NewsMsg::DeleteSource(s.id.clone())));
-        }
-        body = body.push(r);
+        data.push(vec![
+            Cell::Colored(lamp.into(), lc),
+            Cell::Colored(s.label.clone(), if s.enabled { crate::ui::pal::txt() } else { crate::ui::pal::dim() }),
+            Cell::Colored(s.tier_label.clone(), tier_color(&s.tier)),
+            Cell::Colored(newest, if s.is_stale { crate::ui::pal::bad() } else { crate::ui::pal::dim() }),
+            Cell::num(s.in_window as f64, s.in_window.to_string()),
+            Cell::Colored(format!("{}/{}/{}", s.ok, s.not_modified, s.fails), if s.fails > 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
+            Cell::Colored(if !s.enabled { "已关闭".into() } else if why.is_empty() { s.last_status.clone() } else { why }, lc),
+            Cell::Action(if s.enabled { "关闭".into() } else { "启用".into() }, Tone::Neutral),
+            Cell::Action("测试".into(), Tone::Neutral),
+            // **内置的不给删按钮**：删了下次启动又被播种回来，那种「删不掉」比不给删更让人困惑
+            Cell::Action(if s.builtin { String::new() } else { "删除".into() }, Tone::Danger),
+        ]);
+        ids.push((s.id.clone(), s.enabled, s.builtin));
     }
+    SRC_ROWS.with(|r| *r.borrow_mut() = ids);
+    body = body.push(crate::ui::grid::named("news.sources", cols, data, Fit::Fill, None, NewsMsg::Table));
 
     body
 }

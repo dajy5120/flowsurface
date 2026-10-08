@@ -2840,7 +2840,7 @@ impl Flowsurface {
                     let content = scrollable::Scrollable::with_direction(
                         column_content,
                         scrollable::Direction::Vertical(
-                            scrollable::Scrollbar::new().width(8).scroller_width(6),
+                            scrollable::Scrollbar::new().width(8).scroller_width(6).spacing(crate::ui::metrics::SCROLL_GAP),
                         ),
                     );
 

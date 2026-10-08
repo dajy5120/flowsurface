@@ -10,6 +10,9 @@ pub fn space(i: usize) -> f32 {
 }
 
 /// 圆角：网格 / 分割线 / 面板 0；输入框 / 按钮 / 标签 2；菜单 / 弹出 / 吐司 4；对话框 6。
+/// 嵌入式滚动条与内容之间的空隙（像素）：滚动条单独占一条，不盖住文字和表格。
+pub const SCROLL_GAP: f32 = 3.0;
+
 pub mod radius {
     use super::tokens;
     pub const NONE: f32 = tokens::RADIUS_NONE;

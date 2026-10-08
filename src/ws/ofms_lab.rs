@@ -240,6 +240,8 @@ pub enum OfTab {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OfMsg {
+    /// 响应表 / 状态机转移表（ui::grid 命名表）的交互
+    Table(crate::ui::grid::Named),
     Pick(DataPickMsg),
     Run,
     Tab(OfTab),
@@ -513,6 +515,7 @@ pub fn handle(pane: uuid::Uuid, m: OfMsg) {
         OfMsg::RespInformative(b) => {
             with_view(pane, |v| v.resp_informative = b);
         }
+        OfMsg::Table(crate::ui::grid::Named(k, g)) => crate::ui::grid::named_update(&k, g),
         OfMsg::RespReload => {
             with(|g| {
                 g.resp = None;

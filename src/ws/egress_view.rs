@@ -5,7 +5,7 @@
 
 use crate::ui::grid::{self, Cell, Column, GridMsg, GridState};
 use crate::ui::widgets::Tone;
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Color, Element, Length};
 
 use super::egress::{self, Kind, Scope};
@@ -412,7 +412,7 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
         int_col,
     ));
 
-    scrollable(body).width(Length::Fill).height(Length::Fill).into()
+    crate::ui::scroll(body).width(Length::Fill).height(Length::Fill).into()
 }
 
 #[cfg(test)]

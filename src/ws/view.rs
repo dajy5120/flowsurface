@@ -108,12 +108,12 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
         let total_w: f32 = COLW.iter().sum::<f32>() + 6.0 * (COLW.len() as f32 - 1.0);
         // 双向滚动：横向看全 12 列、竖向翻多笔订单；固定高度使其成为独立可滚动区。
         // 底部留白让横向滚动条落在空白区、不压住最底一行。
-        let scroller = scrollable(
+        let scroller = crate::ui::scroll(
             container(tbl).width(Length::Fixed(total_w)).padding(iced::padding::bottom(10)),
         )
         .direction(scrollable::Direction::Both {
-            vertical: scrollable::Scrollbar::new().width(5).scroller_width(5),
-            horizontal: scrollable::Scrollbar::new().width(4).scroller_width(4),
+            vertical: scrollable::Scrollbar::new().width(5).scroller_width(5).spacing(crate::ui::metrics::SCROLL_GAP),
+            horizontal: scrollable::Scrollbar::new().width(4).scroller_width(4).spacing(crate::ui::metrics::SCROLL_GAP),
         })
         .height(Length::Fixed(300.0));
         body = body.push(section("订单明细", scroller));
@@ -232,7 +232,7 @@ pub fn pane_body<'a, M: 'a>(mode: WsPaneMode) -> Element<'a, M> {
         );
     }
 
-    container(scrollable(body))
+    container(crate::ui::scroll(body))
         .padding(crate::ui::metrics::space(4))
         .width(Length::Fill)
         .height(Length::Fill)

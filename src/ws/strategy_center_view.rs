@@ -3,7 +3,7 @@
 //! 只读 [`super::strategy_center::view`] 的快照，不做 IO。完整 tearsheet 在同工作区右侧的
 //! 「回测结果」面板（点一条运行记录会把它钉在那次运行上）。
 
-use iced::widget::{Space, button, column, container, pick_list, row, scrollable, text_input};
+use iced::widget::{Space, button, column, container, pick_list, row, text_input};
 use iced::{Alignment, Element, Length};
 
 use super::strategy_center::{Entry, Param, RunRow, ScMsg, Summary, Tab, View, default_text};
@@ -160,7 +160,7 @@ fn library<'a>(v: &View) -> Element<'a, ScMsg> {
                     .align_y(Alignment::Center),
             );
         }
-        tree_area = Some(scrollable(tree.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into());
+        tree_area = Some(crate::ui::scroll(tree.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into());
     }
 
     let mut lower = column![].spacing(space(2));
@@ -190,7 +190,7 @@ fn library<'a>(v: &View) -> Element<'a, ScMsg> {
         }
         list = list.push(library_item(e, v));
     }
-    lower = lower.push(scrollable(list.width(Length::Fill)).height(Length::Fill));
+    lower = lower.push(crate::ui::scroll(list.width(Length::Fill)).height(Length::Fill));
     let lower: Element<'a, ScMsg> = lower.height(Length::Fill).into();
     col = col.push(match tree_area {
         Some(tree) => crate::ui::split::column(
@@ -343,7 +343,7 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
     if m.is_card() {
         col = col.push(t::caption("百科卡片：这位大师的方法主要靠判断 / 专有信息 / 单次事件，不可程序化或缺数据，没有回测入口。").color(pal::dim()));
         col = col.push(doc_section(e));
-        return container(scrollable(col)).width(Length::FillPortion(5)).height(Length::Fill).into();
+        return container(crate::ui::scroll(col)).width(Length::FillPortion(5)).height(Length::Fill).into();
     }
     // 专用引擎：没有统一回测入口，只给结论与运行方式
     if !m.engines.is_empty() && m.engines.iter().all(|x| x == "harness") {
@@ -353,7 +353,7 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
             t::metadata("这类研究没有统一的回测入口（数据形态 / 回测方式与订单流策略不同），策略中心只列结论；在 Studio 终端里按上面的命令运行。")
                 .color(pal::dim()),
         );
-        return container(scrollable(col)).width(Length::FillPortion(5)).height(Length::Fill).into();
+        return container(crate::ui::scroll(col)).width(Length::FillPortion(5)).height(Length::Fill).into();
     }
 
     // 参数：★ = 值得优化（x-optimize）；● = 改过（只下发改过的）
@@ -438,7 +438,7 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
     if m.master.is_some() {
         col = col.push(doc_section(e));
     }
-    container(scrollable(col)).width(Length::FillPortion(5)).height(Length::Fill).into()
+    container(crate::ui::scroll(col)).width(Length::FillPortion(5)).height(Length::Fill).into()
 }
 
 // ── 右栏：运行记录 + 概况 ──────────────────────────────────────────────
@@ -565,10 +565,10 @@ fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
         return container(col.push(studies(v))).width(Length::FillPortion(5)).height(Length::Fill).into();
     }
     if v.tab == Tab::Compare {
-        return container(col.push(scrollable(compare(v)).height(Length::Fill))).width(Length::FillPortion(5)).height(Length::Fill).into();
+        return container(col.push(crate::ui::scroll(compare(v)).height(Length::Fill))).width(Length::FillPortion(5)).height(Length::Fill).into();
     }
     if v.tab == Tab::Checks {
-        return container(col.push(scrollable(checks(v)).height(Length::Fill))).width(Length::FillPortion(5)).height(Length::Fill).into();
+        return container(col.push(crate::ui::scroll(checks(v)).height(Length::Fill))).width(Length::FillPortion(5)).height(Length::Fill).into();
     }
     if !v.db_err.is_empty() {
         col = col.push(t::metadata(v.db_err.clone()).color(pal::dim()));
@@ -584,7 +584,7 @@ fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
         let in_basket = v.basket.iter().any(|b| b.run_id == r.run_id);
         list = list.push(run_item(r, v.picked_run.as_deref() == Some(r.run_id.as_str()), in_basket));
     }
-    col = col.push(scrollable(list).height(Length::FillPortion(3)));
+    col = col.push(crate::ui::scroll(list).height(Length::FillPortion(3)));
 
     // 概况：选中的那次；没选就看最近一次完成的
     let focus = v
@@ -594,7 +594,7 @@ fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
         .or_else(|| v.runs.iter().find(|r| r.status == "done"));
     if let Some(r) = focus {
         match &r.summary {
-            Some(s) => col = col.push(scrollable(summary_card(r, s)).height(Length::FillPortion(2))),
+            Some(s) => col = col.push(crate::ui::scroll(summary_card(r, s)).height(Length::FillPortion(2))),
             None if !r.error.is_empty() => col = col.push(w::error("这次运行失败了", r.error.clone(), "日志在 /run/user/<uid>/wealthspring/runs/<运行号>.log", None)),
             None => {}
         }
@@ -878,7 +878,7 @@ fn heat_view<'a>(h: &Heat) -> Element<'a, ScMsg> {
         }
         grid = grid.push(r);
     }
-    scrollable(grid).direction(iced::widget::scrollable::Direction::Horizontal(Default::default())).into()
+    crate::ui::scroll(grid).direction(iced::widget::scrollable::Direction::Horizontal(Default::default())).into()
 }
 
 fn study_detail<'a>(s: &StudyRow, v: &View) -> Element<'a, ScMsg> {
@@ -967,10 +967,10 @@ fn studies<'a>(v: &View) -> Element<'a, ScMsg> {
     for s in &v.studies {
         list = list.push(study_item(s, v.picked_study.as_deref() == Some(s.study_id.as_str())));
     }
-    col = col.push(scrollable(list).height(Length::FillPortion(2)));
+    col = col.push(crate::ui::scroll(list).height(Length::FillPortion(2)));
     let focus = v.picked_study.as_ref().and_then(|id| v.studies.iter().find(|s| &s.study_id == id)).or(v.studies.first());
     if let Some(s) = focus {
-        col = col.push(scrollable(study_detail(s, v)).height(Length::FillPortion(5)));
+        col = col.push(crate::ui::scroll(study_detail(s, v)).height(Length::FillPortion(5)));
     }
     col.into()
 }
@@ -1339,7 +1339,7 @@ fn corr_view<'a>(c: &Cmp) -> Element<'a, ScMsg> {
         }
         grid = grid.push(r);
     }
-    scrollable(grid).direction(iced::widget::scrollable::Direction::Horizontal(Default::default())).into()
+    crate::ui::scroll(grid).direction(iced::widget::scrollable::Direction::Horizontal(Default::default())).into()
 }
 
 // ── 交易大师百科卡（docs/38）─────────────────────────────────────────

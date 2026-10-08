@@ -203,6 +203,10 @@ pub enum Cell {
     /// 操作按钮（启动 / 停止 / 更新…）：点了发 `GridMsg::Action(行, 列)`，由宿主决定做什么。
     /// 文字为空 = 这一行没有这个操作（不画按钮）
     Action(String, Tone),
+    /// 链接（强调色文字，可点）：点了发 `GridMsg::Action(行, 列)`，由宿主打开
+    Link(String),
+    /// 占比条（0–1）：`█░` 条按列宽铺开，后面跟显示文字（如 `63%`）；排序按占比
+    Bar(f64, String, Color),
 }
 
 impl Cell {
@@ -212,8 +216,8 @@ impl Cell {
 
     fn sort_text(&self) -> Option<&str> {
         match self {
-            Self::Text(s) | Self::Id(s) | Self::Colored(s, _) | Self::Badge(s, _) | Self::Action(s, _) => Some(s),
-            Self::Num { s, .. } | Self::ColoredNum(_, s, _) => Some(s),
+            Self::Text(s) | Self::Id(s) | Self::Colored(s, _) | Self::Badge(s, _) | Self::Action(s, _) | Self::Link(s) => Some(s),
+            Self::Num { s, .. } | Self::ColoredNum(_, s, _) | Self::Bar(_, s, _) => Some(s),
             Self::Absent(_) => None,
         }
     }
@@ -221,7 +225,7 @@ impl Cell {
     fn sort_num(&self) -> Option<f64> {
         match self {
             Self::Num { v, .. } => *v,
-            Self::ColoredNum(v, ..) => Some(*v),
+            Self::ColoredNum(v, ..) | Self::Bar(v, ..) => Some(*v),
             // 只取数字部分再解析：来源前缀（~ ≈ ^ ·）、方向符号（▲ ▼）、单位（%）、千分位空格都去掉，
             // 否则「▲ +4.97%」这类格子既排不了序也过滤不了（曾经整列当缺失）
             Self::Text(s) | Self::Colored(s, _) => {
@@ -241,7 +245,7 @@ impl Cell {
     pub fn display_text(&self) -> String {
         match self {
             Self::Absent(a) => a.glyph().to_string(),
-            Self::Num { s, .. } | Self::ColoredNum(_, s, _) => s.clone(),
+            Self::Num { s, .. } | Self::ColoredNum(_, s, _) | Self::Bar(_, s, _) => s.clone(),
             _ => self.plain(),
         }
     }
@@ -249,8 +253,8 @@ impl Cell {
     /// 复制为 TSV 时的文字（完整值，不省略）。
     fn plain(&self) -> String {
         match self {
-            Self::Text(s) | Self::Id(s) | Self::Colored(s, _) | Self::Badge(s, _) | Self::Action(s, _) => s.clone(),
-            Self::Num { v: Some(v), .. } | Self::ColoredNum(v, ..) => format!("{v}"),
+            Self::Text(s) | Self::Id(s) | Self::Colored(s, _) | Self::Badge(s, _) | Self::Action(s, _) | Self::Link(s) => s.clone(),
+            Self::Num { v: Some(v), .. } | Self::ColoredNum(v, ..) | Self::Bar(v, ..) => format!("{v}"),
             Self::Num { v: None, s, .. } => s.clone(),
             Self::Absent(a) => a.glyph().to_string(),
         }
@@ -920,12 +924,24 @@ fn cell_view<'a, M: 'a>(cell: &Cell, align: Align, w: f32) -> Element<'a, M> {
                 _ => widgets::value(s.clone(), *prov).wrapping(iced::widget::text::Wrapping::None).into(),
             }
         }
+        Cell::Bar(v, s, fg) => {
+            // 条的格数按列宽算（等宽字体一格约 0.6em），右边留给文字
+            let em = t::size(super::Role::Numeric) * 0.6;
+            let total = (((w - metrics::space(2) * 2.0) / em) as usize).saturating_sub(s.chars().count() + 1).clamp(3, 60);
+            let n = ((v.clamp(0.0, 1.0)) * total as f64).round() as usize;
+            iced::widget::row![
+                t::numeric("█".repeat(n)).color(*fg).wrapping(iced::widget::text::Wrapping::None),
+                t::numeric("░".repeat(total - n)).color(color(core().text_tertiary)).wrapping(iced::widget::text::Wrapping::None),
+                t::numeric(format!(" {s}")).wrapping(iced::widget::text::Wrapping::None),
+            ]
+            .into()
+        }
         Cell::ColoredNum(v, s, fg) => with_full(t::numeric(s.clone()).color(*fg).wrapping(iced::widget::text::Wrapping::None).into(), *v),
         Cell::Absent(a) => widgets::absent(*a).into(),
         Cell::Badge(s, tone) => widgets::badge(s.clone(), *tone),
         Cell::Colored(s, fg) => t::numeric(s.clone()).color(*fg).wrapping(iced::widget::text::Wrapping::None).into(),
-        // 操作格在行里单独画（要发消息），这里不会走到；给个空白兜底
-        Cell::Action(..) => Space::new().into(),
+        // 操作格、链接格在行里单独画（要发消息），这里不会走到；给个空白兜底
+        Cell::Action(..) | Cell::Link(_) => Space::new().into(),
     };
     container(body)
         .width(Length::Fixed(w))
@@ -940,6 +956,9 @@ fn cell_view<'a, M: 'a>(cell: &Cell, align: Align, w: f32) -> Element<'a, M> {
 /// 画网格。`on` 把网格消息包成面板自己的消息。`footer` 是页脚右侧的附加说明（合计等）。
 ///
 /// 数据可借可交（见模块说明）：`&[Column]`、`Vec<Column>`、`Rc<[Column]>` 都行，行与状态同理。
+/// 表体右侧给竖滚动条留的宽度：嵌入式滚动条（默认 10px）+ 空隙，滚动条不盖住最后一列。
+const SCROLL_RESERVE: f32 = 10.0 + crate::ui::metrics::SCROLL_GAP + 3.0;
+
 pub fn view<'a, M, C, R, S>(cols: C, rows: R, st: S, footer: Option<String>, on: impl Fn(GridMsg) -> M + Clone + 'a) -> Element<'a, M>
 where
     M: Clone + 'a,
@@ -961,7 +980,7 @@ where
     let width_key = format!("grid:{:?}", st.borrow().id);
     let base_w: f32 = vis.iter().map(|&i| widths[i]).sum::<f32>() + 3.0;
     if let Some(avail) = crate::ui::mark::width_of(&width_key) {
-        let room = avail - 12.0;
+        let room = avail - SCROLL_RESERVE;
         if room > base_w + 1.0 && base_w > 3.0 {
             let k = (room - 3.0) / (base_w - 3.0);
             for &i in &vis {
@@ -984,12 +1003,16 @@ where
             None => format!("{}{arrow}", col.title),
         };
         let on_s = on.clone();
+        // 表头文字与这一列的内容对齐（数值靠右、文字靠左，左右边距与单元格相同）、上下居中。
+        // 标题格比列宽少 4px（右边是拖宽手柄），右边距相应减掉，靠右的标题才与下面的数字右缘对齐
         let label = button(
             container(t::metadata(title))
                 .width(Length::Fill)
-                .align_x(if col.align == Align::Right { Alignment::End } else { Alignment::Start }),
+                .height(Length::Fill)
+                .align_x(if col.align == Align::Right { Alignment::End } else { Alignment::Start })
+                .align_y(Alignment::Center),
         )
-        .padding(Padding::from([0.0, metrics::space(2)]))
+        .padding(Padding { top: 0.0, bottom: 0.0, left: metrics::space(2), right: (metrics::space(2) - 4.0).max(0.0) })
         .height(Length::Fill)
         .width(Length::Fixed(widths[i] - 4.0))
         .style(|th, s| widgets::button_style(widgets::Kind::Ghost, th, s));
@@ -1112,15 +1135,36 @@ where
                 }
             };
             let selected = st.is_selected(di);
-            let mut r = row![container(Space::new().width(Length::Fixed(2.0)).height(Length::Fill)).style(move |_| container::Style {
+            // 左边 3px 是选中条（与表头左边 3px 对齐）；格与格之间**不留间距**——表头每列正好列宽，
+            // 行里多 1px 间距的话越往右偏得越多（20 列差 20px），表头与内容对不上
+            let mut r = row![container(Space::new().width(Length::Fixed(3.0)).height(Length::Fill)).style(move |_| container::Style {
                 background: selected.then(|| Background::Color(color(core().accent_primary))),
                 ..Default::default()
             })]
-            .spacing(1)
+            .spacing(0)
             .height(Length::Fixed(row_h));
             let rkey = key_col.and_then(|k| rows[di].get(k)).map(Cell::plain);
             for &ci in &vis {
                 let align = aligns[ci];
+                // 链接格：强调色文字，点了把（行, 列）交给宿主
+                if let Some(Cell::Link(label)) = rows[di].get(ci) {
+                    let on_a = on_r.clone();
+                    r = r.push(
+                        container(
+                            button(t::body(label.clone()).color(color(core().accent_primary)).wrapping(iced::widget::text::Wrapping::None))
+                                .padding(0)
+                                .on_press(on_a(GridMsg::Action(di, ci)))
+                                .style(|_, _| iced::widget::button::Style::default()),
+                        )
+                        .width(Length::Fixed(widths[ci]))
+                        .padding(Padding::from([0.0, metrics::space(2)]))
+                        .align_x(if align == Align::Right { Alignment::End } else { Alignment::Start })
+                        .align_y(Alignment::Center)
+                        .height(Length::Fill)
+                        .clip(true),
+                    );
+                    continue;
+                }
                 // 操作格：小按钮，点了把（行, 列）交给宿主
                 if let Some(Cell::Action(label, tone)) = rows[di].get(ci) {
                     let on_a = on_r.clone();
@@ -1181,11 +1225,11 @@ where
         col = col.push(Space::new().height(Length::Fixed((shown - last) as f32 * row_h)));
         LAST_BUILD_US.store(t0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
         let on_s = on_r.clone();
-        scrollable(col)
+        crate::ui::scroll(col)
             .id(scroll_id.clone())
             .on_scroll(move |v| on_s(GridMsg::Scrolled(v)))
             .height(Length::Fill)
-            .width(Length::Fixed(total_w + 12.0))
+            .width(Length::Fixed(total_w + SCROLL_RESERVE))
             .into()
     });
 
@@ -1195,10 +1239,10 @@ where
     // 行区的进出：在里面时不重排（GridMsg::Hover）
     let (on_in, on_out) = (on.clone(), on.clone());
     let body = mouse_area(body).on_enter(on_in(GridMsg::Hover(true))).on_exit(on_out(GridMsg::Hover(false)));
-    let table = column![head, body].width(Length::Fixed(total_w + 12.0)).height(Length::Fill);
+    let table = column![head, body].width(Length::Fixed(total_w + SCROLL_RESERVE)).height(Length::Fill);
     let on_m = on.clone();
     let on_e = on.clone();
-    let table = mouse_area(scrollable(table).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new())).height(Length::Fill))
+    let table = mouse_area(crate::ui::scroll(table).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().spacing(crate::ui::metrics::SCROLL_GAP))).height(Length::Fill))
         .on_move(move |p| on_m(GridMsg::DragMove(p)))
         .on_release(on_e(GridMsg::DragEnd));
     let table: Element<'a, M> = if dragging {
@@ -1289,7 +1333,7 @@ fn settings_panel<'a, M: Clone + 'a>(cols: &[Column], st: &GridState, on: &(impl
             column![
                 row![t::label("列"), Space::new().width(Length::Fill), ghost("全部恢复", GridMsg::ResetCols), ghost("✕", GridMsg::Panel(GridPanel::Columns))]
                     .align_y(Alignment::Center),
-                scrollable(list).height(Length::Fixed(180.0)),
+                crate::ui::scroll(list).height(Length::Fixed(180.0)),
             ]
             .spacing(metrics::space(1))
             .into()
@@ -1591,4 +1635,77 @@ mod abbrev_tests {
         assert_eq!(c.plain(), "1234567890");
         assert_eq!(c.sort_num(), Some(1_234_567_890.0));
     }
+}
+
+// ── 命名表（docs/42 界面修复：自绘表一律换成网格）────────────────────────
+//
+// 面板里有十几张自绘的表（一行一行拼的 row!），表头与数据各算各的宽，撑满窗口后就对不上。
+// 换成网格要每张表自己存 GridState——这里按名字统一存，面板只交列与行，消息里带名字转回来即可。
+
+thread_local! {
+    /// 名字 → (状态, 列, 上一帧的行)。行留一份给「复制」之类要用到数据的操作
+    static NAMED: std::cell::RefCell<std::collections::HashMap<String, (GridState, Vec<Column>, Vec<Vec<Cell>>)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// 表的高度：撑满剩余（页面里只有这一张表）还是按行数（页面里有好几块、外层整页滚动）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Fit {
+    Fill,
+    /// 按行数定高，最多显示这么多行（超出在表内滚动）
+    Rows(usize),
+}
+
+/// 画一张命名表。`key` 在整个 Cockpit 里唯一（建议「面板.表名」）；`on` 把网格消息包成面板消息，
+/// 面板收到后调 [`named_update`]。
+pub fn named<'a, M: Clone + 'a>(
+    key: &str,
+    cols: Vec<Column>,
+    rows: Vec<Vec<Cell>>,
+    fit: Fit,
+    footer: Option<String>,
+    on: impl Fn(GridMsg) -> M + Clone + 'a,
+) -> Element<'a, M> {
+    let n = rows.len();
+    let st = NAMED.with(|g| {
+        let mut g = g.borrow_mut();
+        let e = g.entry(key.to_string()).or_insert_with(|| (GridState::new(&cols), cols.clone(), Vec::new()));
+        // 列数变了（视图换了列组）：状态作废重建，旧的列宽 / 排序对不上新列
+        if e.1.len() != cols.len() || e.1.iter().zip(&cols).any(|(a, b)| a.title != b.title) {
+            e.0 = GridState::new(&cols);
+        }
+        e.1 = cols.clone();
+        e.2 = rows.clone();
+        e.0.resort(&cols, &rows);
+        e.0.clone()
+    });
+    let el = view(cols, rows, st, footer, on);
+    match fit {
+        Fit::Fill => container(el).width(Length::Fill).height(Length::Fill).into(),
+        Fit::Rows(max) => {
+            let shown = n.clamp(1, max.max(1)) as f32;
+            let h = metrics::panel_header() + metrics::row_height() * (shown + 1.0) + 36.0;
+            container(el).width(Length::Fill).height(Length::Fixed(h)).into()
+        }
+    }
+}
+
+/// 命名表的消息，带表名。给要求 `PartialEq` 的面板消息用（网格消息里有滚动视口，比不了）：
+/// 一律不相等——只影响「同一条消息去重」，不影响处理。
+#[derive(Debug, Clone)]
+pub struct Named(pub String, pub GridMsg);
+
+impl PartialEq for Named {
+    fn eq(&self, _: &Self) -> bool {
+        false
+    }
+}
+
+/// 命名表的消息（排序、调宽、选中、滚动……）。
+pub fn named_update(key: &str, m: GridMsg) {
+    NAMED.with(|g| {
+        if let Some((st, cols, rows)) = g.borrow_mut().get_mut(key) {
+            st.update(m, cols, rows);
+        }
+    });
 }

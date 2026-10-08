@@ -34,7 +34,7 @@ fn dim<'a, M: 'a>(t: String) -> Element<'a, M> {
     text(t).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()).into()
 }
 fn cell<'a, M: 'a>(t: String, w: f32, c: Color) -> Element<'a, M> {
-    container(text(t).size(crate::ui::text::s_small()).color(c)).width(Length::FillPortion(w.round().max(1.0) as u16)).into()
+    container(text(t).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
 }
 
 pub(super) fn usd(v: f64) -> String {

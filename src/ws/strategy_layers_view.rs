@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, Text};
-use iced::widget::{Space, button, column, container, row, scrollable};
+use iced::widget::{Space, button, column, container, row};
 use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 use super::strategy_center::LAYERS;
@@ -153,7 +153,7 @@ fn events_list<'a>(s: &SymData, layer: Option<&str>) -> Element<'a, LyMsg> {
             .spacing(space(2)),
         );
     }
-    scrollable(col).height(Length::FillPortion(1)).into()
+    crate::ui::scroll(col).height(Length::FillPortion(1)).into()
 }
 
 /// 不选层时只标这些（信号 / 挂单 / 定仓每天都有，全标会糊成一片）。
@@ -469,16 +469,19 @@ fn matrix<'a>(v: &View) -> Element<'a, LyMsg> {
     let Some(c) = &v.comps else {
         return Space::new().into();
     };
-    const CW: f32 = 26.0;
     const NW: f32 = 170.0;
     let strategies: Vec<(&String, &String)> = c.strategies.iter().collect();
+    // 格宽按可用宽度均分（撑满窗口），最窄 26px——再窄就点不中、看不清；放不下时横向滚动
+    let avail = crate::ui::mark::width_of("strategy_layers.matrix").unwrap_or(0.0);
+    let reserve = 16.0 + (strategies.len() as f32 + 1.0); // 竖滚动条 + 每格 1px 间距
+    let cw = ((avail - NW - reserve) / strategies.len().max(1) as f32).floor().max(26.0);
     let sel_strategy = v.target.as_ref().map(|t| t.strategy.clone());
     // 列头：竖排太难读，用序号 + 悬停看名字；下方给对照表
     let mut head = row![container(t::metadata("共用件 ＼ 策略")).width(Length::Fixed(NW))].spacing(1);
     for (k, (id, name)) in strategies.iter().enumerate() {
         let on = sel_strategy.as_deref() == Some(id.as_str());
         let tip = iced::widget::tooltip(
-            container(t::numeric(format!("{}", k + 1)).color(if on { pal::accent() } else { pal::dim() })).width(Length::Fixed(CW)).center_x(Length::Fixed(CW)),
+            container(t::numeric(format!("{}", k + 1)).color(if on { pal::accent() } else { pal::dim() })).width(Length::Fixed(cw)).center_x(Length::Fixed(cw)),
             container(t::caption(format!("{name}（{id}）"))).padding(space(2)).style(crate::style::tooltip),
             iced::widget::tooltip::Position::Top,
         );
@@ -504,8 +507,8 @@ fn matrix<'a>(v: &View) -> Element<'a, LyMsg> {
                 let bg: Option<Color> = if used { Some(pal::alpha(pal::accent(), if sel || on { 0.75 } else { 0.4 })) } else if on { Some(pal::alpha(pal::accent(), 0.08)) } else { None };
                 r = r.push(
                     container(t::metadata(if used { "●" } else { "" }))
-                        .width(Length::Fixed(CW))
-                        .center_x(Length::Fixed(CW))
+                        .width(Length::Fixed(cw))
+                        .center_x(Length::Fixed(cw))
                         .style(move |_| iced::widget::container::Style { background: bg.map(iced::Background::Color), ..Default::default() }),
                 );
             }
@@ -514,7 +517,16 @@ fn matrix<'a>(v: &View) -> Element<'a, LyMsg> {
     }
     let mut col = column![
         t::metadata(format!("{} 个共用件 × {} 个策略（策略在 STRATEGY[\"master\"][\"layers\"] 里显式声明）。列号悬停看策略名；高亮列 = 策略中心选中的策略。", c.components.len(), strategies.len())).color(pal::dim()),
-        scrollable(grid).direction(iced::widget::scrollable::Direction::Both { vertical: Default::default(), horizontal: Default::default() }).height(Length::FillPortion(3)),
+        crate::ui::mark::width(
+            "strategy_layers.matrix".into(),
+            crate::ui::scroll(grid)
+                .direction(iced::widget::scrollable::Direction::Both {
+                    vertical: iced::widget::scrollable::Scrollbar::new().spacing(crate::ui::metrics::SCROLL_GAP),
+                    horizontal: iced::widget::scrollable::Scrollbar::new().spacing(crate::ui::metrics::SCROLL_GAP),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+        ),
     ]
     .spacing(space(2));
     if let Some(k) = &v.component

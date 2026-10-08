@@ -6,11 +6,11 @@
 //! `Message::PaneEvent(id, Event::RecorderInteraction(..))`。
 
 use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, text, text_input,
+    button, checkbox, column, container, pick_list, row, text, text_input,
 };
 use iced::{Alignment, Element, Length};
 
-use super::recorder::{ALL, DET_PAGE, GOAL_DAYS, RecorderMsg, RecorderPaneState, TierOpt};
+use super::recorder::{ALL, GOAL_DAYS, RecorderMsg, RecorderPaneState, TierOpt};
 
 fn fmt_dur(s: i64) -> String {
     let (d, h, m) = (s / 86400, (s % 86400) / 3600, (s % 3600) / 60);
@@ -64,9 +64,12 @@ fn vgap<'a>(h: f32) -> Element<'a, RecorderMsg> {
 ///
 /// 返回 `Element<'static>`：表里每个格子都是 `to_string`/`format!` 出来的独立所有权，
 /// 没有一处借着 `st`（它是 `pane_body` 的局部快照，借出去会活不过这一帧）。
+///
+/// `fill` = 这一页只有这张表（锁定成「录制明细」页）：表占满剩余高度、自己滚；否则按行数定高（外层整页滚动）。
 fn details(
     app: &RecorderPaneState,
     st: &super::recorder_readout::SvcState,
+    fill: bool,
 ) -> Element<'static, RecorderMsg> {
     let mut opts_sym: Vec<String> = vec![ALL.to_string()];
     opts_sym.extend(st.syms_seen.iter().cloned());
@@ -100,61 +103,52 @@ fn details(
     ]
     .spacing(6);
 
-    col = col.push(
-        row![
-            cell("交易所", 150.0),
-            cell("币种", 90.0),
-            cell("数据类型", 110.0),
-            cell("日期", 100.0),
-            cell("时段(UTC)", 110.0),
-            cell("段数", 60.0),
-            cell("大小", 90.0),
-            cell("未封档/孤儿", 90.0),
-            cell("存储位置(相对根目录)", 300.0),
-        ]
-        .spacing(6),
-    );
-
-    for r in hit.iter().take(app.det_limit) {
-        let flags = if r.orphan > 0 {
-            (format!("{} / {}", r.inprogress, r.orphan), crate::ui::pal::bad())
-        } else if r.inprogress > 0 {
-            (format!("{} / 0", r.inprogress), crate::ui::pal::warn())
-        } else {
-            (crate::ui::fmt::missing(), crate::ui::pal::pend())
-        };
-        col = col.push(
-            row![
-                cell(&st.exchange, 150.0),
-                cell(&r.sym, 90.0),
-                cell(r.stream, 110.0),
-                cell(&r.date, 100.0),
-                cell(&format!("{} ~ {}", r.first, r.last), 110.0),
-                cell(&r.segs.to_string(), 60.0),
-                cell(&fmt_size(r.bytes), 90.0),
-                container(text(flags.0).size(crate::ui::text::s_body()).color(flags.1)).width(Length::Fixed(90.0)),
-                cell(&r.rel, 300.0),
+    // 表格（ui::grid）：表头与数据共用一套列宽，撑满窗口后照样对齐；只画看得见的行，全部分区直接列出（不再分页）
+    use crate::ui::grid::{Cell, Column, Fit};
+    let cols = vec![
+        Column::text("交易所", 160.0),
+        Column::text("币种", 100.0),
+        Column::text("数据类型", 110.0),
+        Column::text("日期", 100.0),
+        Column::text("时段(UTC)", 120.0),
+        Column::num("段数", None, 70.0),
+        Column::num("大小", None, 100.0),
+        Column::text("未封档/孤儿", 100.0),
+        Column::text("存储位置(相对根目录)", 320.0),
+    ];
+    let data: Vec<Vec<Cell>> = hit
+        .iter()
+        .map(|r| {
+            let flags = if r.orphan > 0 {
+                Cell::Colored(format!("{} / {}", r.inprogress, r.orphan), crate::ui::pal::bad())
+            } else if r.inprogress > 0 {
+                Cell::Colored(format!("{} / 0", r.inprogress), crate::ui::pal::warn())
+            } else {
+                Cell::Absent(crate::ui::fmt::Absence::Missing)
+            };
+            vec![
+                Cell::Text(st.exchange.clone()),
+                Cell::Text(r.sym.clone()),
+                Cell::Text(r.stream.to_string()),
+                Cell::Text(r.date.clone()),
+                Cell::Text(format!("{} ~ {}", r.first, r.last)),
+                Cell::num(r.segs as f64, r.segs.to_string()),
+                Cell::num(r.bytes as f64, fmt_size(r.bytes)),
+                flags,
+                Cell::Id(r.rel.clone()),
             ]
-            .spacing(6),
-        );
-    }
-
-    if hit.is_empty() {
-        col = col.push(
-            text("(没有符合条件的分区)").size(crate::ui::text::s_body()).color(crate::ui::pal::pend()),
-        );
-    } else if hit.len() > app.det_limit {
-        col = col.push(
-            row![
-                button(text(format!("显示更多(+{DET_PAGE})")).size(crate::ui::text::s_body()))
-                    .on_press(RecorderMsg::DetailMore),
-                text(format!("  还有 {} 个分区未显示", hit.len() - app.det_limit))
-                    .size(crate::ui::text::s_small())
-                    .color(crate::ui::pal::dim()),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-        );
+        })
+        .collect();
+    col = col.push(crate::ui::grid::named(
+        "recorder.details",
+        cols,
+        data,
+        if fill { Fit::Fill } else { Fit::Rows(30) },
+        None,
+        RecorderMsg::Table,
+    ));
+    if fill {
+        return col.height(Length::Fill).into();
     }
     col.into()
 }
@@ -200,71 +194,60 @@ fn coverage(app: &RecorderPaneState, st: &super::recorder_readout::SvcState) -> 
     ]
     .spacing(6);
 
-    col = col.push(
-        row![
-            cell("币种", 90.0),
-            cell("日期", 100.0),
-            cell("覆盖时长", 80.0),
-            cell("连续段", 60.0),
-            cell("缺口", 55.0),
-            cell("最长可跑窗口", 150.0),
-            cell("录到的时间段 / 缺失的时间段", 420.0),
-        ]
-        .spacing(6),
-    );
-
-    for c in hit.iter().take(app.det_limit) {
-        // 最长可跑窗口是这一行里最该被看见的数：不足 60 分钟基本挑不出可用回测窗口。
-        let (lw, lc) = if c.longest_s >= 3600 {
-            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), crate::ui::pal::ok())
-        } else if c.longest_s >= 600 {
-            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), crate::ui::pal::warn())
-        } else {
-            (format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), crate::ui::pal::bad())
-        };
-        let runs: String = c
-            .runs
-            .iter()
-            .take(3)
-            .map(|&(a, b)| format!("{}~{}", hm(a), hm(b)))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let gaps: String = c
-            .gaps
-            .iter()
-            .take(3)
-            .map(|&(a, b)| format!("{}~{}({})", hm(a), hm(b), dur((b - a) / 1_000_000_000)))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let more = |n: usize, k: usize| if n > k { format!(" +{}", n - k) } else { String::new() };
-        col = col.push(
-            row![
-                cell(&c.sym, 90.0),
-                cell(&c.date, 100.0),
-                cell(&dur(c.covered_s), 80.0),
-                cell(&c.runs.len().to_string(), 60.0),
-                container(
-                    text(c.gaps.len().to_string()).size(crate::ui::text::s_body()).color(if c.gaps.is_empty() {
-                        crate::ui::pal::ok()
-                    } else {
-                        crate::ui::pal::warn()
-                    })
-                )
-                .width(Length::Fixed(55.0)),
-                container(text(lw).size(crate::ui::text::s_body()).color(lc)).width(Length::Fixed(150.0)),
-                cell(
-                    &format!(
-                        "✓ {}{}   ✗ {}{}",
-                        runs,
-                        more(c.runs.len(), 3),
-                        if gaps.is_empty() { "无".into() } else { gaps },
-                        more(c.gaps.len(), 3)
-                    ),
-                    420.0
+    // 表格（ui::grid）：表头与数据共用一套列宽，撑满窗口后照样对齐
+    use crate::ui::grid::{Cell, Column, Fit};
+    let cols = vec![
+        Column::text("币种", 100.0),
+        Column::text("日期", 100.0),
+        Column::num("覆盖时长", None, 90.0),
+        Column::num("连续段", None, 70.0),
+        Column::num("缺口", None, 60.0),
+        Column::text("最长可跑窗口", 150.0),
+        Column::text("录到的时间段 / 缺失的时间段", 480.0),
+    ];
+    let more = |n: usize, k: usize| if n > k { format!(" +{}", n - k) } else { String::new() };
+    let data: Vec<Vec<Cell>> = hit
+        .iter()
+        .map(|c| {
+            // 最长可跑窗口是这一行里最该被看见的数：不足 60 分钟基本挑不出可用回测窗口
+            let lc = if c.longest_s >= 3600 {
+                crate::ui::pal::ok()
+            } else if c.longest_s >= 600 {
+                crate::ui::pal::warn()
+            } else {
+                crate::ui::pal::bad()
+            };
+            let runs: String = c.runs.iter().take(3).map(|&(a, b)| format!("{}~{}", hm(a), hm(b))).collect::<Vec<_>>().join(" ");
+            let gaps: String = c
+                .gaps
+                .iter()
+                .take(3)
+                .map(|&(a, b)| format!("{}~{}({})", hm(a), hm(b), dur((b - a) / 1_000_000_000)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            vec![
+                Cell::Text(c.sym.clone()),
+                Cell::Text(c.date.clone()),
+                Cell::num(c.covered_s as f64, dur(c.covered_s)),
+                Cell::num(c.runs.len() as f64, c.runs.len().to_string()),
+                Cell::ColoredNum(
+                    c.gaps.len() as f64,
+                    c.gaps.len().to_string(),
+                    if c.gaps.is_empty() { crate::ui::pal::ok() } else { crate::ui::pal::warn() },
                 ),
+                Cell::Colored(format!("{} @{}", dur(c.longest_s), hm(c.longest_at)), lc),
+                Cell::Text(format!(
+                    "✓ {}{}   ✗ {}{}",
+                    runs,
+                    more(c.runs.len(), 3),
+                    if gaps.is_empty() { "无".into() } else { gaps },
+                    more(c.gaps.len(), 3)
+                )),
             ]
-            .spacing(6),
-        );
+        })
+        .collect();
+    if !data.is_empty() {
+        col = col.push(crate::ui::grid::named("recorder.coverage", cols, data, Fit::Rows(20), None, RecorderMsg::Table2));
     }
     if hit.is_empty() {
         // 首轮要读约 1.2 万个 parquet 的 ts_recv 列（~21 秒），期间 `started` 还是 false。
@@ -275,12 +258,6 @@ fn coverage(app: &RecorderPaneState, st: &super::recorder_readout::SvcState) -> 
             "首次扫描中…（要读一遍各段的时间戳列，约 20 秒；之后按 mtime 缓存，几乎零成本）"
         };
         col = col.push(text(msg).size(crate::ui::text::s_body()).color(crate::ui::pal::pend()));
-    } else if hit.len() > app.det_limit {
-        col = col.push(
-            text(format!("（还有 {} 天未显示，用上方「显示更多」）", hit.len() - app.det_limit))
-                .size(crate::ui::text::s_small())
-                .color(crate::ui::pal::dim()),
-        );
     }
     col.into()
 }
@@ -345,56 +322,49 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
             .align_y(Alignment::Center),
     );
 
-    col = col.push(
-        row![
-            cell("日期", 100.0),
-            cell("段数", 55.0),
-            cell("大小", 80.0),
-            cell("覆盖时长", 85.0),
-            cell("缺口", 50.0),
-            cell("最长可跑窗口", 150.0),
-            cell("轮次(已判/总)", 110.0),
-            cell("录到的时间段", 300.0),
-        ]
-        .spacing(6),
-    );
+    // 表格（ui::grid）：表头与数据共用一套列宽，撑满窗口后照样对齐
+    use crate::ui::grid::{Cell, Column, Fit};
+    let cols = vec![
+        Column::text("日期", 100.0),
+        Column::num("段数", None, 60.0),
+        Column::num("大小", None, 90.0),
+        Column::num("覆盖时长", None, 90.0),
+        Column::num("缺口", None, 60.0),
+        Column::text("最长可跑窗口", 150.0),
+        Column::text("轮次(已判/总)", 110.0),
+        Column::text("录到的时间段", 360.0),
+    ];
     if st.days.is_empty() {
         col = col.push(text("(还没有已封档的分段)").size(crate::ui::text::s_body()).color(dimc));
     }
-    for d in &st.days {
-        // 一轮 5 分钟，所以「够不够跑」的门槛比行情流低得多：
-        // 30 分钟已能覆盖 6 轮，2 小时以上才谈得上有点样本。
-        let (lc, _) = if d.longest_s >= 7200 {
-            (crate::ui::pal::ok(), 0)
-        } else if d.longest_s >= 1800 {
-            (crate::ui::pal::warn(), 0)
-        } else {
-            (crate::ui::pal::bad(), 0)
-        };
-        let runs: String = d
-            .runs
-            .iter()
-            .take(3)
-            .map(|(a, b)| format!("{}~{}", hm(*a), hm(*b)))
-            .collect::<Vec<_>>()
-            .join("  ");
-        let more = if d.runs.len() > 3 { format!("  …共 {} 段", d.runs.len()) } else { String::new() };
-        col = col.push(
-            row![
-                cell(&d.date, 100.0),
-                cell(&d.segs.to_string(), 55.0),
-                cell(&fmt_size(d.bytes), 80.0),
-                cell(&dur(d.covered_s), 85.0),
-                cell(&d.gaps.to_string(), 50.0),
-                container(
-                    text(format!("{} @{}", dur(d.longest_s), hm(d.longest_at))).size(crate::ui::text::s_body()).color(lc)
-                )
-                .width(Length::Fixed(150.0)),
-                cell(&format!("{}/{}", d.rounds_resolved, d.rounds), 110.0),
-                cell(&format!("{runs}{more}"), 300.0),
+    let data: Vec<Vec<Cell>> = st
+        .days
+        .iter()
+        .map(|d| {
+            // 一轮 5 分钟，所以「够不够跑」的门槛比行情流低得多：30 分钟已能覆盖 6 轮，2 小时以上才谈得上有点样本
+            let lc = if d.longest_s >= 7200 {
+                crate::ui::pal::ok()
+            } else if d.longest_s >= 1800 {
+                crate::ui::pal::warn()
+            } else {
+                crate::ui::pal::bad()
+            };
+            let runs: String = d.runs.iter().take(3).map(|(a, b)| format!("{}~{}", hm(*a), hm(*b))).collect::<Vec<_>>().join("  ");
+            let more = if d.runs.len() > 3 { format!("  …共 {} 段", d.runs.len()) } else { String::new() };
+            vec![
+                Cell::Text(d.date.clone()),
+                Cell::num(d.segs as f64, d.segs.to_string()),
+                Cell::num(d.bytes as f64, fmt_size(d.bytes)),
+                Cell::num(d.covered_s as f64, dur(d.covered_s)),
+                Cell::num(d.gaps as f64, d.gaps.to_string()),
+                Cell::Colored(format!("{} @{}", dur(d.longest_s), hm(d.longest_at)), lc),
+                Cell::Text(format!("{}/{}", d.rounds_resolved, d.rounds)),
+                Cell::Text(format!("{runs}{more}")),
             ]
-            .spacing(6),
-        );
+        })
+        .collect();
+    if !data.is_empty() {
+        col = col.push(crate::ui::grid::named("recorder.pm_days", cols, data, Fit::Rows(40), None, RecorderMsg::Table3));
     }
     col = col.push(
         text(format!(
@@ -412,10 +382,16 @@ pub fn pane_body<'a>(app: &'a RecorderPaneState, lock: Option<&str>) -> Element<
     let st = super::recorder_readout::snapshot();
     // 页面锁定（docs/41）：④ 录制明细、⑥ 预测市场录制各是一页；「行情录制」页是其余各区
     let page = |el: Element<'a, RecorderMsg>| -> Element<'a, RecorderMsg> {
-        container(scrollable(column![el].padding(crate::ui::metrics::space(4)))).width(Length::Fill).height(Length::Fill).into()
+        container(crate::ui::scroll(column![el].padding(crate::ui::metrics::space(4)))).width(Length::Fill).height(Length::Fill).into()
     };
     match lock {
-        Some("录制明细") => return page(details(app, &st)),
+        // 明细页不套整页滚动：表占满剩余高度、自己滚
+        Some("录制明细") => {
+            return container(column![details(app, &st, true)].padding(crate::ui::metrics::space(4)).height(Length::Fill))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        }
         Some("预测市场录制") => return page(pm_section()),
         _ => {}
     }
@@ -637,11 +613,11 @@ pub fn pane_body<'a>(app: &'a RecorderPaneState, lock: Option<&str>) -> Element<
     }
 
     let left = column![svc_ctrl, vgap(12.0), live].spacing(6).width(Length::FillPortion(3));
-    let right = scrollable(overview).width(Length::FillPortion(2)).height(Length::Fill);
+    let right = crate::ui::scroll(overview).width(Length::FillPortion(2)).height(Length::Fill);
     // 明细是宽表（九列），塞进左右分栏会被挤到换行，故整幅放在分栏下方。
     let body = row![left, right].spacing(18).height(Length::Shrink);
 
-    container(scrollable(
+    container(crate::ui::scroll(
         column![
             config,
             vgap(8.0),
@@ -649,7 +625,7 @@ pub fn pane_body<'a>(app: &'a RecorderPaneState, lock: Option<&str>) -> Element<
             vgap(14.0),
             body,
             vgap(14.0),
-            if lock.is_none() { details(app, &st) } else { column![].into() },
+            if lock.is_none() { details(app, &st, false) } else { column![].into() },
             vgap(14.0),
             coverage(app, &st),
             vgap(14.0),

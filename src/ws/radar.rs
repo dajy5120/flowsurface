@@ -329,6 +329,8 @@ impl ViewState {
 pub enum RadarMsg {
     /// 筛选器网格的交互（ui::grid，docs/35 §16.13 第 5 项）
     Grid(crate::ui::grid::GridMsg),
+    /// 各视图里的命名表（全球总览、宽度、加密全景……；ui::grid::named）
+    Table(String, crate::ui::grid::GridMsg),
     Start,
     Stop,
     Refresh,
@@ -565,6 +567,7 @@ pub fn apply(v: ViewState, msg: RadarMsg) -> ViewState {
         // 强制刷新只写请求文件。`ManualEdited` 等已在上面各自处理，不再列
         RadarMsg::Start
         | RadarMsg::Grid(_)
+        | RadarMsg::Table(..)
         | RadarMsg::FetchOnce
         | RadarMsg::ForceBlock(_)
         | RadarMsg::Stop
@@ -583,6 +586,15 @@ pub fn handle(msg: RadarMsg) {
         // 筛选器网格：排序点击已在视图里换成 SortBy；这里只剩网格自己的状态（调宽、选中、筛选…）
         RadarMsg::Grid(g) => {
             super::radar_view::grid_update(g);
+            String::new()
+        }
+        // 链接格：点了打开对应的页面（其余网格消息交给网格自己）
+        RadarMsg::Table(k, crate::ui::grid::GridMsg::Action(r, c)) => match super::radar_view::table_link(&k, r, c) {
+            Some(id) => ro::open_link(id),
+            None => String::new(),
+        },
+        RadarMsg::Table(k, g) => {
+            crate::ui::grid::named_update(&k, g);
             String::new()
         }
         // 打开浏览器是个副作用，走这一路而不是 `apply`——`apply` 是纯函数

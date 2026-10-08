@@ -1,6 +1,6 @@
 //! 进程页的渲染。清单与状态在 [`super::procs`]，这里只画。
 
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Color, Element, Length};
 
 use super::procs::{self, Row};
@@ -282,7 +282,7 @@ pub fn pane_body<'a>(note: &str, lock: Option<&str>) -> Element<'a, ProcsMsg> {
 
     // 页面「进程」只到这里；依赖版本是「检查更新」页（docs/41）
     if lock == Some("进程") {
-        return scrollable(body).into();
+        return crate::ui::scroll(body).into();
     }
     deps_part(body)
 }
@@ -354,7 +354,7 @@ fn deps_part<'a>(mut body: iced::widget::Column<'a, ProcsMsg>) -> Element<'a, Pr
         .color(crate::ui::pal::dim()),
     );
 
-    scrollable(body).into()
+    crate::ui::scroll(body).into()
 }
 
 #[cfg(test)]

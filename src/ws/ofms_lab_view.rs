@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, Text};
-use iced::widget::{Space, button, column, container, row, scrollable, text, text_input};
+use iced::widget::{Space, button, column, container, row, text_input};
 use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 use std::collections::BTreeMap;
@@ -77,7 +77,7 @@ pub fn pane_body<'a>(pane: uuid::Uuid, lock: Option<&str>, hosted: bool) -> Elem
     let mut col = column![w::panel_header("订单流层析", tabs, vec![])].spacing(space(2));
     let body: Element<'a, OfMsg> = match v.tab {
         OfTab::Timeline => timeline_tab(&v, hosted),
-        OfTab::Response => response_tab(&v),
+        OfTab::Response => response_tab(&v, pane),
         OfTab::Setups => setups_tab(&v),
         OfTab::Dictionary => dictionary_tab(&v),
     };
@@ -104,7 +104,7 @@ fn timeline_tab<'a>(v: &View, hosted: bool) -> Element<'a, OfMsg> {
     let chart = iced::widget::Canvas::new(Tomo { d: d.clone(), hidden: v.hidden.clone(), selected: v.selected, overlay: v.overlay.clone() })
         .width(Length::FillPortion(3))
         .height(Length::Fill);
-    let side = scrollable(side_panel(d, v.dict.as_deref(), v.selected)).width(Length::FillPortion(1)).height(Length::Fill);
+    let side = crate::ui::scroll(side_panel(d, v.dict.as_deref(), v.selected)).width(Length::FillPortion(1)).height(Length::Fill);
     column![
         top,
         t::metadata(format!(
@@ -773,7 +773,7 @@ fn dictionary_tab<'a>(v: &View) -> Element<'a, OfMsg> {
             t::metadata(format!("假设：{}", f.hypothesis)).color(pal::dim()),
         ]);
     }
-    col = col.push(scrollable(list).height(Length::Fill));
+    col = col.push(crate::ui::scroll(list).height(Length::Fill));
     col.height(Length::Fill).into()
 }
 
@@ -800,7 +800,8 @@ fn cell_label(dict: Option<&Dict>, kind: &str, cell: &str) -> String {
     format!("{a} · {b} · {c}")
 }
 
-fn response_tab<'a>(v: &View) -> Element<'a, OfMsg> {
+fn response_tab<'a>(v: &View, pane: uuid::Uuid) -> Element<'a, OfMsg> {
+    use crate::ui::grid::{Cell, Column, Fit, Named};
     let Some(r) = &v.resp else {
         return if v.resp_err.is_empty() {
             w::loading("响应表").into()
@@ -847,28 +848,31 @@ fn response_tab<'a>(v: &View) -> Element<'a, OfMsg> {
     .spacing(space(2));
     if k == "trans" {
         col = col.push(t::metadata("L5 响应状态之间的转移：次数，与转移后 30 秒中间价（按当秒订单流方向对齐、扣漂移，bp）。只描述路径，不单独判可交易。").color(pal::dim()));
-        let mut list = column![row![
-            container(t::metadata("从")).width(Length::Fixed(160.0)),
-            container(t::metadata("到")).width(Length::Fixed(160.0)),
-            container(t::metadata("次数")).width(Length::Fixed(80.0)),
-            t::metadata("30s 均值 ± 标准误"),
-        ]
-        .spacing(space(2))]
-        .spacing(space(1));
-        for x in r.transitions.iter().take(80) {
-            let name = |s: &str| cell_label(dict, "state", &format!("||{s}")).trim_start_matches(" ·  · ").to_string();
-            list = list.push(
-                row![
-                    container(t::body(name(&x.from))).width(Length::Fixed(160.0)),
-                    container(t::body(name(&x.to))).width(Length::Fixed(160.0)),
-                    container(t::numeric(x.n.to_string())).width(Length::Fixed(80.0)),
-                    t::numeric(format!("{:+.2} ± {:.2}", x.mean30_bp, x.se30_bp.unwrap_or(f64::NAN)))
-                        .color(if x.mean30_bp >= 0.0 { pal::up() } else { pal::down() }),
+        // 表格（ui::grid）：表头与数据共用一套列宽，撑满窗口后照样对齐
+        let key = format!("ofms.{pane}.trans");
+        let cols = vec![Column::text("从", 200.0), Column::text("到", 200.0), Column::num("次数", None, 90.0), Column::num("30s 均值 ± 标准误", Some("bp"), 180.0)];
+        let data: Vec<Vec<Cell>> = r
+            .transitions
+            .iter()
+            .map(|x| {
+                let name = |s: &str| cell_label(dict, "state", &format!("||{s}")).trim_start_matches(" ·  · ").to_string();
+                vec![
+                    Cell::Text(name(&x.from)),
+                    Cell::Text(name(&x.to)),
+                    Cell::num(x.n as f64, x.n.to_string()),
+                    Cell::ColoredNum(
+                        x.mean30_bp,
+                        format!("{:+.2} ± {:.2}", x.mean30_bp, x.se30_bp.unwrap_or(f64::NAN)),
+                        if x.mean30_bp >= 0.0 { pal::up() } else { pal::down() },
+                    ),
                 ]
-                .spacing(space(2)),
-            );
-        }
-        return col.push(scrollable(list).height(Length::Fill)).height(Length::Fill).into();
+            })
+            .collect();
+        let k2 = key.clone();
+        return col
+            .push(crate::ui::grid::named(&key, cols, data, Fit::Fill, None, move |m| OfMsg::Table(Named(k2.clone(), m))))
+            .height(Length::Fill)
+            .into();
     }
     // 格子 × 视界
     let mut cells: BTreeMap<&str, Vec<&ol::RespRow>> = BTreeMap::new();
@@ -882,53 +886,48 @@ fn response_tab<'a>(v: &View) -> Element<'a, OfMsg> {
         let tt = |xs: &Vec<&ol::RespRow>| xs.iter().find(|x| x.h == 30).and_then(|x| x.t_mid).map(f64::abs).unwrap_or(0.0);
         tt(b.1).partial_cmp(&tt(a.1)).unwrap_or(std::cmp::Ordering::Equal)
     });
-    let cw = 120.0;
-    let mut hdr = row![container(t::metadata("格子")).width(Length::Fixed(300.0)), container(t::metadata("样本（30s）")).width(Length::Fixed(90.0))]
-        .spacing(space(1));
+    // 表格（ui::grid）：表头与数据共用一套列宽，撑满窗口后照样对齐；有信息的格用徽章（绿 = 越过成本、橙 = 有信息未越过成本）
+    let key = format!("ofms.{pane}.resp.{k}");
+    let mut cols = vec![Column::text("格子", 320.0), Column::num("样本（30s）", None, 100.0)];
     for h in HS {
-        hdr = hdr.push(container(t::metadata(format!("{h}s 均值 / 净"))).width(Length::Fixed(cw)));
+        cols.push(Column::text(format!("{h}s 均值 / 净"), 140.0));
     }
     if k == "event" {
-        hdr = hdr.push(t::metadata("按周 30s 均值（最近一周反号或不到全样本 1/4 = 衰减）"));
+        cols.push(Column::text("按周 30s 均值（最近一周反号或不到全样本 1/4 = 衰减）", 420.0));
     }
-    let mut list = column![hdr].spacing(2.0);
-    for (cell, xs) in order.iter().take(200) {
+    let mut data: Vec<Vec<Cell>> = Vec::new();
+    for (cell, xs) in order.iter() {
         let n30 = xs.iter().find(|x| x.h == 30).map(|x| x.n).unwrap_or(0);
-        let mut rr = row![
-            container(t::body(cell_label(dict, k, cell))).width(Length::Fixed(300.0)),
-            container(t::numeric(n30.to_string()).color(pal::dim())).width(Length::Fixed(90.0)),
-        ]
-        .spacing(space(1))
-        .align_y(Alignment::Center);
+        let mut rr = vec![Cell::Text(cell_label(dict, k, cell)), Cell::num(n30 as f64, n30.to_string())];
         for h in HS {
-            let x = xs.iter().find(|x| x.h == h);
-            let (label, bg) = match x {
-                Some(x) if x.verdict != "样本不足" => (
-                    format!("{:+.2} / {:+.1}{}", x.mean_bp.unwrap_or(f64::NAN), x.net_bp.unwrap_or(f64::NAN),
-                            if x.side.as_deref() == Some("逆") && verdict_color(&x.verdict).is_some() { " 逆" } else { "" }),
-                    verdict_color(&x.verdict).map(|c| pal::alpha(c, 0.28)),
-                ),
-                Some(_) => ("样本不足".into(), None),
-                None => ("—".into(), None),
-            };
-            rr = rr.push(
-                container(text(label).size(t::s_meta()))
-                    .width(Length::Fixed(cw))
-                    .height(Length::Fixed(20.0))
-                    .align_y(Alignment::Center)
-                    .style(move |_t: &Theme| container::Style { background: bg.map(iced::Background::Color), ..Default::default() }),
-            );
+            rr.push(match xs.iter().find(|x| x.h == h) {
+                Some(x) if x.verdict != "样本不足" => {
+                    let label = format!(
+                        "{:+.2} / {:+.1}{}",
+                        x.mean_bp.unwrap_or(f64::NAN),
+                        x.net_bp.unwrap_or(f64::NAN),
+                        if x.side.as_deref() == Some("逆") && verdict_color(&x.verdict).is_some() { " 逆" } else { "" }
+                    );
+                    match x.verdict.as_str() {
+                        "越过成本" => Cell::Badge(label, Tone::Success),
+                        "有信息未越过成本" => Cell::Badge(label, Tone::Warning),
+                        _ => Cell::Text(label),
+                    }
+                }
+                Some(_) => Cell::Colored("样本不足".into(), pal::dim()),
+                None => Cell::Absent(crate::ui::fmt::Absence::Missing),
+            });
         }
         if k == "event" {
-            if let Some(ro) = r.rolling.iter().find(|x| x.cell == **cell) {
-                let wk = ro.weeks.iter().map(|x| format!("{} {:+.2}", &x.week[5..], x.mean_bp)).collect::<Vec<_>>().join("  ");
-                rr = rr.push(
-                    t::metadata(format!("{wk}{}", if ro.decayed { " · 衰减" } else { "" }))
-                        .color(if ro.decayed { pal::warn() } else { pal::dim() }),
-                );
-            }
+            rr.push(match r.rolling.iter().find(|x| x.cell == **cell) {
+                Some(ro) => {
+                    let wk = ro.weeks.iter().map(|x| format!("{} {:+.2}", &x.week[5..], x.mean_bp)).collect::<Vec<_>>().join("  ");
+                    Cell::Colored(format!("{wk}{}", if ro.decayed { " · 衰减" } else { "" }), if ro.decayed { pal::warn() } else { pal::dim() })
+                }
+                None => Cell::Absent(crate::ui::fmt::Absence::Missing),
+            });
         }
-        list = list.push(rr);
+        data.push(rr);
     }
     col = col.push(
         row![
@@ -939,7 +938,10 @@ fn response_tab<'a>(v: &View) -> Element<'a, OfMsg> {
         .spacing(space(2))
         .align_y(Alignment::Center),
     );
-    col.push(scrollable(list).height(Length::Fill)).height(Length::Fill).into()
+    let k2 = key.clone();
+    col.push(crate::ui::grid::named(&key, cols, data, Fit::Fill, None, move |m| OfMsg::Table(Named(k2.clone(), m))))
+        .height(Length::Fill)
+        .into()
 }
 
 // ── 入场形态矩阵页（P4）───────────────────────────────────────────────
@@ -1035,5 +1037,5 @@ fn setups_tab<'a>(v: &View) -> Element<'a, OfMsg> {
                 .style(|_t: &Theme| container::Style { background: Some(iced::Background::Color(pal::card_bg())), ..Default::default() }),
         );
     }
-    scrollable(col).height(Length::Fill).into()
+    crate::ui::scroll(col).height(Length::Fill).into()
 }

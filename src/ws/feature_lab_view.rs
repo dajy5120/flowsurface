@@ -12,13 +12,14 @@
 //! 先盯住最上面那行。先告诉他「35 个检验里偶然就该有 1.75 个 p<0.05」，
 //! 他再看那一行时才不会把它当发现。
 
-use iced::widget::{column, container, row, scrollable, text};
+use iced::widget::{column, container, row, text};
 use iced::{Color, Element, Length};
 
 use super::feature_lab_readout::{self as ro, FeatureLab};
 
+/// 表格单元格：`w` 是比例（原像素宽）。表头与数据行格数相同、间距相同，按比例撑满后照样对齐。
 fn cell<'a, M: 'a>(t: String, w: f32, c: Color) -> Element<'a, M> {
-    container(text(t).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
+    container(text(t).size(crate::ui::text::s_small()).color(c)).width(Length::FillPortion(w.round().max(1.0) as u16)).into()
 }
 fn dim<'a, M: 'a>(t: String) -> Element<'a, M> {
     text(t).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()).into()
@@ -234,12 +235,12 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
                 60.0,
                 crate::ui::pal::dim()
             ),
-            container(text(r.doc.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::txt())).width(Length::Fixed(330.0)),
+            container(text(r.doc.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::txt())).width(Length::FillPortion(330)),
         ]);
         b = b.push(container(dim(format!("　假设：{}", r.hypothesis))).padding(crate::ui::metrics::space(0)));
     }
 
-    container(scrollable(b)).width(Length::Fill).height(Length::Fill).into()
+    container(crate::ui::scroll(b)).width(Length::Fill).height(Length::Fill).into()
 }
 
 #[cfg(test)]

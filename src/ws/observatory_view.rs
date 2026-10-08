@@ -9,7 +9,7 @@
 
 use std::time::Instant;
 
-use iced::widget::{button, canvas, checkbox, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, canvas, checkbox, column, container, row, text, text_input};
 use iced::{Color, Element, Length};
 
 use super::observatory_hist as hist;
@@ -394,7 +394,7 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
                 .size(crate::ui::text::s_small())
                 .color(crate::ui::pal::dim()),
         );
-        return scrollable(body).width(Length::Fill).height(Length::Fill).into();
+        return crate::ui::scroll(body).width(Length::Fill).height(Length::Fill).into();
     };
 
     // ── 会话 ──
@@ -626,9 +626,9 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     // 上下滚看行、左右滚看内容
     let cw = table.content_width();
     body = body.push(
-        scrollable(canvas(table).width(Length::Fixed(cw)).height(Length::Fixed(h)))
+        crate::ui::scroll(canvas(table).width(Length::Fixed(cw)).height(Length::Fixed(h)))
             .direction(iced::widget::scrollable::Direction::Horizontal(
-                iced::widget::scrollable::Scrollbar::new(),
+                iced::widget::scrollable::Scrollbar::new().spacing(crate::ui::metrics::SCROLL_GAP),
             ))
             .width(Length::Fill)
             .height(Length::Fixed(h + 14.0)),
@@ -643,7 +643,7 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
         ]
         .spacing(6),
     );
-    scrollable(body).width(Length::Fill).height(Length::Fill).into()
+    crate::ui::scroll(body).width(Length::Fill).height(Length::Fill).into()
 }
 
 /// 记录并返回本次构建耗时（毫秒），同时维护一个滚动峰值。
