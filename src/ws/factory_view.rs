@@ -255,13 +255,25 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
         .color(crate::ui::pal::down())
         .into()
     };
-    let header = column![
-        text("Alpha Factory 驾驶舱").size(crate::ui::text::s_title()).color(crate::ui::pal::head()),
-        status_line,
-        text(format!("生成来源  {gensrc_s}")).size(crate::ui::text::s_body()).color(crate::ui::pal::dim()),
-        text(format!("晋级阈值  {thr_s}")).size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
-    ]
-    .spacing(5);
+    // 部位（docs/42 第 4 期）：标题进「说明」，总览三行（状态 / 生成来源 / 晋级阈值）进「数据」；
+    // 读不到 Registry 是读图前必须看见的，主区照留
+    let part = super::inspector_props::part();
+    let db_bad = st.started && !st.db_ok;
+    let mut header = column![].spacing(5);
+    if part.intro() {
+        header = header.push(text("Alpha Factory 驾驶舱").size(crate::ui::text::s_title()).color(crate::ui::pal::head()));
+    }
+    if part.data() || db_bad {
+        header = header.push(status_line);
+    }
+    if part.data() {
+        header = header
+            .push(text(format!("生成来源  {gensrc_s}")).size(crate::ui::text::s_body()).color(crate::ui::pal::dim()))
+            .push(text(format!("晋级阈值  {thr_s}")).size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
+    }
+    if part.side() {
+        return header.into();
+    }
 
     // —— 左列：Stage-A 排行 + Stage-B ——
     let mut sa = column![sec("② Stage-A 排行（按 |IC t|，F2/F3）", crate::ui::pal::up())].spacing(2);
@@ -535,7 +547,12 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
     .spacing(16)
     .height(Length::Fill);
 
-    container(column![header, vgap(10.0), body].spacing(8))
+    let main = if part == super::inspector_props::Part::Main && !db_bad {
+        column![crate::ui::mark::here(), body]
+    } else {
+        column![header, vgap(10.0), crate::ui::mark::here(), body]
+    };
+    container(main.spacing(8))
         .padding(crate::ui::metrics::space(4))
         .width(Length::Fill)
         .height(Length::Fill)

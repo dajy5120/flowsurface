@@ -743,6 +743,11 @@ impl State {
         timezone: UserTimezone,
         tickers_table: &'a TickersTable,
     ) -> pane_grid::Content<'a, Message, Theme, Renderer> {
+        // 检查器托管着这个面板吗（docs/42）：只认主窗口平铺层里的那个 pane——浮窗与弹出窗口各有一套 pane 编号，
+        // 只比 pane 会把编号相同的浮窗面板也当成被托管
+        let hosted = window == main_window.id && crate::ws::inspector_props::hosted(id);
+        // 渲染部位（docs/42 第 4 期）：面板视图里读 `inspector_props::part()`，本函数返回时恢复
+        let _part = crate::ws::inspector_props::scope(crate::ws::inspector_props::Part::of(hosted));
         let mut top_left_buttons = if Content::Starter == self.content {
             row![]
         } else {
@@ -1086,7 +1091,7 @@ impl State {
                 let base = crate::ws::ofms_lab_view::pane_body(
                     self.unique_id(),
                     self.settings.view.as_deref(),
-                    crate::ws::inspector_props::hosted(id),
+                    hosted,
                 )
                     .map(move |m| Message::PaneEvent(id, Event::OfmsLabInteraction(m)));
                 self.compose_stack_view(
@@ -1130,7 +1135,7 @@ impl State {
                 // 特征矩阵（docs/31 §8.1）：只读 ~/ws-data/cockpit/feature_matrix.json，
                 // 由 wealthspring-features 的引擎周期性写出。**零交易所流、零计算**。
                 // 筛选/视图切换发 FeatureMatrixMsg → 包成 pane 事件。
-                let base = crate::ws::feature_matrix_view::pane_body(crate::ws::inspector_props::hosted(id), self.settings.view.as_deref())
+                let base = crate::ws::feature_matrix_view::pane_body(hosted, self.settings.view.as_deref())
                     .map(move |m| Message::PaneEvent(id, Event::FeatureMatrixInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -1208,7 +1213,7 @@ impl State {
                         let pid = self.id;
                         crate::ws::series_table::view(pid, &t).map(move |m| Message::PaneEvent(id, Event::SeriesTable(m)))
                     }
-                    None => crate::ws::tardis_board_view::pane_body(tb, crate::ws::inspector_props::hosted(id))
+                    None => crate::ws::tardis_board_view::pane_body(tb, hosted)
                         .map(move |m| Message::PaneEvent(id, Event::TardisBoardInteraction(m))),
                 };
                 self.compose_stack_view(
@@ -1223,7 +1228,7 @@ impl State {
             }
             Content::TardisReplay(tr) => {
                 // Tardis 历史回放（docs/20 Phase 5）：交互视图发 TardisReplayMsg → 包成 pane 事件。
-                let base = crate::ws::tardis_replay_view::pane_body(tr, crate::ws::inspector_props::hosted(id))
+                let base = crate::ws::tardis_replay_view::pane_body(tr, hosted)
                     .map(move |m| Message::PaneEvent(id, Event::TardisReplayInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -1256,10 +1261,11 @@ impl State {
             Content::BacktestResult => {
                 // 回测结果（docs/08 F6-P7）：渲染走 ws::backtest_readout 旁路快照。
                 // 顶上是「发起回测」（选策略 + 共用数据选择组件 → 起 runner）。
-                let launch = crate::ws::backtest_launch_view::view(crate::ws::inspector_props::hosted(id))
+                let launch = crate::ws::backtest_launch_view::view(hosted)
                     .map(move |m| Message::PaneEvent(id, Event::BacktestLaunchInteraction(m)));
-                let body = crate::ws::backtest_view::pane_body()
-                    .map(move |(w, m)| Message::PaneEvent(id, Event::BacktestGrid(w, m)));
+                let body = crate::ui::mark::content(
+                    crate::ws::backtest_view::pane_body().map(move |(w, m)| Message::PaneEvent(id, Event::BacktestGrid(w, m))),
+                );
                 let base = column![launch, body].into();
                 self.compose_stack_view(
                     base,
@@ -1706,6 +1712,9 @@ impl State {
             Status::Ready => {}
         }
 
+        // 非内容高度测量（docs/42 第 4 期）：只记被检查器托管的面板；图表类整块就是内容
+        let body = if self.is_chart_kind() && !matches!(self.content, Content::OfmsLab) { crate::ui::mark::content(body) } else { body };
+        let body = crate::ui::mark::body(self.settings.view.clone().unwrap_or_else(|| self.content.to_string()), hosted, body);
         let content = pane_grid::Content::new(body)
             .style(move |theme| style::pane_background(theme, is_focused));
 

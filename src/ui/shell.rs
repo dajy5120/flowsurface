@@ -882,6 +882,8 @@ pub struct InspView {
     pub about: Option<String>,
     /// 检查器作用的面板名（与工具栏同一个目标；没选中时是本页第一个有控件的面板）
     pub panel: Option<String>,
+    /// 与缺省值不同的设置（「已改 n 项」，docs/42 §5.2）
+    pub changed: Vec<String>,
 }
 
 /// 检查器（UPDS V2 §9，docs/42 §3）：三页——**属性**（选中面板的可编辑设置）、**数据**（数据源与数据环境）、
@@ -913,7 +915,16 @@ pub fn inspector<'a, M: Clone + 'a>(
     .align_y(Alignment::Center);
     let tabs = super::widgets::tabs(
         &[
-            (if has_props { "属性 •" } else { "属性" }, InspTab::Props),
+            (
+                if !v.changed.is_empty() {
+                    "属性 · 已改"
+                } else if has_props {
+                    "属性 •"
+                } else {
+                    "属性"
+                },
+                InspTab::Props,
+            ),
             (if has_data { "数据 •" } else { "数据" }, InspTab::Data),
             ("说明", InspTab::About),
         ],
@@ -928,6 +939,16 @@ pub fn inspector<'a, M: Clone + 'a>(
     match tab {
         InspTab::Props => {
             col = col.push(panel);
+            if !v.changed.is_empty() {
+                // 「为什么我看到的和别人不一样」：改过的设置逐项列出
+                col = col.push(
+                    column![
+                        t::label(format!("已改 {} 项", v.changed.len())).color(color(c.accent_primary)),
+                        t::caption(v.changed.join(" · ")),
+                    ]
+                    .spacing(metrics::space(1)),
+                );
+            }
             match props {
                 Some(p) => col = col.push(p),
                 None => {

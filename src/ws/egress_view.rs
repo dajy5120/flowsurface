@@ -233,6 +233,28 @@ fn etable<'a>(n: u8, cols: Vec<Column>, rows: Vec<Vec<Cell>>) -> Element<'a, Egr
     container(grid::view(cols, rows, st, None, move |m| EgressMsg::Grid(n, m))).height(Length::Fixed(h)).into()
 }
 
+/// 网络出口页的说明（面板内联显示；检查器托管时在「说明」页）。
+pub fn notes() -> Vec<String> {
+    vec![
+        "这个设置下次启动才生效，只改设置、不动现在的连接。「关闭」会停掉对外的服务、\
+         行情订阅和对外的定时任务——定时任务不跟随窗口，停了之后要等下次以「开启」启动\
+         （只补开设了自启的）或手动启动才会再触发。"
+            .into(),
+        // 两个数**本来就对不上**。不说清的话，用户会以为哪儿算错了
+        format!(
+            "整机 = 真实网卡（{}）上的字节，含 IP/TCP 头，且是整台机器的（浏览器、系统更新都在内）；\
+             每一路数的是 TCP 载荷。走本机代理的流量两边各算一次，所以逐行相加会大于整机。",
+            egress::wire_ifaces().join(" + ")
+        ),
+        "「现在 0 条」不等于「不会再用流量」——定时任务平时就是 0，到点照拉。看「下次」那一列".into(),
+        // 这个缺口必须说。不说的话「今日 3.2G」会被当成一整天的真实用量
+        "「今日」只在 Cockpit 开着的时候数（不用停在这一页，程序一起来就在数）——\
+         但面板关掉的那段时间没人记。想要无缺口的数就看上面那个「开机以来」：\
+         网卡计数器不依赖任何程序开着。"
+            .into(),
+    ]
+}
+
 pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
     let rows = egress::rows();
     let inner = egress::inner_rows();
@@ -310,40 +332,12 @@ pub fn pane_body<'a>(note: &str) -> Element<'a, EgressMsg> {
         .spacing(6)
         .align_y(iced::Alignment::Center),
     );
-    body = body.push(
-        text(
-            "这个设置下次启动才生效，只改设置、不动现在的连接。「关闭」会停掉对外的服务、\
-             行情订阅和对外的定时任务——定时任务不跟随窗口，停了之后要等下次以「开启」启动\
-             （只补开设了自启的）或手动启动才会再触发。",
-        )
-        .size(crate::ui::text::s_meta())
-        .color(crate::ui::pal::dim()),
-    );
-
-    // 两个数**本来就对不上**。不说清的话，用户会以为哪儿算错了
-    body = body.push(
-        text(format!(
-            "整机 = 真实网卡（{}）上的字节，含 IP/TCP 头，且是整台机器的（浏览器、系统更新都在内）；             每一路数的是 TCP 载荷。走本机代理的流量两边各算一次，所以逐行相加会大于整机。",
-            egress::wire_ifaces().join(" + ")
-        ))
-        .size(crate::ui::text::s_meta())
-        .color(crate::ui::pal::dim()),
-    );
-    body = body.push(
-        text("「现在 0 条」不等于「不会再用流量」——定时任务平时就是 0，到点照拉。看「下次」那一列")
-            .size(crate::ui::text::s_meta())
-            .color(crate::ui::pal::dim()),
-    );
-    // 这个缺口必须说。不说的话「今日 3.2G」会被当成一整天的真实用量
-    body = body.push(
-        text(
-            "「今日」只在 Cockpit 开着的时候数（不用停在这一页，程序一起来就在数）——\
-             但面板关掉的那段时间没人记。想要无缺口的数就看上面那个「开机以来」：\
-             网卡计数器不依赖任何程序开着。",
-        )
-        .size(crate::ui::text::s_meta())
-        .color(crate::ui::pal::dim()),
-    );
+    // 长说明（docs/42 第 4 期）：检查器托管时进「说明」页
+    if super::inspector_props::part().intro() {
+        for n in notes() {
+            body = body.push(text(n).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
+        }
+    }
     if !note.is_empty() {
         body = body.push(text(note.to_string()).size(crate::ui::text::s_small()).color(crate::ui::pal::warn()));
     }

@@ -78,7 +78,9 @@ pub fn pane_body<'a>() -> Element<'a, GridMsg> {
     let st: OptionsReadout = super::options_readout::snapshot();
     let mut body = column![].spacing(8).padding(crate::ui::metrics::space(3));
 
-    body = body.push(sec("期权 / 0DTE 回测·探针（docs/18 · 不下真实单）"));
+    if super::inspector_props::part().intro() {
+        body = body.push(sec("期权 / 0DTE 回测·探针（docs/18 · 不下真实单）"));
+    }
 
     if !st.present || st.rows.is_empty() {
         body = body.push(
@@ -102,6 +104,7 @@ pub fn pane_body<'a>() -> Element<'a, GridMsg> {
     );
 
     // 逐策略：一个策略一行（净 PnL、探针、摩擦分解；探针 docs/16 §5 净捕获 vs 摩擦）
+    body = body.push(crate::ui::mark::here());
     let cols = cols();
     let rows: Vec<Vec<Cell>> = st.rows.iter().map(strategy_row).collect();
     let n = rows.len();

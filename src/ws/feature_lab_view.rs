@@ -53,7 +53,11 @@ fn fam_color(f: &str) -> Color {
 
 pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     let st: FeatureLab = ro::snapshot();
-    let mut b = column![sec("订单流与市场微观结构 · 特征库（docs/30）".into())]
+    let mut b = if super::inspector_props::part().intro() {
+        column![sec("订单流与市场微观结构 · 特征库（docs/30）".into())]
+    } else {
+        column![]
+    }
         .spacing(8)
         .padding(crate::ui::metrics::space(3));
 
@@ -73,6 +77,7 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         return b.push(text(st.reason.clone()).size(crate::ui::text::s_body()).color(crate::ui::pal::warn())).into();
     }
 
+    b = b.push(crate::ui::mark::here());
     // ① 样本是否够判定 —— 放最前面
     let ok = ro::sample_sufficient(&st);
     let (dot, dc, msg) = if ok {

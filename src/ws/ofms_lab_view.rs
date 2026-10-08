@@ -81,7 +81,7 @@ pub fn pane_body<'a>(pane: uuid::Uuid, lock: Option<&str>, hosted: bool) -> Elem
         OfTab::Setups => setups_tab(&v),
         OfTab::Dictionary => dictionary_tab(&v),
     };
-    col = col.push(body);
+    col = col.push(crate::ui::mark::content(body));
     container(col).padding(crate::ui::metrics::pad2(2, 3)).width(Length::Fill).height(Length::Fill).into()
 }
 

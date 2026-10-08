@@ -872,6 +872,11 @@ pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoar
     .spacing(6)
     .align_y(Alignment::Center);
 
+    // 检查器「属性」页（docs/42 第 4 期）：出图（单符号 / 对比、加载、自动、热图带宽）与导出
+    if super::inspector_props::part() == super::inspector_props::Part::Props {
+        return column![picks.wrap(), export_row.wrap()].spacing(8).into();
+    }
+
     let hint_text = match &loading {
         Some(d) => format!("⏳ 后台加载中 {d}…（界面不冻结，可继续操作）"),
         None => {
@@ -961,7 +966,12 @@ pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoar
     }
     .spacing(8);
     container(
-        column![top, picks, play_row, export_row, hint, scrollable(body).height(Length::Fill)]
+        if hosted {
+            // 托管时：提示行 + 回放条（查看器的一部分）+ 图；出图、导出在检查器「属性」页，「加载」也在工具栏
+            column![hint, crate::ui::mark::content(column![play_row, scrollable(body).height(Length::Fill)].spacing(8))]
+        } else {
+            column![top, picks, play_row, export_row, hint, crate::ui::mark::content(scrollable(body).height(Length::Fill))]
+        }
             .spacing(8)
             .padding(crate::ui::metrics::space(4)),
     )

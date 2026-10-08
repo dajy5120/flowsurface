@@ -262,11 +262,15 @@ fn recent_block<'a, M: 'a>(st: &PmBinanceReadout) -> Element<'a, M> {
 
 pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
     let st = pm::snapshot();
-    let mut body = column![].spacing(8).padding(crate::ui::metrics::space(3));
-    body = body.push(sec(format!(
-        "Binance Prediction Trading · {} · 实时盘口",
-        if st.symbol.is_empty() { "BTC 5m".into() } else { st.symbol.clone() }
-    )));
+    // 部位（docs/42 第 4 期）：标题进「说明」，录制状态进「数据」
+    let part = super::inspector_props::part();
+    let mut body = column![].spacing(8).padding(if part.side() { 0.0 } else { crate::ui::metrics::space(3) });
+    if part.intro() {
+        body = body.push(sec(format!(
+            "Binance Prediction Trading · {} · 实时盘口",
+            if st.symbol.is_empty() { "BTC 5m".into() } else { st.symbol.clone() }
+        )));
+    }
 
     if !st.present {
         body = body.push(
@@ -280,7 +284,14 @@ pub fn pane_body<'a, M: 'a>() -> Element<'a, M> {
         return body.into();
     }
 
-    body = body.push(rec_block(&st));
+    // 没在录时数据是陈的，读图前要看见——这种情况主区也留着
+    if part.data() || !pm::recording_alive(&st) {
+        body = body.push(rec_block(&st));
+    }
+    if part.side() {
+        return body.into();
+    }
+    body = body.push(crate::ui::mark::here());
     if let Some(r) = &st.round {
         body = body.push(round_block(r));
     }

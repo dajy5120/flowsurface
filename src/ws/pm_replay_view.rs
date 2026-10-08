@@ -48,7 +48,12 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
         _ => None,
     };
 
-    let mut body = column![
+    // 部位（docs/42 第 4 期）：标题两行进「说明」，符号与日期进「数据」
+    let part = super::inspector_props::part();
+    let mut body = if !part.intro() {
+        column![].padding(if part.side() { 0.0 } else { crate::ui::metrics::space(3) })
+    } else {
+        column![
         text("预测市场回放 · 币安钱包 BTC 5 分钟涨跌（自录数据，零交易所连接）")
             .size(crate::ui::text::s_section())
             .color(crate::ui::pal::head()),
@@ -59,10 +64,12 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
         .size(crate::ui::text::s_meta())
         .color(crate::ui::pal::dim()),
     ]
-    .spacing(6)
-    .padding(crate::ui::metrics::space(3));
+    .padding(crate::ui::metrics::space(3))
+    }
+    .spacing(6);
 
     // ── 选择器 ──
+    if part.data() {
     if let Some(e) = &cat.error {
         body = body.push(text(e.clone()).size(crate::ui::text::s_small()).color(crate::ui::pal::warn()));
     }
@@ -76,7 +83,7 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
         ));
     }
     syms = syms.push(chip("⟳ 刷新清单".into(), false, crate::ui::pal::dim(), PmReplayMsg::RefreshCatalog));
-    body = body.push(syms);
+    body = body.push(syms.wrap());
 
     if let Some(sym) = cat.symbol(&app.symbol) {
         let mut dates = row![text("日期").size(crate::ui::text::s_body()).color(crate::ui::pal::dim())].spacing(6).align_y(Alignment::Center);
@@ -89,7 +96,11 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
                 PmReplayMsg::PickDate(d.date.clone()),
             ));
         }
-        body = body.push(dates);
+        body = body.push(dates.wrap());
+    }
+    }
+    if part.side() {
+        return body.into();
     }
 
     // ── 加载 + 播放 ──
@@ -131,6 +142,7 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
         );
     }
 
+    body = body.push(crate::ui::mark::here());
     let rounds = app.rounds();
     if rounds.is_empty() {
         body = body.push(

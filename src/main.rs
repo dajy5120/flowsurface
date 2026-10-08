@@ -738,6 +738,8 @@ impl Flowsurface {
                         self.active_dashboard().panes.iter().map(|(p, st)| (*p, st.content.to_string())).collect();
                     panes.sort_by_key(|(p, _)| *p);
                     ws::specimen::append_focus_order(&sp.dir, &ws_name, &panes.into_iter().map(|(_, n)| n).collect::<Vec<_>>());
+                    // 非内容高度（docs/42 第 4 期）：本页被检查器托管的面板，内容之上占了多少像素
+                    ws::specimen::append_chrome(&sp.dir, &ws_name, ui::mark::take());
                 }
                 let done = self
                     .specimen
@@ -1394,15 +1396,16 @@ impl Flowsurface {
                 }
                 let props = target_state.and_then(|(w, p, st)| Some(route(w, p, ws::inspector_props::view(st)?)));
                 let data = target_state.and_then(|(w, p, st)| Some(route(w, p, ws::inspector_props::data_view(st)?)));
-                let (source, about, panel) = target_state
+                let (source, about, panel, changed) = target_state
                     .map(|(_, _, st)| {
                         (
                             st.toolbar_spec().source,
                             ws::inspector_props::about(&st.content),
                             Some(st.settings.view.clone().unwrap_or_else(|| st.content.to_string())),
+                            ws::inspector_props::changed(st),
                         )
                     })
-                    .unwrap_or((None, None, None));
+                    .unwrap_or((None, None, None, vec![]));
                 let insp = ui::shell::inspector(
                     &info,
                     &ui::shell::InspView {
@@ -1412,6 +1415,7 @@ impl Flowsurface {
                         source,
                         about,
                         panel,
+                        changed,
                     },
                     props,
                     data,

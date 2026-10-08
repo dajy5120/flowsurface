@@ -1087,7 +1087,7 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
         );
     }
 
-    let mut col = column![head].spacing(3);
+    let mut col = column![head.wrap()].spacing(3);
     if v.show_filters {
         // 每行 4 个，比横向滚动好找
         let mut n_shown = 0usize;
@@ -1168,7 +1168,7 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
                     col = col.push(std::mem::replace(
                         &mut r,
                         row![].spacing(6).align_y(iced::Alignment::Center),
-                    ));
+                    ).wrap());
                 }
                 continue;
             }
@@ -1201,11 +1201,11 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
                 col = col.push(std::mem::replace(
                     &mut r,
                     row![].spacing(6).align_y(iced::Alignment::Center),
-                ));
+                ).wrap());
             }
         }
         if !n_shown.is_multiple_of(4) {
-            col = col.push(r);
+            col = col.push(r.wrap());
         }
         col = col.push(
             text(
@@ -2957,16 +2957,21 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
     // Arc：每帧只是引用计数加一，不再深拷贝整份读数（见 snapshot 的说明）
     let st = super::radar_readout::snapshot();
     let v = super::radar::view();
-    let mut body = column![].spacing(6).padding(crate::ui::metrics::space(3));
+    // 部位（docs/42 第 4 期）：标题进「说明」，守护与数据状态进「数据」，资产 / 来源 / 筛选 / 大小颜色色板进「属性」
+    let part = super::inspector_props::part();
+    let mut body = column![].spacing(6).padding(if part.side() { 0.0 } else { crate::ui::metrics::space(3) });
 
-    body = body.push(
-        text("全市场雷达 · 加密热层（docs/22 · 发现工具·非交易信号）")
-            .size(crate::ui::text::s_section())
-            .color(crate::ui::pal::head()),
-    );
+    if part.intro() {
+        body = body.push(
+            text("全市场雷达 · 加密热层（docs/22 · 发现工具·非交易信号）")
+                .size(crate::ui::text::s_section())
+                .color(crate::ui::pal::head()),
+        );
+    }
 
     // ── 守护控制条 ──
     let running = st.svc.active;
+    if part.data() {
     body = body.push(
         row![
             text("守护 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()),
@@ -2985,15 +2990,20 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
             text(format!("  刷新于 {}", st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(4)
-        .align_y(iced::Alignment::Center),
+        .align_y(iced::Alignment::Center)
+        .wrap(),
     );
+    }
     let am = super::radar::action_message();
-    if !am.is_empty() {
+    if !am.is_empty() && (part.main() || part.data()) {
         let bad = am.starts_with('✗');
         body = body.push(text(am).size(crate::ui::text::s_meta()).color(if bad { crate::ui::pal::bad() } else { crate::ui::pal::ok() }));
     }
 
     if !st.present || st.rows.is_empty() {
+        if part.side() {
+            return body.into();
+        }
         body = body.push(
             text("暂无快照——点上方「⇩ 抓取一次」抓一轮就停（含回填约 5–15 分钟），或「▶ 启动」常驻（首轮约 5s 出数据）")
                 .size(crate::ui::text::s_small())
@@ -3052,7 +3062,10 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
         .color(crate::ui::pal::dim()),
     );
     tr = tr.push(chip("⟳ 立即刷新", false, RadarMsg::Refresh));
-    body = body.push(tr);
+    if part.main() || part.data() {
+        body = body.push(tr.wrap());
+    }
+    if part.data() {
     body = body.push(
         text(format!(
             "{} 标的 · 单轮 {}ms · z 可信 {}/{}{}",
@@ -3069,8 +3082,9 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
         .size(crate::ui::text::s_meta())
         .color(if warm == 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
     );
+    }
     let bf = &st.backfill;
-    if bf.running {
+    if bf.running && part.data() {
         body = body.push(
             text(format!(
                 "⟳ σ 回填中 {}/{}（{:.0}%）{}",
@@ -3082,7 +3096,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
             .size(crate::ui::text::s_meta())
             .color(crate::ui::pal::head()),
         );
-    } else if warm == 0 {
+    } else if warm == 0 && part.main() {
         body = body.push(
             text(if bf.finished {
                 "⏳ 回填已完成但仍无可信 z——检查 K 线端点（journalctl --user -u ws-radar）"
@@ -3095,7 +3109,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
     }
 
     // ── 视图切换 ──
-    if lock.is_none() {
+    if lock.is_none() && part.main() {
         let mut mr = row![text("视图 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
         for (m, l) in VIEWS {
             mr = mr.push(chip(l, m == v.mode, RadarMsg::SetMode(m)));
@@ -3104,7 +3118,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
     }
     // 表达形式**单独一行**（官方页面左上角那三个小图标）。热图页没有这个
     // 选择——它本来就是热图。
-    if v.mode == ViewMode::Screener {
+    if v.mode == ViewMode::Screener && part.props() {
         let mut fr = row![text("形式 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
         for (f, l) in [(Form::Table, "表格"), (Form::Heatmap, "热图")] {
             fr = fr.push(chip(l, f == v.form, RadarMsg::SetForm(f)));
@@ -3113,6 +3127,9 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
     }
 
     if !matches!(v.mode, ViewMode::Heatmap | ViewMode::Screener) {
+        if part.side() {
+            return body.into();
+        }
         // 动作回执（打开链接、启停守护）**要在提前返回之前推进去**：
         // 原来它挂在下面热图那一段里，四个新看板点了链接后没有任何反馈
         let am = super::radar::action_message();
@@ -3128,7 +3145,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
             ViewMode::Macro => macro_view(&st.macros, v, st.fetched.macros),
             _ => breadth_view(&st.breadth, v, st.fetched.breadth),
         };
-        body = body.push(inner);
+        body = body.push(crate::ui::mark::content(inner));
         // 用**慢层**的快照时间：这几屏的数据都来自慢层文件，
         // 显示热层时间（5 秒一刷）会让人以为它们也那么快
         body = body.push(
@@ -3258,8 +3275,8 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
         .copied()
         .unwrap_or_else(|| MarketOpt::all(crypto_mode));
 
-    // 把选中的来源写给守护——选了没在拉的市场，下一轮就会去取
-    if !crypto_mode {
+    // 把选中的来源写给守护——选了没在拉的市场，下一轮就会去取（画进检查器那一遍不重复写）
+    if !crypto_mode && !part.side() {
         // 筛选一并下发：能下推的那些由服务端在**整个市场**上筛，
         // 而不是在守护已抓回的样本里筛
         super::radar_readout::write_request(
@@ -3285,11 +3302,19 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
             .size(crate::ui::text::s_meta())
             .color(crate::ui::pal::dim()),
     );
-    body = body.push(ar.align_y(iced::Alignment::Center));
+    if part.props() {
+        body = body.push(ar.align_y(iced::Alignment::Center).wrap());
+    }
     // 筛选栏放在空表判断**之前**——被筛空时也得有清除的入口。
     // 热图页不出筛选：官方热图没有筛选栏，靠「来源」选范围
-    if v.mode != ViewMode::Heatmap {
+    if v.mode != ViewMode::Heatmap && part.props() {
         body = body.push(filter_bar(v, &st.catalog));
+    }
+    if part == super::inspector_props::Part::Data {
+        return body.into();
+    }
+    if vis.is_empty() && part.side() {
+        return body.into();
     }
     if vis.is_empty() {
         let nf = radar_filter::active_count(&v);
@@ -3360,7 +3385,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
     // 「来源」已在上面的资产行里（它同时兼作资产类的范围选择）。
     // 分组维度由目录按资产类下发——官方股票只有「没有分组 / 板块」，
     // ETF 是「没有分组 / 资产类别」，加密**根本没有分组下拉**。
-    if draw_map {
+    if draw_map && part.props() {
         let mut r1 = row![text("大小 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
         r1 = r1.push(
             pick_list(size_list.clone(), Some(cur_size), RadarMsg::SetSize)
@@ -3383,7 +3408,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
                 r1 = r1.push(chip(&g.label, gb == v.group_by, RadarMsg::SetGroupBy(gb)));
             }
         }
-        body = body.push(r1.align_y(iced::Alignment::Center));
+        body = body.push(r1.align_y(iced::Alignment::Center).wrap());
 
         // 色板与色阶**单独一排**
         let mut r2 = row![text("色板 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(3);
@@ -3396,7 +3421,11 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
         }
         r2 = r2.push(text("　").size(crate::ui::text::s_small()));
         r2 = r2.push(legend(v.color.key, v.palette, asset_scale(&st.catalog, v.asset)));
-        body = body.push(r2.align_y(iced::Alignment::Center));
+        body = body.push(r2.align_y(iced::Alignment::Center).wrap());
+    }
+    // 托管时色阶不留在主区：检查器开着，「属性」页里色板那一行就带着色阶
+    if part.side() {
+        return body.into();
     }
 
     let hint = match v.color.key {
@@ -3518,7 +3547,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
         }
     };
     if draw_map {
-    body = body.push(
+    body = body.push(crate::ui::mark::content(
         canvas_widget(TreemapCanvas {
             groups,
             header_h,
@@ -3538,7 +3567,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
         } else {
             Length::Fixed(340.0)
         }),
-    );
+    ));
     }
 
     // ── Screener（表格）──
@@ -3573,7 +3602,8 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
             .color(crate::ui::pal::dim()),
     );
     // 色板不在这一行：官方筛选器的表格没有配色切换（热图页才有）。
-    body = body.push(cs.align_y(iced::Alignment::Center));
+    // 列组是表格的页签（内容导航），热图形式下内容起点是上面的树图
+    body = body.push(if draw_map { cs.align_y(iced::Alignment::Center).into() } else { crate::ui::mark::content(cs.align_y(iced::Alignment::Center)) });
 
     // 表格换成 ui::grid（docs/35 §16.13 第 5 项）：原来只画前 80 行，现在全部行可滚动查看
     // （网格只渲染可见行）；可调宽、多选合计、列管理、过滤、右键复制。

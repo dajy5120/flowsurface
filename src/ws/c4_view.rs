@@ -79,9 +79,12 @@ fn table<'a>(vs: bool, cols: Vec<Column>, rows: Vec<Vec<Cell>>, wrap: fn(GridMsg
 
 pub fn pane_body<'a>() -> Element<'a, C4Msg> {
     let st: C4Readout = super::c4_readout::snapshot();
-    let mut body = column![].spacing(6).padding(crate::ui::metrics::space(3));
+    // 部位（docs/42 第 4 期）：守护启停与状态进检查器「数据」页，主区从「今日实时」起
+    let part = super::inspector_props::part();
+    let mut body = column![].spacing(6).padding(if part.side() { 0.0 } else { crate::ui::metrics::space(3) });
 
     // ── 守护启停（不随开机自启，全由这里控制；状态来自 poller，非每帧查） ──
+    if part.data() {
     body = body.push(sec("maker 影子守护（SOLUSDT · 不下真实单）"));
     {
         // 状态行：● 运行中 已X 重启N次 / ○ 已停止（同录制驾驶舱口径）
@@ -119,8 +122,13 @@ pub fn pane_body<'a>() -> Element<'a, C4Msg> {
             body = body.push(text(am).size(crate::ui::text::s_meta()).color(if bad { crate::ui::pal::down() } else { crate::ui::pal::up() }));
         }
     }
+    }
+    if part.side() {
+        return body.into();
+    }
 
     // ── 今日实时（守护 checkpoint，5min 刷新） ──
+    body = body.push(crate::ui::mark::here());
     body = body.push(sec("今日实时（maker 影子守护 · SOLUSDT · 不下真实单）"));
     match &st.today {
         Some(t) => {

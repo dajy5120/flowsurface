@@ -151,7 +151,9 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, NewsMsg> {
         }
     }
     let st = ro::snapshot();
-    let mut body = column![].spacing(4).padding(crate::ui::metrics::space(3));
+    // 部位（docs/42 第 4 期）：顶栏（守护、计数、源新鲜度）进检查器「数据」页；主区留视图切换、筛选与时间线
+    let part = super::inspector_props::part();
+    let mut body = column![].spacing(4).padding(if part.side() { 0.0 } else { crate::ui::metrics::space(3) });
 
     // ── 顶栏 ──
     let stale_txt = if st.stale_sources > 0 {
@@ -159,6 +161,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, NewsMsg> {
     } else {
         "源全部新鲜".into()
     };
+    if part.data() {
     body = body.push(
         row![
             text("新闻资讯").size(crate::ui::text::s_emph()).color(crate::ui::pal::txt()),
@@ -177,8 +180,13 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, NewsMsg> {
             text(stale_txt).size(crate::ui::text::s_small()).color(if st.stale_sources > 0 { crate::ui::pal::bad() } else { crate::ui::pal::dim() }),
         ]
         .spacing(8)
-        .align_y(iced::Alignment::Center),
+        .align_y(iced::Alignment::Center)
+        .wrap(),
     );
+    }
+    if part.side() {
+        return body.into();
+    }
 
     // ── 视图切换 ──
     //
@@ -198,7 +206,10 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, NewsMsg> {
                 .color(crate::ui::pal::bad()),
         );
     }
-    body = body.push(vr);
+    // 锁定视图且没有告警时这一行是空的，不占高度
+    if lock.is_none() || (v == View::Feed && st.stale_sources > 0) {
+        body = body.push(vr);
+    }
 
     if !st.present || st.sources.is_empty() {
         body = body.push(
@@ -208,7 +219,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, NewsMsg> {
     }
 
     if v == View::Watch {
-        body = body.push(watch_view(&st));
+        body = body.push(crate::ui::mark::here()).push(watch_view(&st));
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
 
@@ -217,7 +228,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, NewsMsg> {
         // 一度是 `return sources_view(...)`，那棵树里没有上面那行视图切换——
         // 进了源管理就再也回不去新闻页。现在头部由这里统一画，
         // 分支只能产出「内容」，结构上没有漏掉切换器的可能
-        body = body.push(sources_view(&st));
+        body = body.push(crate::ui::mark::here()).push(sources_view(&st));
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
 
@@ -287,9 +298,12 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, NewsMsg> {
         .spacing(8)
         .align_y(iced::Alignment::Center),
     );
-    body = body.push(
-        text("`~` = 源没给发布时间，这里显示的是我们抓到的时刻").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
-    );
+    if part.intro() {
+        body = body.push(
+            text("`~` = 源没给发布时间，这里显示的是我们抓到的时刻").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
+        );
+    }
+    body = body.push(crate::ui::mark::here());
     for it in shown.iter().take(120) {
         body = body.push(item_row(it, st.now_ms));
     }

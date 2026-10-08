@@ -114,6 +114,19 @@ pub fn append_focus_order(dir: &std::path::Path, workspace: &str, panes: &[Strin
     let _ = writeln!(f, "| {workspace} | {} | {} |", panes.len(), order.join(" → "));
 }
 
+/// 追加一页的非内容高度到 `chrome.json`（一行一个 JSON；`scripts/ui_chrome_gate.py` 判定）。
+/// 本页没有被托管的面板时 `m` 是 `None`，照样写一行，闸门据此区分「没测」与「没标记」。
+pub fn append_chrome(dir: &std::path::Path, page: &str, m: Option<crate::ui::mark::Measure>) {
+    use std::io::Write;
+    let p = dir.join("chrome.json");
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) else { return };
+    let v = match m {
+        Some(m) => serde_json::json!({ "page": page, "panel": m.panel, "px": m.px }),
+        None => serde_json::json!({ "page": page, "panel": null, "px": null }),
+    };
+    let _ = writeln!(f, "{v}");
+}
+
 fn write_ppm(path: &std::path::Path, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
     let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
     out.reserve((w * h * 3) as usize);

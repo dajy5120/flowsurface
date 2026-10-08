@@ -955,7 +955,13 @@ fn filter_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
 }
 
 /// 顶栏：先说「现在有多少个 slot 能下单」。
+/// 状态区：第一行（可下单质量占比）+ 明细（质量分布、标的 / 事件 / 快照时刻）。
+/// 检查器托管时主区只留第一行，明细进「数据」页（docs/42 第 4 期）。
 fn top_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
+    column![top_status(m), top_detail(m)].spacing(3).into()
+}
+
+fn top_status<'a>(m: &Matrix) -> Element<'a, Msg> {
     let usable = m.usable_slots;
     let total = m.total_slots.max(1);
     let frac = usable as f64 / total as f64;
@@ -966,8 +972,7 @@ fn top_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
     } else {
         crate::ui::pal::bad()
     };
-    let mut b = column![].spacing(3);
-    b = b.push(row![
+    row![
         text(if frac >= 0.8 { "● " } else { "○ " }).size(crate::ui::text::s_section()).color(c),
         text(format!(
             "{usable}/{} 个 slot 处于可下单质量（{:.0}%）",
@@ -983,13 +988,19 @@ fn top_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
         ))
         .size(crate::ui::text::s_small())
         .color(crate::ui::pal::dim()),
-    ]);
+    ]
+    .wrap()
+    .into()
+}
+
+fn top_detail<'a>(m: &Matrix) -> Element<'a, Msg> {
+    let mut b = column![].spacing(3);
     // 质量分布：一行里写清「降级的是多数还是少数」。
     let mut qr = row![text("质量分布 ").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())].spacing(6);
     for (q, n) in m.quality_counts() {
         qr = qr.push(text(format!("{q}×{n}")).size(crate::ui::text::s_meta()).color(qcolor(&q)));
     }
-    b = b.push(qr);
+    b = b.push(qr.wrap());
     b = b.push(dim(format!(
         "标的 {}　事件 {}　时段 {}{}　簿 {} {:?}　快照时刻 {}　读于 {}",
         m.symbol_id,
@@ -1621,7 +1632,12 @@ pub fn inspector_settings<'a>() -> Element<'a, Msg> {
 /// 检查器「数据」页：特征引擎的数据源（共用数据选择组件）。
 pub fn inspector_source<'a>() -> Element<'a, Msg> {
     let src = super::feature_source::view();
-    source_bar(&src, true)
+    let m = ro::snapshot();
+    let mut b = column![source_bar(&src, true)].spacing(8);
+    if m.present {
+        b = b.push(top_detail(&m));
+    }
+    b.into()
 }
 
 pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
@@ -1630,6 +1646,7 @@ pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
     }
     let m = ro::snapshot();
     let v = super::feature_matrix::state();
+    let top = |m: &Matrix| if hosted { top_status(m) } else { top_bar(m) };
     // 检查器托管时（docs/42 第 3 期）：标题、数据源、引擎 / 启用集 / 窗口 / 筛选 / 展示这些控件都在检查器里，
     // 主区只留视图切换、状态行与内容
     let mut b = if hosted {
@@ -1704,24 +1721,24 @@ pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
     }
     if v.view == View::Chart {
         // 不套外层滚动：卡片网格要拿到面板的真实高度（两行排满一屏、卡片内各自滚动）
-        b = b.push(top_bar(&m)).push(super::chart_params_view::view(&m, hosted));
+        b = b.push(top(&m)).push(crate::ui::mark::content(super::chart_params_view::view(&m, hosted)));
         return container(b.width(Length::Fill).height(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
     }
     if v.view == View::Engine {
-        b = b.push(top_bar(&m)).push(engine_view(&m));
+        b = b.push(top(&m)).push(crate::ui::mark::content(engine_view(&m)));
         return container(scrollable(b.width(Length::Fill)))
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
     }
     if !fold {
-        b = b.push(top_bar(&m));
+        b = b.push(top(&m));
         b = b.push(filter_bar(&m, &v));
     } else if hosted {
-        b = b.push(top_bar(&m));
+        b = b.push(top(&m));
     }
     if !hosted {
         b = b.push(table_controls(&v));
@@ -1750,7 +1767,7 @@ pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
         .height(Length::Fill);
     column![
         b,
-        container(head).padding(crate::ui::metrics::pad2(0, 3)),
+        crate::ui::mark::content(container(head).padding(crate::ui::metrics::pad2(0, 3))),
         container(body)
             .padding(iced::Padding { top: 0.0, right: 10.0, bottom: 4.0, left: 10.0 })
             .height(Length::Fill),

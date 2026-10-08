@@ -158,13 +158,17 @@ fn market_block<'a, M: 'a>(m: &MarketRow) -> Element<'a, M> {
 /// 兼职写出——面板零交易所流，与 radar/news 同一模式。
 pub fn pane_body<'a>() -> Element<'a, PredictionMsg> {
     let st: PredictionReadout = super::prediction_readout::snapshot();
-    let mut body = column![].spacing(8).padding(crate::ui::metrics::space(3));
+    // 部位（docs/42 第 4 期）：标题进「说明」，夜跑启停与定时进「数据」
+    let part = super::inspector_props::part();
+    let mut body = column![].spacing(8).padding(if part.side() { 0.0 } else { crate::ui::metrics::space(3) });
 
-    body = body.push(sec("预测市场 · Polymarket（docs/19 · 决策支持·非投注信号）"));
+    if part.intro() {
+        body = body.push(sec("预测市场 · Polymarket（docs/19 · 决策支持·非投注信号）"));
+    }
 
     // ── 夜跑启停（不随开机自启，全由这里控制；状态来自 poller，非每帧查） ──
     // 放在下面「暂无快照」的提前返回之前：没数据时正是最需要点「立即运行」的时候。
-    {
+    if part.data() {
         let running = st.svc.active;
         // 状态行：夜跑是 oneshot，「重启次数」无意义，看的是上次跑没跑成。
         let (dot, dotc, run) = if running {
@@ -226,7 +230,8 @@ pub fn pane_body<'a>() -> Element<'a, PredictionMsg> {
             text(format!("  刷新于 {}", st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(4)
-        .align_y(iced::Alignment::Center);
+        .align_y(iced::Alignment::Center)
+        .wrap();
         body = body.push(ctl);
         // 操作反馈单独一行：和按钮挤一行会溢出换行、把按钮挤变形（同 factory 面板）
         let am = super::prediction::action_message();
@@ -234,6 +239,9 @@ pub fn pane_body<'a>() -> Element<'a, PredictionMsg> {
             let bad = am.starts_with('✗');
             body = body.push(text(am).size(crate::ui::text::s_meta()).color(if bad { crate::ui::pal::down() } else { crate::ui::pal::up() }));
         }
+    }
+    if part.side() {
+        return body.into();
     }
 
     if !st.present || st.rows.is_empty() {
@@ -245,6 +253,7 @@ pub fn pane_body<'a>() -> Element<'a, PredictionMsg> {
         return scrollable(body).width(Length::Fill).height(Length::Fill).into();
     }
 
+    body = body.push(crate::ui::mark::here());
     body = body.push(
         text("⚠ 预测市场校准良好·AI 分歧仅信息性·默认只读不自动下注（合规：Polymarket 加密真金·美国受限）")
             .size(crate::ui::text::s_meta())

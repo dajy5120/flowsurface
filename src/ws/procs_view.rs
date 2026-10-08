@@ -162,6 +162,16 @@ pub fn handle(m: ProcsMsg) -> String {
     }
 }
 
+/// 进程页的说明（面板内联显示；检查器托管时在「说明」页）。
+pub const NOTES: [&str; 4] = [
+    "下面这些守护跟随本窗口：Cockpit 一起来就拉起，关掉就一并停止。",
+    "级联由 systemd 负责（各单元 PartOf=ws-stack.target），所以停止是原子的、\
+     也不需要面板懂依赖次序。但 Cockpit 被 kill -9 时没有任何用户态代码能跑——\
+     那种情况下守护会留着，下次启动 Cockpit 时被同一个 target 接管，不会变成孤儿。",
+    "编排交给 systemd：进程挂了自动按退避重启，「重启」列的数字就是它爬起来过几次。",
+    "有外部连接的那几个（两个 feed）在「网络出口」页上也能停——两边操作的是同一个单元。",
+];
+
 pub fn pane_body<'a>(note: &str, lock: Option<&str>) -> Element<'a, ProcsMsg> {
     if lock == Some("检查更新") {
         return deps_part(column![].spacing(6).padding(crate::ui::metrics::space(3)));
@@ -188,32 +198,12 @@ pub fn pane_body<'a>(note: &str, lock: Option<&str>) -> Element<'a, ProcsMsg> {
         .spacing(10)
         .align_y(iced::Alignment::Center),
     );
-    body = body.push(
-        text("下面这些守护跟随本窗口：Cockpit 一起来就拉起，关掉就一并停止。")
-            .size(crate::ui::text::s_meta())
-            .color(crate::ui::pal::ok()),
-    );
-    body = body.push(
-        text(
-            "级联由 systemd 负责（各单元 PartOf=ws-stack.target），所以停止是原子的、\
-             也不需要面板懂依赖次序。但 Cockpit 被 kill -9 时没有任何用户态代码能跑——\
-             那种情况下守护会留着，下次启动 Cockpit 时被同一个 target 接管，不会变成孤儿。",
-        )
-        .size(crate::ui::text::s_meta())
-        .color(crate::ui::pal::dim()),
-    );
-    body = body.push(
-        text("编排交给 systemd：进程挂了自动按退避重启，「重启」列的数字就是它爬起来过几次。")
-            .size(crate::ui::text::s_meta())
-            .color(crate::ui::pal::dim()),
-    );
-    body = body.push(
-        text(
-            "有外部连接的那几个（两个 feed）在「网络出口」页上也能停——两边操作的是同一个单元。",
-        )
-        .size(crate::ui::text::s_meta())
-        .color(crate::ui::pal::dim()),
-    );
+    // 长说明（docs/42 第 4 期）：检查器托管时进「说明」页，主区只留表
+    if super::inspector_props::part().intro() {
+        for (i, n) in NOTES.iter().enumerate() {
+            body = body.push(text(*n).size(crate::ui::text::s_meta()).color(if i == 0 { crate::ui::pal::ok() } else { crate::ui::pal::dim() }));
+        }
+    }
     if !note.is_empty() {
         body = body.push(text(note.to_string()).size(crate::ui::text::s_small()).color(crate::ui::pal::warn()));
     }
