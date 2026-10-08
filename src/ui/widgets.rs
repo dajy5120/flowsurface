@@ -244,6 +244,36 @@ pub fn section<'a, M: 'a>(title: impl Into<String>) -> Element<'a, M> {
     .into()
 }
 
+/// 大分区（一页里几个大功能之间的分界，如「常驻守护」与「按点触发」）：上方留白 + 2px 实线 + 分区标题。
+/// 比 [`section`]（细线小字，块内分节用）醒目得多——一眼看出这里换了一件事。
+pub fn major<'a, M: 'a>(title: impl Into<String>) -> Element<'a, M> {
+    major_tinted(title, color(core().text_primary))
+}
+
+/// 同 [`major`]，标题用指定颜色（原来就按含义着色的分区标题）。
+pub fn major_tinted<'a, M: 'a>(title: impl Into<String>, c: iced::Color) -> Element<'a, M> {
+    column![
+        container(Space::new().width(Length::Fill).height(Length::Fixed(2.0)))
+            .style(|_| container::Style { background: Some(Background::Color(color(core().border_strong))), ..Default::default() }),
+        t::section(title).color(c),
+    ]
+    .spacing(metrics::space(1))
+    .padding(iced::Padding { top: metrics::space(3), ..Default::default() })
+    .width(Length::Fill)
+    .into()
+}
+
+/// 并排的大块之间的竖分隔线（撑满高度）。
+pub fn vrule<'a, M: 'a>() -> Element<'a, M> {
+    container(
+        container(Space::new().width(Length::Fixed(1.0)).height(Length::Fill))
+            .style(|_| container::Style { background: Some(Background::Color(color(core().border_default))), ..Default::default() }),
+    )
+    .padding(iced::Padding { left: metrics::space(2), right: metrics::space(2), ..Default::default() })
+    .height(Length::Fill)
+    .into()
+}
+
 /// 检查器里的一行「标签 · 值」：标签列定宽，所有行对齐同一条竖线（UPDS V6 §53 对齐律）。
 pub fn kv<'a, M: 'a>(label: impl Into<String>, value: Element<'a, M>, label_w: f32) -> Element<'a, M> {
     row![container(t::caption(label)).width(Length::Fixed(label_w)), value]

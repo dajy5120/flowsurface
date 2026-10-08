@@ -26,14 +26,15 @@ use super::pm_binance_readout::{self as pm, BookView, Ladder, PmBinanceReadout, 
 /// 档位条的满格宽度（字符数）。
 const BAR_W: usize = 14;
 
+/// 大分区标题：上方留白 + 2px 实线（几个大功能之间要一眼分得开）。
 fn sec<'a, M: 'a>(t: String) -> Element<'a, M> {
-    text(t).size(crate::ui::text::s_section()).color(crate::ui::pal::head()).into()
+    crate::ui::widgets::major(t)
 }
 fn dim<'a, M: 'a>(t: String) -> Element<'a, M> {
     text(t).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()).into()
 }
 fn cell<'a, M: 'a>(t: String, w: f32, c: Color) -> Element<'a, M> {
-    container(text(t).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
+    container(text(t).size(crate::ui::text::s_small()).color(c)).width(Length::FillPortion(w.round().max(1.0) as u16)).into()
 }
 
 pub(super) fn usd(v: f64) -> String {

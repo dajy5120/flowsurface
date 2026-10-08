@@ -950,12 +950,25 @@ where
     let cols = cols.as_ref();
     let c = core();
     let row_h = metrics::row_height();
-    let widths: Vec<f32> =
+    let mut widths: Vec<f32> =
         cols.iter().enumerate().map(|(i, col)| st.borrow().widths.get(i).copied().unwrap_or(col.width)).collect();
     let aligns: Vec<Align> = cols.iter().map(|c| c.align).collect();
     let key_col = cols.iter().position(|c| c.key);
     // 列管理器隐藏的、固定列翻页翻过去的不画
     let vis: Vec<usize> = st.borrow().visible_cols(cols);
+    // 撑满面板宽度：列宽加起来不够时按比例放大（上一帧量到的可用宽度；超出时照旧横向滚动）。
+    // 拖动调宽改的是基准宽度，放大只在画的时候做
+    let width_key = format!("grid:{:?}", st.borrow().id);
+    let base_w: f32 = vis.iter().map(|&i| widths[i]).sum::<f32>() + 3.0;
+    if let Some(avail) = crate::ui::mark::width_of(&width_key) {
+        let room = avail - 12.0;
+        if room > base_w + 1.0 && base_w > 3.0 {
+            let k = (room - 3.0) / (base_w - 3.0);
+            for &i in &vis {
+                widths[i] = (widths[i] * k).floor();
+            }
+        }
+    }
     let total_w: f32 = vis.iter().map(|&i| widths[i]).sum::<f32>() + 3.0;
 
     // ── 表头：点标题排序，标题右侧的竖线可拖动调宽 ──
@@ -1233,9 +1246,10 @@ where
         None => table,
     };
 
+    let table = crate::ui::mark::width(width_key, container(table).width(Length::Fill).height(Length::Fill));
     column![
         settings.unwrap_or_else(|| Space::new().into()),
-        container(table).height(Length::Fill).style(move |_| container::Style {
+        container(table).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
             background: Some(Background::Color(color(c.surface_primary))),
             ..Default::default()
         }),

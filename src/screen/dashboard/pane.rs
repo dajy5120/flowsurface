@@ -154,6 +154,8 @@ pub enum Event {
     OfmsLabInteraction(crate::ws::ofms_lab::OfMsg),
     /// 回测结果面板顶上的「发起回测」（共用数据选择组件 + 起 runner）。
     BacktestLaunchInteraction(crate::ws::backtest_launch::LaunchMsg),
+    /// 自有数据图：检查器「数据」页里选数据文件（docs/42）
+    SelfChartInteraction(crate::ws::customchart::SelfChartMsg),
     /// 点了链路徽标：跳到对应面板的数据源选择。
     LinkBadgeClicked,
     /// 冻结 / 解冻这个面板（停止重画，docs/35 §8）
@@ -715,6 +717,25 @@ impl State {
             _ => {}
         }
         spec
+    }
+
+    /// 工具栏面板名前的状态点（docs/42）：跟随运行状态变符号和颜色——
+    /// WS 面板用标题栏同一个状态位（实时 / 降级 / 过期 / 离线 / 对账中），行情图按数据流（就绪 / 加载中 / 过期），
+    /// 两样都没有的面板是灰圈。返回 (符号, 颜色, 悬停说明)。
+    pub fn run_dot(&self) -> (String, iced::Color, String) {
+        use crate::ui::pal;
+        if let Some((s, c)) = crate::ws::panel_status::status(&self.content) {
+            let sym = s.chars().next().map(String::from).unwrap_or_else(|| "●".into());
+            return (sym, c, s);
+        }
+        if self.has_stream() {
+            return match &self.status {
+                Status::Ready => ("●".into(), pal::ok(), "● 行情就绪".into()),
+                Status::Loading(_) => ("⟳".into(), pal::info(), "⟳ 加载中".into()),
+                Status::Stale(m) => ("◌".into(), pal::warn(), format!("◌ {m}")),
+            };
+        }
+        ("○".into(), pal::dim(), "○ 没有运行状态".into())
     }
 
     /// 图表类面板（docs/41 §4.2：只有它们能进浮动层——表格、表单浮起来只会互相遮挡）。
@@ -1880,6 +1901,7 @@ impl State {
                 crate::ws::prediction::handle(m);
             }
             Event::BacktestLaunchInteraction(m) => crate::ws::backtest_launch::handle(m),
+            Event::SelfChartInteraction(m) => crate::ws::customchart::handle(m),
             Event::OrdersInteraction(m) => crate::ws::orders_view::handle(m),
             Event::LinkBadgeClicked => crate::ws::provenance::on_link_click(),
             Event::ToggleFreeze => self.frozen = !self.frozen,

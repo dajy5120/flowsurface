@@ -17,8 +17,9 @@ use super::factory_readout::{FactoryReadout, HORIZONS, IcDecay};
 fn vgap<'a, M: 'a>(h: f32) -> Element<'a, M> {
     container(text("")).height(Length::Fixed(h)).into()
 }
+/// 大分区标题：上方留白 + 2px 实线，标题沿用按含义的颜色。
 fn sec<'a, M: 'a>(title: &str, c: Color) -> Element<'a, M> {
-    text(title.to_string()).size(crate::ui::text::s_section()).color(c).into()
+    crate::ui::widgets::major_tinted(title.to_string(), c)
 }
 /// 缺失值一律显示 `—`，**不要退化成 0 或 NaN**。
 /// 「没记录」和「值是 0」是两回事：实测同一批影子 run，C4 面板显示 fills 711，
@@ -539,12 +540,14 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
         .spacing(4)
         .width(Length::FillPortion(4));
 
+    // 三栏之间画竖分隔线：三件事（排行 / 组合与 IC / 数据底座与夜跑）一眼分开
     let body = row![
         scrollable(left).height(Length::Fill),
+        crate::ui::widgets::vrule(),
         scrollable(mid).height(Length::Fill),
+        crate::ui::widgets::vrule(),
         scrollable(right).height(Length::Fill),
     ]
-    .spacing(16)
     .height(Length::Fill);
 
     let main = if part == super::inspector_props::Part::Main && !db_bad {

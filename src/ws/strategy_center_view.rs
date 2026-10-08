@@ -140,6 +140,8 @@ fn library<'a>(v: &View) -> Element<'a, ScMsg> {
         }
     }
     col = col.push(head.wrap());
+    // 目录树与下面的策略列表之间是可拖拽的分隔条（上下拖改目录区高度，双击复位）
+    let mut tree_area: Option<Element<'a, ScMsg>> = None;
     if !f.tree_hidden {
         let mut tree = column![].spacing(0);
         for n in lb::tree(&v.catalog, f, verdict, &q) {
@@ -158,13 +160,14 @@ fn library<'a>(v: &View) -> Element<'a, ScMsg> {
                     .align_y(Alignment::Center),
             );
         }
-        col = col.push(scrollable(tree).height(Length::Shrink));
+        tree_area = Some(scrollable(tree.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into());
     }
 
+    let mut lower = column![].spacing(space(2));
     if !v.catalog_err.is_empty() {
-        col = col.push(w::error("策略目录读不出来", v.catalog_err.clone(), "确认 ~/ws-venv 可用后点「刷新」", None));
+        lower = lower.push(w::error("策略目录读不出来", v.catalog_err.clone(), "确认 ~/ws-venv 可用后点「刷新」", None));
     } else if v.catalog.is_empty() {
-        col = col.push(if v.catalog_loading {
+        lower = lower.push(if v.catalog_loading {
             w::loading("策略目录")
         } else {
             w::empty("还没有接入的策略", "在策略文件里写 STRATEGY（见 strategies/research/README）")
@@ -175,7 +178,7 @@ fn library<'a>(v: &View) -> Element<'a, ScMsg> {
     let key = |e: &Entry| lb::group_of(e, f.group_by);
     items.sort_by(|a, b| key(a).0.cmp(&key(b).0).then(a.id.cmp(&b.id)));
     if items.is_empty() && !v.catalog.is_empty() {
-        col = col.push(w::empty("没有符合条件的策略", "放宽类型 / 目录 / 结论过滤"));
+        lower = lower.push(w::empty("没有符合条件的策略", "放宽类型 / 目录 / 结论过滤"));
     }
     let mut list = column![].spacing(space(1));
     let mut family = String::new();
@@ -187,8 +190,18 @@ fn library<'a>(v: &View) -> Element<'a, ScMsg> {
         }
         list = list.push(library_item(e, v));
     }
-    col = col.push(scrollable(list).height(Length::Fill));
-    container(col).width(Length::Fixed(330.0)).height(Length::Fill).into()
+    lower = lower.push(scrollable(list.width(Length::Fill)).height(Length::Fill));
+    let lower: Element<'a, ScMsg> = lower.height(Length::Fill).into();
+    col = col.push(match tree_area {
+        Some(tree) => crate::ui::split::column(
+            "strategy_center.library",
+            vec![(tree, 0.3, 60.0), (lower, 0.7, 120.0)],
+            ScMsg::Split,
+        ),
+        None => lower,
+    });
+    // 宽度由外层分栏定（左右拖）
+    container(col).width(Length::Fill).height(Length::Fill).into()
 }
 
 fn library_item<'a>(e: &Entry, v: &View) -> Element<'a, ScMsg> {
@@ -591,11 +604,20 @@ fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
 
 pub fn pane_body<'a>() -> Element<'a, ScMsg> {
     let v = super::strategy_center::view();
-    row![library(&v), detail(&v), runs(&v)]
-        .spacing(space(3))
-        .padding(crate::ui::metrics::pad2(2, 3))
-        .height(Length::Fill)
-        .into()
+    use crate::ui::split;
+    // 三栏之间是可拖拽的分隔条（按比例：拖动在相邻两栏之间挪宽度，每栏有最小宽度；双击复位）
+    container(split::row(
+        "strategy_center.cols",
+        vec![
+            (library(&v), 0.26, 220.0),
+            (container(detail(&v)).padding(crate::ui::metrics::pad2(0, 2)).into(), 0.37, 260.0),
+            (runs(&v), 0.37, 300.0),
+        ],
+        ScMsg::Split,
+    ))
+    .padding(crate::ui::metrics::pad2(2, 3))
+    .height(Length::Fill)
+    .into()
 }
 
 // ── 中栏：参数优化表单 ─────────────────────────────────────────────────

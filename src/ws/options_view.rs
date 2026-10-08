@@ -19,11 +19,13 @@ fn sign_c(v: f64) -> Color {
         crate::ui::pal::down()
     }
 }
+/// 大分区标题：上方留白 + 2px 实线（几个大功能之间要一眼分得开）。
 fn sec<'a, M: 'a>(title: &str) -> Element<'a, M> {
-    text(title.to_string()).size(crate::ui::text::s_section()).color(crate::ui::pal::head()).into()
+    crate::ui::widgets::major(title.to_string())
 }
+/// 表格单元格：`w` 是比例（原像素宽），整行撑满面板。
 fn cell<'a, M: 'a>(s: String, w: f32, c: Color) -> Element<'a, M> {
-    container(text(s).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
+    container(text(s).size(crate::ui::text::s_small()).color(c)).width(Length::FillPortion(w.round().max(1.0) as u16)).into()
 }
 
 thread_local! {

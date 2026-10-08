@@ -17,11 +17,13 @@ use super::c4_readout::{C4Readout, QUALIFY_TARGET, QUALIFY_UPTIME_SECS};
 fn sign_c(v: f64) -> Color {
     if v >= 0.0 { crate::ui::pal::up() } else { crate::ui::pal::down() }
 }
+/// 大分区标题：上方留白 + 2px 实线（几个大功能之间要一眼分得开）。
 fn sec<'a, M: 'a>(title: &str) -> Element<'a, M> {
-    text(title.to_string()).size(crate::ui::text::s_section()).color(crate::ui::pal::head()).into()
+    crate::ui::widgets::major(title.to_string())
 }
+/// 表格单元格：`w` 是比例（原像素宽），整行撑满面板。
 fn cell<'a, M: 'a>(s: String, w: f32, c: Color) -> Element<'a, M> {
-    container(text(s).size(crate::ui::text::s_small()).color(c)).width(Length::Fixed(w)).into()
+    container(text(s).size(crate::ui::text::s_small()).color(c)).width(Length::FillPortion(w.round().max(1.0) as u16)).into()
 }
 fn wr_s(w: Option<f64>) -> String {
     w.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| crate::ui::fmt::missing())

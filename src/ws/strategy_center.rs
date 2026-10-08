@@ -307,6 +307,8 @@ pub enum ScMsg {
     LibOpen(String),
     LibGroup(lib::GroupBy),
     LibTreeHidden,
+    /// 策略库 / 三栏的分隔条拖动（ui::split）
+    Split(crate::ui::split::SplitMsg),
     // ── AI 研究助理（只起草，不发起）──
     AiText(String),
     AiDraft,
@@ -1245,6 +1247,7 @@ pub fn handle(m: ScMsg) {
             with(|g| g.cmp_freq = f);
             maybe_compare();
         }
+        ScMsg::Split(m) => crate::ui::split::handle(m),
         ScMsg::LibStyle(_) | ScMsg::LibStylesClear | ScMsg::LibDir(_) | ScMsg::LibOpen(_) | ScMsg::LibGroup(_) | ScMsg::LibTreeHidden => {
             with(|g| {
                 let f = g.lib.get_or_insert_with(lib::load);

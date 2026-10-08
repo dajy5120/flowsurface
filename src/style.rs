@@ -222,6 +222,19 @@ pub mod button {
         }
     }
 
+/// 侧栏导航项（工作区图标）：选中的用强调色——淡强调色底 + 强调色描边与图标，一眼看出在哪个工作区。
+    pub fn nav_item(theme: &Theme, status: Status, active: bool) -> Style {
+        let palette = theme.extended_palette();
+        let accent = palette.primary.base.color;
+        let mut st = transparent(theme, status, false);
+        if active {
+            st.text_color = palette.primary.strong.color;
+            st.background = Some(accent.scale_alpha(if status == Status::Hovered { 0.32 } else { 0.22 }).into());
+            st.border = Border { color: accent, width: 1.0, radius: crate::ui::metrics::radius::SM.into() };
+        }
+        st
+    }
+
     pub fn modifier(theme: &Theme, status: Status, is_clicked: bool) -> Style {
         let palette = theme.extended_palette();
 

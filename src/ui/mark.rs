@@ -50,6 +50,29 @@ pub fn take() -> Vec<Measure> {
 enum Kind {
     Body { panel: String },
     Content,
+    /// 量宽度（[`width`]）：布局时记下可用宽度，下一帧给需要「撑满」的组件用
+    Width(String),
+}
+
+/// 键 → (宽, 高, 最近一次布局的时刻)
+static WIDTHS: Mutex<BTreeMap<String, (f32, f32, Instant)>> = Mutex::new(BTreeMap::new());
+
+/// 包住一块，布局时把它拿到的宽度记在 `key` 下（[`width_of`] 取）。
+///
+/// 给「内容宽度要按可用宽度算」的组件用（如表格列宽撑满）：iced 的横向滚动区里不能放 Fill，
+/// 只能先量出可用宽度、下一帧按它定宽——晚一帧，窗口拖宽时表格跟着撑开会慢一拍，看不出来。
+pub fn width<'a, M: 'a>(key: String, content: impl Into<Element<'a, M, Theme, Renderer>>) -> Element<'a, M, Theme, Renderer> {
+    Element::new(Mark { content: content.into(), kind: Kind::Width(key) })
+}
+
+/// 上一帧量到的宽度。
+pub fn width_of(key: &str) -> Option<f32> {
+    WIDTHS.lock().ok().and_then(|g| g.get(key).map(|s| s.0))
+}
+
+/// 上一帧量到的高度（同一个包装记的）。
+pub fn height_of(key: &str) -> Option<f32> {
+    WIDTHS.lock().ok().and_then(|g| g.get(key).map(|s| s.1))
 }
 
 pub struct Mark<'a, M> {
@@ -83,7 +106,18 @@ impl<M> Widget<M, Theme, Renderer> for Mark<'_, M> {
     }
 
     fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
-        self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
+        let node = self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits);
+        if let Kind::Width(key) = &self.kind
+            && let Ok(mut g) = WIDTHS.lock()
+        {
+            let now = Instant::now();
+            // 有的表每帧新建状态（键每帧都变）：条目多了就淘汰 10 秒没布局过的，正在显示的不受影响
+            if g.len() > 512 {
+                g.retain(|_, v| now.duration_since(v.2) < Duration::from_secs(10));
+            }
+            g.insert(key.clone(), (node.size().width, node.size().height, now));
+        }
+        node
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -132,6 +166,9 @@ impl<M> Widget<M, Theme, Renderer> for Mark<'_, M> {
                 {
                     g.insert((panel.clone(), top as i32), (Measure { panel, px }, Instant::now()));
                 }
+            }
+            Kind::Width(_) => {
+                self.content.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
             }
             Kind::Content => {
                 // 只认第一个内容标记（面板里可能有多块内容，起点是最上面那块）

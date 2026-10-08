@@ -23,6 +23,7 @@ pub mod perf;
 pub mod metrics;
 pub mod pal;
 pub mod shell;
+pub mod split;
 pub mod text;
 pub mod theme;
 pub mod widgets;

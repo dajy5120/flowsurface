@@ -3,7 +3,8 @@
 //! 读用户提供的 **CSV/JSON 数据文件** → 通用自适应图：多列折线 + 散点，横轴时间或数值
 //! **按数据自动判定**，横/纵轴范围随数据缩放。与策略运行解耦——纯展示任意二维数据。
 //!
-//! 数据文件路径：env `WS_SELFDATA_CHART`，否则默认 `<repo>/strategies/data/selfdata.csv`。
+//! 数据文件路径：检查器「数据」页里用户选的（存在 Cockpit 数据目录的 `selfchart.json`），
+//! 否则 env `WS_SELFDATA_CHART`，否则默认 `<repo>/strategies/data/selfdata.csv`。
 //! - CSV：首行表头，第 1 列为 X（数值或时间），其余列各为一条 Y 序列。
 //! - JSON：`{"x_label":"t","x_is_time":true,"x":[...],"series":[{"name":"a","v":[...]}]}`。
 //! 文件按 mtime 缓存，改动即重载（每帧渲染读快照）。
@@ -34,7 +35,149 @@ pub struct ChartData {
     pub error: Option<String>,
 }
 
+// ── 用户选的数据文件（docs/42：检查器「数据」页）──────────────────────
+
+const PREF_FILE: &str = "selfchart.json";
+
+#[derive(Debug, Clone)]
+pub enum SelfChartMsg {
+    /// 路径输入框
+    Input(String),
+    /// 用输入框里的路径
+    Apply,
+    /// 弹文件对话框
+    Browse,
+    /// 回到缺省（环境变量或仓库里的 selfdata.csv）
+    Reset,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct Pref {
+    path: Option<String>,
+}
+
+/// (用户选的路径, 输入框草稿)
+static USER: OnceLock<Mutex<(Option<String>, Option<String>)>> = OnceLock::new();
+static PICKED: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn user() -> &'static Mutex<(Option<String>, Option<String>)> {
+    USER.get_or_init(|| {
+        let p: Pref = std::fs::read_to_string(data::data_path(Some(PREF_FILE)))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        Mutex::new((p.path, None))
+    })
+}
+
+fn set_user(path: Option<String>) {
+    if let Ok(mut g) = user().lock() {
+        g.0 = path.clone().filter(|p| !p.trim().is_empty());
+        g.1 = None;
+        let j = serde_json::to_string_pretty(&Pref { path: g.0.clone() }).unwrap_or_default();
+        if let Err(e) = data::write_json_to_file(&j, PREF_FILE) {
+            log::warn!("写 {PREF_FILE} 失败：{e}");
+        }
+    }
+}
+
+/// 对话框选回来的文件（后台线程放进来，这里取走生效）。
+fn take_picked() {
+    if let Some(p) = PICKED.get_or_init(|| Mutex::new(None)).lock().ok().and_then(|mut x| x.take()) {
+        set_user(Some(p));
+    }
+}
+
+pub fn handle(m: SelfChartMsg) {
+    match m {
+        SelfChartMsg::Input(t) => {
+            if let Ok(mut g) = user().lock() {
+                g.1 = Some(t);
+            }
+        }
+        SelfChartMsg::Apply => {
+            let draft = user().lock().ok().and_then(|g| g.1.clone());
+            if let Some(d) = draft {
+                set_user(Some(d.trim().to_string()));
+            }
+        }
+        SelfChartMsg::Reset => set_user(None),
+        SelfChartMsg::Browse => {
+            let start = data_path();
+            super::spawn_named("ws-selfchart-pick", move || {
+                let out = std::process::Command::new("zenity")
+                    .args(["--file-selection", "--title=选自有数据文件（CSV / JSON）", "--file-filter=数据文件 | *.csv *.json", "--file-filter=全部 | *"])
+                    .arg(format!("--filename={}", start.display()))
+                    .output();
+                if let Ok(o) = out
+                    && o.status.success()
+                {
+                    let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if !p.is_empty()
+                        && let Ok(mut x) = PICKED.get_or_init(|| Mutex::new(None)).lock()
+                    {
+                        *x = Some(p);
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// 检查器「数据」页：当前文件、读取结果、改路径。
+pub fn inspector<'a>() -> Element<'a, SelfChartMsg> {
+    use iced::widget::{row, text_input};
+    use crate::ui::widgets::{Kind, btn};
+    take_picked();
+    let (chosen, draft) = user().lock().map(|g| (g.0.clone(), g.1.clone())).unwrap_or_default();
+    let cur = data_path();
+    let d = snapshot();
+    let origin = if chosen.is_some() {
+        "你选的文件"
+    } else if std::env::var_os("WS_SELFDATA_CHART").is_some() {
+        "环境变量 WS_SELFDATA_CHART"
+    } else {
+        "缺省（仓库 strategies/data/selfdata.csv）"
+    };
+    let status: Element<'a, SelfChartMsg> = match &d.error {
+        Some(e) => text(format!("✗ {e}")).size(crate::ui::text::s_small()).color(crate::ui::pal::bad()).into(),
+        None => text(format!("{} 行 · {} 条序列 · 横轴 {}", d.x.len(), d.series.len(), if d.x_is_time { "时间" } else { "数值" }))
+            .size(crate::ui::text::s_small())
+            .color(crate::ui::pal::ok())
+            .into(),
+    };
+    let input = draft.unwrap_or_else(|| cur.display().to_string());
+    column![
+        crate::ui::text::metadata("数据文件"),
+        text(cur.display().to_string()).size(crate::ui::text::s_small()),
+        text(format!("来源：{origin}")).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
+        status,
+        text_input("CSV 或 JSON 文件路径", &input)
+            .on_input(SelfChartMsg::Input)
+            .on_submit(SelfChartMsg::Apply)
+            .size(crate::ui::text::s_small()),
+        row![
+            btn("选择文件…", Kind::Standard, Some(SelfChartMsg::Browse)),
+            btn("用这个路径", Kind::Ghost, Some(SelfChartMsg::Apply)),
+            btn("恢复默认", Kind::Ghost, chosen.is_some().then_some(SelfChartMsg::Reset)),
+        ]
+        .spacing(crate::ui::metrics::space(1))
+        .wrap(),
+        text(
+            "CSV：首行表头，第 1 列是横轴（数值或时间），其余每列一条序列。\
+             JSON：{\"x_label\",\"x_is_time\",\"x\":[…],\"series\":[{\"name\",\"v\":[…]}]}。文件改了自动重读。",
+        )
+        .size(crate::ui::text::s_meta())
+        .color(crate::ui::pal::dim()),
+    ]
+    .spacing(crate::ui::metrics::space(2))
+    .into()
+}
+
 fn data_path() -> PathBuf {
+    if let Some(p) = user().lock().ok().and_then(|g| g.0.clone()) {
+        return PathBuf::from(p);
+    }
     if let Ok(p) = std::env::var("WS_SELFDATA_CHART") {
         return PathBuf::from(p);
     }
@@ -161,6 +304,8 @@ struct JsonData {
 
 /// 读数据快照（按 mtime + 路径缓存，改动即重载）。
 pub fn snapshot() -> ChartData {
+    // 对话框选回来的文件：检查器关着也要生效（图每帧都读快照）
+    take_picked();
     let path = data_path();
     let mtime =
         std::fs::metadata(&path).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);

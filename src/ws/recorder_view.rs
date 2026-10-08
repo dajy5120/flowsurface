@@ -83,7 +83,7 @@ fn details(
     let total_bytes: u64 = hit.iter().map(|r| r.bytes).sum();
 
     let mut col = column![
-        text("④ 录制明细(逐 币种 × 类型 × 日期)").size(crate::ui::text::s_section()).color(crate::ui::pal::head()),
+        crate::ui::widgets::major("④ 录制明细(逐 币种 × 类型 × 日期)"),
         row![
             text("币种").size(crate::ui::text::s_body()),
             pick_list(opts_sym, Some(app.det_sym.clone()), RecorderMsg::DetailSym).text_size(12),
@@ -191,9 +191,7 @@ fn coverage(app: &RecorderPaneState, st: &super::recorder_readout::SvcState) -> 
         .collect();
 
     let mut col = column![
-        text("⑤ 按日覆盖（那天真正录到的时间段 · 洞在哪 · 最长可跑窗口）")
-            .size(crate::ui::text::s_section())
-            .color(crate::ui::pal::ok()),
+        crate::ui::widgets::major_tinted("⑤ 按日覆盖（那天真正录到的时间段 · 洞在哪 · 最长可跑窗口）", crate::ui::pal::ok()),
         text(
             "区间取自 parquet 页脚统计，只看得见段间的洞（段是 600 秒轮转）——             数字是「至少这么碎」。能不能跑最终由回测入口的窗口体检说了算。"
         )
@@ -304,9 +302,7 @@ fn pm_section<'a>() -> Element<'a, RecorderMsg> {
     let head = crate::ui::pal::series(5);
     let dimc = crate::ui::pal::dim();
     let mut col = column![
-        text("⑥ 预测市场录制 — 币安钱包 BTC 5 分钟涨跌（ws-pm-recorder，独立于上面的行情录制）")
-            .size(crate::ui::text::s_section())
-            .color(head),
+        crate::ui::widgets::major_tinted("⑥ 预测市场录制 — 币安钱包 BTC 5 分钟涨跌（ws-pm-recorder，独立于上面的行情录制）", head),
         text(
             "这份数据没有第三方历史源：5 分钟市场结束即消失，不录就永远没有，             事后一秒都补不回来。启停在「进程」页，连接在「网络出口」页。"
         )
@@ -491,8 +487,8 @@ pub fn pane_body<'a>(app: &'a RecorderPaneState, lock: Option<&str>) -> Element<
         ("○", crate::ui::pal::dim(), "已停止".to_string())
     };
     let svc_ctrl = column![
+        crate::ui::widgets::major("① 24/7 守护服务"),
         row![
-            text("① 24/7 守护服务").size(crate::ui::text::s_section()).color(crate::ui::pal::head()),
             text(format!("  {dot} ")).size(crate::ui::text::s_section()).color(dotc),
             text(runtxt).size(crate::ui::text::s_emph()),
         ]
@@ -543,9 +539,7 @@ pub fn pane_body<'a>(app: &'a RecorderPaneState, lock: Option<&str>) -> Element<
 
     // ② 录制实况
     let mut live = column![
-        text("② 录制实况(每 symbol 累计计数 · ↑=正在增长 · 来自服务日志)")
-            .size(crate::ui::text::s_section())
-            .color(crate::ui::pal::ok())
+        crate::ui::widgets::major_tinted("② 录制实况(每 symbol 累计计数 · ↑=正在增长 · 来自服务日志)", crate::ui::pal::ok())
     ]
     .spacing(2);
     live = live.push(
@@ -599,7 +593,7 @@ pub fn pane_body<'a>(app: &'a RecorderPaneState, lock: Option<&str>) -> Element<
     let filled = (pct * 24.0) as usize;
     let bar: String = "▓".repeat(filled) + &"░".repeat(24 - filled);
     let mut overview = column![
-        text("③ 已录制总览(磁盘落盘,跨全部日期)").size(crate::ui::text::s_section()).color(crate::ui::pal::head()),
+        crate::ui::widgets::major("③ 已录制总览(磁盘落盘,跨全部日期)"),
         text(if st.span_days > 0 {
             format!(
                 "时间跨度  {} ~ {}({} 天)      总大小  {}",

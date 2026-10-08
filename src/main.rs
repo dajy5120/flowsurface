@@ -1808,7 +1808,16 @@ impl Flowsurface {
                 };
                 let spec = st.toolbar_spec();
                 let name = st.settings.view.clone().unwrap_or_else(|| st.content.to_string());
-                r = r.push(ui::text::metadata(format!("│ ◉ {name}")).color(ui::pal::dim()));
+                // 面板名前的状态点跟随运行状态（实时 ● / 过期 ◌ / 离线 ○ …），悬停看文字
+                let (dot, dot_c, dot_tip) = st.run_dot();
+                r = r.push(ui::text::metadata("│").color(ui::pal::dim()));
+                r = r.push(iced::widget::tooltip(
+                    row![ui::text::label(dot).color(dot_c), ui::text::metadata(name).color(ui::pal::dim())]
+                        .spacing(ui::metrics::space(1))
+                        .align_y(Alignment::Center),
+                    iced::widget::container(ui::text::caption(dot_tip)).padding(ui::metrics::space(2)).style(style::tooltip),
+                    iced::widget::tooltip::Position::Bottom,
+                ));
                 if let Some(src) = spec.source {
                     r = r.push(tool_pick("数据", src, None::<Message>, false));
                 }

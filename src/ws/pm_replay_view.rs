@@ -157,10 +157,9 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
         // scrollable 里 → 高度被压成一条缝，还被下面的控制行盖住。嵌套两层方向
         // 相反的滚动本来就难摆，而这里根本不需要：换行之后由外层竖向滚动统一管。
         let n_all = app.all_rounds().len();
-        let per_row = 6; // 一行 6 个：标签形如「8:55AM-9AM ET 跌」，再多就换行了
-        let mut grid = column![].spacing(4);
+        // 按窗口宽度自动换行（不再固定每行 6 个）：宽窗口一行排得多，轮次区铺满整行
         let mut line = row![].spacing(4).align_y(Alignment::Center);
-        for (i, r) in rounds.iter().enumerate() {
+        for r in rounds.iter() {
             let (v, c) = verdict(&r.resolved);
             line = line.push(chip(
                 format!("{} {}", r.label, v),
@@ -168,12 +167,8 @@ pub fn pane_body(app: &PmReplayState) -> Element<'_, PmReplayMsg> {
                 c,
                 PmReplayMsg::PickRound(r.market_id.clone()),
             ));
-            if (i + 1) % per_row == 0 {
-                grid = grid.push(line);
-                line = row![].spacing(4).align_y(Alignment::Center);
-            }
         }
-        grid = grid.push(line);
+        let grid = column![line.wrap().vertical_spacing(4.0)].width(Length::Fill);
 
         let filtered = n_all - rounds.len();
         body = body.push(

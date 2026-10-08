@@ -220,7 +220,7 @@ impl Sidebar {
                 Message::SelectWorkspace(uid),
                 Some(name),
                 tooltip_position,
-                move |theme, status| crate::style::button::transparent(theme, status, is_active),
+                move |theme, status| crate::style::button::nav_item(theme, status, is_active),
             ));
         }
         // 工作区组放进可滚动区：小屏幕高度不够时滚轮翻动，不再把下方工具组挤出状态栏以上的可见区。

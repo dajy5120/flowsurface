@@ -1229,9 +1229,10 @@ fn chip<'a>(label: &str, active: bool, msg: RadarMsg) -> Element<'a, RadarMsg> {
 
 /// 表格单元。数值列**右对齐**（同 TradingView）：右对齐后小数点纵向成列，
 /// 一眼能比大小；左对齐的数字列要逐行读才知道谁大。
+/// 表格单元格。`w` 是**比例**（原来的像素宽）：各列按它分摊整行宽度，表格撑满面板，窄窗口时按比例收窄。
 fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, RadarMsg> {
     container(text(s).size(crate::ui::text::s_small()).color(c))
-        .width(Length::Fixed(w))
+        .width(Length::FillPortion(w.round().max(1.0) as u16))
         .align_x(if numeric {
             iced::Alignment::End
         } else {

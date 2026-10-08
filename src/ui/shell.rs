@@ -765,9 +765,10 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
         row![
             container(t::code(l.time.clone()).color(color(c.text_tertiary))).width(Length::Fixed(96.0)),
             container(t::code(tag).color(fg)).width(Length::Fixed(40.0)),
-            t::code(l.msg.clone()).color(if l.level == Level::Info { color(c.text_primary) } else { fg }),
+            container(t::code(l.msg.clone()).color(if l.level == Level::Info { color(c.text_primary) } else { fg })).width(Length::Fill),
         ]
         .spacing(metrics::space(3))
+        .width(Length::Fill)
         .into()
     };
 
@@ -777,7 +778,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
             for l in shell.log.lines.iter() {
                 col = col.push(line(l));
             }
-            scrollable(col).anchor_bottom().height(Length::Fill).into()
+            scrollable(col.width(Length::Fill)).anchor_bottom().width(Length::Fill).height(Length::Fill).into()
         }
         BottomTab::Problems => {
             if n_prob == 0 {
@@ -787,7 +788,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
                 for l in shell.log.problems() {
                     col = col.push(line(l));
                 }
-                scrollable(col).anchor_bottom().height(Length::Fill).into()
+                scrollable(col.width(Length::Fill)).anchor_bottom().width(Length::Fill).height(Length::Fill).into()
             }
         }
         BottomTab::Notices => {
@@ -799,7 +800,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
                     let l = LogLine { time: time.clone(), level: *level, msg: if title.is_empty() { body.clone() } else { format!("{title}　{body}") } };
                     col = col.push(line(&l));
                 }
-                scrollable(col).height(Length::Fill).into()
+                scrollable(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into()
             }
         }
         BottomTab::Alerts => {
@@ -828,7 +829,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
                             .into()
                     });
                 }
-                scrollable(col).height(Length::Fill).into()
+                scrollable(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into()
             }
         }
         BottomTab::Activity => {
@@ -839,12 +840,12 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
                 for a in &info.activity {
                     col = col.push(t::body(a.clone()));
                 }
-                col.into()
+                scrollable(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into()
             }
         }
     };
 
-    container(column![header, container(body).padding([4, 8]).height(Length::Fill)].spacing(2))
+    container(column![header, container(body).padding([4, 8]).width(Length::Fill).height(Length::Fill)].spacing(2))
         .height(Length::Fixed(200.0))
         .width(Length::Fill)
         .style(|_| {

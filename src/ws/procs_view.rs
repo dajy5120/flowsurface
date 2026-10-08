@@ -255,7 +255,7 @@ pub fn pane_body<'a>(note: &str, lock: Option<&str>) -> Element<'a, ProcsMsg> {
 
     // ── 按点触发的任务 ──
     if !timers.is_empty() {
-        body = body.push(text("按点触发（不跟随窗口）").size(crate::ui::text::s_emph()).color(crate::ui::pal::head()));
+        body = body.push(crate::ui::widgets::major("按点触发（不跟随窗口）"));
         body = body.push(
             text(
                 "这些是研究任务，绑进窗口生命周期等于「Cockpit 没开着就永远不跑」——\
@@ -293,7 +293,7 @@ fn deps_part<'a>(mut body: iced::widget::Column<'a, ProcsMsg>) -> Element<'a, Pr
     let dnote = super::deps::note();
     let checked = drows.iter().filter(|r| r.checked()).count();
     let stale = drows.iter().filter(|r| r.outdated()).count();
-    body = body.push(text("依赖").size(crate::ui::text::s_emph()).color(crate::ui::pal::head()));
+    body = body.push(crate::ui::widgets::major("依赖"));
     body = body.push(
         row![
             // 查询要十几个 HTTP 请求：查的时候按钮转圈、宽度不变、不能重复点

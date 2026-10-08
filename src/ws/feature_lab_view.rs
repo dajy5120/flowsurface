@@ -23,8 +23,9 @@ fn cell<'a, M: 'a>(t: String, w: f32, c: Color) -> Element<'a, M> {
 fn dim<'a, M: 'a>(t: String) -> Element<'a, M> {
     text(t).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()).into()
 }
+/// 大分区标题：上方留白 + 2px 实线（几个大功能之间要一眼分得开）。
 fn sec<'a, M: 'a>(t: String) -> Element<'a, M> {
-    text(t).size(crate::ui::text::s_section()).color(crate::ui::pal::head()).into()
+    crate::ui::widgets::major(t)
 }
 fn num(v: Option<f64>) -> String {
     match v {

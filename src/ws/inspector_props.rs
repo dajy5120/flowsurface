@@ -209,6 +209,9 @@ pub fn data_view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
         Content::C4Shadow => Some(with_part(Part::Data, super::c4_view::pane_body).map(Event::C4Interaction)),
         Content::PredictionBoard => Some(with_part(Part::Data, super::prediction_view::pane_body).map(Event::PredictionInteraction)),
         Content::PmBinance => Some(with_part(Part::Data, super::pm_binance_view::pane_body)),
+        Content::WealthSpring(data::layout::pane::WsPaneMode::SelfChart) => {
+            Some(super::customchart::inspector().map(Event::SelfChartInteraction))
+        }
         Content::PmReplay(pr) => Some(with_part(Part::Data, || super::pm_replay_view::pane_body(pr)).map(Event::PmReplayInteraction)),
         Content::TardisReplay(tr) => Some(
             column![
@@ -333,6 +336,7 @@ pub fn about(content: &Content) -> Option<String> {
         Content::FeatureLab => "特征库（docs/30）：特征的研究纪律记录与检验结果。",
         Content::OptionsBoard => "期权 / 0DTE（docs/18）：期权回测与探针。",
         Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) => "预测市场（docs/19）：Polymarket 决策支持与币安钱包 5 分钟盘口；只读旁路快照。\n\nPolymarket 夜跑启停与每日定时、币安钱包的录制状态、回放的符号与日期在「数据」页。",
+        Content::WealthSpring(data::layout::pane::WsPaneMode::SelfChart) => "自有数据图：把任意 CSV / JSON 数据画成自适应折线（横轴时间或数值按数据自动判定），与策略运行无关，纯展示。\n\n数据文件在「数据」页选（选择文件… 或直接填路径），选过的会记住；文件改了自动重读。",
         Content::Orders => "订单：活动挂单与成交明细；选中一行，「属性」页列出它的全部字段。",
         Content::Kline { .. } | Content::Heatmap { .. } | Content::ShaderHeatmap { .. } | Content::TimeAndSales(_) | Content::Ladder(_) | Content::Comparison(_) => {
             "行情图表：标的与周期在顶部工具栏改（作用于选中的这张图，开了 ⛓ 联动时同组一起改）。指标与显示设置在面板标题栏的齿轮里。\n\n同页按时间轴的图会联动十字线：光标放在一张上，其他图在同一时刻画竖线。"
