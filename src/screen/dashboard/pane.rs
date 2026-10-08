@@ -681,8 +681,36 @@ impl State {
                     tb.pick
                         .selection(&crate::ws::tardis_board::pick_opts())
                         .map(|s| s.describe())
+                        // 选择器没选完、但面板上有已加载的图：显示那一份（与面板里「上次加载的结果」一句同口径）
+                        .or_else(|| {
+                            let p = crate::ws::tardis_board_readout::panel();
+                            p.loaded.then(|| {
+                                format!("{} · {} {} {} +{}min（已加载）", p.source_label, p.symbol, p.date, p.start, p.minutes)
+                            })
+                        })
                         .unwrap_or_else(|| "未选数据".into()),
                 );
+                spec.actions.push((
+                    "加载".into(),
+                    false,
+                    Event::TardisBoardInteraction(crate::ws::tardis_board::TardisBoardMsg::Load),
+                ));
+            }
+            Content::BacktestResult => {
+                // 发起回测（docs/42 第 3 期）：表单在检查器里，运行 / 停止放工具栏
+                use crate::ws::backtest_launch::{self as bl, LaunchMsg};
+                let v = bl::view();
+                let sel = v.pick.selection(&bl::pick_opts());
+                spec.source = Some(match (&v.strategy, &sel) {
+                    (Some(st), Some(d)) => format!("{} · {}", st.rsplit('/').next().unwrap_or(st), d.describe()),
+                    (Some(st), None) => format!("{} · 未选数据", st.rsplit('/').next().unwrap_or(st)),
+                    (None, _) => "未选策略（在检查器里选）".into(),
+                });
+                if v.running {
+                    spec.actions.push(("■ 停止".into(), true, Event::BacktestLaunchInteraction(LaunchMsg::Stop)));
+                } else if v.strategy.is_some() && sel.is_some() {
+                    spec.actions.push(("▶ 运行回测".into(), false, Event::BacktestLaunchInteraction(LaunchMsg::Run)));
+                }
             }
             _ => {}
         }
@@ -1055,7 +1083,11 @@ impl State {
             }
             Content::OfmsLab => {
                 // 订单流层析（docs/40）：OFMS-10 时间轴 · 因果链 · 特征字典
-                let base = crate::ws::ofms_lab_view::pane_body(self.unique_id(), self.settings.view.as_deref())
+                let base = crate::ws::ofms_lab_view::pane_body(
+                    self.unique_id(),
+                    self.settings.view.as_deref(),
+                    crate::ws::inspector_props::hosted(id),
+                )
                     .map(move |m| Message::PaneEvent(id, Event::OfmsLabInteraction(m)));
                 self.compose_stack_view(
                     base,

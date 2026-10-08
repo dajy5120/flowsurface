@@ -697,6 +697,53 @@ fn label<'a>(s: &str) -> Element<'a, TardisBoardMsg> {
 }
 
 /// `hosted` = 数据选择正显示在检查器里（见 `ws::inspector_props`）。
+/// ① 数据 + 读法 + ② 数据类型（docs/42 第 3 期：检查器托管时整块进「数据」页）。
+fn data_block(app: &TardisBoardState, cat: &ro::Catalog, picker: bool, wrap: usize) -> Element<'static, TardisBoardMsg> {
+    let mut src_col = column![label("① 数据")].spacing(4);
+    if picker {
+        src_col = src_col.push(super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisBoardMsg::Data));
+    }
+    if app.pick.local_key() == Some("tardis") {
+        let mut r = row![label("读法")].spacing(6).align_y(Alignment::Center);
+        for (k, name) in TARDIS_ACCESS {
+            r = r.push(chip(name.into(), app.access == k, true, TardisBoardMsg::Access(k.into())));
+        }
+        src_col = src_col.push(r.wrap());
+    }
+    // ② 数据类型（当天没有的类型置灰，不可点——不画空面板）
+    let have = app.avail_types();
+    let all: Vec<String> = if cat.type_labels.is_empty() {
+        have.clone()
+    } else {
+        let mut v: Vec<String> = cat.type_labels.keys().cloned().collect();
+        v.sort_by_key(|t| have.iter().position(|x| x == t).unwrap_or(usize::MAX));
+        v
+    };
+    let mut ty_row1 = row![label("② 数据类型")].spacing(6).align_y(Alignment::Center);
+    let mut ty_row2 = row![label("                ")].spacing(6).align_y(Alignment::Center);
+    for (i, t) in all.iter().enumerate() {
+        let has = have.contains(t);
+        let c = chip(
+            cat.type_labels.get(t).cloned().unwrap_or_else(|| t.clone()),
+            *t == app.dtype,
+            has,
+            TardisBoardMsg::TypePick(t.clone()),
+        );
+        if i < wrap {
+            ty_row1 = ty_row1.push(c);
+        } else {
+            ty_row2 = ty_row2.push(c);
+        }
+    }
+    column![src_col, ty_row1.wrap(), ty_row2.wrap()].spacing(8).into()
+}
+
+/// 检查器「数据」页：数据选择 + 读法 + 数据类型。
+pub fn inspector_data(app: &TardisBoardState) -> Element<'static, TardisBoardMsg> {
+    let cat = ro::catalog();
+    data_block(app, &cat, true, usize::MAX)
+}
+
 pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoardMsg> {
     // 每帧轮询后台加载（顺带收割已结束的子进程并刷新面板缓存）。
     let loading = poll_load();
@@ -734,50 +781,6 @@ pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoar
             .color(crate::ui::pal::pend()),
     ]
     .spacing(3);
-
-    // ① 数据：共用数据选择组件（管线 → 来源 → 根目录扫描 → 市场 → 标的 → 时间）
-    let mut src_col = column![
-        label("① 数据"),
-        if hosted {
-            super::inspector_props::hint("数据选择")
-        } else {
-            super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisBoardMsg::Data)
-        },
-    ]
-    .spacing(4);
-    if app.pick.local_key() == Some("tardis") {
-        let mut r = row![label("读法")].spacing(6).align_y(Alignment::Center);
-        for (k, name) in TARDIS_ACCESS {
-            r = r.push(chip(name.into(), app.access == k, true, TardisBoardMsg::Access(k.into())));
-        }
-        src_col = src_col.push(r);
-    }
-
-    // ② 数据类型（当天没有的类型置灰，不可点——不画空面板）
-    let have = app.avail_types();
-    let all: Vec<String> = if cat.type_labels.is_empty() {
-        have.clone()
-    } else {
-        let mut v: Vec<String> = cat.type_labels.keys().cloned().collect();
-        v.sort_by_key(|t| have.iter().position(|x| x == t).unwrap_or(usize::MAX));
-        v
-    };
-    let mut ty_row1 = row![label("② 数据类型")].spacing(6).align_y(Alignment::Center);
-    let mut ty_row2 = row![label("                ")].spacing(6).align_y(Alignment::Center);
-    for (i, t) in all.iter().enumerate() {
-        let has = have.contains(t);
-        let c = chip(
-            cat.type_labels.get(t).cloned().unwrap_or_else(|| t.clone()),
-            *t == app.dtype,
-            has,
-            TardisBoardMsg::TypePick(t.clone()),
-        );
-        if i < 4 {
-            ty_row1 = ty_row1.push(c);
-        } else {
-            ty_row2 = ty_row2.push(c);
-        }
-    }
 
     // ③ 出图（标的 / 日期 / 时段在 ① 里选）
     let picks = row![
@@ -950,18 +953,15 @@ pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoar
         }
     }
 
+    // 检查器托管时（docs/42 第 3 期）：标题两行进「说明」，数据 / 读法 / 数据类型进「数据」，主区只留出图、回放、导出与图
+    let top = if hosted {
+        column![]
+    } else {
+        column![header, data_block(app, &cat, true, 4)]
+    }
+    .spacing(8);
     container(
-        column![
-            header,
-            src_col,
-            ty_row1,
-            ty_row2,
-            picks,
-            play_row,
-            export_row,
-            hint,
-            scrollable(body).height(Length::Fill)
-        ]
+        column![top, picks, play_row, export_row, hint, scrollable(body).height(Length::Fill)]
             .spacing(8)
             .padding(crate::ui::metrics::space(4)),
     )

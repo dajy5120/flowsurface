@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use iced::widget::{
-    Space, button, column, container, mouse_area, opaque, row, rule, scrollable, space, stack, text, text_input,
+    Space, button, column, container, mouse_area, opaque, row, scrollable, space, stack, text, text_input,
 };
 use iced::{Alignment, Background, Border, Element, Length, Padding};
 
@@ -209,6 +209,14 @@ pub struct Palette {
 #[derive(Debug, Clone)]
 pub enum ShellEvent {
     Run(Cmd),
+    /// 检查器（docs/42 第 2 期）：切页 / 钉住 / 关掉 / 拖宽 / 双击复位
+    InspTab(InspTab),
+    InspPin,
+    InspClose,
+    InspDragStart,
+    InspDragMove(f32),
+    InspDragEnd,
+    InspResetWidth,
     PaletteQuery(String),
     PaletteMove(i32),
     PaletteSubmit,
@@ -226,11 +234,48 @@ pub struct Shell {
     pub notices: Vec<(String, String, String, Level)>,
     /// 侧栏收起（Ctrl B）
     pub sidebar_hidden: bool,
+    /// 检查器当前页、宽度、是否在拖宽；`inspector` 字段 = 钉住（常开）
+    pub insp_tab: InspTab,
+    pub insp_width: f32,
+    pub insp_drag: bool,
+    /// 拖宽的起点（第一次移动时记下：光标 x、当时的宽度），之后按位移改宽，按下的位置不准也不跳
+    insp_anchor: Option<(f32, f32)>,
+    /// 上次按下拖动条的时刻（两次按下 0.4 秒内 = 双击复位）
+    insp_last_press: Option<Instant>,
+    /// 自动展开时用户点了 ✕：对这个面板不再自动展开，换了面板再说
+    pub insp_dismissed: Option<String>,
+    /// 主窗口宽（拖宽时算位置与上限，由 main 写入）
+    pub window_w: f32,
+}
+
+/// 检查器的三页（docs/42 §3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InspTab {
+    #[default]
+    Props,
+    Data,
+    About,
 }
 
 impl Default for Shell {
     fn default() -> Self {
-        Self { palette: None, bottom: false, bottom_tab: BottomTab::Log, inspector: false, log: LogTail::default(), alerts: AlertTail::default(), notices: Vec::new(), sidebar_hidden: false }
+        Self {
+            palette: None,
+            bottom: false,
+            bottom_tab: BottomTab::Log,
+            inspector: false,
+            log: LogTail::default(),
+            alerts: AlertTail::default(),
+            notices: Vec::new(),
+            sidebar_hidden: false,
+            insp_tab: InspTab::Props,
+            insp_width: crate::ws::shell_prefs::INSPECTOR_DEFAULT,
+            insp_drag: false,
+            insp_anchor: None,
+            insp_last_press: None,
+            insp_dismissed: None,
+            window_w: 1920.0,
+        }
     }
 }
 
@@ -240,6 +285,20 @@ pub fn palette_input_id() -> iced::widget::Id {
 }
 
 impl Shell {
+    fn save_insp(&self) {
+        crate::ws::shell_prefs::save(&crate::ws::shell_prefs::ShellPrefs {
+            inspector_width: self.insp_width,
+            inspector_pinned: self.inspector,
+        });
+    }
+
+    /// 读回上次的检查器宽度与钉住状态（启动时调）。
+    pub fn load_insp(&mut self) {
+        let p = crate::ws::shell_prefs::load();
+        self.insp_width = p.inspector_width;
+        self.inspector = p.inspector_pinned;
+    }
+
     /// 处理外壳内部事件；需要应用去执行的命令原样返回。
     pub fn update(&mut self, ev: ShellEvent, entries: &[Entry]) -> Option<Cmd> {
         match ev {
@@ -266,6 +325,57 @@ impl Shell {
                 return picked;
             }
             ShellEvent::PaletteClose => self.palette = None,
+            ShellEvent::InspTab(t) => self.insp_tab = t,
+            ShellEvent::InspPin => {
+                self.inspector = !self.inspector;
+                self.save_insp();
+            }
+            ShellEvent::InspClose => {
+                // 钉住时 ✕ = 取消钉住；自动展开时 ✕ = 这个面板先别自动开（由 main 记下是哪个面板）
+                if self.inspector {
+                    self.inspector = false;
+                    self.save_insp();
+                }
+                return Some(Cmd::InspectorDismiss);
+            }
+            ShellEvent::InspDragStart => {
+                // 双击（两次按下间隔 0.4 秒内）= 复位到缺省宽度。不能靠 mouse_area 的双击：第一下按下
+                // 就开始拖、整窗盖上接鼠标的层，第二下落在那层上，拖动条收不到双击
+                let now = Instant::now();
+                if self.insp_last_press.is_some_and(|t| now.duration_since(t) < Duration::from_millis(400)) {
+                    self.insp_last_press = None;
+                    self.insp_drag = false;
+                    self.insp_anchor = None;
+                    self.insp_width = crate::ws::shell_prefs::INSPECTOR_DEFAULT;
+                    self.save_insp();
+                } else {
+                    self.insp_last_press = Some(now);
+                    self.insp_drag = true;
+                    self.insp_anchor = None;
+                }
+            }
+            ShellEvent::InspDragMove(x) => {
+                if self.insp_drag {
+                    match self.insp_anchor {
+                        None => self.insp_anchor = Some((x, self.insp_width)),
+                        // 检查器贴在右边：光标往左 = 变宽
+                        Some((x0, w0)) => {
+                            self.insp_width = crate::ws::shell_prefs::clamp_width(w0 + (x0 - x), self.window_w);
+                        }
+                    }
+                }
+            }
+            ShellEvent::InspDragEnd => {
+                if self.insp_drag {
+                    self.insp_drag = false;
+                    self.insp_anchor = None;
+                    self.save_insp();
+                }
+            }
+            ShellEvent::InspResetWidth => {
+                self.insp_width = crate::ws::shell_prefs::INSPECTOR_DEFAULT;
+                self.save_insp();
+            }
         }
         None
     }
@@ -760,48 +870,130 @@ pub fn empty<'a, M: 'a>(title: &'a str, hint: &'a str) -> Element<'a, M> {
 ///
 /// `props` = 聚焦面板的可编辑属性（数据选择器、口径设置……，docs/35 §16.5 第 3 项），由调用方
 /// 按面板类型拼好、消息已包成调用方自己的类型；`on` 把外壳事件包成同一类型。
+/// 检查器这一帧要显示的东西（docs/42 §3）。
+pub struct InspView {
+    pub tab: InspTab,
+    /// 已夹好的宽度（像素）
+    pub width: f32,
+    pub pinned: bool,
+    /// 选中面板的数据源摘要（与工具栏同一句）
+    pub source: Option<String>,
+    /// 选中面板的说明（用途、口径、纪律提示）
+    pub about: Option<String>,
+    /// 检查器作用的面板名（与工具栏同一个目标；没选中时是本页第一个有控件的面板）
+    pub panel: Option<String>,
+}
+
+/// 检查器（UPDS V2 §9，docs/42 §3）：三页——**属性**（选中面板的可编辑设置）、**数据**（数据源与数据环境）、
+/// **说明**（面板用途与口径）。左边缘是拖动条：按住拖宽、双击复位；标题栏 📌 钉住常开、✕ 关。
 pub fn inspector<'a, M: Clone + 'a>(
     info: &Info,
+    v: &InspView,
     props: Option<Element<'a, M>>,
-    on: impl Fn(ShellEvent) -> M,
+    data: Option<Element<'a, M>>,
+    on: fn(ShellEvent) -> M,
 ) -> Element<'a, M> {
+    use super::widgets::{Kind, btn};
     let c = core();
     let section = |title: &'a str| t::metadata(title);
-    let kv = |k: &'a str, v: String| -> Element<'a, M> {
-        row![container(t::caption(k)).width(Length::Fixed(72.0)), t::body(v)].spacing(8).into()
+    let kv = |k: &'a str, val: String| -> Element<'a, M> {
+        row![container(t::caption(k)).width(Length::Fixed(72.0)), t::body(val)].spacing(8).into()
     };
-    let wide = props.is_some();
-    let mut col = column![
-        row![t::section("检查器"), space::horizontal(), button(t::label("✕")).padding([2, 8]).on_press(on(ShellEvent::Run(Cmd::ToggleInspector))).style(|th, st| crate::style::button::transparent(th, st, false))].align_y(Alignment::Center),
-        section("当前面板"),
+    let has_props = props.is_some();
+    let has_data = data.is_some();
+    // 只有数据、没有属性的面板（如 Tardis 历史面板）：停在「属性」页时直接给「数据」页，不让用户先看一句空话
+    let tab = if v.tab == InspTab::Props && !has_props && has_data { InspTab::Data } else { v.tab };
+    let head = row![
+        t::section("检查器"),
+        space::horizontal(),
+        btn(if v.pinned { "📌 已钉住" } else { "📌 钉住" }, if v.pinned { Kind::Standard } else { Kind::Ghost }, Some(on(ShellEvent::InspPin))),
+        button(t::label("✕")).padding([2, 8]).on_press(on(ShellEvent::InspClose)).style(|th, st| crate::style::button::transparent(th, st, false)),
     ]
-    .spacing(metrics::space(3));
-    match &info.focused {
-        Some(n) => col = col.push(kv("面板", n.clone())),
-        None => col = col.push(empty("没有聚焦的面板", "点一下面板或按 F6 聚焦，这里会显示它的属性。")),
+    .spacing(metrics::space(1))
+    .align_y(Alignment::Center);
+    let tabs = super::widgets::tabs(
+        &[
+            (if has_props { "属性 •" } else { "属性" }, InspTab::Props),
+            (if has_data { "数据 •" } else { "数据" }, InspTab::Data),
+            ("说明", InspTab::About),
+        ],
+        &tab,
+        move |t| on(ShellEvent::InspTab(t)),
+    );
+    let mut col = column![head, tabs].spacing(metrics::space(3));
+    let panel = match v.panel.as_ref().or(info.focused.as_ref()) {
+        Some(n) => kv("面板", n.clone()),
+        None => empty("没有选中的面板", "点一下面板（或按 F6），这里显示它的设置、数据与说明。"),
+    };
+    match tab {
+        InspTab::Props => {
+            col = col.push(panel);
+            match props {
+                Some(p) => col = col.push(p),
+                None => {
+                    col = col.push(
+                        t::caption(if has_data {
+                            "这个面板的设置都在「数据」页（选数据）与顶部工具栏。"
+                        } else {
+                            "这个面板没有可在这里改的设置（标的、周期等在顶部工具栏）。"
+                        })
+                        .color(color(c.text_tertiary)),
+                    )
+                }
+            }
+        }
+        InspTab::Data => {
+            col = col.push(panel).push(kv("工作区", info.workspace.clone()));
+            if let Some(src) = &v.source {
+                col = col.push(section("数据源")).push(t::body(src.clone()));
+            }
+            // 选中面板自己的数据选择（docs/42 第 3 期：原来在面板顶上的选择器搬到这里）
+            if let Some(d) = data {
+                col = col.push(section("选择数据")).push(d);
+            }
+            if let Some((label, detail, _)) = &info.link {
+                col = col.push(section("数据链路")).push(t::body(label.clone())).push(t::caption(detail.clone()));
+            }
+            col = col
+                .push(section("数据环境"))
+                .push(kv("性质", info.env_label.clone()))
+                .push(t::caption(info.env_detail.clone()));
+            if !info.run.is_empty() {
+                col = col.push(kv("运行", info.run.clone()));
+            }
+        }
+        InspTab::About => {
+            col = col.push(panel);
+            match &v.about {
+                Some(a) => {
+                    for para in a.split("\n\n") {
+                        col = col.push(t::body(para.to_string()));
+                    }
+                }
+                None => col = col.push(t::caption("这个面板还没有写说明。").color(color(c.text_tertiary))),
+            }
+        }
     }
-    col = col
-        .push(kv("工作区", info.workspace.clone()))
-        .push(section("数据环境"))
-        .push(kv("性质", info.env_label.clone()))
-        .push(t::caption(info.env_detail.clone()));
-    if !info.run.is_empty() {
-        col = col.push(kv("运行", info.run.clone()));
-    }
-    if let Some(p) = props {
-        col = col.push(rule::horizontal(1)).push(t::section("可编辑属性")).push(p);
-    }
-    // 有可编辑属性时加宽：数据选择器的一行控件在 300 宽里会挤成竖排
-    container(scrollable(col.padding(Padding::from([metrics::space(4), metrics::space(4)]))))
-        .width(Length::Fixed(if wide { 380.0 } else { 300.0 }))
+    // 左边缘拖动条：按住拖宽（整窗接住鼠标由 main 负责），双击复位到缺省宽度
+    let handle = iced::widget::mouse_area(
+        container(Space::new().width(Length::Fixed(5.0)).height(Length::Fill)).style(move |_| container::Style {
+            background: Some(Background::Color(color(c.border_default))),
+            ..Default::default()
+        }),
+    )
+    .on_press(on(ShellEvent::InspDragStart))
+    .on_double_click(on(ShellEvent::InspResetWidth))
+    .interaction(iced::mouse::Interaction::ResizingHorizontally);
+    let body = container(scrollable(col.padding(Padding::from([metrics::space(4), metrics::space(4)]))))
+        .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_| container::Style {
             background: Some(Background::Color(color(c.surface_primary))),
             border: Border { width: 1.0, color: color(c.border_default), radius: 0.0.into() },
             text_color: Some(color(c.text_primary)),
             ..Default::default()
-        })
-        .into()
+        });
+    row![handle, body].width(Length::Fixed(v.width)).height(Length::Fill).into()
 }
 
 /// 命令面板浮层（UPDS V2 §12）：e3、居中偏上、输入即过滤，↑↓ 选、↵ 运行、Esc 关。

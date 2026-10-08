@@ -830,7 +830,9 @@ fn table_controls<'a>(v: &ViewState) -> Element<'a, Msg> {
             ] {
                 l = l.push(text(format!("■{name}")).size(crate::ui::text::s_meta()).color(qcolor(q)));
             }
-            l.push(text("　值前 ≈ = 降级（估算）、! = 无效　悬停看原因").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim())).into()
+            l.push(text("　值前 ≈ = 降级（估算）、! = 无效　悬停看原因").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()))
+                .wrap()
+                .into()
         }
         (TableMode::Pivot, Metric::Z) => dim("蓝 = 低于常态，红 = 高于常态，颜色越深偏离越大（|z| ≥ 3 封顶）".into()),
         (TableMode::Pivot, Metric::Pct) => dim("蓝 = 处在历史低位，红 = 处在历史高位，50% 附近不着色".into()),
@@ -901,7 +903,7 @@ fn filter_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
         r1 = r1.push(text("　").size(crate::ui::text::s_small()));
         r1 = r1.push(chip("✕ 清筛选".into(), false, Msg::ClearFilters));
     }
-    b = b.push(r1.align_y(iced::Alignment::Center));
+    b = b.push(r1.align_y(iced::Alignment::Center).wrap());
 
     let mut r2 = row![text("阶段 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(4);
     r2 = r2.push(chip("全部".into(), v.stage.is_none(), Msg::SetStage(None)));
@@ -912,7 +914,7 @@ fn filter_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
             Msg::SetStage(Some(k)),
         ));
     }
-    b = b.push(r2.align_y(iced::Alignment::Center));
+    b = b.push(r2.align_y(iced::Alignment::Center).wrap());
 
     // 市场筛选的取值**来自快照**而不是写死：加一个市场 profile 就该自动出现。
     let mut r3 = row![text("市场 ").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(4);
@@ -924,7 +926,7 @@ fn filter_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
             Msg::SetMarket(Some(mk)),
         ));
     }
-    b = b.push(r3.align_y(iced::Alignment::Center));
+    b = b.push(r3.align_y(iced::Alignment::Center).wrap());
 
     // 族（类别）有三十来个，横排会溢出——所以只在选了阶段之后列该阶段的族。
     // 一次给三十个按钮等于没给筛选。
@@ -945,7 +947,7 @@ fn filter_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
                 Msg::SetFamily(Some(f)),
             ));
         }
-        b = b.push(r4.align_y(iced::Alignment::Center));
+        b = b.push(r4.align_y(iced::Alignment::Center).wrap());
     } else {
         b = b.push(dim("类别筛选在选定阶段后出现——三十多个族横排等于没有筛选".into()));
     }
@@ -1199,7 +1201,7 @@ fn window_bar<'a>(m: &Matrix, v: &ViewState) -> Element<'a, Msg> {
                         .color(crate::ui::pal::dim()),
                 );
             }
-            b = b.push(r);
+            b = b.push(r.wrap());
         }
         Some(w) => {
             r = r.push(text("全局：").size(crate::ui::text::s_small()).color(crate::ui::pal::dim()));
@@ -1283,7 +1285,7 @@ fn mode_bar<'a>(m: &Matrix) -> Element<'a, Msg> {
     if mode == "all" {
         r = r.push(text("全开超出常驻延迟 / 内存预算，适合临时观察").size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
     }
-    r.into()
+    r.wrap().into()
 }
 
 fn prior_tag(p: &str) -> (&'static str, Color) {
@@ -1502,15 +1504,19 @@ fn picker_view<'a>(m: &Matrix, p: &super::feature_matrix::Picker) -> Element<'a,
 /// 看特征的人要在看特征的地方启停，而不是切到进程页去找。
 /// 停掉**没有数据缺口**（录制器照常落盘，事后可回放重算），所以不需要二次确认。
 /// 数据源栏：收起时一行（现在读的是什么 + 回放状态），展开是共用数据选择组件 + 回放控制。
-fn source_bar<'a>(s: &super::feature_source::View, hosted: bool) -> Element<'a, Msg> {
+///
+/// `inspector` = 画在检查器「数据」页里：始终展开、不要收起按钮（docs/42 第 3 期）。
+fn source_bar<'a>(s: &super::feature_source::View, inspector: bool) -> Element<'a, Msg> {
     use super::feature_source::{Pace, SourceMsg};
     let mut head = row![
         text("数据源").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
         text(s.reading.clone()).size(crate::ui::text::s_small()).color(if s.is_replay { crate::ui::pal::warn() } else { crate::ui::pal::txt() }),
-        chip(if s.open { "▴ 收起".into() } else { "▾ 选择数据".into() }, s.open, Msg::Source(SourceMsg::Toggle)),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
+    if !inspector {
+        head = head.push(chip(if s.open { "▴ 收起".into() } else { "▾ 选择数据".into() }, s.open, Msg::Source(SourceMsg::Toggle)));
+    }
     if s.running {
         head = head
             .push(chip(
@@ -1520,7 +1526,7 @@ fn source_bar<'a>(s: &super::feature_source::View, hosted: bool) -> Element<'a, 
             ))
             .push(chip("■ 停止回放".into(), false, Msg::Source(SourceMsg::Stop)));
     }
-    let mut b = column![head].spacing(5);
+    let mut b = column![head.wrap()].spacing(5);
     if !s.status.is_empty() {
         b = b.push(text(s.status.clone()).size(crate::ui::text::s_meta()).color(if s.paused {
             crate::ui::pal::warn()
@@ -1530,13 +1536,9 @@ fn source_bar<'a>(s: &super::feature_source::View, hosted: bool) -> Element<'a, 
             crate::ui::pal::dim()
         }));
     }
-    if s.open {
+    if s.open || inspector {
         let opts = super::feature_source::pick_opts();
-        b = b.push(if hosted {
-            super::inspector_props::hint("数据选择")
-        } else {
-            super::data_picker_view::view(&s.pick, &opts).map(|m| Msg::Source(SourceMsg::Data(m)))
-        });
+        b = b.push(super::data_picker_view::view(&s.pick, &opts).map(|m| Msg::Source(SourceMsg::Data(m))));
         if s.pick.local_key().is_some() {
             let mut pr = row![text("回放速度").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(4).align_y(iced::Alignment::Center);
             for p in Pace::ALL {
@@ -1557,7 +1559,7 @@ fn source_bar<'a>(s: &super::feature_source::View, hosted: bool) -> Element<'a, 
             } else {
                 text("⏸ 暂停回放").size(crate::ui::text::s_small()).color(crate::ui::pal::pend()).into()
             });
-            b = b.push(pr).push(
+            b = b.push(pr.wrap()).push(
                 text(
                     "回放由特征引擎直接读数据商接口（不转格式），启用集与时间窗口用本面板的配置；\
                      写自己的一组文件，常驻引擎照常运行。选回 B1 即切回实时。",
@@ -1600,20 +1602,41 @@ fn engine_bar<'a>() -> Element<'a, Msg> {
     if !note.is_empty() {
         r = r.push(text(note).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     }
-    r.into()
+    r.wrap().into()
 }
 
 ///
 /// `hosted` = 这个面板的可编辑属性正显示在检查器里（见 `ws::inspector_props`）。
+/// 检查器「属性」页（docs/42 第 3 期）：引擎启停、启用集、时间窗口、筛选、展示——原来堆在矩阵上方的几行控件。
+pub fn inspector_settings<'a>() -> Element<'a, Msg> {
+    let m = ro::snapshot();
+    let v = super::feature_matrix::state();
+    let mut b = column![engine_bar(), mode_bar(&m), window_bar(&m, &v)].spacing(6);
+    if v.view == View::Matrix && m.present {
+        b = b.push(filter_bar(&m, &v)).push(table_controls(&v));
+    }
+    b.into()
+}
+
+/// 检查器「数据」页：特征引擎的数据源（共用数据选择组件）。
+pub fn inspector_source<'a>() -> Element<'a, Msg> {
+    let src = super::feature_source::view();
+    source_bar(&src, true)
+}
+
 pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
     if let Some(l) = lock {
         super::feature_matrix::lock_view(l);
     }
     let m = ro::snapshot();
     let v = super::feature_matrix::state();
-    let mut b = column![sec(
-        "订单流与市场微观结构 · 特征矩阵（docs/31 · 感知层·非交易信号）".into()
-    )]
+    // 检查器托管时（docs/42 第 3 期）：标题、数据源、引擎 / 启用集 / 窗口 / 筛选 / 展示这些控件都在检查器里，
+    // 主区只留视图切换、状态行与内容
+    let mut b = if hosted {
+        column![]
+    } else {
+        column![sec("订单流与市场微观结构 · 特征矩阵（docs/31 · 感知层·非交易信号）".into())]
+    }
     .spacing(6)
     .padding(crate::ui::metrics::space(3));
 
@@ -1623,7 +1646,7 @@ pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
     for view in View::ALL.into_iter().filter(|_| lock.is_none()) {
         vr = vr.push(chip(view.label().into(), v.view == view, Msg::SetView(view)));
     }
-    if v.view != View::Engine && v.picker.is_none() {
+    if v.view != View::Engine && v.picker.is_none() && !hosted {
         vr = vr.push(text("　").size(crate::ui::text::s_small())).push(chip(
             if v.fold_controls { "▾ 展开控件".into() } else { "▴ 收起控件".into() },
             v.fold_controls,
@@ -1632,8 +1655,10 @@ pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
     }
     b = b.push(vr.align_y(iced::Alignment::Center));
     let src = super::feature_source::view();
-    b = b.push(source_bar(&src, hosted));
-    let fold = v.fold_controls && v.view != View::Engine && v.picker.is_none();
+    if !hosted {
+        b = b.push(source_bar(&src, false));
+    }
+    let fold = hosted || (v.fold_controls && v.view != View::Engine && v.picker.is_none());
     if !fold {
         b = b.push(engine_bar());
         b = b.push(mode_bar(&m));
@@ -1695,8 +1720,12 @@ pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
     if !fold {
         b = b.push(top_bar(&m));
         b = b.push(filter_bar(&m, &v));
+    } else if hosted {
+        b = b.push(top_bar(&m));
     }
-    b = b.push(table_controls(&v));
+    if !hosted {
+        b = b.push(table_controls(&v));
+    }
 
     // 表头固定在滚动区之外（横向跟着表体滚：表体滚动时回传偏移，上层把表头滚到同一位置）；
     // 表体双向滚动，横向滚动条在表格区域底部。表头与所有行共用同一套窗口列与列宽。

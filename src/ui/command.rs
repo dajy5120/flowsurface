@@ -29,6 +29,8 @@ pub enum Cmd {
     FloatNew,
     FloatTidy,
     FloatToggle,
+    /// 检查器 ✕：自动展开的情况下记住「这个面板先别自动开」（docs/42 第 2 期）
+    InspectorDismiss,
     Theme(ThemeId),
     CycleTheme,
     Density(Density),

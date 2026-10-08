@@ -26,29 +26,23 @@ const LANES: [(u8, &str, f32); 7] = [
     (6, "L6–L10 策略", 0.8),
 ];
 
-pub fn pane_body<'a>(pane: uuid::Uuid, lock: Option<&str>) -> Element<'a, OfMsg> {
-    if let Some(l) = lock {
-        ol::lock_tab(pane, l);
-    }
+/// 检查器「数据」页（docs/42 第 3 期）：数据选择 + 生成 / 实时 + 实时窗口长度。
+pub fn inspector_data<'a>(pane: uuid::Uuid) -> Element<'a, OfMsg> {
     let v = ol::view(pane);
-    // 页面锁定了视图：切换在顶部页签上（docs/41），面板里不再画第二层页签
-    let tabs = lock.is_none().then(|| w::tabs(&ol::TABS.map(|(t, n)| (n, t)), &v.tab, OfMsg::Tab));
-    let mut col = column![w::panel_header("订单流层析", tabs, vec![])].spacing(space(2));
-    let body: Element<'a, OfMsg> = match v.tab {
-        OfTab::Timeline => timeline_tab(&v),
-        OfTab::Response => response_tab(&v),
-        OfTab::Setups => setups_tab(&v),
-        OfTab::Dictionary => dictionary_tab(&v),
-    };
-    col = col.push(body);
-    container(col).padding(crate::ui::metrics::pad2(2, 3)).width(Length::Fill).height(Length::Fill).into()
+    let mut col = column![super::data_picker_view::view(&v.pick, &ol::opts()).map(OfMsg::Pick), run_row(&v)].spacing(space(2));
+    if !v.note.is_empty() {
+        col = col.push(t::metadata(v.note.clone()).color(pal::dim()));
+    }
+    col.into()
 }
 
-// ── 层析时间轴页 ───────────────────────────────────────────────────────
+/// 检查器「属性」页：泳道显示开关。
+pub fn inspector_settings<'a>(pane: uuid::Uuid) -> Element<'a, OfMsg> {
+    let v = ol::view(pane);
+    column![t::metadata("泳道"), lane_toggles(&v, row![].spacing(space(2)).align_y(Alignment::Center)).wrap()].spacing(space(2)).into()
+}
 
-fn timeline_tab<'a>(v: &View) -> Element<'a, OfMsg> {
-    let picker = super::data_picker_view::view(&v.pick, &ol::opts()).map(OfMsg::Pick);
-    let mut top = column![picker].spacing(space(1));
+fn run_row<'a>(v: &View) -> iced::widget::Row<'a, OfMsg> {
     let mut actions = row![
         w::btn_busy("生成 / 读取", Kind::Primary, Some(OfMsg::Run), v.running),
         w::btn(if v.live { "● 实时（点击停止）" } else { "实时" }, if v.live { Kind::Standard } else { Kind::Ghost }, Some(OfMsg::Live(!v.live))),
@@ -60,13 +54,47 @@ fn timeline_tab<'a>(v: &View) -> Element<'a, OfMsg> {
             actions = actions.push(w::btn(format!("{m} 分"), if v.live_minutes == m { Kind::Standard } else { Kind::Ghost }, Some(OfMsg::LiveMinutes(m))));
         }
     }
+    actions
+}
+
+/// 泳道开关接在 `r` 后面（面板内联时与生成 / 实时同一行）。
+fn lane_toggles<'a>(v: &View, mut r: iced::widget::Row<'a, OfMsg>) -> iced::widget::Row<'a, OfMsg> {
     for (l, name, _) in LANES {
         let on = !v.hidden.contains(&l);
-        actions = actions.push(w::btn(name, if on { Kind::Standard } else { Kind::Ghost }, Some(OfMsg::ToggleLane(l))));
+        r = r.push(w::btn(name, if on { Kind::Standard } else { Kind::Ghost }, Some(OfMsg::ToggleLane(l))));
     }
-    top = top.push(actions.wrap());
-    if !v.note.is_empty() {
-        top = top.push(t::metadata(v.note.clone()).color(pal::dim()));
+    r
+}
+
+/// `hosted` = 检查器正托管这个面板：数据选择、生成 / 实时、泳道开关都在检查器里（docs/42 第 3 期）。
+pub fn pane_body<'a>(pane: uuid::Uuid, lock: Option<&str>, hosted: bool) -> Element<'a, OfMsg> {
+    if let Some(l) = lock {
+        ol::lock_tab(pane, l);
+    }
+    let v = ol::view(pane);
+    // 页面锁定了视图：切换在顶部页签上（docs/41），面板里不再画第二层页签
+    let tabs = lock.is_none().then(|| w::tabs(&ol::TABS.map(|(t, n)| (n, t)), &v.tab, OfMsg::Tab));
+    let mut col = column![w::panel_header("订单流层析", tabs, vec![])].spacing(space(2));
+    let body: Element<'a, OfMsg> = match v.tab {
+        OfTab::Timeline => timeline_tab(&v, hosted),
+        OfTab::Response => response_tab(&v),
+        OfTab::Setups => setups_tab(&v),
+        OfTab::Dictionary => dictionary_tab(&v),
+    };
+    col = col.push(body);
+    container(col).padding(crate::ui::metrics::pad2(2, 3)).width(Length::Fill).height(Length::Fill).into()
+}
+
+// ── 层析时间轴页 ───────────────────────────────────────────────────────
+
+fn timeline_tab<'a>(v: &View, hosted: bool) -> Element<'a, OfMsg> {
+    let mut top = column![].spacing(space(1));
+    if !hosted {
+        let actions = lane_toggles(v, run_row(v));
+        top = top.push(super::data_picker_view::view(&v.pick, &ol::opts()).map(OfMsg::Pick)).push(actions.wrap());
+        if !v.note.is_empty() {
+            top = top.push(t::metadata(v.note.clone()).color(pal::dim()));
+        }
     }
     let Some(d) = &v.data else {
         return column![top, w::empty("还没有数据", "选一个窗口点「生成 / 读取」：Rust 特征引擎回放 + OFMS 检测器，结果按窗口缓存")]

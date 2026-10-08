@@ -393,6 +393,10 @@ impl Flowsurface {
         // （官方原生 / 实盘 / 回测 / 数据录制 / Alpha Factory），不动用户已有 layout。
         // docs/41 B 期：缺页才按模板建，已有的页不动；模板有更新的只记下来在页签上提示
         state.pages = ws::pages::load();
+        // 检查器宽度与钉住状态（docs/42 第 2 期，shell.json）；样张模式另有开关，不读
+        if state.specimen.is_none() {
+            state.shell.load_insp();
+        }
         let report = ws::workspace::seed_pages(&mut state.layout_manager, &mut state.pages);
         state.outdated = report.outdated.into_iter().collect();
         if state.specimen.is_none() {
@@ -689,6 +693,7 @@ impl Flowsurface {
                 window::Event::Resized(w, size) => {
                     if w == self.main_window.id {
                         self.main_width = size.width;
+                        self.shell.window_w = size.width;
                     }
                 }
             },
@@ -710,7 +715,7 @@ impl Flowsurface {
                             let target = d
                                 .panes
                                 .iter()
-                                .find(|(_, st)| ws::inspector_props::view(&st.content).is_some())
+                                .find(|(_, st)| ws::inspector_props::has_props(&st.content))
                                 .map(|(p, _)| *p);
                             if let Some(p) = target {
                                 d.focus = Some((main, p));
@@ -1245,8 +1250,18 @@ impl Flowsurface {
         // 检查器托管聚焦面板的可编辑属性（docs/35 §16.5 第 3 项）：先登记托管的是哪个 pane，
         // 面板视图据此把原处的数据选择器 / 口径设置收成一行提示。
         let main_id = self.main_window.id;
-        let host = if self.shell.inspector {
-            dashboard.focus.filter(|(w, _)| *w == main_id).map(|(_, p)| p)
+        // docs/42 第 2 期：检查器作用于工具栏同一个面板；钉住 = 常开，否则这个面板有可设置的东西才自动展开
+        let insp_target = self.toolbar_target();
+        let insp_key = insp_target.map(|(w, p)| format!("{w:?}{p:?}"));
+        let target_has_props = insp_target
+            .and_then(|(w, p)| dashboard.get_pane(main_id, w, p))
+            .is_some_and(|st| ws::inspector_props::has_props(&st.content));
+        let insp_visible = self.gallery.is_none()
+            && (self.shell.inspector
+                || self.shell.insp_drag
+                || (target_has_props && self.shell.insp_dismissed != insp_key));
+        let host = if insp_visible {
+            insp_target.filter(|(w, _)| *w == main_id).map(|(_, p)| p)
         } else {
             None
         };
@@ -1368,17 +1383,40 @@ impl Flowsurface {
             } else {
                 dashboard_view
             };
-            let work: Element<'_, Message> = if self.shell.inspector {
-                // 检查器里的控件发的是聚焦 pane 自己的事件，原样送回那个 pane 的处理函数
-                let props = host.and_then(|p| {
-                    let st = dashboard.panes.get(p)?;
-                    let el = ws::inspector_props::view(&st.content)?;
-                    Some(el.map(move |ev| Message::Dashboard {
+            let work: Element<'_, Message> = if insp_visible {
+                // 检查器里的控件发的是那个 pane 自己的事件，原样送回那个 pane 的处理函数
+                let target_state = insp_target.and_then(|(w, p)| dashboard.get_pane(main_id, w, p).map(|st| (w, p, st)));
+                fn route<'a>(w: window::Id, p: pane_grid::Pane, el: Element<'a, dashboard::pane::Event>) -> Element<'a, Message> {
+                    el.map(move |ev| Message::Dashboard {
                         layout_id: None,
-                        event: dashboard::Message::Pane(main_id, dashboard::pane::Message::PaneEvent(p, ev)),
-                    }))
-                });
-                let insp = ui::shell::inspector(&info, props, Message::Shell);
+                        event: dashboard::Message::Pane(w, dashboard::pane::Message::PaneEvent(p, ev)),
+                    })
+                }
+                let props = target_state.and_then(|(w, p, st)| Some(route(w, p, ws::inspector_props::view(st)?)));
+                let data = target_state.and_then(|(w, p, st)| Some(route(w, p, ws::inspector_props::data_view(st)?)));
+                let (source, about, panel) = target_state
+                    .map(|(_, _, st)| {
+                        (
+                            st.toolbar_spec().source,
+                            ws::inspector_props::about(&st.content),
+                            Some(st.settings.view.clone().unwrap_or_else(|| st.content.to_string())),
+                        )
+                    })
+                    .unwrap_or((None, None, None));
+                let insp = ui::shell::inspector(
+                    &info,
+                    &ui::shell::InspView {
+                        tab: self.shell.insp_tab,
+                        width: ws::shell_prefs::clamp_width(self.shell.insp_width, self.main_width.min(10_000.0)),
+                        pinned: self.shell.inspector,
+                        source,
+                        about,
+                        panel,
+                    },
+                    props,
+                    data,
+                    Message::Shell,
+                );
                 if self.main_width < NARROW_PX {
                     // 窄窗口：抽屉盖在工作区右侧，不挤占面板宽度。stack 以第一层为尺寸基准，工作区放第一层
                     iced::widget::stack![work, row![iced::widget::space::horizontal(), insp]].into()
@@ -1413,6 +1451,21 @@ impl Flowsurface {
                 self.view_with_modal(base.into(), dashboard, menu)
             } else {
                 base.into()
+            };
+            // 拖检查器宽度时：整窗接住鼠标（光标离开拖动条也照样跟），松开结束（docs/42 第 2 期）
+            let base: Element<'_, Message> = if self.shell.insp_drag {
+                iced::widget::stack![
+                    base,
+                    iced::widget::mouse_area(iced::widget::Space::new().width(iced::Length::Fill).height(iced::Length::Fill))
+                        // 双击的第二下可能落在这层上（拖动条那一帧还没换回来）：也当作按下拖动条
+                        .on_press(Message::Shell(ui::shell::ShellEvent::InspDragStart))
+                        .on_move(|p| Message::Shell(ui::shell::ShellEvent::InspDragMove(p.x)))
+                        .on_release(Message::Shell(ui::shell::ShellEvent::InspDragEnd))
+                        .interaction(iced::mouse::Interaction::ResizingHorizontally)
+                ]
+                .into()
+            } else {
+                base
             };
 
             // 命令面板（Ctrl K）浮在一切之上（UPDS V2 §12：e3 覆盖层）
@@ -2278,7 +2331,14 @@ impl Flowsurface {
                 return self.update(Message::ScaleFactorChanged(next.into()));
             }
             Cmd::ToggleBottom => self.shell.bottom = !self.shell.bottom,
-            Cmd::ToggleInspector => self.shell.inspector = !self.shell.inspector,
+            // Ctrl I = 钉住 / 取消钉住（docs/42 第 2 期；不钉住时检查器按选中面板自动展开 / 收起）
+            Cmd::ToggleInspector => {
+                let _ = self.shell.update(ui::shell::ShellEvent::InspPin, &[]);
+                self.shell.insp_dismissed = None;
+            }
+            Cmd::InspectorDismiss => {
+                self.shell.insp_dismissed = self.toolbar_target().map(|(w, p)| format!("{w:?}{p:?}"));
+            }
             Cmd::BottomTab(tab) => {
                 self.shell.bottom = true;
                 self.shell.bottom_tab = tab;

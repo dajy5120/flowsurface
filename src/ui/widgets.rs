@@ -392,7 +392,7 @@ pub fn time_range<'a, M: Clone + 'a>(date: Option<&str>, start: &str, minutes: u
     let resolved = date
         .and_then(|d| resolve_window(d, start, minutes))
         .unwrap_or_else(|| "先选日期；起始填 HH:MM（UTC）".to_string());
-    column![presets, t::caption(resolved)].spacing(metrics::space(1)).into()
+    column![presets.wrap(), t::caption(resolved)].spacing(metrics::space(1)).into()
 }
 
 // ── 带原因的禁用 / 加载中（UPDS V3 §13 交互状态，docs/35 §6.2）────────────

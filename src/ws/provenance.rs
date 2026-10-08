@@ -94,7 +94,7 @@ pub fn badge(replay_mode: bool) -> Badge {
         _ => Badge {
             label: "等待运行".into(),
             detail: "回放工作区，但当前没有活动的回测。\n\
-                     在回测结果面板顶上的「发起回测」选策略与数据后运行，图表会边跑边画。"
+                     在回测结果面板的「发起回测」（检查器开着时在检查器的属性 / 数据页）选策略与数据后运行，图表会边跑边画。"
                 .into(),
             tone: Tone::Warn,
         },
@@ -245,7 +245,7 @@ pub fn link(replay_mode: bool, venue: &str, symbol: &str) -> Link {
                      {} 计算  NautilusTrader BacktestEngine · run {}\n\
                      ✔ 输出  Redis ws:bt:{}:trades → 图（K 线 / ▲▼ / 订单面板）\n\
                      \x20 状态  {}\n\n\
-                     点击：展开回测结果面板顶上的「发起回测」",
+                     点击：展开回测结果面板的「发起回测」",
                     source_label(&ar.source),
                     ar.symbol,
                     if running { "✔" } else { "·" },
