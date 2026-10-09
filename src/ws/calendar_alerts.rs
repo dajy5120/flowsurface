@@ -652,6 +652,150 @@ pub fn stop_sender() {
     let _ = std::process::Command::new("systemctl").args(["--user", "stop", "--no-block", SENDER_UNIT]).status();
 }
 
+/// 不管 Telegram 开没开都拉起发送进程（界面「测试连通」「读取会话」用；它关着时空闲两分钟会自己退出）。
+pub fn start_sender_now() {
+    if !super::svcctl::query(SENDER_UNIT).active {
+        let _ = std::process::Command::new("systemctl").args(["--user", "start", "--no-block", SENDER_UNIT]).status();
+    }
+}
+
+// ── 界面里的 Telegram 配置与连通测试（docs/43 §18）────────────────────
+//
+// 界面里没有网络代码：写 `telegram_request.json`（带 nonce），`ws-telegram` 处理完写 `telegram_status.json`。
+
+fn request_path() -> std::path::PathBuf {
+    super::paths::runtime_dir().join("telegram_request.json")
+}
+
+fn status_path() -> std::path::PathBuf {
+    super::paths::runtime_dir().join("telegram_status.json")
+}
+
+/// 交给 `ws-telegram` 的一次动作：`probe`（测试连通，不发消息）/ `detect`（从最近消息读会话 ID）。返回 nonce。
+pub fn request_telegram(action: &str) -> Result<i64, String> {
+    let nonce = now_ms();
+    let p = request_path();
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::json!({ "nonce": nonce, "action": action }).to_string()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
+    start_sender_now();
+    Ok(nonce)
+}
+
+/// `ws-telegram` 写回的结果（不含令牌）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TgStatus {
+    pub nonce: i64,
+    pub action: String,
+    pub ok: bool,
+    pub message: String,
+    pub bot: String,
+    /// （会话 ID, 类型, 名字）
+    pub chats: Vec<(String, String, String)>,
+    pub at: String,
+}
+
+static TG_STATUS: Mutex<Option<(Option<std::time::SystemTime>, TgStatus)>> = Mutex::new(None);
+
+/// 读结果文件（变了才读）。日历面板的读数线程每秒调一次——面板不显示时不读。
+pub fn poll_tg_status() {
+    let mt = std::fs::metadata(status_path()).and_then(|m| m.modified()).ok();
+    let Ok(mut g) = TG_STATUS.lock() else { return };
+    if g.as_ref().is_some_and(|(m, _)| *m == mt) {
+        return;
+    }
+    let st = std::fs::read_to_string(status_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .map(|v| TgStatus {
+            nonce: v["nonce"].as_i64().unwrap_or(0),
+            action: v["action"].as_str().unwrap_or("").into(),
+            ok: v["ok"].as_bool().unwrap_or(false),
+            message: v["message"].as_str().unwrap_or("").into(),
+            bot: v["bot"].as_str().unwrap_or("").into(),
+            chats: v["chats"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|c| (c["id"].as_str().unwrap_or("").into(), c["kind"].as_str().unwrap_or("").into(), c["name"].as_str().unwrap_or("").into()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            at: v["at"].as_str().unwrap_or("").into(),
+        })
+        .unwrap_or_default();
+    *g = Some((mt, st));
+}
+
+pub fn tg_status() -> TgStatus {
+    TG_STATUS.lock().ok().and_then(|g| g.as_ref().map(|(_, s)| s.clone())).unwrap_or_default()
+}
+
+/// 令牌的遮挡写法：`123456:AA…k9`。**界面上从不显示完整令牌**。
+pub fn masked_token(t: &str) -> String {
+    let t = t.trim();
+    match t.split_once(':') {
+        Some((id, rest)) if rest.chars().count() > 4 => {
+            let head: String = rest.chars().take(2).collect();
+            let tail: String = rest.chars().rev().take(2).collect::<Vec<_>>().into_iter().rev().collect();
+            format!("{id}:{head}…{tail}")
+        }
+        _ if t.is_empty() => String::new(),
+        _ => "…".into(),
+    }
+}
+
+/// 令牌的样子：`数字:30 位以上的字母数字-_`。
+pub fn token_looks_valid(t: &str) -> bool {
+    match t.trim().split_once(':') {
+        Some((id, rest)) => !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) && rest.len() >= 30 && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        None => false,
+    }
+}
+
+/// 会话 ID 的样子：整数（私聊正、群组 / 频道负）或 `@频道名`。
+pub fn chat_looks_valid(c: &str) -> bool {
+    let c = c.trim();
+    c.parse::<i64>().is_ok() || (c.starts_with('@') && c.len() > 1 && c[1..].chars().all(|x| x.is_ascii_alphanumeric() || x == '_'))
+}
+
+/// 保存配置：`token = None` 保留原来的令牌；`enabled` 原样保留（开关在出口总闸 / 界面的启用按钮）。
+/// 写完权限 600。返回给界面的一句话。
+pub fn save_telegram(token: Option<&str>, chat: &str, min_importance: u8) -> Result<String, String> {
+    let old = telegram();
+    let token = match token.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) if !token_looks_valid(t) => return Err("令牌的格式不对：应该是「数字:一串字母数字」，从 @BotFather 的回复里整段复制".into()),
+        Some(t) => t.to_string(),
+        None => old.bot_token.clone(),
+    };
+    let chat = chat.trim();
+    if !chat.is_empty() && !chat_looks_valid(chat) {
+        return Err("会话 ID 应该是数字（私聊是正数，群组 / 频道是 -100 开头的负数）或 @频道名".into());
+    }
+    let p = telegram_path();
+    let mut v: serde_json::Value = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::json!({}));
+    v["bot_token"] = serde_json::Value::from(token);
+    v["chat_id"] = serde_json::Value::from(chat.to_string());
+    v["min_importance"] = serde_json::Value::from(min_importance.min(3));
+    if v.get("enabled").is_none() {
+        v["enabled"] = serde_json::Value::Bool(false);
+    }
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    // 先建 600 再写：避免令牌在一个能被别人读的文件里待哪怕一瞬间
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&p).map_err(|e| e.to_string())?;
+        let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+        std::io::Write::write_all(&mut f, &serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&p, serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok("✔ Telegram 配置已保存（权限 600）".into())
+}
+
 /// 「发一条测试消息」：写一条测试任务 + 一行 Telegram 待送，交给守护发。返回给界面的一句话。
 pub fn queue_test_message(c: &Connection) -> Result<String, String> {
     let tg = telegram();
@@ -1174,6 +1318,18 @@ mod tests {
         let b: TelegramConfig = serde_json::from_str(r#"{"bot_token":"1:x","chat_id":"123456789","enabled":true}"#).unwrap();
         assert_eq!((a.chat_id.as_str(), a.configured(), a.min_importance), ("123456789", true, 1));
         assert!(b.enabled && b.configured());
+    }
+
+    #[test]
+    fn the_token_is_never_shown_whole_and_inputs_are_checked() {
+        let t = "1234567890:AAH1234567890abcdefghijklmnopqrstuv";
+        let m = masked_token(t);
+        assert_eq!(m, "1234567890:AA…uv");
+        assert!(!m.contains("1234567890abcdef"));
+        assert!(token_looks_valid(t));
+        assert!(!token_looks_valid("1234:short") && !token_looks_valid("abc:AAH1234567890abcdefghijklmnopqrstuv"));
+        assert!(chat_looks_valid("123456789") && chat_looks_valid("-1001234567890") && chat_looks_valid("@my_channel"));
+        assert!(!chat_looks_valid("https://t.me/x") && !chat_looks_valid("@"));
     }
 
     #[test]

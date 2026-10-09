@@ -183,6 +183,55 @@ pub fn handle(m: CalMsg) {
                 Err(e) => ro::set_alert_note(format!("✗ {e}")),
             }
         }
+        CalMsg::TgToken(t) => ro::set_tg_token(t),
+        CalMsg::TgChat(t) => ro::set_tg_chat(t),
+        CalMsg::TgImp(i) => ro::set_tg_imp(i),
+        CalMsg::TgSave | CalMsg::TgSaveProbe => {
+            let probe = matches!(m, CalMsg::TgSaveProbe);
+            let saved = al::telegram();
+            let (token, chat, imp) = ro::tg_form(&saved);
+            match al::save_telegram(Some(&token), &chat, imp) {
+                Ok(note) => {
+                    ro::clear_tg_form();
+                    if probe {
+                        match al::request_telegram("probe") {
+                            Ok(n) => {
+                                ro::set_tg_wait(n);
+                                ro::set_alert_note(note);
+                            }
+                            Err(e) => ro::set_alert_note(format!("✗ 已保存，但发不出测试请求：{e}")),
+                        }
+                    } else {
+                        ro::set_alert_note(note);
+                    }
+                }
+                Err(e) => ro::set_alert_note(format!("✗ {e}")),
+            }
+        }
+        CalMsg::TgDetect => {
+            // 先把刚贴的令牌存上：读会话用的是已保存的令牌
+            let saved = al::telegram();
+            let (token, chat, imp) = ro::tg_form(&saved);
+            if !token.trim().is_empty() {
+                if let Err(e) = al::save_telegram(Some(&token), &chat, imp) {
+                    ro::set_alert_note(format!("✗ {e}"));
+                    return;
+                }
+                ro::set_tg_token(String::new());
+            }
+            if al::telegram().bot_token.trim().is_empty() {
+                ro::set_alert_note("✗ 先填机器人令牌");
+                return;
+            }
+            match al::request_telegram("detect") {
+                Ok(n) => ro::set_tg_wait(n),
+                Err(e) => ro::set_alert_note(format!("✗ {e}")),
+            }
+        }
+        CalMsg::TgEnable(on) => {
+            // 与出口总闸「Telegram 提醒」那一行同一个开关
+            ro::set_alert_note(super::egress::action("telegram", if on { "start" } else { "stop" }));
+        }
         CalMsg::TelegramTest => {
             let mut note = String::new();
             let r = al::write(|c| {

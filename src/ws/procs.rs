@@ -131,6 +131,14 @@ pub static ALL: &[Proc] = &[
         if_stopped: "新闻面板停更；源健康页的陈旧判定会开始变红",
     },
     Proc {
+        key: "telegram",
+        label: "Telegram 提醒发送",
+        what: "金融日历提醒 → api.telegram.org（只发提醒、不抓新闻；docs/43 §17）",
+        unit: "ws-telegram",
+        kind: Kind::Daemon,
+        if_stopped: "Telegram 收不到提醒（待送的到点作废）；Telegram 开着时 Cockpit 会再拉起它；关着时它空闲两分钟会自己退出",
+    },
+    Proc {
         key: "observatory",
         label: "接口观察终端",
         what: "REST/WS/TCP/FIX 探针 → observatory.json",

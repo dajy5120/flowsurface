@@ -63,8 +63,17 @@ pub enum CalMsg {
     QuietTo(String),
     QuietP0(bool),
     QuietSave,
-    /// 发一条 Telegram 测试消息（交给资讯守护发）。
+    /// 发一条 Telegram 测试消息（交给 ws-telegram 发）。
     TelegramTest,
+    TgToken(String),
+    TgChat(String),
+    TgImp(u8),
+    TgSave,
+    /// 保存，再让 ws-telegram 测试连通（getMe + getChat，不发消息）。
+    TgSaveProbe,
+    /// 让 ws-telegram 从最近消息里读会话 ID（getUpdates）。
+    TgDetect,
+    TgEnable(bool),
     RulesTable(crate::ui::grid::GridMsg),
     NoticesTable(crate::ui::grid::GridMsg),
     /// 事件流表（ui::grid）。
@@ -1106,37 +1115,122 @@ fn alerts_view<'a>(snap: &CalReadout) -> Element<'a, CalMsg> {
         .wrap()
         .into(),
     ));
+    col = col.push(telegram_section(&tg));
+    crate::ui::scroll(col).width(Length::Fill).height(Length::Fill).into()
+}
+
+
+/// Telegram 配置与连通测试（docs/43 §18）：在界面里填令牌和会话、测试，不用再手改文件。
+///
+/// 界面里没有网络代码：「测试连通」「从最近消息读取」都写请求文件交给 `ws-telegram`，结果从它写回的状态文件读。
+/// **令牌只进不出**：输入框是密码框，保存后只显示遮挡写法（`123456:AA…k9`），草稿清空。
+fn telegram_section<'a>(tg: &super::calendar_alerts::TelegramConfig) -> Element<'a, CalMsg> {
+    use super::calendar_alerts as al;
+    let kv = |k: &str, v: Element<'a, CalMsg>| crate::ui::widgets::kv(k.to_string(), v, 72.0);
+    let (token, chat, imp) = ro::tg_form(tg);
+    let st = al::tg_status();
     let private = al::telegram_file_private();
-    let tg_line = if !tg.configured() {
-        format!("未配置——在 {} 写 bot_token、chat_id（权限 600）", al::telegram_path().display())
+    let mut col = column![crate::ui::widgets::section("Telegram")].spacing(crate::ui::metrics::space(2));
+
+    // 现状一行
+    let (state, c) = if !tg.configured() {
+        ("未配置".to_string(), crate::ui::pal::dim())
+    } else if tg.enabled {
+        (format!("已启用 · 只发 ≤ {}", ro::importance_label(tg.min_importance)), crate::ui::pal::ok())
     } else {
-        format!(
-            "已配置 · {} · 只发 ≤ {}{}",
-            if tg.enabled { "开着" } else { "关着" },
-            ro::importance_label(tg.min_importance),
-            if private == Some(false) { " · ⚠ 配置文件别人也能读（令牌在里面），chmod 600" } else { "" }
-        )
+        ("已配置、没启用".to_string(), crate::ui::pal::warn())
+    };
+    let mut head = row![meta(state, c)].spacing(crate::ui::metrics::space(3)).align_y(Alignment::Center);
+    if tg.configured() {
+        head = head.push(chip_on(if tg.enabled { "启用中（点一下停用）" } else { "启用 Telegram" }, tg.enabled, CalMsg::TgEnable(!tg.enabled)));
+    }
+    if private == Some(false) {
+        head = head.push(meta("⚠ 配置文件别人也能读（令牌在里面）——点「保存」会改回 600", crate::ui::pal::warn()));
+    }
+    col = col.push(kv("状态", head.wrap().into()));
+
+    // 令牌（密码框）
+    let ph = if tg.bot_token.trim().is_empty() {
+        "粘贴 @BotFather 给的令牌（数字:一串字母）".to_string()
+    } else {
+        format!("已保存 {}——要换就粘贴新的", al::masked_token(&tg.bot_token))
     };
     col = col.push(kv(
-        "Telegram",
-        row![
-            meta(tg_line, if private == Some(false) { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
-            crate::ui::widgets::btn(
-                "发一条测试消息",
-                crate::ui::widgets::Kind::Standard,
-                (tg.configured() && tg.enabled).then_some(CalMsg::TelegramTest),
-            ),
-        ]
-        .spacing(crate::ui::metrics::space(3))
-        .align_y(Alignment::Center)
-        .wrap()
-        .into(),
+        "机器人令牌",
+        text_input(&ph, &token)
+            .on_input(CalMsg::TgToken)
+            .secure(true)
+            .size(crate::ui::text::s_small())
+            .padding(crate::ui::metrics::pad2(0, 2))
+            .width(Length::Fixed(420.0))
+            .into(),
     ));
+
+    // 会话 ID + 从最近消息读取
+    let mut chat_row = row![
+        text_input("数字，如 123456789（群组 / 频道是 -100 开头）", &chat)
+            .on_input(CalMsg::TgChat)
+            .size(crate::ui::text::s_small())
+            .padding(crate::ui::metrics::pad2(0, 2))
+            .width(Length::Fixed(260.0)),
+        crate::ui::widgets::btn("从最近消息读取", crate::ui::widgets::Kind::Subtle, Some(CalMsg::TgDetect)),
+    ]
+    .spacing(crate::ui::metrics::space(2))
+    .align_y(Alignment::Center);
+    if st.action == "detect" && !st.chats.is_empty() {
+        for (id, kind, name) in &st.chats {
+            let k = match kind.as_str() {
+                "private" => "私聊",
+                "channel" => "频道",
+                "group" | "supergroup" => "群组",
+                _ => "",
+            };
+            chat_row = chat_row.push(chip_on(format!("{name}（{k} {id}）"), *id == chat, CalMsg::TgChat(id.clone())));
+        }
+    }
+    col = col.push(kv("会话 ID", chat_row.wrap().into()));
+    col = col.push(kv(
+        "只发",
+        crate::ui::widgets::segmented(&[("P0", 0_u8), ("≤P1", 1), ("≤P2", 2), ("全部", 3)], &imp, CalMsg::TgImp),
+    ));
+
+    // 动作
+    col = col.push(
+        row![
+            crate::ui::widgets::btn("保存", crate::ui::widgets::Kind::Standard, Some(CalMsg::TgSave)),
+            crate::ui::widgets::btn("保存并测试连通", crate::ui::widgets::Kind::Primary, Some(CalMsg::TgSaveProbe)),
+            crate::ui::widgets::btn("发一条测试消息", crate::ui::widgets::Kind::Standard, (tg.configured() && tg.enabled).then_some(CalMsg::TelegramTest)),
+        ]
+        .spacing(crate::ui::metrics::space(2))
+        .align_y(Alignment::Center)
+        .wrap(),
+    );
+
+    // 结果：在等的请求还没回来 → 「测试中」；回来了 → 它的结论
+    let waiting = ro::tg_wait().filter(|(n, _)| *n != st.nonce);
+    let result: Option<(String, Color)> = match waiting {
+        Some((_, secs)) if secs >= 20 => Some(("✗ 20 秒没有回应：发送进程 ws-telegram 没起来？在「资源｜进程」里看看".into(), crate::ui::pal::bad())),
+        Some(_) => Some(("测试中…（ws-telegram 正在问 api.telegram.org）".into(), crate::ui::pal::info())),
+        None if !st.message.is_empty() => Some((
+            format!("{} · {}", st.at, st.message),
+            if st.ok { crate::ui::pal::ok() } else { crate::ui::pal::warn() },
+        )),
+        None => None,
+    };
+    if let Some((t, c)) = result {
+        col = col.push(meta(t, c));
+    }
     col = col.push(meta(
-        "开关在「资源｜网络出口」（出口总闸，默认关）。发送由资讯守护负责：打开 Telegram 后守护随 Cockpit 起停；同一轮的普通提醒合并成一条、P0 单独发、每秒最多一条；发出去没收到回复记「不确定」，只有 P0 重试一次；事件过了未送出即作废。只出不进：不收消息、不做机器人命令。",
+        "怎么配：① 在 Telegram 找 @BotFather 发 /newbot，复制它给的令牌贴到上面；② 打开你的新机器人、随便发一条消息；\
+         ③ 点「从最近消息读取」选你的会话；④「保存并测试连通」（只检查、不发消息）；⑤「启用 Telegram」，再「发一条测试消息」确认能收到。",
         crate::ui::pal::dim(),
     ));
-    crate::ui::scroll(col).width(Length::Fill).height(Length::Fill).into()
+    col = col.push(meta(
+        "令牌只存本机 ~/.config/wealthspring/telegram.json（权限 600），界面不回显。发送由独立进程 ws-telegram 负责（不抓新闻），开着时随 Cockpit 起停；\
+         同一轮的普通提醒合并成一条、P0 单独发、每秒最多一条；发出去没收到回复记「不确定」，只有 P0 重试一次；事件过了未送出即作废。只出不进：不收消息、不做机器人命令。",
+        crate::ui::pal::dim(),
+    ));
+    col.into()
 }
 
 #[cfg(test)]

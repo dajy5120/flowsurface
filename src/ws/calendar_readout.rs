@@ -242,6 +242,8 @@ pub fn snapshot() -> std::sync::Arc<CalReadout> {
                         *g = std::sync::Arc::new(snap);
                     }
                 }
+                // Telegram 连通测试的结果（界面「提醒」页）
+                super::calendar_alerts::poll_tg_status();
                 // 自动刷新：面板在显示 + 数据旧了 + 没在跑 + 守护没常驻 + 离上次自动刷新够久
                 let cur = lock.lock().map(|g| g.clone()).unwrap_or_default();
                 let now = chrono::Local::now().timestamp_millis();
@@ -653,6 +655,11 @@ struct Ui {
     quiet_edit: Option<(String, String, bool)>,
     /// 提醒页最近一次操作的回执。
     alert_note: String,
+    /// Telegram 配置表单：令牌（空 = 保留已保存的）、会话 ID、只发到哪一档；等哪个请求的结果（nonce, 发出时刻）。
+    tg_token: String,
+    tg_chat: Option<String>,
+    tg_imp: Option<u8>,
+    tg_wait: Option<(i64, std::time::Instant)>,
 }
 
 static UI: Mutex<Option<Ui>> = Mutex::new(None);
@@ -779,6 +786,41 @@ pub fn alert_note() -> String {
 pub fn set_alert_note(t: impl Into<String>) {
     let t = t.into();
     with_ui(|u| u.alert_note = t);
+}
+
+/// Telegram 表单：（令牌草稿, 会话 ID, 只发到哪一档）。会话与档位没改过就用已保存的。
+pub fn tg_form(saved: &super::calendar_alerts::TelegramConfig) -> (String, String, u8) {
+    with_ui(|u| (u.tg_token.clone(), u.tg_chat.clone().unwrap_or_else(|| saved.chat_id.clone()), u.tg_imp.unwrap_or(saved.min_importance)))
+}
+
+pub fn set_tg_token(t: String) {
+    with_ui(|u| u.tg_token = t);
+}
+
+pub fn set_tg_chat(t: String) {
+    with_ui(|u| u.tg_chat = Some(t));
+}
+
+pub fn set_tg_imp(i: u8) {
+    with_ui(|u| u.tg_imp = Some(i));
+}
+
+/// 保存成功后：令牌草稿清空（输入框不再留着令牌），会话 / 档位回到「用已保存的」。
+pub fn clear_tg_form() {
+    with_ui(|u| {
+        u.tg_token.clear();
+        u.tg_chat = None;
+        u.tg_imp = None;
+    });
+}
+
+pub fn set_tg_wait(nonce: i64) {
+    with_ui(|u| u.tg_wait = Some((nonce, std::time::Instant::now())));
+}
+
+/// 在等的请求：（nonce, 等了几秒）。
+pub fn tg_wait() -> Option<(i64, u64)> {
+    with_ui(|u| u.tg_wait.map(|(n, t)| (n, t.elapsed().as_secs())))
 }
 
 pub fn selected_event() -> Option<String> {
