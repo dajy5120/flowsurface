@@ -525,16 +525,19 @@ pub enum View {
     Stream,
     /// 提醒：规则、通知中心、免打扰与渠道（docs/43 K4）。
     Alerts,
+    /// 历史事件研究（docs/43 K5c）。
+    Study,
 }
 
 impl View {
-    pub const ALL: [View; 4] = [View::Month, View::Year, View::Stream, View::Alerts];
+    pub const ALL: [View; 5] = [View::Month, View::Year, View::Stream, View::Alerts, View::Study];
     pub fn label(self) -> &'static str {
         match self {
             View::Month => "月历",
             View::Year => "全年",
             View::Stream => "事件流",
             View::Alerts => "提醒",
+            View::Study => "研究",
         }
     }
 }
@@ -660,6 +663,10 @@ struct Ui {
     tg_chat: Option<String>,
     tg_imp: Option<u8>,
     tg_wait: Option<(i64, std::time::Instant)>,
+    /// 风控窗口宽度的编辑值（P0 前, P0 后, P1 前, P1 后）。
+    win_edit: Option<(String, String, String, String)>,
+    /// 研究页看哪个系列（`None` = 报告里的第一个）。
+    study_series: Option<String>,
 }
 
 static UI: Mutex<Option<Ui>> = Mutex::new(None);
@@ -842,6 +849,34 @@ pub fn set_tg_wait(nonce: i64) {
 /// 在等的请求：（nonce, 等了几秒）。
 pub fn tg_wait() -> Option<(i64, u64)> {
     with_ui(|u| u.tg_wait.map(|(n, t)| (n, t.elapsed().as_secs())))
+}
+
+pub fn win_edit(saved: &super::calendar_alerts::WindowCfg) -> (String, String, String, String) {
+    with_ui(|u| u.win_edit.clone())
+        .unwrap_or_else(|| (saved.p0_pre.to_string(), saved.p0_post.to_string(), saved.p1_pre.to_string(), saved.p1_post.to_string()))
+}
+
+pub fn set_win_field(saved: &super::calendar_alerts::WindowCfg, field: &str, v: String) {
+    let mut cur = win_edit(saved);
+    match field {
+        "p0_pre" => cur.0 = v,
+        "p0_post" => cur.1 = v,
+        "p1_pre" => cur.2 = v,
+        _ => cur.3 = v,
+    }
+    with_ui(|u| u.win_edit = Some(cur));
+}
+
+pub fn study_series() -> Option<String> {
+    with_ui(|u| u.study_series.clone())
+}
+
+pub fn set_study_series(s: String) {
+    with_ui(|u| u.study_series = Some(s));
+}
+
+pub fn clear_win_edit() {
+    with_ui(|u| u.win_edit = None);
 }
 
 pub fn selected_event() -> Option<String> {

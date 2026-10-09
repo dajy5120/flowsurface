@@ -240,6 +240,32 @@ pub fn handle(m: CalMsg) {
                 Err(e) => ro::set_alert_note(format!("✗ {e}")),
             }
         }
+        CalMsg::WinEdit(f, v) => ro::set_win_field(&al::snapshot().window_cfg, f, v),
+        CalMsg::WinSave => {
+            let e = ro::win_edit(&al::snapshot().window_cfg);
+            let p = |s: &str| s.trim().parse::<i64>().ok().filter(|v| (0..=24 * 60).contains(v));
+            let (Some(a), Some(b), Some(c), Some(d)) = (p(&e.0), p(&e.1), p(&e.2), p(&e.3)) else {
+                ro::set_alert_note("✗ 窗口宽度写 0–1440 的整数分钟");
+                return;
+            };
+            let w = al::WindowCfg { p0_pre: a, p0_post: b, p1_pre: c, p1_post: d };
+            match al::write(|conn| al::set_window_cfg(conn, &w)) {
+                Ok(()) => {
+                    ro::clear_win_edit();
+                    ro::set_alert_note("✔ 风控窗口已保存（实时与回测用同一份）");
+                }
+                Err(e) => ro::set_alert_note(format!("✗ {e}")),
+            }
+        }
+        CalMsg::StudyRun => super::calendar_study::run_now(),
+        CalMsg::StudySeries(s) => ro::set_study_series(s),
+        CalMsg::StudyDaily(g) => crate::ui::grid::named_update("calendar.study.daily", g),
+        CalMsg::StudyIntra(g) => crate::ui::grid::named_update("calendar.study.intra", g),
+        CalMsg::ChartLines(on) => {
+            if let Err(e) = al::write(|c| al::set_chart_lines(c, on)) {
+                ro::set_alert_note(format!("✗ {e}"));
+            }
+        }
         CalMsg::TgEnable(on) => {
             // 与出口总闸「Telegram 提醒」那一行同一个开关
             ro::set_alert_note(super::egress::action("telegram", if on { "start" } else { "stop" }));

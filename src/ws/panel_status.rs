@@ -44,6 +44,12 @@ pub fn status(content: &Content) -> Option<(String, Color)> {
             let h = (now - r.generated_ms) / 3_600_000;
             let stale = super::calendar_readout::needs_refresh(true, r.generated_ms, now);
             // 错过的提醒（Cockpit 关着时到点的）：在状态里说出来，通知中心里点「知道了」消掉
+            // 此刻在风控窗口里（K5a）：最该被看见的一句，放最前
+            let snap = super::calendar_alerts::snapshot();
+            if let Some(w) = snap.active.first() {
+                let left = (w.end_ms - now) / 60_000;
+                return Some((format!("⚠ 事件窗口中：{}（还有 {left} 分钟）", w.title), pal::warn()));
+            }
             let missed = super::calendar_alerts::status().missed;
             let tail = if missed > 0 { format!(" · 错过 {missed} 条提醒") } else { String::new() };
             Some((

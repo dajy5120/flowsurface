@@ -109,7 +109,7 @@ pub const PAGE_SEP: char = '｜';
 /// 同一面板出现在同一工作区的几页里时，靠 `Settings.view` 锁定各自显示哪个视图（§3.3）；
 /// 几页不会同时显示，共用面板的其余状态正好一致。
 pub const PAGES: [(&str, &[&str]); 12] = [
-    (WS_CALENDAR, &["月历", "全年", "事件流", "提醒"]),
+    (WS_CALENDAR, &["月历", "全年", "事件流", "提醒", "研究"]),
     (WS_NEWS, &["新闻", "订阅与检索", "源管理"]),
     (WS_GLOBAL, &["热图", "筛选器", "全球总览", "市场宽度", "加密全景", "预测市场", "股票全景", "宏观新闻"]),
     (WS_RECORDER, &["行情录制", "录制明细", "预测市场录制"]),
@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(GROUPS[3].1, [WS_FEATURES, WS_OFMS, WS_STRATEGY, WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]);
         // docs/43：金融日历是资讯组第一个（组首快捷键 Ctrl Shift 2 直达它）
         assert_eq!(GROUPS[1].1, [WS_CALENDAR, WS_NEWS, WS_GLOBAL]);
-        assert_eq!(page_layouts(WS_CALENDAR), ["金融日历", "金融日历｜全年", "金融日历｜事件流", "金融日历｜提醒"]);
+        assert_eq!(page_layouts(WS_CALENDAR), ["金融日历", "金融日历｜全年", "金融日历｜事件流", "金融日历｜提醒", "金融日历｜研究"]);
         assert!(pane_template("金融日历｜全年").contains(r#""view":"全年""#));
     }
 

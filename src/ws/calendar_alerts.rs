@@ -597,6 +597,137 @@ pub fn mark_missed(c: &Connection, now: i64) -> rusqlite::Result<usize> {
     c.execute("UPDATE alert_jobs SET state='missed' WHERE state='pending' AND fire_at < ?1", [now - 2 * 60_000])
 }
 
+// ── 风控窗口（docs/43 §8 第 3 条、K5a）────────────────────────────────
+//
+// 「P0/P1 事件前 N 分钟到后 M 分钟」作为窗口：**日历只给窗口，不碰下单**；策略侧自己决定暂停开仓、降仓还是不管。
+// 实时：每轮写 Redis `ws:calendar:windows`（2 分钟过期——读到过期 / 没有 = 日历没在跑，策略自己决定怎么办）；
+// 回测：`strategies/calendar_windows.py` 直接读事件库，同一份设置、同一套口径。
+
+pub const WINDOWS_KEY: &str = "ws:calendar:windows";
+/// Redis 里的窗口多久过期（秒）。线程最多 30 秒一轮，留足余量。
+const WINDOWS_TTL: u64 = 120;
+
+/// 窗口宽度（分钟）：P0 / P1 各自的「事件前」与「事件后」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowCfg {
+    pub p0_pre: i64,
+    pub p0_post: i64,
+    pub p1_pre: i64,
+    pub p1_post: i64,
+}
+
+impl Default for WindowCfg {
+    fn default() -> Self {
+        Self { p0_pre: 30, p0_post: 60, p1_pre: 15, p1_post: 30 }
+    }
+}
+
+impl WindowCfg {
+    pub fn span(&self, importance: u8) -> Option<(i64, i64)> {
+        match importance {
+            0 => Some((self.p0_pre, self.p0_post)),
+            1 => Some((self.p1_pre, self.p1_post)),
+            _ => None,
+        }
+    }
+}
+
+pub fn window_cfg(c: &Connection) -> WindowCfg {
+    let d = WindowCfg::default();
+    let g = |k: &str, dv: i64| setting(c, k).and_then(|v| v.parse::<i64>().ok()).filter(|v| (0..=24 * 60).contains(v)).unwrap_or(dv);
+    WindowCfg { p0_pre: g("win_p0_pre", d.p0_pre), p0_post: g("win_p0_post", d.p0_post), p1_pre: g("win_p1_pre", d.p1_pre), p1_post: g("win_p1_post", d.p1_post) }
+}
+
+pub fn set_window_cfg(c: &Connection, w: &WindowCfg) -> rusqlite::Result<()> {
+    for (k, v) in [("win_p0_pre", w.p0_pre), ("win_p0_post", w.p0_post), ("win_p1_pre", w.p1_pre), ("win_p1_post", w.p1_post)] {
+        c.execute("INSERT INTO alert_settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=?2", params![k, v.to_string()])?;
+    }
+    Ok(())
+}
+
+/// 一个事件窗口。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Window {
+    pub event_id: String,
+    pub title: String,
+    pub series: Option<String>,
+    pub country: String,
+    pub importance: u8,
+    /// 事件时刻（UTC 毫秒）。
+    pub at_ms: i64,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    /// `exact` / `conventional`：时刻按惯例补的（FOMC 14:00 美东）也算——窗口本来就留了余量。
+    pub precision: String,
+}
+
+/// `[from, to]` 里会产生窗口的事件（P0/P1、有时刻、没被撤下），按事件时刻排。
+/// **没有时刻的（仅日期 / 预计）不出窗口**：不编时刻。
+pub fn windows(c: &Connection, cfg: &WindowCfg, from_ms: i64, to_ms: i64) -> Vec<Window> {
+    let Ok(mut st) = c.prepare(
+        "SELECT id, title, series, country, importance, scheduled_at, precision FROM events
+         WHERE importance <= 1 AND scheduled_at IS NOT NULL AND status NOT IN ('unlisted','conflict')
+           AND precision IN ('exact','conventional') AND scheduled_at BETWEEN ?1 AND ?2 ORDER BY scheduled_at",
+    ) else {
+        return Vec::new();
+    };
+    // 前后最宽能到多少：按最宽的放宽查询范围，再逐个按窗口判
+    let pad = 60_000 * cfg.p0_pre.max(cfg.p0_post).max(cfg.p1_pre).max(cfg.p1_post);
+    st.query_map(params![from_ms - pad, to_ms + pad], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, i64>(4)?.clamp(0, 3) as u8,
+            r.get::<_, i64>(5)?,
+            r.get::<_, String>(6)?,
+        ))
+    })
+    .map(|it| {
+        it.filter_map(|x| x.ok())
+            .filter_map(|(event_id, title, series, country, importance, at_ms, precision)| {
+                let (pre, post) = cfg.span(importance)?;
+                let (start_ms, end_ms) = (at_ms - pre * 60_000, at_ms + post * 60_000);
+                (end_ms >= from_ms && start_ms <= to_ms).then_some(Window { event_id, title, series, country, importance, at_ms, start_ms, end_ms, precision })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// 写进 Redis 的那份：`active` = 此刻在窗口里的；`upcoming` = 接下来 24 小时的。策略**按 start / end 自己判**，
+/// 不要只看 `active`（这份最多 30 秒刷新一次）。
+pub fn windows_payload(c: &Connection, now: i64) -> serde_json::Value {
+    let cfg = window_cfg(c);
+    let all = windows(c, &cfg, now, now + 24 * 3_600_000);
+    let (active, upcoming): (Vec<&Window>, Vec<&Window>) = all.iter().partition(|w| w.start_ms <= now && now <= w.end_ms);
+    serde_json::json!({
+        "version": 1,
+        "generated_ms": now,
+        "ttl_secs": WINDOWS_TTL,
+        "config": { "p0_pre_min": cfg.p0_pre, "p0_post_min": cfg.p0_post, "p1_pre_min": cfg.p1_pre, "p1_post_min": cfg.p1_post },
+        "active": active,
+        "upcoming": upcoming,
+        "note": "日历只给窗口，不碰下单（docs/43 §8）。读到过期或没有这个键 = 日历没在跑。",
+    })
+}
+
+fn publish_windows(conn: &mut Option<redis::Connection>, payload: &serde_json::Value) -> Result<(), String> {
+    use redis::Commands;
+    if conn.is_none() {
+        let url = std::env::var("WS_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        *conn = Some(redis::Client::open(url).and_then(|c| c.get_connection()).map_err(|e| e.to_string())?);
+    }
+    let c = conn.as_mut().expect("just connected");
+    let r: redis::RedisResult<()> = c.set_ex(WINDOWS_KEY, payload.to_string(), WINDOWS_TTL);
+    if let Err(e) = r {
+        *conn = None; // 下一轮重连
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
 // ── 发出 ────────────────────────────────────────────────────────────
 
 /// Telegram 配置（`~/.config/wealthspring/telegram.json`，权限 600；**令牌不进快照、不进日志**）。
@@ -1078,6 +1209,81 @@ pub struct Snapshot {
     pub rules: Vec<Rule>,
     pub notices: Vec<Notice>,
     pub quiet: Quiet,
+    pub window_cfg: WindowCfg,
+    /// 此刻在窗口里的、接下来 24 小时的。
+    pub active: Vec<Window>,
+    pub upcoming: Vec<Window>,
+    /// 最近一次写 Redis 的结果（空 = 成功）。
+    pub redis_err: String,
+    /// K 线图上的事件竖线（K5b）：P0/P1、有时刻的事件，过去 400 天到未来 60 天。图重绘时读它，不读库。
+    pub marks: Vec<ChartMark>,
+    /// 画不画事件竖线（「提醒」页的开关，缺省开）。
+    pub chart_lines: bool,
+}
+
+/// 图上的一条事件竖线。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartMark {
+    pub at_ms: i64,
+    pub importance: u8,
+    /// 图上的短名（FOMC、CPI、非农……）。
+    pub label: String,
+}
+
+/// 系列 → 图上的短名。没有的用标题截短。
+fn short_label(series: Option<&str>, title: &str) -> String {
+    let s = match series.unwrap_or("") {
+        "fomc-decision" => "FOMC",
+        "ecb-decision" => "ECB",
+        "us-cpi" => "CPI",
+        "us-nfp" => "非农",
+        "us-ppi" => "PPI",
+        "us-gdp" => "GDP",
+        "us-pce" => "PCE",
+        "us-jolts" => "JOLTS",
+        "us-eci" => "ECI",
+        "us-retail-sales" => "零售",
+        "us-ism-mfg" => "ISM",
+        "binance-quarterly-delivery" => "交割",
+        "us-quad-witching" => "四巫",
+        _ => "",
+    };
+    if !s.is_empty() {
+        return s.to_string();
+    }
+    let t: String = title.chars().take(8).collect();
+    if title.chars().count() > 8 { format!("{t}…") } else { t }
+}
+
+fn chart_marks(c: &Connection, now: i64) -> Vec<ChartMark> {
+    let Ok(mut st) = c.prepare(
+        "SELECT scheduled_at, importance, series, title FROM events
+         WHERE importance <= 1 AND scheduled_at BETWEEN ?1 AND ?2 AND status NOT IN ('unlisted','conflict')
+           AND precision IN ('exact','conventional') ORDER BY scheduled_at",
+    ) else {
+        return Vec::new();
+    };
+    st.query_map(params![now - 400 * 86_400_000, now + 60 * 86_400_000], |r| {
+        Ok(ChartMark {
+            at_ms: r.get(0)?,
+            importance: r.get::<_, i64>(1)?.clamp(0, 3) as u8,
+            label: short_label(r.get::<_, Option<String>>(2)?.as_deref(), &r.get::<_, String>(3)?),
+        })
+    })
+    .map(|it| it.filter_map(|x| x.ok()).collect())
+    .unwrap_or_default()
+}
+
+pub fn chart_lines_on(c: &Connection) -> bool {
+    setting(c, "chart_lines").is_none_or(|v| v != "0")
+}
+
+pub fn set_chart_lines(c: &Connection, on: bool) -> rusqlite::Result<()> {
+    c.execute(
+        "INSERT INTO alert_settings (key, value) VALUES ('chart_lines', ?1) ON CONFLICT(key) DO UPDATE SET value=?1",
+        [if on { "1" } else { "0" }],
+    )?;
+    Ok(())
 }
 
 static SNAP: Mutex<Option<std::sync::Arc<Snapshot>>> = Mutex::new(None);
@@ -1113,7 +1319,24 @@ pub fn wake() {
 pub fn load_snapshot_only() {
     let Ok(c) = open(&db_path()) else { return };
     if let Ok(mut g) = SNAP.lock() {
-        *g = Some(std::sync::Arc::new(Snapshot { rules: rules(&c).unwrap_or_default(), notices: notices(&c, 200), quiet: quiet(&c) }));
+        *g = Some(std::sync::Arc::new(build_snapshot(&c, now_ms(), String::new())));
+    }
+}
+
+fn build_snapshot(c: &Connection, now: i64, redis_err: String) -> Snapshot {
+    let wc = window_cfg(c);
+    let all = windows(c, &wc, now, now + 24 * 3_600_000);
+    let (active, upcoming): (Vec<Window>, Vec<Window>) = all.into_iter().partition(|w| w.start_ms <= now && now <= w.end_ms);
+    Snapshot {
+        rules: rules(c).unwrap_or_default(),
+        notices: notices(c, 200),
+        quiet: quiet(c),
+        window_cfg: wc,
+        active,
+        upcoming,
+        redis_err,
+        marks: chart_marks(c, now),
+        chart_lines: chart_lines_on(c),
     }
 }
 
@@ -1141,6 +1364,7 @@ pub fn start() {
                 log::info!("[calendar-alerts] Cockpit 关着时错过 {n} 条提醒");
             }
             let mut board_mtime = None;
+            let mut redis: Option<redis::Connection> = None;
             loop {
                 let now = now_ms();
                 let mut err = String::new();
@@ -1158,8 +1382,13 @@ pub fn start() {
                 }
                 let (pending, missed) = counts(&c);
                 let nd = next_due(&c);
+                // 风控窗口写 Redis（K5a）：Redis 不在时只记一句，不影响提醒
+                let redis_err = match publish_windows(&mut redis, &windows_payload(&c, now)) {
+                    Ok(()) => String::new(),
+                    Err(e) => e,
+                };
                 if let Ok(mut g) = SNAP.lock() {
-                    *g = Some(std::sync::Arc::new(Snapshot { rules: rules(&c).unwrap_or_default(), notices: notices(&c, 200), quiet: quiet(&c) }));
+                    *g = Some(std::sync::Arc::new(build_snapshot(&c, now, redis_err)));
                 }
                 if let Ok(mut g) = STATUS.lock() {
                     *g = Some(Status {
@@ -1395,6 +1624,53 @@ mod tests {
         let legacy = TelegramConfig { bot_token: tok_a.into(), chat_id: "42".into(), ..Default::default() };
         assert!(legacy.configured() && !legacy.chat_mismatch());
         assert_eq!(bot_id(tok_a), "111");
+    }
+
+    #[test]
+    fn risk_windows_cover_p0_p1_with_a_time_only() {
+        let c = db();
+        let at = T0 + 3_600_000;
+        put(&c, "cpi", Some(at), "exact", "scheduled", 1); // P1（put 写的是 importance 1）
+        put(&c, "gone", Some(at), "exact", "unlisted", 1);
+        put(&c, "noday", None, "date_only", "scheduled", 1);
+        c.execute("UPDATE events SET importance=0 WHERE id='cpi'", []).unwrap();
+        let cfg = WindowCfg::default();
+        let w = windows(&c, &cfg, T0, T0 + 86_400_000);
+        assert_eq!(w.len(), 1, "撤下的、没有时刻的不出窗口：{w:?}");
+        assert_eq!((w[0].start_ms, w[0].end_ms), (at - 30 * 60_000, at + 60 * 60_000), "P0：前 30 后 60");
+        // 改成 P2：不出窗口
+        c.execute("UPDATE events SET importance=2 WHERE id='cpi'", []).unwrap();
+        assert!(windows(&c, &cfg, T0, T0 + 86_400_000).is_empty());
+        // 设置可改、写进库
+        let w2 = WindowCfg { p0_pre: 5, p0_post: 10, p1_pre: 1, p1_post: 2 };
+        set_window_cfg(&c, &w2).unwrap();
+        assert_eq!(window_cfg(&c), w2);
+    }
+
+    #[test]
+    fn the_payload_splits_active_and_upcoming() {
+        let c = db();
+        put(&c, "now", Some(T0 + 10 * 60_000), "exact", "scheduled", 1); // P1：前 15 分钟 → 此刻已在窗口里
+        put(&c, "later", Some(T0 + 5 * 3_600_000), "conventional", "scheduled", 1);
+        let v = windows_payload(&c, T0);
+        assert_eq!(v["active"].as_array().unwrap().len(), 1);
+        assert_eq!(v["upcoming"].as_array().unwrap().len(), 1);
+        assert_eq!(v["config"]["p1_pre_min"], 15);
+        assert_eq!(v["ttl_secs"], 120);
+    }
+
+    #[test]
+    fn chart_marks_are_p0_p1_with_a_time_and_get_a_short_label() {
+        let c = db();
+        put(&c, "cpi", Some(T0 + 3_600_000), "exact", "scheduled", 1);
+        put(&c, "noday", None, "date_only", "scheduled", 1);
+        let m = chart_marks(&c, T0);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].label, "CPI");
+        assert_eq!(short_label(None, "Employment Cost Index Long Title"), "Employme…");
+        assert!(chart_lines_on(&c), "缺省开");
+        set_chart_lines(&c, false).unwrap();
+        assert!(!chart_lines_on(&c));
     }
 
     #[test]

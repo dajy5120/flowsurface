@@ -1097,6 +1097,11 @@ impl canvas::Program<Message> for KlineChart {
                 draw_gaps(frame, ts, &interval_to_x, region, chart.scaling, earliest, latest);
             }
 
+            // 金融日历（docs/43 K5b）：P0/P1 事件的时刻画虚线竖线——读提醒线程的旁路快照，不读库。仅时间基
+            if matches!(chart.basis, Basis::Time(_)) {
+                draw_calendar_marks(frame, interval_to_x, region, chart.scaling, earliest, latest);
+            }
+
             // F3b：在蜡烛/足迹图上叠加成交标记 ▲（买）/▼（卖）——读进程级旁路缓存（来自 ws::orders）。
             draw_ws_fill_markers(
                 frame,
@@ -1276,6 +1281,53 @@ fn draw_candle_dp(
 /// 标记尺寸用 像素/scaling 抵消 `frame.scale`，保证屏幕上恒定大小；带描边以在红绿蜡烛上保持可见。
 /// 数据来自进程级旁路缓存 `ws::orders::chart_fills_snapshot()`（不侵入 FS 的 ContentKind/数据源）。
 #[allow(clippy::too_many_arguments)]
+/// 金融日历的事件竖线（docs/43 K5b）：P0 红、P1 橙（状态色，不是涨跌色），顶部写短名（FOMC、CPI、非农……）。
+/// 「提醒」页可以关。线宽 / 字号 ÷scaling，屏幕上恒定。
+fn draw_calendar_marks(frame: &mut canvas::Frame, interval_to_x: impl Fn(u64) -> f32, region: Rectangle, scaling: f32, earliest: u64, latest: u64) {
+    if scaling <= f32::EPSILON {
+        return;
+    }
+    let snap = crate::ws::calendar_alerts::snapshot();
+    if !snap.chart_lines {
+        return;
+    }
+    let mut last_label_x = f32::MIN;
+    for m in snap.marks.iter().filter(|m| m.at_ms >= 0 && (m.at_ms as u64) >= earliest && (m.at_ms as u64) <= latest) {
+        let x = interval_to_x(m.at_ms as u64);
+        let col = if m.importance == 0 {
+            crate::ui::widgets::Tone::Danger.color()
+        } else {
+            crate::ui::widgets::Tone::Warning.color()
+        };
+        frame.stroke(
+            &Path::line(Point::new(x, region.y), Point::new(x, region.y + region.height)),
+            Stroke::with_color(
+                Stroke {
+                    width: 1.0 / scaling,
+                    line_dash: LineDash { segments: &[3.0, 3.0], offset: 0 },
+                    ..Default::default()
+                },
+                col.scale_alpha(0.75),
+            ),
+        );
+        // 两条线挨得太近时，后一个不写字（线照画）：字叠在一起什么都看不清
+        if x - last_label_x < 36.0 / scaling {
+            continue;
+        }
+        last_label_x = x;
+        frame.fill_text(canvas::Text {
+            content: m.label.clone(),
+            position: Point::new(x + 2.0 / scaling, region.y + 2.0 / scaling),
+            size: iced::Pixels(10.0 / scaling),
+            color: col,
+            font: crate::ui::text::ui_font(),
+            align_x: Alignment::Start.into(),
+            align_y: Alignment::Start.into(),
+            ..canvas::Text::default()
+        });
+    }
+}
+
 fn draw_ws_fill_markers(
     frame: &mut canvas::Frame,
     price_to_y: impl Fn(Price) -> f32,

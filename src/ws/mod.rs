@@ -45,6 +45,7 @@ pub mod observatory_view;
 pub mod calendar;
 pub mod calendar_alerts;
 pub mod calendar_readout;
+pub mod calendar_study;
 pub mod calendar_view;
 pub mod news;
 pub mod news_readout;

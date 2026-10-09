@@ -5,6 +5,7 @@
 //!   日历负责概览、列表负责密度。
 //! - **全年**：未来 12 个月的小热图，深浅 = 当天重要事件；点一天看那天的列表。
 //! - **事件流**：未来 7 / 30 / 90 / 365 天的高密度表（`ui::grid`）。
+//! - **提醒**（K4）、**研究**（K5c：历史事件研究，数据见 `calendar_study`）。
 //!
 //! 主区始终减负（docs/42）：筛选、显示时区、选中事件的详情在检查器「属性」页；刷新、数据新旧、
 //! 各源覆盖到哪天在「数据」页。**确定性要看得出来**：预计的、按惯例补时刻的、来源已撤下的，
@@ -74,6 +75,16 @@ pub enum CalMsg {
     /// 让 ws-telegram 从最近消息里读会话 ID（getUpdates）。
     TgDetect,
     TgEnable(bool),
+    /// 风控窗口宽度在改（字段, 分钟）。
+    WinEdit(&'static str, String),
+    WinSave,
+    /// K 线图上画不画事件竖线。
+    ChartLines(bool),
+    /// 研究页：后台重新计算一次（人工触发）。
+    StudyRun,
+    StudySeries(String),
+    StudyDaily(crate::ui::grid::GridMsg),
+    StudyIntra(crate::ui::grid::GridMsg),
     /// 点了「从最近消息读取」列出的一个会话：立即保存，绑到当前机器人。
     TgPickChat(String),
     RulesTable(crate::ui::grid::GridMsg),
@@ -239,7 +250,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, CalMsg> {
     let v = ro::view();
     if lock.is_none() {
         body = body.push(crate::ui::widgets::segmented(
-            &[("月历", View::Month), ("全年", View::Year), ("事件流", View::Stream), ("提醒", View::Alerts)],
+            &[("月历", View::Month), ("全年", View::Year), ("事件流", View::Stream), ("提醒", View::Alerts), ("研究", View::Study)],
             &v,
             CalMsg::SetView,
         ));
@@ -256,6 +267,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, CalMsg> {
         View::Year => year_view(&snap, &f),
         View::Stream => stream_view(&snap, &f),
         View::Alerts => alerts_view(&snap),
+        View::Study => study_view(),
     };
     body.push(content).width(Length::Fill).height(Length::Fill).into()
 }
@@ -1096,6 +1108,61 @@ fn alerts_view<'a>(snap: &CalReadout) -> Element<'a, CalMsg> {
         col = col.push(crate::ui::grid::named("calendar.notices", cols, data, Fit::Rows(12), None, CalMsg::NoticesTable));
     }
 
+    // ── 风控窗口（K5a）──
+    col = col.push(crate::ui::widgets::section("风控窗口（给策略用）"));
+    let wc = ro::win_edit(&a.window_cfg);
+    let num = |v: &str, f: &'static str| {
+        text_input("分钟", v)
+            .on_input(move |t| CalMsg::WinEdit(f, t))
+            .size(crate::ui::text::s_small())
+            .padding(crate::ui::metrics::pad2(0, 2))
+            .width(Length::Fixed(52.0))
+    };
+    col = col.push(kv(
+        "窗口宽度",
+        row![
+            meta("P0 前", crate::ui::pal::dim()),
+            num(&wc.0, "p0_pre"),
+            meta("后", crate::ui::pal::dim()),
+            num(&wc.1, "p0_post"),
+            meta("分钟 · P1 前", crate::ui::pal::dim()),
+            num(&wc.2, "p1_pre"),
+            meta("后", crate::ui::pal::dim()),
+            num(&wc.3, "p1_post"),
+            meta("分钟", crate::ui::pal::dim()),
+            crate::ui::widgets::btn("保存", crate::ui::widgets::Kind::Standard, Some(CalMsg::WinSave)),
+        ]
+        .spacing(crate::ui::metrics::space(1))
+        .align_y(Alignment::Center)
+        .wrap()
+        .into(),
+    ));
+    let fmt_w = |w: &super::calendar_alerts::Window| {
+        let t = |ms: i64| chrono::TimeZone::timestamp_millis_opt(&chrono::Local, ms).single().map(|x| x.format("%m-%d %H:%M").to_string()).unwrap_or_default();
+        format!("{} {} · {}–{}{}", ro::importance_label(w.importance), w.title, t(w.start_ms), t(w.end_ms), if w.precision == "conventional" { "（时刻按惯例）" } else { "" })
+    };
+    if a.active.is_empty() {
+        col = col.push(kv("此刻", meta("不在任何事件窗口里", crate::ui::pal::dim()).into()));
+    } else {
+        for w in &a.active {
+            col = col.push(kv("此刻", meta(format!("⚠ 在窗口里：{}", fmt_w(w)), crate::ui::pal::warn()).into()));
+        }
+    }
+    col = col.push(kv(
+        "图上竖线",
+        chip_on("在 K 线图上画 P0 / P1 事件竖线", a.chart_lines, CalMsg::ChartLines(!a.chart_lines)),
+    ));
+    let up: Vec<String> = a.upcoming.iter().take(6).map(fmt_w).collect();
+    col = col.push(kv("24 小时内", meta(if up.is_empty() { "没有".into() } else { up.join("；") }, crate::ui::pal::txt()).into()));
+    col = col.push(meta(
+        if a.redis_err.is_empty() {
+            "实时：每 30 秒写一次 Redis ws:calendar:windows（2 分钟过期）；回测：strategies/calendar_windows.py 直接读事件库，同一份设置。日历只给窗口，不碰下单——暂停开仓、降仓还是不管，由策略决定。".to_string()
+        } else {
+            format!("⚠ 写 Redis 失败：{}——实盘 / 观察模式的策略此刻读不到窗口（回测不受影响）", a.redis_err)
+        },
+        if a.redis_err.is_empty() { crate::ui::pal::dim() } else { crate::ui::pal::warn() },
+    ));
+
     // ── 免打扰与渠道 ──
     col = col.push(crate::ui::widgets::section("免打扰与渠道"));
     let (qf, qt, qp) = ro::quiet_edit(&a.quiet);
@@ -1250,6 +1317,206 @@ fn telegram_section<'a>(tg: &super::calendar_alerts::TelegramConfig) -> Element<
         crate::ui::pal::dim(),
     ));
     col.into()
+}
+
+// ── 研究（docs/43 K5c）──────────────────────────────────────────────
+
+fn bp(x: Option<f64>) -> String {
+    x.map_or_else(|| "—".into(), |v| format!("{:+.1}", v * 1e4))
+}
+
+fn times(x: Option<f64>) -> String {
+    x.map_or_else(|| "—".into(), |v| format!("{v:.2}×"))
+}
+
+/// q 值：< 0.05 前面打 ★（不只靠颜色）。
+fn q_cell(q: Option<f64>) -> crate::ui::grid::Cell {
+    use crate::ui::grid::Cell;
+    match q {
+        Some(v) if v < 0.05 => Cell::Colored(format!("★ {v:.3}"), crate::ui::pal::accent()),
+        Some(v) => Cell::Colored(format!("{v:.3}"), crate::ui::pal::dim()),
+        None => Cell::Text("—".into()),
+    }
+}
+
+fn study_view<'a>() -> Element<'a, CalMsg> {
+    use super::calendar_study as cs;
+    use crate::ui::grid::{Cell, Column, Fit};
+    let (running, note) = cs::status();
+    let rep = cs::load();
+    let mut head = row![
+        crate::ui::widgets::btn(
+            if running.is_some() { "计算中…" } else { "重新计算" },
+            crate::ui::widgets::Kind::Standard,
+            running.is_none().then_some(CalMsg::StudyRun),
+        ),
+    ]
+    .spacing(crate::ui::metrics::space(2))
+    .align_y(Alignment::Center);
+    if let Some(s) = running {
+        head = head.push(meta(format!("后台在跑（{s} 秒）：Databento 日线 + Tardis 分钟线，约十几秒"), crate::ui::pal::dim()));
+    } else if !note.is_empty() {
+        head = head.push(meta(note.clone(), if note.starts_with('✗') { crate::ui::pal::bad() } else { crate::ui::pal::ok() }));
+    }
+    if let Ok(Some(r)) = &rep {
+        let at = chrono::TimeZone::timestamp_millis_opt(&chrono::Local, r.generated_ms)
+            .single()
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        head = head.push(meta(format!("报告生成于 {at}"), crate::ui::pal::dim()));
+    }
+    let mut col = column![
+        head.wrap(),
+        meta("历史上事件前后发生过什么——不是预测，不给方向打分；日历永不下单（docs/43 §8）。", crate::ui::pal::dim()),
+        crate::ui::mark::here()
+    ]
+    .spacing(crate::ui::metrics::space(3));
+    let r = match rep {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            col = col.push(crate::ui::widgets::empty(
+                "还没有研究报告",
+                "点「重新计算」：用 Databento 日线（期货、SPY）和 Tardis 分钟线（BTC / ETH / SOL）对齐事件库里已经过去的 P0 / P1 事件。",
+            ));
+            return col.width(Length::Fill).height(Length::Fill).into();
+        }
+        Err(e) => {
+            col = col.push(meta(format!("✗ {e}"), crate::ui::pal::bad()));
+            return col.width(Length::Fill).height(Length::Fill).into();
+        }
+    };
+
+    // ── 系列 ──
+    let all = r.series();
+    let cur = ro::study_series().filter(|s| all.contains(s)).or_else(|| all.first().cloned()).unwrap_or_default();
+    let mut chips = row![meta("事件：", crate::ui::pal::dim())].spacing(crate::ui::metrics::space(1)).align_y(Alignment::Center);
+    for s in &all {
+        let n = r.coverage.get(s).map(|c| c.n).unwrap_or(0);
+        chips = chips.push(chip_on(format!("{}（{n}）", r.name(s)), *s == cur, CalMsg::StudySeries(s.clone())));
+    }
+    col = col.push(chips.wrap());
+
+    // ── 日线 ──
+    col = col.push(crate::ui::widgets::section("日线 · 事件日 vs 平常日（Databento）"));
+    let cols = vec![
+        Column::text("品种", 60.0),
+        Column::text("n", 56.0),
+        Column::text("|收益| 倍数", 84.0),
+        Column::text("按事前波动", 84.0),
+        Column::text("q", 72.0),
+        Column::text("成交量倍数", 84.0),
+        Column::text("q", 72.0),
+        Column::text("原始均值 bp", 90.0),
+        Column::text("扣漂移 bp", 84.0),
+        Column::text("中位扣漂移", 84.0),
+        Column::text("去最极端一天", 96.0),
+        Column::text("q", 72.0),
+        Column::text("最极端的一天", 100.0),
+        Column::text("同日有别的事件", 104.0),
+    ];
+    let mut data = Vec::new();
+    for b in &r.daily {
+        for x in b.rows.iter().filter(|x| x.series == cur) {
+            let s = &x.signed;
+            let dimc = if x.few { crate::ui::pal::dim() } else { crate::ui::pal::txt() };
+            data.push(vec![
+                Cell::Text(b.symbol.clone()),
+                Cell::Colored(if x.few { format!("{}（少）", x.n) } else { x.n.to_string() }, dimc),
+                Cell::Text(times(x.abs_ratio)),
+                Cell::Text(times(x.z_ratio)),
+                q_cell(x.z_q),
+                Cell::Text(times(x.vol_ratio)),
+                q_cell(x.vol_q),
+                Cell::Text(bp(s.mean)),
+                Cell::Text(bp(s.adj)),
+                Cell::Text(bp(s.median_adj)),
+                Cell::Text(bp(s.adj_trim)),
+                q_cell(s.q),
+                Cell::Text(x.extreme_day.clone()),
+                Cell::Text(if x.shared_days > 0 { format!("{} 天", x.shared_days) } else { String::new() }),
+            ]);
+        }
+    }
+    if data.is_empty() {
+        col = col.push(meta("这个系列在日线里没有样本", crate::ui::pal::dim()));
+    } else {
+        col = col.push(crate::ui::grid::named("calendar.study.daily", cols, data, Fit::Rows(10), None, CalMsg::StudyDaily));
+    }
+    if let Some(c) = r.coverage.get(&cur) {
+        col = col.push(meta(
+            format!(
+                "样本：事件库里 {} 至 {} 的 {} 次（更早的没抓到，不是没有）。基准 = 同一区间里没有任何 P0 / P1 事件的交易日。",
+                c.first, c.last, c.n
+            ),
+            crate::ui::pal::dim(),
+        ));
+    }
+
+    // ── 日内 ──
+    let hz = &r.params.horizons_min;
+    col = col.push(crate::ui::widgets::section(format!("日内 · 每个事件时刻（Tardis 1 分钟，前 {} 分钟到后 {} 分钟）", r.params.pre_min, hz.last().copied().unwrap_or(0))));
+    let mut cols = vec![Column::text("品种", 76.0), Column::text("时刻（UTC）", 104.0), Column::text("同时刻", 120.0), Column::text(format!("事前 {} 分", r.params.pre_min), 84.0)];
+    for h in hz {
+        cols.push(Column::text(format!("{h} 分：原始 / 扣漂移 bp"), 150.0));
+    }
+    cols.push(Column::text(format!("|收益| 分位（{} 分）", hz.first().copied().unwrap_or(0)), 120.0));
+    cols.push(Column::text(format!("成交量倍数（{} 分）", hz.first().copied().unwrap_or(0)), 120.0));
+    cols.push(Column::text("基准天数", 72.0));
+    cols.push(Column::text("挨着别的事件", 96.0));
+    let mut data = Vec::new();
+    let mut span = String::new();
+    for b in &r.intraday {
+        span = format!("{} 至 {}", b.start.get(..10).unwrap_or(&b.start), b.end.get(..10).unwrap_or(&b.end));
+        for x in b.rows.iter().filter(|x| x.kind == "moment" && x.series_list().contains(&cur)) {
+            let others: Vec<&str> = x.series.as_array().into_iter().flatten().filter_map(|v| v.as_str()).filter(|s| *s != cur).map(|s| r.name(s)).collect();
+            let at = x.at.get(5..16).unwrap_or(&x.at).replace('T', " ");
+            let mut row = vec![
+                Cell::Text(b.symbol.clone()),
+                Cell::Text(at),
+                Cell::Text(others.join("、")),
+                Cell::Text(bp(x.pre)),
+            ];
+            for h in &x.h {
+                row.push(Cell::Text(format!("{} / {}", bp(h.ret), bp(h.adj))));
+            }
+            let h0 = x.h.first();
+            row.push(Cell::Text(h0.and_then(|h| h.abs_pct).map_or_else(|| "—".into(), |p| format!("{:.0}%", p * 100.0))));
+            row.push(Cell::Text(times(h0.and_then(|h| h.vol_ratio))));
+            row.push(Cell::Text(x.base_n.to_string()));
+            row.push(Cell::Text(if x.overlap.is_empty() { String::new() } else { format!("{} 个", x.overlap.len()) }));
+            data.push(row);
+        }
+    }
+    if data.is_empty() {
+        col = col.push(meta("Tardis 的时间段里没有这个系列的事件", crate::ui::pal::dim()));
+    } else {
+        col = col.push(crate::ui::grid::named("calendar.study.intra", cols, data, Fit::Rows(8), None, CalMsg::StudyIntra));
+    }
+    col = col.push(meta(
+        format!(
+            "加密只有 Tardis {span} 这一段：每个时刻单独列，不做显著性。基准 = 非事件工作日的同一钟点；分位 100% = 比所有基准日都大。"
+        ),
+        crate::ui::pal::dim(),
+    ));
+
+    // ── 口径 ──
+    col = col.push(crate::ui::widgets::section("口径与局限"));
+    for line in [
+        "扣漂移：带方向的收益一律并排给原始值与「减去基准均值」之后的值——样本期单边涨跌时，原始均值大半是漂移（docs/20 D8）。".to_string(),
+        format!(
+            "按事前波动：当天 |收益| ÷ 之前 {} 个交易日的实现波动（不含当天），去掉波动率高低时期的影响；q 是 BH 校正后的（共 {} 个检验），★ = q < 0.05。",
+            r.params.vol_lookback, r.tests
+        ),
+        "去最极端一天、中位数：二十来个样本里一天就能决定均值（2025-04-04 关税暴跌恰逢非农日）。".to_string(),
+        format!("样本少于 {} 标「少」，不下结论。日线按 UTC 日切：FOMC（14:00 美东）只含发布后 4–6 小时；08:30 的数据含全天。", r.params.min_n),
+        "同日有别的事件（GDP 与 PCE 常同一天）：效应分不开。".to_string(),
+    ] {
+        col = col.push(meta(line, crate::ui::pal::dim()));
+    }
+    for e in &r.errors {
+        col = col.push(meta(format!("⚠ {e}"), crate::ui::pal::warn()));
+    }
+    crate::ui::scroll(col).width(Length::Fill).height(Length::Fill).into()
 }
 
 #[cfg(test)]
