@@ -175,6 +175,13 @@ pub enum Pane {
         #[serde(default)]
         link_group: Option<LinkGroup>,
     },
+    /// 金融日历（docs/43）：全球金融事件的月历 / 全年 / 事件流。无行情流，只读 calendar_board.json 旁路快照。
+    Calendar {
+        #[serde(default)]
+        settings: Settings,
+        #[serde(default)]
+        link_group: Option<LinkGroup>,
+    },
     /// 网络出口总闸：一页看全谁在往外发包，每一路都能手动启停。
     NetEgress {
         #[serde(default)]
@@ -406,6 +413,8 @@ pub enum ContentKind {
     /// 进程页（docs/26 S4）：常驻单元状态与启停。**零交易所流**——只调 systemctl。
     Procs,
     News,
+    /// 金融日历（docs/43）。**零交易所流**：抓取在 ws-news 守护的日历管线里，面板只读快照。
+    Calendar,
     /// 录制驾驶舱（docs/08 F6-P3）：24/7 守护录制控制中心（服务启停 + 配置 + 实况 + 总览）。
     Recorder,
     /// Tardis 历史回放（docs/20 Phase 5）：已购 30 天逐笔按变速推进 `ws:bt:{run}:trades` 喂图。
@@ -441,7 +450,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 31] = [
+    pub const ALL: [ContentKind; 32] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -468,6 +477,7 @@ impl ContentKind {
         ContentKind::NetEgress,
         ContentKind::Procs,
         ContentKind::News,
+        ContentKind::Calendar,
         ContentKind::Recorder,
         ContentKind::TardisReplay,
         ContentKind::TardisBoard,
@@ -505,6 +515,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::NetEgress => "网络出口",
             ContentKind::Procs => "进程",
             ContentKind::News => "新闻资讯",
+            ContentKind::Calendar => "金融日历",
             ContentKind::Recorder => "数据录制",
             ContentKind::TardisReplay => "Tardis 历史回放",
             ContentKind::TardisBoard => "Tardis 历史面板",
@@ -597,6 +608,7 @@ impl PaneSetup {
                 | ContentKind::NetEgress
                 | ContentKind::Procs
                 | ContentKind::News
+                | ContentKind::Calendar
                 | ContentKind::Recorder
                 | ContentKind::TardisReplay
                 | ContentKind::TardisBoard
@@ -641,6 +653,7 @@ impl PaneSetup {
             | ContentKind::NetEgress
             | ContentKind::Procs
             | ContentKind::News
+            | ContentKind::Calendar
             | ContentKind::Recorder
             | ContentKind::TardisReplay
             | ContentKind::TardisBoard

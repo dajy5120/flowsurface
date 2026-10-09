@@ -31,6 +31,23 @@ pub fn status(content: &Content) -> Option<(String, Color)> {
             let extra = if degraded { format!(" · {} 个源已陈", r.stale_sources) } else { String::new() };
             live(LiveState::classify(age, Duration::from_secs(60), r.svc.active, degraded, false), &extra)
         }
+        // 日历不是实时流：按「数据多旧」说话，超过 12 小时（会自动刷新的阈值）标黄
+        Content::Calendar => {
+            let r = super::calendar_readout::snapshot();
+            if super::once::CALENDAR.running() {
+                return Some(("⟳ 日历刷新中".to_string(), pal::info()));
+            }
+            if !r.present {
+                return Some(("○ 还没有日历数据".to_string(), pal::warn()));
+            }
+            let now = chrono::Local::now().timestamp_millis();
+            let h = (now - r.generated_ms) / 3_600_000;
+            let stale = super::calendar_readout::needs_refresh(true, r.generated_ms, now);
+            Some((
+                format!("{} {} 个事件 · 数据 {h} 小时前", if stale { "▲" } else { "●" }, r.events.len()),
+                if stale { pal::warn() } else { pal::ok() },
+            ))
+        }
         Content::MarketMap => {
             let r = super::radar_readout::snapshot();
             let filling = !r.progress.cur.is_empty();

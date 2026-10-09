@@ -84,6 +84,7 @@ pub enum Icon {
     WsEquity = 59661,
     WsPulse = 59662,
     WsChip = 59663,
+    WsCalendar = 59664,
 }
 
 impl From<Icon> for char {

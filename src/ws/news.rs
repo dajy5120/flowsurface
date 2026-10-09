@@ -50,6 +50,7 @@ pub fn handle(m: NewsMsg) {
             }
         }
         NewsMsg::Table(g) => crate::ui::grid::named_update("news.sources", g),
+        NewsMsg::UsesFilter(u) => ro::set_uses_filter(&u),
         NewsMsg::DeleteSource(id) => ro::remove_source(&id),
         NewsMsg::ProbeSource(id_or_url) => {
             // 表格里的按钮给的是源 id，加源表单给的是 URL。
@@ -148,7 +149,7 @@ pub fn open_args(url: &str) -> Vec<String> {
 /// **② 失败不能吞。** 原来 stdout/stderr 都丢进 /dev/null 且不等退出码，
 /// 于是上面那个 bug 的表现就只是「点了没反应」——一条日志都没有。
 /// 现在起一个线程收退出码，失败就记下来。
-fn open_in_browser(url: &str) {
+pub(crate) fn open_in_browser(url: &str) {
     if !is_safe_url(url) {
         log::warn!("拒绝打开这个链接（只放行 http/https）：{url}");
         return;

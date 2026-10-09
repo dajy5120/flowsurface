@@ -13,6 +13,8 @@ pub struct OnceJob {
     bin: &'static str,
     /// 配置文件（相对仓库根）
     config: &'static str,
+    /// `--once` 之后的额外参数（日历：`calendar` = 只抓日历源，docs/43）
+    extra: &'static [&'static str],
     state: Mutex<State>,
 }
 
@@ -25,7 +27,20 @@ struct State {
 
 impl OnceJob {
     pub const fn new(bin: &'static str, config: &'static str) -> Self {
-        Self { bin, config, state: Mutex::new(State { child: None, last: String::new() }) }
+        Self::with_args(bin, config, &[])
+    }
+
+    pub const fn with_args(bin: &'static str, config: &'static str, extra: &'static [&'static str]) -> Self {
+        Self { bin, config, extra, state: Mutex::new(State { child: None, last: String::new() }) }
+    }
+
+    /// 日志文件名：同一个守护的不同 `--once` 用法各写各的（新闻抓取一次 / 日历刷新）。
+    fn log_name(&self) -> String {
+        if self.extra.is_empty() {
+            format!("{}-once.log", self.bin)
+        } else {
+            format!("{}-once-{}.log", self.bin, self.extra.join("-"))
+        }
     }
 
     /// 起一次。已在跑 / 常驻守护开着（`daemon_active`）→ 不起，返回原因。
@@ -52,10 +67,10 @@ impl OnceJob {
         if !exe.is_file() {
             return format!("✗ 找不到 {}（先 cargo build --release -p 对应 crate）", exe.display());
         }
-        let log = super::paths::runtime_dir().join(format!("{}-once.log", self.bin));
+        let log = super::paths::runtime_dir().join(self.log_name());
         let out = std::fs::File::create(&log).ok();
         let mut cmd = Command::new(&exe);
-        cmd.arg(root.join(self.config)).arg("--once").current_dir(&root).stdin(Stdio::null());
+        cmd.arg(root.join(self.config)).arg("--once").args(self.extra).current_dir(&root).stdin(Stdio::null());
         match out.and_then(|f| f.try_clone().ok().map(|f2| (f, f2))) {
             Some((a, b)) => {
                 cmd.stdout(a).stderr(b);
@@ -110,6 +125,8 @@ fn poll(g: &mut State) {
 
 pub static RADAR: OnceJob = OnceJob::new("ws-radar", "crates/wealthspring-radar/radar.toml");
 pub static NEWS: OnceJob = OnceJob::new("ws-news", "crates/wealthspring-news/news.toml");
+/// 金融日历刷新（docs/43）：同一个资讯守护，只抓日历源，**不写新闻快照**。
+pub static CALENDAR: OnceJob = OnceJob::with_args("ws-news", "crates/wealthspring-news/news.toml", &["calendar"]);
 
 #[cfg(test)]
 mod tests {

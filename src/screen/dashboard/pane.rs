@@ -144,6 +144,7 @@ pub enum Event {
     ProcsInteraction(crate::ws::procs_view::ProcsMsg),
     /// 新闻资讯：守护启停 + 打开原文。
     NewsInteraction(crate::ws::news_view::NewsMsg),
+    CalendarInteraction(crate::ws::calendar_view::CalMsg),
     /// 预测市场面板交互：夜跑手动启停 + 每日定时开关（同上，默认不自启）。
     PredictionInteraction(crate::ws::prediction::PredictionMsg),
     /// 全市场雷达交互（docs/22 P0b）：守护启停 + 窗口/排序口径切换。
@@ -483,6 +484,7 @@ impl State {
                 ContentKind::NetEgress => (Content::NetEgress, vec![]),
                 ContentKind::Procs => (Content::Procs, vec![]),
                 ContentKind::News => (Content::News, vec![]),
+                ContentKind::Calendar => (Content::Calendar, vec![]),
                 ContentKind::OptionsBoard => (Content::OptionsBoard, vec![]),
                 ContentKind::PredictionBoard => (Content::PredictionBoard, vec![]),
                 ContentKind::PmBinance => (Content::PmBinance, vec![]),
@@ -841,6 +843,7 @@ impl State {
                 | Content::NetEgress
                 | Content::Procs
                 | Content::News
+                | Content::Calendar
                 | Content::OptionsBoard
                 | Content::PredictionBoard
                 | Content::PmBinance
@@ -1013,6 +1016,21 @@ impl State {
                 // **面板里没有一行网络代码**——连接全在 ws-news 守护里
                 let base = crate::ws::news_view::pane_body(self.settings.view.as_deref())
                     .map(move |m| Message::PaneEvent(id, Event::NewsInteraction(m)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::Calendar => {
+                // 金融日历（docs/43）：渲染走 ws::calendar_readout 旁路快照。
+                // **面板里没有一行网络代码**——抓取在 ws-news 守护的日历管线里
+                let base = crate::ws::calendar_view::pane_body(self.settings.view.as_deref())
+                    .map(move |m| Message::PaneEvent(id, Event::CalendarInteraction(m)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1829,6 +1847,7 @@ impl State {
                         | ContentKind::NetEgress
                         | ContentKind::Procs
                         | ContentKind::News
+                        | ContentKind::Calendar
                         | ContentKind::OptionsBoard
                         | ContentKind::PredictionBoard
                         | ContentKind::PmBinance
@@ -1886,6 +1905,10 @@ impl State {
             Event::NewsInteraction(m) => {
                 // 新闻资讯：守护启停 + 打开原文（副作用为 systemctl / xdg-open）。
                 crate::ws::news::handle(m);
+            }
+            Event::CalendarInteraction(m) => {
+                // 金融日历：选日期 / 翻月 / 筛选只改面板内存；刷新是起一次 `ws-news --once calendar`
+                crate::ws::calendar::handle(m);
             }
             Event::ProcsInteraction(m) => {
                 // 进程页：systemctl 启停。回执写进进程级静态，下一帧显示。
@@ -2573,7 +2596,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::StrategyCenter | Content::StrategyLayers | Content::OfmsLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::Calendar | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::StrategyCenter | Content::StrategyLayers | Content::OfmsLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => None,
         }
     }
@@ -2605,6 +2628,7 @@ impl State {
             | Content::NetEgress
             | Content::Procs
             | Content::News
+            | Content::Calendar
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::PmBinance
@@ -2732,6 +2756,9 @@ pub enum Content {
     /// 新闻资讯（docs/25）：无行情流，渲染走 `ws::news_readout` 旁路快照。
     /// **面板里没有一行网络代码**——连接全在 `ws-news` 守护里。
     News,
+    /// 金融日历（docs/43）：无行情流，渲染走 `ws::calendar_readout` 旁路快照。
+    /// **面板里没有一行网络代码**——日程抓取在 `ws-news` 守护的日历管线里。
+    Calendar,
     /// 期权/0DTE 回测·探针（docs/18）：无行情流，渲染走 `ws::options_readout` 旁路快照。
     OptionsBoard,
     /// 预测市场 Polymarket（docs/19）：无行情流，渲染走 `ws::prediction_readout` 旁路快照。
@@ -2986,6 +3013,7 @@ impl Content {
             ContentKind::NetEgress => Content::NetEgress,
             ContentKind::Procs => Content::Procs,
             ContentKind::News => Content::News,
+            ContentKind::Calendar => Content::Calendar,
             ContentKind::OptionsBoard => Content::OptionsBoard,
             ContentKind::PredictionBoard => Content::PredictionBoard,
             ContentKind::PmBinance => Content::PmBinance,
@@ -3028,6 +3056,7 @@ impl Content {
             | Content::NetEgress
             | Content::Procs
             | Content::News
+            | Content::Calendar
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::PmBinance
@@ -3125,6 +3154,7 @@ impl Content {
             | Content::NetEgress
             | Content::Procs
             | Content::News
+            | Content::Calendar
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::PmBinance
@@ -3193,6 +3223,7 @@ impl Content {
             | Content::NetEgress
             | Content::Procs
             | Content::News
+            | Content::Calendar
             | Content::OptionsBoard
             | Content::PredictionBoard
             | Content::PmBinance
@@ -3280,6 +3311,7 @@ impl Content {
             Content::NetEgress => ContentKind::NetEgress,
             Content::Procs => ContentKind::Procs,
             Content::News => ContentKind::News,
+            Content::Calendar => ContentKind::Calendar,
             Content::OptionsBoard => ContentKind::OptionsBoard,
             Content::PredictionBoard => ContentKind::PredictionBoard,
             Content::PmBinance => ContentKind::PmBinance,
@@ -3313,7 +3345,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::StrategyCenter | Content::StrategyLayers | Content::OfmsLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::Calendar | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::StrategyCenter | Content::StrategyLayers | Content::OfmsLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => true,
         }
     }

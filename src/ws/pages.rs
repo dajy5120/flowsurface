@@ -168,7 +168,7 @@ pub fn category(k: ContentKind) -> &'static str {
         K::FeatureMatrix | K::OfmsLab | K::FeatureLab => "订单流",
         K::Factory | K::C4Shadow | K::OptionsBoard | K::PredictionBoard | K::PmBinance | K::PmReplay | K::StrategyCenter | K::StrategyLayers => "研究",
         K::WealthSpring | K::SelfChart | K::BacktestResult | K::Orders => "策略",
-        K::MarketMap | K::News | K::Recorder | K::TardisReplay | K::TardisBoard | K::Observatory => "数据与资讯",
+        K::MarketMap | K::News | K::Calendar | K::Recorder | K::TardisReplay | K::TardisBoard | K::Observatory => "数据与资讯",
         K::Procs | K::NetEgress => "系统",
         K::Starter => "其他",
     }

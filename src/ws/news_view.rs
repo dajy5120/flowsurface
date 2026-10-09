@@ -76,6 +76,8 @@ pub enum NewsMsg {
     PickSource(SourcePick),
     /// 源管理表（ui::grid）的交互；操作格（关闭 / 测试 / 删除）按行号找回是哪个源
     Table(crate::ui::grid::GridMsg),
+    /// 源管理按用途筛：`""` = 全部、`news`、`calendar`（docs/43 §2.1：新闻与日历共用一张源表）
+    UsesFilter(String),
 }
 
 thread_local! {
@@ -94,9 +96,9 @@ pub(crate) fn source_action(row: usize, col: usize) -> Option<NewsMsg> {
     }
 }
 
-const SRC_COL_TOGGLE: usize = 7;
-const SRC_COL_PROBE: usize = 8;
-const SRC_COL_DELETE: usize = 9;
+const SRC_COL_TOGGLE: usize = 9;
+const SRC_COL_PROBE: usize = 10;
+const SRC_COL_DELETE: usize = 11;
 
 fn chip<'a>(label: &str, msg: NewsMsg) -> Element<'a, NewsMsg> {
     button(text(label.to_string()).size(crate::ui::text::s_small()))
@@ -148,6 +150,13 @@ fn tier_color(tier: &str) -> Color {
 pub fn source_lamp(s: &SourceRow) -> (&'static str, Color, String) {
     if s.failing() {
         return ("✕", crate::ui::pal::bad(), format!("连续失败 {} 次", s.consecutive_fails));
+    }
+    // 日历源（docs/43）：没有「最新一条」，新闻的新鲜度判据不适用；状态行就是同步结果（几个事件、覆盖到哪天）
+    if s.uses == "calendar" {
+        if s.ok == 0 {
+            return ("○", crate::ui::pal::dim(), "还没抓到".into());
+        }
+        return ("●", crate::ui::pal::ok(), String::new());
     }
     if s.is_stale {
         // **这一行是这一页的理由**
@@ -461,7 +470,7 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
             text("加源").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
             text_input("id", &id).on_input(|t| NewsMsg::AddEdited("id", t)).size(crate::ui::text::s_small()).padding(crate::ui::metrics::pad2(0, 2)).width(Length::Fixed(96.0)),
             text_input("显示名", &label).on_input(|t| NewsMsg::AddEdited("label", t)).size(crate::ui::text::s_small()).padding(crate::ui::metrics::pad2(0, 2)).width(Length::Fixed(120.0)),
-            text_input("RSS / Atom 地址", &url)
+            text_input("RSS / Atom / ICS 日历地址", &url)
                 .on_input(|t| NewsMsg::AddEdited("url", t))
                 .on_submit(NewsMsg::AddSource)
                 .size(crate::ui::text::s_small()).padding(crate::ui::metrics::pad2(0, 2)).width(Length::Fixed(300.0)),
@@ -478,8 +487,8 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
             text(note.clone()).size(crate::ui::text::s_meta()).color(if note.starts_with('✔') { crate::ui::pal::ok() } else { crate::ui::pal::bad() }));
     }
     body = body.push(
-        text("只能加 RSS / Atom。JSON 接口（交易所公告那种）要写提取规则，那是代码不是配置——\
-              在配置里填错一个字段的表现是「这个源什么都抓不到」，查不出为什么")
+        text("能加 RSS / Atom 新闻源，和 ICS 日历订阅（地址以 .ics 结尾的自动归到金融日历）。\
+              JSON / 网页接口要写提取规则，那是代码不是配置——在配置里填错一个字段的表现是「这个源什么都抓不到」，查不出为什么")
             .size(crate::ui::text::s_meta())
             .color(crate::ui::pal::dim()));
 
@@ -498,22 +507,39 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
     }
 
     // ── 源健康 + 管理 ──
+    // 新闻与金融日历共用这一张源表（docs/43 §2.1）：按机构分组、按用途筛
+    let uses = ro::uses_filter();
+    let shown_src: Vec<&SourceRow> = st
+        .sources
+        .iter()
+        .filter(|s| uses.is_empty() || s.uses == uses || s.uses == "both")
+        .collect();
     body = body.push(
         row![
             text("源").size(crate::ui::text::s_small()).color(crate::ui::pal::head()),
-            text(format!("{} 个，{} 个开着", st.sources.len(), st.sources.iter().filter(|s| s.enabled).count()))
+            crate::ui::widgets::segmented(
+                &[("全部", String::new()), ("新闻", "news".to_string()), ("日历", "calendar".to_string())],
+                &uses,
+                NewsMsg::UsesFilter,
+            ),
+            text(format!("{} 个，{} 个开着", shown_src.len(), shown_src.iter().filter(|s| s.enabled).count()))
                 .size(crate::ui::text::s_meta())
                 .color(crate::ui::pal::dim()),
-            text("HTTP 200 不等于有新闻——「见过的最新」那一列才是判断依据").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
+            text("HTTP 200 不等于有新闻——「见过的最新」那一列才是判断依据；日历源看「覆盖到」").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(8)
-        .align_y(iced::Alignment::Center));
+        .align_y(iced::Alignment::Center)
+        .wrap());
     // 表格（ui::grid）：表头与数据共用一套列宽，撑满窗口后照样对齐；可排序、调宽、复制
     use crate::ui::grid::{Cell, Column, Fit};
     use crate::ui::widgets::Tone;
     let cols = vec![
         Column::text("", 28.0),
+        // 按机构排在一起：美联储的新闻稿与 FOMC 日程挨着（页脚「分组」可按机构分组）。
+        // 不默认分组——多数机构只有一个源，每个都多一行组头，表长一倍
+        Column::text("机构", 110.0).groupable(),
         Column::text("源", 150.0),
+        Column::text("用途", 70.0).groupable(),
         Column::text("分级", 64.0),
         Column::text("见过的最新", 110.0),
         Column::num("窗内", None, 60.0),
@@ -524,8 +550,8 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
         Column::text("", 70.0),
     ];
     // 有问题的排在前面：一片正常里混着一行红，很容易被翻过去
-    let mut rows: Vec<&SourceRow> = st.sources.iter().collect();
-    rows.sort_by_key(|s| (!(s.is_stale || s.failing()), !s.enabled, s.label.clone()));
+    let mut rows: Vec<&SourceRow> = shown_src;
+    rows.sort_by_key(|s| (!(s.is_stale || s.failing()), !s.enabled, s.org.clone(), s.label.clone()));
     let mut data = Vec::with_capacity(rows.len());
     let mut ids = Vec::with_capacity(rows.len());
     for s in rows {
@@ -534,6 +560,12 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
         let (lamp, lc) = if s.enabled { (lamp, lc) } else { ("◌", crate::ui::pal::dim()) };
         // 三种「没有时间」要分开：源不给时间 / 还没抓到 / 真的陈了
         let newest = match (s.newest_ms, s.no_timestamps, s.last_new_ms) {
+            // 日历源没有「最新一条」：看覆盖到哪天
+            _ if s.uses == "calendar" => match &s.coverage_to {
+                Some(c) => format!("覆盖到 {c}"),
+                None if s.shape == "rule" => "本地推算".into(),
+                None => crate::ui::fmt::unknown(),
+            },
             (Some(m), _, _) => ago(m, st.now_ms),
             // 源根本不给时间戳（实测 ESMA）。显示成「—」的话，一个好源看起来像没通
             (None, true, Some(t)) => format!("源无时间·{}", ago(t, st.now_ms)),
@@ -543,7 +575,9 @@ fn sources_view<'a>(st: &ro::NewsReadout) -> iced::widget::Column<'a, NewsMsg> {
         };
         data.push(vec![
             Cell::Colored(lamp.into(), lc),
+            Cell::Text(if s.org.is_empty() { s.label.clone() } else { s.org.clone() }),
             Cell::Colored(s.label.clone(), if s.enabled { crate::ui::pal::txt() } else { crate::ui::pal::dim() }),
+            Cell::Text(if s.uses_label.is_empty() { "新闻".into() } else { s.uses_label.clone() }),
             Cell::Colored(s.tier_label.clone(), tier_color(&s.tier)),
             Cell::Colored(newest, if s.is_stale { crate::ui::pal::bad() } else { crate::ui::pal::dim() }),
             Cell::num(s.in_window as f64, s.in_window.to_string()),

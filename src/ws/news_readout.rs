@@ -42,6 +42,15 @@ pub struct SourceRow {
     pub consecutive_fails: i64,
     pub last_status: String,
     pub seeded: bool,
+    /// 机构（docs/43 §2.1）：源管理按它分组——美联储的新闻稿与 FOMC 日程是同一机构下的两行。
+    pub org: String,
+    /// `news` / `calendar` / `both`
+    pub uses: String,
+    pub uses_label: String,
+    /// `feed` / `json` / `ics` / `fomc` / … / `rule`
+    pub shape: String,
+    /// 日历源覆盖到哪天（新闻源为空）。
+    pub coverage_to: Option<String>,
 }
 
 impl SourceRow {
@@ -192,6 +201,11 @@ pub fn parse(v: &serde_json::Value) -> NewsReadout {
                         consecutive_fails: i(r, "consecutive_fails"),
                         last_status: s(r, "last_status"),
                         seeded: b(r, "seeded"),
+                        org: s(r, "org"),
+                        uses: s(r, "uses"),
+                        uses_label: s(r, "uses_label"),
+                        shape: s(r, "shape"),
+                        coverage_to: r.get("calendar").and_then(|c| c.get("coverage_to")).and_then(|x| x.as_str()).map(str::to_string),
                     })
                     .collect()
             })
@@ -307,6 +321,12 @@ pub struct UserSource {
     pub lang: String,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// **守护认、面板不认的字段原样保留**（`shape`、`org`、`country`、`every_secs`…）。
+    ///
+    /// 面板开关一个源时会把整个文件读进来再写回去。没有这一项的话，面板不认识的字段在写回时
+    /// 被悄悄丢掉——用户加的 ICS 日历源（`"shape":"ics"`）开关一次就变回 RSS（docs/43 §10 第 8 条）。
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 fn yes() -> bool {
@@ -345,6 +365,7 @@ pub fn set_enabled(id: &str, on: bool) {
             tier: String::new(),
             lang: String::new(),
             enabled: on,
+            extra: Default::default(),
         }),
     }
     write_sources(&v);
@@ -371,9 +392,22 @@ pub fn add_source(id: &str, label: &str, url: &str, tier: &str) -> String {
         tier: if tier.trim().is_empty() { "media".into() } else { tier.trim().to_string() },
         lang: "en".into(),
         enabled: true,
+        // 日历订阅（ICS）也能加（docs/43 §2.1）：通用格式，不用写提取规则
+        extra: if looks_like_ics(url) {
+            serde_json::Map::from_iter([("shape".to_string(), serde_json::Value::from("ics"))])
+        } else {
+            Default::default()
+        },
     });
     write_sources(&v);
     String::new()
+}
+
+/// 地址看起来是 ICS 日历订阅（`.ics` 结尾、`/ics/` 路径或 `webcal`）。
+pub fn looks_like_ics(url: &str) -> bool {
+    let u = url.trim().to_ascii_lowercase();
+    let path = u.split(['?', '#']).next().unwrap_or("");
+    path.ends_with(".ics") || path.contains("/ics/") || u.starts_with("webcal://")
 }
 
 /// 删一个自定义源。**内置的删不掉**——它下次启动会被播种回来。
@@ -456,6 +490,19 @@ impl View {
 }
 
 static VIEW: Mutex<View> = Mutex::new(View::Feed);
+
+/// 源管理按用途筛（`""` 全部 / `news` / `calendar`）。只在面板内存里。
+static USES_FILTER: Mutex<String> = Mutex::new(String::new());
+
+pub fn uses_filter() -> String {
+    USES_FILTER.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub fn set_uses_filter(v: &str) {
+    if let Ok(mut g) = USES_FILTER.lock() {
+        *g = v.to_string();
+    }
+}
 
 pub fn view() -> View {
     VIEW.lock().map(|g| *g).unwrap_or_default()
@@ -878,6 +925,40 @@ mod tests {
                 .join(format!("ws-news-test-{}", std::process::id()))
                 .join("news_request.json")
         }))
+    }
+
+    #[test]
+    fn toggling_a_source_keeps_fields_the_panel_does_not_know() {
+        // docs/43 §10 第 8 条：面板开关一个源会整份读写源表——守护认、面板不认的字段不能丢
+        let _g = lock_for_test();
+        let dir = std::env::temp_dir().join(format!("ws-news-x-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("news_sources.json");
+        std::fs::write(
+            &p,
+            r#"[{"id":"my-ics","label":"我的日历","url":"https://example.com/a.ics","shape":"ics","country":"US","every_secs":3600}]"#,
+        )
+        .unwrap();
+        if let Ok(mut g) = SRC_PATH.lock() {
+            *g = Some(p.clone());
+        }
+        set_enabled("my-ics", false);
+        set_enabled("fed", false);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let ics = v.as_array().unwrap().iter().find(|x| x["id"] == "my-ics").unwrap();
+        assert_eq!(ics["shape"], "ics", "开关一次不能把日历源变回 RSS");
+        assert_eq!(ics["country"], "US");
+        assert_eq!(ics["every_secs"], 3600);
+        assert_eq!(ics["enabled"], false);
+        // 加源：.ics 地址自动标成日历
+        assert_eq!(add_source("ics2", "", "https://example.com/cal/x.ics?k=1", ""), "");
+        assert_eq!(read_sources().iter().find(|u| u.id == "ics2").unwrap().extra["shape"], "ics");
+        assert_eq!(add_source("rss2", "", "https://example.com/rss.xml", ""), "");
+        assert!(read_sources().iter().find(|u| u.id == "rss2").unwrap().extra.get("shape").is_none());
+        if let Ok(mut g) = SRC_PATH.lock() {
+            *g = None;
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

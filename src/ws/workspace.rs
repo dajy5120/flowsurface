@@ -43,6 +43,7 @@ pub const WS_GLOBAL: &str = "全球市场"; // 全市场雷达 + 树图（docs/2
 pub const WS_OBSERVATORY: &str = "接口观察终端"; // REST/WS/TCP/FIX 统一观察与录制（docs/23）
 pub const WS_EGRESS: &str = "网络出口"; // 谁在往外发包 + 手动启停（一页看全）
 pub const WS_NEWS: &str = "新闻资讯"; // 交易所/监管/媒体统一时间线（docs/25）
+pub const WS_CALENDAR: &str = "金融日历"; // 全球金融事件日历（docs/43）：资讯组第一个，Ctrl Shift 2 直达
 pub const WS_PROCS: &str = "进程"; // 常驻单元状态与启停（docs/26 S4）——已并入「资源」
 /// 资源（docs/35 批 7，UPDS V7 §60 资源可见性）：「进程」与「网络出口」合成一个工作区，
 /// 左右两栏——常驻单元的状态与启停、谁在往外发包与流量。两页原本各占一个工作区，
@@ -56,7 +57,7 @@ pub const WS_RESOURCES: &str = "资源";
 /// | 组 | 工作区 |
 /// |---|---|
 /// | 图表 | 官方原生 |
-/// | 资讯 | 新闻资讯 · 全球市场 |
+/// | 资讯 | 金融日历 · 新闻资讯 · 全球市场 |（2026-10-09 用户：金融日历放资讯组第一个，docs/43）
 /// | 数据 | 数据录制 · Tardis 历史回放 · 接口观察终端 |
 /// | 研究 | 订单流特征 · 订单流层析 · 策略中心 · Alpha Factory · C4 影子 · 期权/0DTE · 预测市场 |
 /// | 回测 | 回测 · 实时数据回测 |
@@ -65,7 +66,7 @@ pub const WS_RESOURCES: &str = "资源";
 /// 改分组只改这里；[`WORKSPACES`] 必须是它按顺序摊平的结果（有测试钉住）。
 pub const GROUPS: [(&str, &[&str]); 6] = [
     ("图表", &[WS_OFFICIAL]),
-    ("资讯", &[WS_NEWS, WS_GLOBAL]),
+    ("资讯", &[WS_CALENDAR, WS_NEWS, WS_GLOBAL]),
     ("数据", &[WS_RECORDER, WS_TARDIS, WS_OBSERVATORY]),
     ("研究", &[WS_FEATURES, WS_OFMS, WS_STRATEGY, WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]),
     ("回测", &[WS_BACKTEST, WS_LIVE]),
@@ -76,8 +77,9 @@ pub const GROUPS: [(&str, &[&str]); 6] = [
 ///
 /// **加/删项要同时改 `GROUPS`、`icon()` 与 `pane_template()` 的 match 臂**，
 /// 漏了会落到 `_ => Starter` 兜底（有测试钉住）。
-pub const WORKSPACES: [&str; 16] = [
+pub const WORKSPACES: [&str; 17] = [
     WS_OFFICIAL,
+    WS_CALENDAR,
     WS_NEWS,
     WS_GLOBAL,
     WS_RECORDER,
@@ -106,7 +108,8 @@ pub const PAGE_SEP: char = '｜';
 /// 2026-10-07 用户逐个指定（docs/41 §3.2）：面板内部原有的视图 / 分节拆成页面，去掉「总览」页。
 /// 同一面板出现在同一工作区的几页里时，靠 `Settings.view` 锁定各自显示哪个视图（§3.3）；
 /// 几页不会同时显示，共用面板的其余状态正好一致。
-pub const PAGES: [(&str, &[&str]); 11] = [
+pub const PAGES: [(&str, &[&str]); 12] = [
+    (WS_CALENDAR, &["月历", "全年", "事件流"]),
     (WS_NEWS, &["新闻", "订阅与检索", "源管理"]),
     (WS_GLOBAL, &["热图", "筛选器", "全球总览", "市场宽度", "加密全景", "预测市场", "股票全景", "宏观新闻"]),
     (WS_RECORDER, &["行情录制", "录制明细", "预测市场录制"]),
@@ -131,6 +134,7 @@ fn page_template(layout: &str) -> Option<String> {
     let title = page_title(layout);
     let t = title.as_str();
     Some(match ws {
+        WS_CALENDAR => locked("Calendar", t),
         WS_NEWS => locked("News", t),
         WS_GLOBAL => locked("MarketMap", t),
         WS_RECORDER => locked("Recorder", t),
@@ -216,6 +220,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
     use crate::style::Icon;
     match name {
         WS_OFFICIAL => Icon::WsCandles,     // 官方原生图表：K 线
+        WS_CALENDAR => Icon::WsCalendar,    // 金融日历（docs/43）
         WS_NEWS => Icon::WsNewspaper,       // 新闻资讯（docs/25）
         WS_GLOBAL => Icon::WsGlobe,         // 全球市场（docs/22）
         WS_RECORDER => Icon::WsDatabase,    // 数据录制：数据湖
@@ -335,6 +340,7 @@ fn pane_template_base(name: &str) -> &'static str {
         // 和「网络出口」是邻居：一个管进程、一个管出口。
         // 新闻资讯：**零交易所连接**——全部在 ws-news 守护里，这个 pane 只读快照
         WS_NEWS => r#"{"News":{"settings":{},"link_group":null}}"#,
+        WS_CALENDAR => r#"{"Calendar":{"settings":{},"link_group":null}}"#,
         // ── 页面（docs/41 §3.2）：第一页是上面的组合布局，以下是单项放大 ──
         // 四张图（与第一页同一组：Footprint ∣ Ladder 在上，热图 ∣ Tape 在下）
         "订单流特征｜图表" => {
@@ -501,6 +507,10 @@ mod tests {
         let names: Vec<&str> = GROUPS.iter().map(|(g, _)| *g).collect();
         assert_eq!(names, ["图表", "资讯", "数据", "研究", "回测", "系统"]);
         assert_eq!(GROUPS[3].1, [WS_FEATURES, WS_OFMS, WS_STRATEGY, WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]);
+        // docs/43：金融日历是资讯组第一个（组首快捷键 Ctrl Shift 2 直达它）
+        assert_eq!(GROUPS[1].1, [WS_CALENDAR, WS_NEWS, WS_GLOBAL]);
+        assert_eq!(page_layouts(WS_CALENDAR), ["金融日历", "金融日历｜全年", "金融日历｜事件流"]);
+        assert!(pane_template("金融日历｜全年").contains(r#""view":"全年""#));
     }
 
     /// 页面：第一页的布局名就是工作区名（旧存档 = 第一页），其余页「工作区｜页名」；名字能双向还原。
@@ -632,7 +642,7 @@ mod tests {
         // 只读面板类：没有 ticker、不吃行情流，各自是一个独立用途的页面。
         for kind in [
             "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "FeatureMatrix", "StrategyCenter", "StrategyLayers", "OfmsLab", "TardisBoard",
-            "MarketMap", "Observatory", "NetEgress", "Procs", "News",
+            "MarketMap", "Observatory", "NetEgress", "Procs", "News", "Calendar",
         ] {
             assert!(
                 templates.contains(&format!("\"{kind}\"")),

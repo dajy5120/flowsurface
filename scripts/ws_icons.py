@@ -251,6 +251,20 @@ def chip():  # 资源：处理器
     return i
 
 
+def calendar():  # 金融日历：日历页 + 两个挂环 + 标记日
+    i = Icon()
+    i.rect(3, 5, 21, 21, 2)
+    i.line((3.5, 10), (20.5, 10))
+    i.line((8, 2.5), (8, 7))
+    i.line((16, 2.5), (16, 7))
+    i.solid(6.5, 13, 9.5, 16, 0.8)
+    i.dot(12, 14.5, 1.2)
+    i.dot(16.5, 14.5, 1.2)
+    i.dot(7.5, 18.5, 1.2)
+    i.dot(12, 18.5, 1.2)
+    return i
+
+
 # 顺序 = 码位顺序（WS_BASE + 下标），与 style.rs 的 Icon 枚举一致
 ICONS = [
     ("ws-candles", candles),
@@ -269,6 +283,7 @@ ICONS = [
     ("ws-equity", equity),
     ("ws-pulse", pulse),
     ("ws-chip", chip),
+    ("ws-calendar", calendar),
 ]
 
 

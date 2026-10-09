@@ -146,6 +146,9 @@ pub fn view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
         Content::TardisBoard(tb) => {
             Some(with_part(Part::Props, || super::tardis_board_view::pane_body(tb, true)).map(Event::TardisBoardInteraction))
         }
+        Content::Calendar => Some(
+            with_part(Part::Props, || super::calendar_view::pane_body(st.settings.view.as_deref())).map(Event::CalendarInteraction),
+        ),
         Content::MarketMap => Some(
             with_part(Part::Props, || super::radar_view::pane_body(st.settings.view.as_deref())).map(Event::RadarInteraction),
         ),
@@ -205,6 +208,7 @@ pub fn data_view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
         // 以下面板没有「属性」，只把守护 / 运行控制与数据状态搬进「数据」页（docs/42 第 4 期）。
         // 它们不自动展开检查器——只有在用户打开或钉住检查器时，主区才减负
         Content::News => Some(with_part(Part::Data, || super::news_view::pane_body(st.settings.view.as_deref())).map(Event::NewsInteraction)),
+        Content::Calendar => Some(with_part(Part::Data, || super::calendar_view::pane_body(st.settings.view.as_deref())).map(Event::CalendarInteraction)),
         Content::Factory => Some(with_part(Part::Data, super::factory_view::pane_body).map(Event::FactoryInteraction)),
         Content::C4Shadow => Some(with_part(Part::Data, super::c4_view::pane_body).map(Event::C4Interaction)),
         Content::PredictionBoard => Some(with_part(Part::Data, super::prediction_view::pane_body).map(Event::PredictionInteraction)),
@@ -277,6 +281,7 @@ pub fn changed(st: &State) -> Vec<String> {
                 out.push(format!("隐藏泳道 {} 条", v.hidden.len()));
             }
         }
+        Content::Calendar => out.extend(super::calendar_readout::filter().changed()),
         Content::MarketMap => {
             let v = super::radar::view();
             let d = super::radar::ViewState::DEFAULT;
@@ -310,7 +315,8 @@ pub fn has_props(content: &Content) -> bool {
         | Content::TardisBoard(_)
         | Content::TardisReplay(_)
         | Content::OfmsLab
-        | Content::MarketMap => true,
+        | Content::MarketMap
+        | Content::Calendar => true,
         Content::Orders => super::orders_view::selected_detail().is_some(),
         _ => false,
     }
@@ -326,6 +332,7 @@ pub fn about(content: &Content) -> Option<String> {
         Content::BacktestResult => "回测结果（docs/37）：最近一次（或钉住的那次）回测的 tearsheet——收益、回撤、成交、数据来源与体检等级。\n\n选策略在「属性」页、选数据在「数据」页，运行 / 停止在顶部工具栏。回测 PnL 不可直接外推实盘：队列位置已建模，但逆向选择、他人撤单、自身冲击不在内（docs/27 §9）。",
         Content::StrategyCenter => "策略中心（docs/37）：策略库、参数表单、完整 / 快速回测、运行记录、优化与验证、闸门（G1–G8）、对比。\n\n只跑观察模式与回测；真金下单必须逐次确认。",
         Content::StrategyLayers => "七层（docs/39）：交易大师策略的七层流水线，跟随策略中心选中的策略与运行。",
+        Content::Calendar => "金融日历（docs/43）：全球金融事件的月历、未来 12 个月概览与事件流——宏观数据发布（BLS / BEA）、FOMC 与欧洲央行决议、国债拍卖、币安季度交割，以及按规则推算的美股休市、期权到期、四巫日。\n\n抓取在资讯守护 ws-news 里（与新闻共用源表），面板只读快照。筛选、显示时区、选中事件的详情与修订历史在「属性」页；刷新与各源覆盖期在「数据」页。\n\n确定性分得开：≈ = 时刻按惯例（来源只给日期）；预计 = 规则推算；⊘ = 来源已撤下。重要性不等于实际波动。",
         Content::News => "新闻资讯（docs/25）：交易所 / 监管 / 媒体的统一时间线；连接全在 ws-news 守护里，面板只读快照。\n\n守护启停、条数与源新鲜度在「数据」页；`~` = 源没给发布时间，显示的是我们抓到的时刻。",
         Content::MarketMap => "全球市场雷达（docs/22）：全市场热图、筛选器、宽度等视图。发现工具，不是交易信号；加密是实时价，股票是延迟报价，徽章分档标出。\n\n资产 / 来源 / 筛选 / 大小 / 颜色 / 色板在「属性」页；守护启停、刷新、标的数、z 可信度与回填在「数据」页。",
         Content::Recorder(_) => "数据录制（docs/08）：行情录制守护的启停、实况、落盘总览、按日覆盖与录制明细。",
