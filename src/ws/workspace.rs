@@ -209,25 +209,28 @@ const MERGES: [(&str, &str); 4] = [
 ];
 
 /// 工作区在侧边栏的图标（合并进 FS 原生侧边栏，docs/08 F6 — P1）。
+///
+/// 一个工作区一个专属线性图标（`scripts/ws_icons.py` 画，风格参照 TradingView / Bloomberg 左栏），
+/// 不复用——此前只有 8 个可用字形，16 个工作区里有 6 组重复（有测试钉住）。
 pub fn icon(name: &str) -> crate::style::Icon {
     use crate::style::Icon;
     match name {
-        WS_OFFICIAL => Icon::BinanceLogo, // 官方直连 Binance
-        WS_LIVE => Icon::ChartOutline,    // 实时图表 + 交易
-        WS_STRATEGY => Icon::Layout,      // 策略中心（docs/37）
-        WS_BACKTEST => Icon::Return,      // 回放/重放（两个数据源合一）
-        WS_RECORDER => Icon::Folder,      // 数据湖
-        WS_FACTORY => Icon::Star,         // alpha 因子
-        WS_OFMS => Icon::ChartOutline,    // 订单流层析（docs/40）
-        WS_C4 => Icon::Checkmark,         // C4 判定进度（合格影子日）
-        WS_OPTIONS => Icon::Layout,       // 期权/0DTE 回测面板
-        WS_PREDICTION => Icon::Layout,    // 预测市场 Polymarket 面板
-        WS_TARDIS => Icon::Return,        // 历史回放（同「录制数据回测」语义）
-        WS_GLOBAL => Icon::Search,        // 全市场扫描
-        WS_FEATURES => Icon::ChartOutline, // 订单流特征：矩阵 + 同源图表（docs/31）
-        WS_OBSERVATORY => Icon::Search,   // 接口观察（docs/23）
-        WS_RESOURCES => Icon::Cog,        // 资源：进程 + 网络出口
-        WS_NEWS => Icon::Star,            // 新闻资讯（docs/25）
+        WS_OFFICIAL => Icon::WsCandles,     // 官方原生图表：K 线
+        WS_NEWS => Icon::WsNewspaper,       // 新闻资讯（docs/25）
+        WS_GLOBAL => Icon::WsGlobe,         // 全球市场（docs/22）
+        WS_RECORDER => Icon::WsDatabase,    // 数据录制：数据湖
+        WS_TARDIS => Icon::WsHistory,       // Tardis 历史回放
+        WS_OBSERVATORY => Icon::WsTerminal, // 接口观察终端（docs/23）
+        WS_FEATURES => Icon::WsLadder,      // 订单流特征：DOM 阶梯（docs/31）
+        WS_OFMS => Icon::WsLayers,          // 订单流层析：分层切片（docs/40）
+        WS_STRATEGY => Icon::WsNodes,       // 策略中心：策略流程节点（docs/37）
+        WS_FACTORY => Icon::WsFlask,        // Alpha Factory：研究烧瓶
+        WS_C4 => Icon::WsShield,            // C4 影子：合格判定
+        WS_OPTIONS => Icon::WsPayoff,       // 期权/0DTE：损益曲线（docs/18）
+        WS_PREDICTION => Icon::WsPie,       // 预测市场：概率（docs/19）
+        WS_BACKTEST => Icon::WsEquity,      // 回测：权益曲线
+        WS_LIVE => Icon::WsPulse,           // 实时数据回测：心跳线
+        WS_RESOURCES => Icon::WsChip,       // 资源：进程 + 网络出口
         _ => Icon::Layout,
     }
 }
@@ -578,6 +581,16 @@ mod tests {
         ensure_seeded(&mut m);
         assert!(m.layouts.iter().all(|l| l.id.name != "资源｜总览"));
         assert!(m.layouts.iter().any(|l| l.id.name == "资源｜检查更新"));
+    }
+
+    #[test]
+    fn 侧栏图标互不重复() {
+        let codes: Vec<u32> = WORKSPACES.iter().map(|w| icon(w) as u32).collect();
+        let mut uniq = codes.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), codes.len(), "每个工作区要有自己的图标：{codes:?}");
+        assert!(!codes.contains(&(crate::style::Icon::Layout as u32)), "不能落到兜底图标");
     }
 
     #[test]

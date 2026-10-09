@@ -67,6 +67,23 @@ pub enum Icon {
     DragHandle = 59415,
     Folder = 61716,
     ExternalLink = 61772,
+    // 工作区侧栏专属图标（scripts/ws_icons.py 生成，U+E900 起，顺序与脚本 ICONS 一致）
+    WsCandles = 59648,
+    WsNewspaper = 59649,
+    WsGlobe = 59650,
+    WsDatabase = 59651,
+    WsHistory = 59652,
+    WsTerminal = 59653,
+    WsLadder = 59654,
+    WsLayers = 59655,
+    WsNodes = 59656,
+    WsFlask = 59657,
+    WsShield = 59658,
+    WsPayoff = 59659,
+    WsPie = 59660,
+    WsEquity = 59661,
+    WsPulse = 59662,
+    WsChip = 59663,
 }
 
 impl From<Icon> for char {
