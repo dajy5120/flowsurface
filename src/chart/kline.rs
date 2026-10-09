@@ -1282,7 +1282,7 @@ fn draw_candle_dp(
 /// 数据来自进程级旁路缓存 `ws::orders::chart_fills_snapshot()`（不侵入 FS 的 ContentKind/数据源）。
 #[allow(clippy::too_many_arguments)]
 /// 金融日历的事件竖线（docs/43 K5b）：P0 红、P1 橙（状态色，不是涨跌色），顶部写短名（FOMC、CPI、非农……）。
-/// 「提醒」页可以关。线宽 / 字号 ÷scaling，屏幕上恒定。
+/// 「提醒」页可以关。线宽 / 字号 ÷scaling，屏幕上恒定。视野里没有事件时，左右边缘提示最近的前一个 / 下一个。
 fn draw_calendar_marks(frame: &mut canvas::Frame, interval_to_x: impl Fn(u64) -> f32, region: Rectangle, scaling: f32, earliest: u64, latest: u64) {
     if scaling <= f32::EPSILON {
         return;
@@ -1291,8 +1291,37 @@ fn draw_calendar_marks(frame: &mut canvas::Frame, interval_to_x: impl Fn(u64) ->
     if !snap.chart_lines {
         return;
     }
+    let in_view = |m: &&crate::ws::calendar_alerts::ChartMark| m.at_ms >= 0 && (m.at_ms as u64) >= earliest && (m.at_ms as u64) <= latest;
+    // 视野里一条都没有（1 分钟线只看得到几个小时）：在左右边缘标出最近的前一个 / 下一个事件，告诉用户往哪边拖
+    if !snap.marks.iter().any(|m| in_view(&m)) {
+        let prev = snap.marks.iter().filter(|m| m.at_ms >= 0 && (m.at_ms as u64) < earliest).max_by_key(|m| m.at_ms);
+        let next = snap.marks.iter().filter(|m| m.at_ms >= 0 && (m.at_ms as u64) > latest).min_by_key(|m| m.at_ms);
+        let day = |ms: i64| {
+            chrono::TimeZone::timestamp_millis_opt(&chrono::Local, ms).single().map(|t| t.format("%m-%d").to_string()).unwrap_or_default()
+        };
+        for (m, left) in [(prev, true), (next, false)] {
+            let Some(m) = m else { continue };
+            let col = if m.importance == 0 { crate::ui::widgets::Tone::Danger.color() } else { crate::ui::widgets::Tone::Warning.color() };
+            let (content, x, align) = if left {
+                (format!("← {} {}", m.label, day(m.at_ms)), region.x + 4.0 / scaling, Alignment::Start)
+            } else {
+                (format!("{} {} →", m.label, day(m.at_ms)), region.x + region.width - 4.0 / scaling, Alignment::End)
+            };
+            frame.fill_text(canvas::Text {
+                content,
+                position: Point::new(x, region.y + 2.0 / scaling),
+                size: iced::Pixels(10.0 / scaling),
+                color: col.scale_alpha(0.85),
+                font: crate::ui::text::ui_font(),
+                align_x: align.into(),
+                align_y: Alignment::Start.into(),
+                ..canvas::Text::default()
+            });
+        }
+        return;
+    }
     let mut last_label_x = f32::MIN;
-    for m in snap.marks.iter().filter(|m| m.at_ms >= 0 && (m.at_ms as u64) >= earliest && (m.at_ms as u64) <= latest) {
+    for m in snap.marks.iter().filter(in_view) {
         let x = interval_to_x(m.at_ms as u64);
         let col = if m.importance == 0 {
             crate::ui::widgets::Tone::Danger.color()
