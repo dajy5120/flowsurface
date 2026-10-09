@@ -662,6 +662,8 @@ pub struct ViewState {
     layout: ViewConfig,
     /// 上次看到的联动时间版本（docs/41 E 期）；变了就重画十字线
     linked_seen: std::sync::atomic::AtomicU64,
+    /// 价格轴宽度的高水位（f32 位）：只增不减。见 [`ViewState::y_labels_width`]。
+    y_labels_max: std::sync::atomic::AtomicU32,
 }
 
 /// 同页图表的时间联动（docs/41 §4.3，E 期）：光标所在的图把它指着的时间放在这里，
@@ -755,6 +757,7 @@ impl ViewState {
         self.latest_x = 0;
         self.translation = Vector::default();
         self.scaling = 1.0;
+        self.y_labels_max.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn new(
@@ -782,6 +785,7 @@ impl ViewState {
             ticker_info,
             layout,
             linked_seen: std::sync::atomic::AtomicU64::new(0),
+            y_labels_max: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -1170,9 +1174,16 @@ impl ViewState {
         let precision = self.ticker_info.min_ticksize;
 
         let value = self.base_price_y.to_string(precision);
-        let width = (value.len() as f32 * TEXT_SIZE * 0.8).max(72.0);
+        let width = (value.len() as f32 * TEXT_SIZE * 0.8).max(72.0).ceil();
 
-        Length::Fixed(width.ceil())
+        // 只增不减（2026-10-09 用户报「拖到尽头图表抖动」）：宽度按视野最高价的字数算，自动适配下
+        // 最高价跨过 100000 时轴变宽 → 图变窄 → 视野左边缘把那根 K 线挤出去 → 最高价回到 9xxxx → 轴变窄
+        // → 那根又露回来……每帧来回跳。轴宽只随最宽的标签长，循环就断了；换品种是新的 ViewState。
+        let prev = f32::from_bits(self.y_labels_max.load(std::sync::atomic::Ordering::Relaxed));
+        let width = width.max(prev);
+        self.y_labels_max.store(width.to_bits(), std::sync::atomic::Ordering::Relaxed);
+
+        Length::Fixed(width)
     }
 
     fn snap_x_to_index(&self, x: f32, bounds: Size, region: Rectangle) -> (u64, f32) {
