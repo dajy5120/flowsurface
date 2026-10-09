@@ -80,6 +80,15 @@ pub enum CalMsg {
     WinSave,
     /// K 线图上画不画事件竖线。
     ChartLines(bool),
+    /// 相关度高的事件不受重要性筛选。
+    RelevantAlways(bool),
+    /// 「我关注的标的」在改 / 保存。
+    WatchEdit(String),
+    WatchSave,
+    /// 让本页按时间的 K 线图跳到这个时刻（UTC 毫秒）。
+    GotoChart(i64),
+    /// 切到「新闻资讯｜源管理」，用途筛成日历。
+    GotoSources,
     /// 研究页：后台重新计算一次（人工触发）。
     StudyRun,
     StudySeries(String),
@@ -182,6 +191,11 @@ fn weekday_cn(w: Weekday) -> &'static str {
 }
 
 /// 事件标题前后的确定性 / 状态记号。
+/// 与我相关度高的事件前面打 ◆（不只靠颜色）。
+fn rel_mark(e: &Ev) -> &'static str {
+    if super::calendar_relevance::level(e) == super::calendar_relevance::Level::High { "◆ " } else { "" }
+}
+
 fn marks(e: &Ev) -> String {
     let mut s = String::new();
     if let Some(st) = ro::status_label(&e.status) {
@@ -348,7 +362,7 @@ fn month_cell<'a>(snap: &CalReadout, f: &Filter, d: NaiveDate, in_month: bool, i
     for e in top.iter().take(3) {
         let (g, _) = importance_style(e.importance);
         let t = if e.scheduled_at.is_some() { ro::display_time(e, f.tz) } else { String::new() };
-        let line = format!("{g} {}{} {}", marks(e), t, clip(&ro::display_title(e), 16));
+        let line = format!("{g} {}{}{} {}", rel_mark(e), marks(e), t, clip(&ro::display_title(e), 16));
         // 非本月的日子：事件也淡一档，和本月的分得开
         c = c.push(meta(line, if in_month { event_color(e) } else { crate::ui::pal::alpha(event_color(e), 0.55) }));
     }
@@ -421,7 +435,7 @@ fn event_row<'a>(e: &Ev, tz: DispTz, picked: bool) -> Element<'a, CalMsg> {
     {
         title.push_str(&format!("（会期 {} 起）", sp.format("%m-%d")));
     }
-    let m = marks(e);
+    let m = format!("{}{}", rel_mark(e), marks(e));
     let vals = e.headline().map(ro::value_text).filter(|t| !t.is_empty());
     let mut title_col = column![small(title, event_color(e))];
     if let Some(v) = vals {
@@ -617,6 +631,7 @@ fn stream_view<'a>(snap: &CalReadout, f: &Filter) -> Element<'a, CalMsg> {
         Column::text("倒计时", 84.0),
         Column::text("地区", 56.0).groupable(),
         Column::text("重要性", 60.0).groupable(),
+        Column::text("与我", 48.0).groupable(),
         Column::text("事件", 320.0),
         Column::text("类别", 84.0).groupable(),
         Column::text("实际", 80.0),
@@ -645,6 +660,11 @@ fn stream_view<'a>(snap: &CalReadout, f: &Filter) -> Element<'a, CalMsg> {
             Cell::Text(countdown(e, now)),
             Cell::Text(ro::country_label(&e.country).to_string()),
             Cell::Colored(format!("{g} {}", ro::importance_label(e.importance)), ic),
+            {
+                let l = super::calendar_relevance::level(e);
+                let c = if l == super::calendar_relevance::Level::None { crate::ui::pal::dim() } else { crate::ui::pal::accent() };
+                Cell::Colored(if l == super::calendar_relevance::Level::High { "◆ 高".into() } else { l.label().into() }, c)
+            },
             Cell::Colored(ro::display_title(e), event_color(e)),
             Cell::Text(ro::kind_label(&e.kind).to_string()),
             Cell::Text(e.headline().and_then(|v| v.actual.clone()).unwrap_or_default()),
@@ -718,6 +738,7 @@ fn props_view<'a>(snap: &CalReadout, f: &Filter) -> Element<'a, CalMsg> {
         "确定性：≈ = 时刻按惯例（来源只给日期）；预计 = 规则推算；⊘ = 列过它的来源都撤下了；⚠ = 规则与官方不符",
         crate::ui::pal::dim(),
     ));
+    col = col.push(relevance_props(f));
 
     // 选中的事件
     let Some(id) = ro::selected_event() else {
@@ -752,6 +773,12 @@ fn props_view<'a>(snap: &CalReadout, f: &Filter) -> Element<'a, CalMsg> {
     if !e.assets.is_empty() {
         col = col.push(kv("关联标的", e.assets.join(" · "), crate::ui::pal::txt()));
     }
+    let (rl, why) = super::calendar_relevance::of(e);
+    col = col.push(kv(
+        "与我",
+        if why.is_empty() { format!("{}（没有关联你的标的）", rl.label()) } else { format!("{} · {why}", rl.label()) },
+        if rl == super::calendar_relevance::Level::None { crate::ui::pal::dim() } else { crate::ui::pal::accent() },
+    ));
     let src: Vec<String> = e
         .sources
         .iter()
@@ -779,6 +806,7 @@ fn props_view<'a>(snap: &CalReadout, f: &Filter) -> Element<'a, CalMsg> {
             72.0,
         ));
     }
+    col = col.push(goto_row(e));
     col = col.push(crate::ui::widgets::kv(
         "提醒",
         crate::ui::widgets::btn("为这个事件设提醒", crate::ui::widgets::Kind::Standard, Some(CalMsg::AlertForEvent(e.id.clone()))),
@@ -862,7 +890,15 @@ fn data_view<'a>(snap: &CalReadout) -> Element<'a, CalMsg> {
             .spacing(0),
         );
     }
-    col = col.push(meta("源的启停、测试、加 ICS 订阅在「新闻资讯｜源管理」（按机构分组，用途列可筛「日历」）。", crate::ui::pal::dim()));
+    col = col.push(
+        row![
+            crate::ui::widgets::btn("去源管理", crate::ui::widgets::Kind::Standard, Some(CalMsg::GotoSources)),
+            meta("源的启停、测试、加 ICS 订阅在「新闻资讯｜源管理」，跳过去时只看日历用的源", crate::ui::pal::dim()),
+        ]
+        .spacing(crate::ui::metrics::space(2))
+        .align_y(Alignment::Center)
+        .wrap(),
+    );
     col.into()
 }
 
@@ -1317,6 +1353,78 @@ fn telegram_section<'a>(tg: &super::calendar_alerts::TelegramConfig) -> Element<
         crate::ui::pal::dim(),
     ));
     col.into()
+}
+
+// ── 与我的相关度、在图上看（docs/43 §4、§8）────────────────────────
+
+fn relevance_props<'a>(f: &Filter) -> Element<'a, CalMsg> {
+    use super::calendar_relevance as rel;
+    let mut col = column![crate::ui::widgets::section("与我的相关度")].spacing(crate::ui::metrics::space(2));
+    col = col.push(crate::ui::widgets::kv(
+        "筛选",
+        chip_on("相关度高的总显示（不受重要性筛选）", f.relevant_always, CalMsg::RelevantAlways(!f.relevant_always)),
+        72.0,
+    ));
+    let saved = rel::watch().join(", ");
+    let edit = ro::watch_edit();
+    let dirty = edit.as_ref().is_some_and(|x| *x != saved);
+    col = col.push(crate::ui::widgets::kv(
+        "我关注的",
+        row![
+            text_input("BTCUSDT, SPY, AAPL（逗号分隔）", edit.as_deref().unwrap_or(&saved))
+                .on_input(CalMsg::WatchEdit)
+                .on_submit(CalMsg::WatchSave)
+                .size(crate::ui::text::s_small())
+                .padding(crate::ui::metrics::pad2(0, 2)),
+            crate::ui::widgets::btn("保存", crate::ui::widgets::Kind::Standard, dirty.then_some(CalMsg::WatchSave)),
+        ]
+        .spacing(crate::ui::metrics::space(1))
+        .align_y(Alignment::Center)
+        .into(),
+        72.0,
+    ));
+    let mine = rel::current();
+    let groups = rel::by_source(&mine);
+    for src in ["手填", "持仓", "运行", "收藏", "图表"] {
+        if let Some(v) = groups.get(src) {
+            col = col.push(crate::ui::widgets::kv(src.to_string(), small(v.join(" · "), crate::ui::pal::txt()).into(), 72.0));
+        }
+    }
+    if mine.is_empty() {
+        col = col.push(meta("还没有你的标的：手填上面一栏，或在侧栏收藏、在任意页开一张 K 线图", crate::ui::pal::dim()));
+    }
+    col = col.push(meta(
+        "规则写死：事件关联你的标的 = 高（◆，ES / SPY / SPX 这类等价写法算同一个；财报、交割看标题里的代码）；同一类资产 = 中（只看宏观事件的关联标的，别家财报不算）。图表与收藏读 Cockpit 存盘，最多晚 1 分钟。",
+        crate::ui::pal::dim(),
+    ));
+    col.into()
+}
+
+/// 事件该放到图上的时刻：有时刻用时刻；只有日期的放在当地那天的中午。
+fn event_instant(e: &Ev) -> Option<i64> {
+    e.scheduled_at.or_else(|| e.date_local.and_then(|d| d.and_hms_opt(12, 0, 0)).map(|t| t.and_utc().timestamp_millis()))
+}
+
+fn goto_row<'a>(e: &Ev) -> Element<'a, CalMsg> {
+    let mut r = row![crate::ui::widgets::btn(
+        "在图上看",
+        crate::ui::widgets::Kind::Standard,
+        event_instant(e).map(CalMsg::GotoChart),
+    )]
+    .spacing(crate::ui::metrics::space(2))
+    .align_y(Alignment::Center);
+    if let Some((_, age, n)) = crate::chart::goto_time::last()
+        && age.as_secs() < 8
+    {
+        r = r.push(if n > 0 {
+            meta(format!("✔ 本页 {n} 张 K 线图已跳到这个时刻"), crate::ui::pal::ok())
+        } else if age.as_millis() > 1500 {
+            meta("本页没有按时间的 K 线图：在旁边加一张（标题栏选品种）再点", crate::ui::pal::warn())
+        } else {
+            meta("…", crate::ui::pal::dim())
+        });
+    }
+    crate::ui::widgets::kv("图表", r.wrap().into(), 72.0)
 }
 
 // ── 研究（docs/43 K5c）──────────────────────────────────────────────

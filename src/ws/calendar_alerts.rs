@@ -1215,10 +1215,12 @@ pub struct Snapshot {
     pub upcoming: Vec<Window>,
     /// 最近一次写 Redis 的结果（空 = 成功）。
     pub redis_err: String,
-    /// K 线图上的事件竖线（K5b）：P0/P1、有时刻的事件，过去 400 天到未来 60 天。图重绘时读它，不读库。
+    /// K 线图上的事件竖线（K5b）：P0/P1、有时刻的事件，库里全部过去的到未来 60 天。图重绘时读它，不读库。
     pub marks: Vec<ChartMark>,
     /// 画不画事件竖线（「提醒」页的开关，缺省开）。
     pub chart_lines: bool,
+    /// 手填的「我关注的标的」（相关度用，docs/43 §4）。
+    pub watch: Vec<String>,
 }
 
 /// 图上的一条事件竖线。
@@ -1263,7 +1265,8 @@ fn chart_marks(c: &Connection, now: i64) -> Vec<ChartMark> {
     ) else {
         return Vec::new();
     };
-    st.query_map(params![now - 400 * 86_400_000, now + 60 * 86_400_000], |r| {
+    // 过去不设下限：往年档案（docs/43 §21）回到 2003 年，日线图往回拖也看得到；一千来条，每帧过滤一遍不费事
+    st.query_map(params![0_i64, now + 60 * 86_400_000], |r| {
         Ok(ChartMark {
             at_ms: r.get(0)?,
             importance: r.get::<_, i64>(1)?.clamp(0, 3) as u8,
@@ -1272,6 +1275,19 @@ fn chart_marks(c: &Connection, now: i64) -> Vec<ChartMark> {
     })
     .map(|it| it.filter_map(|x| x.ok()).collect())
     .unwrap_or_default()
+}
+
+/// 手填的「我关注的标的」：存原样文字（逗号分隔），读的时候再规范化。
+pub fn watch_list(c: &Connection) -> Vec<String> {
+    setting(c, "watch").map(|s| super::calendar_relevance::parse_watch(&s)).unwrap_or_default()
+}
+
+pub fn set_watch(c: &Connection, list: &[String]) -> rusqlite::Result<()> {
+    c.execute(
+        "INSERT INTO alert_settings (key, value) VALUES ('watch', ?1) ON CONFLICT(key) DO UPDATE SET value=?1",
+        [list.join(", ")],
+    )?;
+    Ok(())
 }
 
 pub fn chart_lines_on(c: &Connection) -> bool {
@@ -1337,6 +1353,7 @@ fn build_snapshot(c: &Connection, now: i64, redis_err: String) -> Snapshot {
         redis_err,
         marks: chart_marks(c, now),
         chart_lines: chart_lines_on(c),
+        watch: watch_list(c),
     }
 }
 

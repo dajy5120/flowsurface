@@ -257,6 +257,29 @@ pub fn handle(m: CalMsg) {
                 Err(e) => ro::set_alert_note(format!("✗ {e}")),
             }
         }
+        CalMsg::RelevantAlways(on) => ro::update_filter(|f| f.relevant_always = on),
+        CalMsg::WatchEdit(s) => ro::set_watch_edit(Some(s)),
+        CalMsg::WatchSave => {
+            let list = super::calendar_relevance::parse_watch(&ro::watch_edit().unwrap_or_default());
+            match al::write(|c| al::set_watch(c, &list)) {
+                Ok(()) => {
+                    ro::set_watch_edit(None);
+                    super::calendar_relevance::saved(list);
+                }
+                Err(e) => ro::set_alert_note(format!("✗ {e}")),
+            }
+        }
+        CalMsg::GotoChart(ms) => {
+            crate::chart::goto_time::request(ms.max(0) as u64);
+        }
+        CalMsg::GotoSources => {
+            super::news_readout::set_uses_filter("calendar");
+            crate::ui::command::post(crate::ui::command::Cmd::Workspace(format!(
+                "{}{}源管理",
+                super::workspace::WS_NEWS,
+                super::workspace::PAGE_SEP
+            )));
+        }
         CalMsg::StudyRun => super::calendar_study::run_now(),
         CalMsg::StudySeries(s) => ro::set_study_series(s),
         CalMsg::StudyDaily(g) => crate::ui::grid::named_update("calendar.study.daily", g),

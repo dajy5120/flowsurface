@@ -6,6 +6,20 @@
 
 use super::{Density, ThemeId};
 
+/// 面板投递的界面命令（面板的消息到不了工作区切换这一层）：主程序每次 Tick 取出来执行。
+static POSTED: std::sync::Mutex<Vec<Cmd>> = std::sync::Mutex::new(Vec::new());
+
+/// 投递一条命令（下一次 Tick 执行，约 100 毫秒内）。
+pub fn post(c: Cmd) {
+    if let Ok(mut g) = POSTED.lock() {
+        g.push(c);
+    }
+}
+
+pub fn take_posted() -> Vec<Cmd> {
+    POSTED.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default()
+}
+
 /// 一条命令要做的事。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {

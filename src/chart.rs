@@ -664,6 +664,72 @@ pub struct ViewState {
     linked_seen: std::sync::atomic::AtomicU64,
     /// 价格轴宽度的高水位（f32 位）：只增不减。见 [`ViewState::y_labels_width`]。
     y_labels_max: std::sync::atomic::AtomicU32,
+    /// 见过的「在图上看」请求版本（[`goto_time`]）。
+    goto_seen: u64,
+}
+
+/// 「在图上看」（docs/43 §8 第 1 条）：日历请求跳到某个时刻，**当前页**按时间的 K 线图把视野中心移过去。
+///
+/// 请求带版本号与发出时刻：图表在每次刷新（`invalidate`）时看一眼，比自己见过的新、且发出不到 5 秒才执行——
+/// 别的页的图不刷新，过几分钟切过去时不会莫名其妙跳走。执行了就记一次「接住」，日历据此说清本页有没有图。
+pub mod goto_time {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    static REQ: Mutex<Option<(u64, u64, Instant)>> = Mutex::new(None); // (版本, 时刻毫秒, 发出)
+    static VERSION: AtomicU64 = AtomicU64::new(0);
+    static TAKEN: Mutex<(u64, u32)> = Mutex::new((0, 0)); // (版本, 接住的图数)
+    const FRESH: Duration = Duration::from_secs(5);
+
+    /// 发一个跳转请求，返回版本号。
+    pub fn request(at_ms: u64) -> u64 {
+        let v = VERSION.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Ok(mut g) = REQ.lock() {
+            *g = Some((v, at_ms, Instant::now()));
+        }
+        v
+    }
+
+    /// 比 `seen` 新、还新鲜的请求：(版本, 时刻)。
+    pub fn pending(seen: u64) -> Option<(u64, u64)> {
+        let g = REQ.lock().ok()?;
+        let (v, at, t) = (*g)?;
+        (v > seen && t.elapsed() < FRESH).then_some((v, at))
+    }
+
+    pub fn ack(v: u64) {
+        if let Ok(mut g) = TAKEN.lock() {
+            if g.0 == v {
+                g.1 += 1;
+            } else {
+                *g = (v, 1);
+            }
+        }
+    }
+
+    /// 最近一次请求：(版本, 发出多久了, 接住的图数)。
+    pub fn last() -> Option<(u64, Duration, u32)> {
+        let (v, _, t) = (*REQ.lock().ok()?)?;
+        let n = TAKEN.lock().ok().map_or(0, |g| if g.0 == v { g.1 } else { 0 });
+        Some((v, t.elapsed(), n))
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_request_is_taken_once_per_chart_and_counted() {
+            let v = request(1_000);
+            assert_eq!(pending(v - 1), Some((v, 1_000)), "没见过的图要执行");
+            assert_eq!(pending(v), None, "执行过的图不再执行");
+            ack(v);
+            ack(v);
+            assert_eq!(last().map(|x| (x.0, x.2)), Some((v, 2)));
+            let w = request(2_000);
+            assert_eq!(last().map(|x| (x.0, x.2)), Some((w, 0)), "新请求从零数");
+        }
+    }
 }
 
 /// 同页图表的时间联动（docs/41 §4.3，E 期）：光标所在的图把它指着的时间放在这里，
@@ -786,6 +852,7 @@ impl ViewState {
             layout,
             linked_seen: std::sync::atomic::AtomicU64::new(0),
             y_labels_max: std::sync::atomic::AtomicU32::new(0),
+            goto_seen: 0,
         }
     }
 

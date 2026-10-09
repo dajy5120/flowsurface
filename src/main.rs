@@ -596,6 +596,11 @@ impl Flowsurface {
                     self.last_autosave = now;
                     return window::collect_window_specs(self.all_window_ids(), Message::AutoSave);
                 }
+                // 面板投递的界面命令（金融日历「去源管理」等）
+                let posted = ui::command::take_posted();
+                if !posted.is_empty() {
+                    return Task::batch(posted.into_iter().map(|c| self.run_command(c)).collect::<Vec<_>>());
+                }
                 // 网格右键菜单复制出来的文字（网格自己发不了剪贴板 Task）
                 if let Some(t) = ui::grid::take_clipboard() {
                     self.notifications.push(Toast::info(format!("已复制 {} 行", t.lines().count().saturating_sub(1))));

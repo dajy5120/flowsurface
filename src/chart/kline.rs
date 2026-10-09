@@ -781,6 +781,20 @@ impl KlineChart {
     }
 
     pub fn invalidate(&mut self, now: Option<Instant>) -> Option<Action> {
+        // 「在图上看」（docs/43 §8）：把请求的时刻放到视野中心，价格轴改回自动适配（否则那段 K 线可能在上下边外）
+        if matches!(self.chart.basis, Basis::Time(_))
+            && let Some((v, at)) = super::goto_time::pending(self.chart.goto_seen)
+        {
+            let fit = self.supports_fit_autoscaling();
+            let chart = &mut self.chart;
+            chart.goto_seen = v;
+            chart.translation.x = -chart.interval_to_x(at);
+            if fit {
+                chart.layout.autoscale = Some(super::Autoscale::FitToVisible);
+                chart.scaling = 1.0;
+            }
+            super::goto_time::ack(v);
+        }
         let chart = &mut self.chart;
 
         if let Some(autoscale) = chart.layout.autoscale {

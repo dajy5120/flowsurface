@@ -568,6 +568,8 @@ pub struct Filter {
     pub tz: DispTz,
     /// 事件流的范围（天）。
     pub stream_days: i64,
+    /// 与我相关度高的事件不受重要性筛选（docs/43 §4：「重要性 ≥ P1 或 相关度 = 高」）。
+    pub relevant_always: bool,
 }
 
 impl Default for Filter {
@@ -580,13 +582,16 @@ impl Default for Filter {
             query: String::new(),
             tz: DispTz::Local,
             stream_days: 30,
+            relevant_always: true,
         }
     }
 }
 
 impl Filter {
     pub fn pass(&self, e: &Ev) -> bool {
-        if e.importance > self.max_importance {
+        if e.importance > self.max_importance
+            && !(self.relevant_always && super::calendar_relevance::level(e) == super::calendar_relevance::Level::High)
+        {
             return false;
         }
         if self.hidden_kinds.contains(&e.kind) || self.hidden_countries.contains(&e.country) {
@@ -633,6 +638,9 @@ impl Filter {
         if self.tz != d.tz {
             v.push(self.tz.label().into());
         }
+        if self.relevant_always != d.relevant_always {
+            v.push("相关度高的也按重要性筛".into());
+        }
         v
     }
 }
@@ -667,6 +675,8 @@ struct Ui {
     win_edit: Option<(String, String, String, String)>,
     /// 研究页看哪个系列（`None` = 报告里的第一个）。
     study_series: Option<String>,
+    /// 「我关注的标的」的编辑值（保存前）。
+    watch_edit: Option<String>,
 }
 
 static UI: Mutex<Option<Ui>> = Mutex::new(None);
@@ -867,6 +877,14 @@ pub fn set_win_field(saved: &super::calendar_alerts::WindowCfg, field: &str, v: 
     with_ui(|u| u.win_edit = Some(cur));
 }
 
+pub fn watch_edit() -> Option<String> {
+    with_ui(|u| u.watch_edit.clone())
+}
+
+pub fn set_watch_edit(s: Option<String>) {
+    with_ui(|u| u.watch_edit = s);
+}
+
 pub fn study_series() -> Option<String> {
     with_ui(|u| u.study_series.clone())
 }
@@ -905,7 +923,8 @@ pub fn events_on<'a>(snap: &'a CalReadout, d: NaiveDate, f: &Filter) -> Vec<&'a 
 /// 月历格子里先放哪几个：重要的在前，同档按时刻。
 pub fn top_for_cell<'a>(evs: &[&'a Ev]) -> Vec<&'a Ev> {
     let mut v = evs.to_vec();
-    v.sort_by_key(|e| (e.importance, e.scheduled_at.unwrap_or(i64::MIN)));
+    // 同一档里与我相关度高的排前面（格子只放得下 3 个）
+    v.sort_by_key(|e| (e.importance, std::cmp::Reverse(super::calendar_relevance::level(e)), e.scheduled_at.unwrap_or(i64::MIN)));
     v
 }
 
