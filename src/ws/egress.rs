@@ -220,7 +220,7 @@ pub static ALL: &[Source] = &[
     Source {
         key: "news",
         label: "新闻资讯",
-        what: "监管/交易所/媒体的 RSS·Atom·JSON 源（docs/25）",
+        what: "监管/交易所/媒体的 RSS·Atom·JSON 源 + 金融日历日程（ICS/官方日程页/JSON，docs/25、docs/43）",
         kind: Kind::Service,
         scope: Scope::External,
         unit: "ws-news",
