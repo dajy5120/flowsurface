@@ -1237,6 +1237,8 @@ fn short_label(series: Option<&str>, title: &str) -> String {
     let s = match series.unwrap_or("") {
         "fomc-decision" => "FOMC",
         "ecb-decision" => "ECB",
+        "boj-decision" => "日银",
+        "boe-decision" => "英银",
         "us-cpi" => "CPI",
         "us-nfp" => "非农",
         "us-ppi" => "PPI",

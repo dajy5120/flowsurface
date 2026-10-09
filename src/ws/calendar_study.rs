@@ -134,7 +134,7 @@ pub struct Report {
 }
 
 /// 系列在页面上的顺序（P0 在前）；报告里有、这里没列的排在后面。
-pub const SERIES_ORDER: [&str; 6] = ["fomc-decision", "ecb-decision", "us-cpi", "us-nfp", "us-gdp", "us-pce"];
+pub const SERIES_ORDER: [&str; 8] = ["fomc-decision", "ecb-decision", "boj-decision", "boe-decision", "us-cpi", "us-nfp", "us-gdp", "us-pce"];
 
 impl Report {
     pub fn name<'a>(&'a self, series: &'a str) -> &'a str {

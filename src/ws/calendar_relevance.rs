@@ -56,6 +56,8 @@ const ALIASES: &[&[&str]] = &[
     &["ZB", "US", "TLT"],
     &["6E", "EURUSD", "EUR", "FXE"],
     &["6J", "USDJPY", "JPY", "FXY"],
+    &["6B", "GBPUSD", "GBP", "FXB"],
+    &["NKD", "NIY", "N225", "NIKKEI", "JP225"],
     &["DXY", "DX", "UUP"],
     &["VIX", "VX", "UVXY", "VXX"],
     &["FESX", "SX5E", "STOXX50"],
@@ -70,6 +72,7 @@ fn class(sym: &str) -> Option<&'static str> {
         ("能源", &["CL", "NG"]),
         ("外汇", &["6E", "6J", "6B", "DXY", "EURUSD"]),
         ("欧股", &["FESX"]),
+        ("日股", &["NKD"]),
     ];
     if let Some((c, _)) = CLASSES.iter().find(|(_, xs)| xs.contains(&sym)) {
         return Some(c);
