@@ -224,7 +224,7 @@ pub static ALL: &[Source] = &[
         key: "telegram",
         label: "Telegram 提醒",
         // 只出不进：不收消息、不做机器人命令（那会变成一个能从外面操作本机的入口）
-        what: "api.telegram.org——金融日历提醒的 Telegram 渠道，由资讯守护发送（docs/43 §6.4，K4b 接通）；默认关，只出不进",
+        what: "api.telegram.org——金融日历提醒的 Telegram 渠道，由资讯守护发送（docs/43 §6.4）；默认关，只出不进；打开时会拉起资讯守护",
         kind: Kind::Switch,
         scope: Scope::External,
         unit: "",
@@ -552,7 +552,13 @@ pub fn action(key: &str, act: &str) -> String {
             );
         }
         return match super::calendar_alerts::set_telegram_enabled(on) {
-            Ok(()) => format!("✔ {} 已{}", s.label, if on { "打开" } else { "关闭" }),
+            Ok(()) => {
+                if on {
+                    // 发送在资讯守护里：打开时把它拉起来
+                    super::calendar_alerts::ensure_sender_running();
+                }
+                format!("✔ {} 已{}{}", s.label, if on { "打开" } else { "关闭" }, if on { "（资讯守护会随 Cockpit 起停）" } else { "" })
+            }
             Err(e) => format!("✗ {} 写配置失败：{e}", s.label),
         };
     }

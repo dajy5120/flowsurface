@@ -124,7 +124,7 @@ pub enum Channel {
     InApp,
     /// 桌面通知（`notify-send`）。
     Desktop,
-    /// Telegram：Cockpit 只写「待送」，资讯守护发（K4b 接通）。
+    /// Telegram：Cockpit 只写「待送」，资讯守护发（K4b）。
     Telegram,
 }
 
@@ -604,7 +604,8 @@ pub fn mark_missed(c: &Connection, now: i64) -> rusqlite::Result<usize> {
 pub struct TelegramConfig {
     #[serde(default)]
     pub bot_token: String,
-    #[serde(default)]
+    /// 数字或字符串都认（多数教程里是数字、不带引号；按字符串读会整份读不出、被当成「未配置」）。
+    #[serde(default, deserialize_with = "str_or_num")]
     pub chat_id: String,
     #[serde(default)]
     pub enabled: bool,
@@ -615,6 +616,58 @@ pub struct TelegramConfig {
 
 fn one() -> u8 {
     1
+}
+
+fn str_or_num<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    use serde::Deserialize;
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    })
+}
+
+/// Telegram 开着时，资讯守护得在跑（发送在守护里，docs/43 §12 第 2 条：启用 Telegram 后守护随 Cockpit 起停）。
+/// 幂等：已经在跑就什么都不做。**必须 --no-block**（systemctl start 会等单元就绪，冻住调用方）。
+pub fn ensure_sender_running() {
+    let tg = telegram();
+    if !(tg.enabled && tg.configured()) {
+        return;
+    }
+    if super::svcctl::query(super::news_readout::SERVICE).active {
+        return;
+    }
+    let _ = std::process::Command::new("systemctl").args(["--user", "start", "--no-block", super::news_readout::SERVICE]).status();
+    log::info!("[calendar-alerts] Telegram 开着：拉起资讯守护（发送在守护里）");
+}
+
+/// 「发一条测试消息」：写一条测试任务 + 一行 Telegram 待送，交给守护发。返回给界面的一句话。
+pub fn queue_test_message(c: &Connection) -> Result<String, String> {
+    let tg = telegram();
+    if !tg.configured() {
+        return Err(format!("还没配置：在 {} 写 bot_token 与 chat_id", telegram_path().display()));
+    }
+    if !tg.enabled {
+        return Err("Telegram 关着：先在「资源｜网络出口」把「Telegram 提醒」打开".into());
+    }
+    let now = now_ms();
+    let title = "WealthSpring 金融日历 · 测试消息";
+    let body = format!("这条是测试：收到说明 Telegram 渠道通了（{}）。", Local::now().format("%m-%d %H:%M:%S"));
+    c.execute(
+        "INSERT INTO alert_jobs (idem_key, event_id, rule_id, offset_min, what, version, fire_at, state, title, body, importance, created_at, fired_at)
+         VALUES (?1, '', 0, 0, 'test', 0, ?2, 'fired', ?3, ?4, 1, ?2, ?2)",
+        params![format!("test|{now}"), now, title, body],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = c.last_insert_rowid();
+    // 两分钟内没发出去就作废（守护没起来 / 网络不通）
+    c.execute(
+        "INSERT INTO alert_deliveries (job_id, channel, state, attempts, expires_at) VALUES (?1, 'telegram', 'pending', 0, ?2)",
+        params![id, now + 120_000],
+    )
+    .map_err(|e| e.to_string())?;
+    ensure_sender_running();
+    Ok("✔ 测试消息已交给资讯守护发送（几秒内到；结果看下面通知中心的「渠道」列）".into())
 }
 
 pub fn telegram_path() -> std::path::PathBuf {
@@ -713,7 +766,7 @@ pub fn fire_due(c: &Connection, now: i64, dry: bool) -> rusqlite::Result<usize> 
                     Ok(()) => ("sent", None),
                     Err(e) => ("failed", Some(e)),
                 },
-                // 联网渠道：Cockpit 只写「待送」，守护发（K4b）。没配置 / 关着 / 不够重要的直接记下原因
+                // 联网渠道：Cockpit 只写「待送」，资讯守护发。没配置 / 关着 / 不够重要的直接记下原因
                 Channel::Telegram if !tg.configured() => ("disabled", Some("未配置".into())),
                 Channel::Telegram if !tg.enabled => ("disabled", Some("已关（出口总闸 / 配置）".into())),
                 Channel::Telegram if imp > tg.min_importance => ("disabled", Some(format!("重要性低于 Telegram 门槛 {}", importance_tag(tg.min_importance)))),
@@ -728,6 +781,9 @@ pub fn fire_due(c: &Connection, now: i64, dry: bool) -> rusqlite::Result<usize> 
         }
         c.execute("UPDATE alert_jobs SET state='fired', fired_at=?2 WHERE id=?1", params![id, now])?;
         n += 1;
+    }
+    if !dry && n > 0 && tg.enabled && tg.configured() {
+        ensure_sender_running();
     }
     // 过期的 Telegram 待送
     c.execute("UPDATE alert_deliveries SET state='expired' WHERE state='pending' AND expires_at < ?1", [now])?;
@@ -875,6 +931,8 @@ pub fn start() {
                     return;
                 }
             };
+            // Telegram 开着：发送在资讯守护里，保证它在跑
+            ensure_sender_running();
             // 启动补报：关着的那段时间到点的，不弹窗
             if let Ok(n) = mark_missed(&c, now_ms())
                 && n > 0
@@ -1096,6 +1154,15 @@ mod tests {
             assert_eq!(tg.1, "disabled");
         }
         assert!(n[0].deliveries.iter().any(|d| d.0 == "inapp" && d.1 == "sent"));
+    }
+
+    #[test]
+    fn telegram_chat_id_may_be_a_number() {
+        // 多数教程里 chat_id 不带引号；按字符串读会整份读不出、被当成「未配置」
+        let a: TelegramConfig = serde_json::from_str(r#"{"bot_token":"1:x","chat_id":123456789}"#).unwrap();
+        let b: TelegramConfig = serde_json::from_str(r#"{"bot_token":"1:x","chat_id":"123456789","enabled":true}"#).unwrap();
+        assert_eq!((a.chat_id.as_str(), a.configured(), a.min_importance), ("123456789", true, 1));
+        assert!(b.enabled && b.configured());
     }
 
     #[test]

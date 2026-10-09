@@ -183,6 +183,20 @@ pub fn handle(m: CalMsg) {
                 Err(e) => ro::set_alert_note(format!("✗ {e}")),
             }
         }
+        CalMsg::TelegramTest => {
+            let mut note = String::new();
+            let r = al::write(|c| {
+                note = match al::queue_test_message(c) {
+                    Ok(m) => m,
+                    Err(e) => format!("✗ {e}"),
+                };
+                Ok(())
+            });
+            ro::set_alert_note(match r {
+                Ok(()) => note,
+                Err(e) => format!("✗ {e}"),
+            });
+        }
         CalMsg::RulesTable(crate::ui::grid::GridMsg::Action(r, c)) => {
             if let Some(m) = super::calendar_view::rule_action(r, c) {
                 handle(m);

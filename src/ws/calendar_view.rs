@@ -63,6 +63,8 @@ pub enum CalMsg {
     QuietTo(String),
     QuietP0(bool),
     QuietSave,
+    /// 发一条 Telegram 测试消息（交给资讯守护发）。
+    TelegramTest,
     RulesTable(crate::ui::grid::GridMsg),
     NoticesTable(crate::ui::grid::GridMsg),
     /// 事件流表（ui::grid）。
@@ -914,6 +916,7 @@ fn delivery_text(d: &[(String, String, Option<String>)]) -> String {
             let mark = match st.as_str() {
                 "sent" => "✓".to_string(),
                 "pending" => "待送".to_string(),
+                "uncertain" => format!("不确定（已发出、没收到回复）{}", err.clone().map(|e| format!("：{e}")).unwrap_or_default()),
                 "expired" => "过期未送".to_string(),
                 "failed" => format!("✗ {}", err.clone().unwrap_or_default()),
                 "disabled" => err.clone().unwrap_or_else(|| "关".into()),
@@ -1114,9 +1117,23 @@ fn alerts_view<'a>(snap: &CalReadout) -> Element<'a, CalMsg> {
             if private == Some(false) { " · ⚠ 配置文件别人也能读（令牌在里面），chmod 600" } else { "" }
         )
     };
-    col = col.push(kv("Telegram", meta(tg_line, if private == Some(false) { crate::ui::pal::warn() } else { crate::ui::pal::dim() }).into()));
+    col = col.push(kv(
+        "Telegram",
+        row![
+            meta(tg_line, if private == Some(false) { crate::ui::pal::warn() } else { crate::ui::pal::dim() }),
+            crate::ui::widgets::btn(
+                "发一条测试消息",
+                crate::ui::widgets::Kind::Standard,
+                (tg.configured() && tg.enabled).then_some(CalMsg::TelegramTest),
+            ),
+        ]
+        .spacing(crate::ui::metrics::space(3))
+        .align_y(Alignment::Center)
+        .wrap()
+        .into(),
+    ));
     col = col.push(meta(
-        "Telegram 的开关在「资源｜网络出口」（出口总闸，默认关）；发送由资讯守护负责，K4b 接通——现在只记「待送」，事件过了未送出即作废。只出不进：不收消息、不做机器人命令。",
+        "开关在「资源｜网络出口」（出口总闸，默认关）。发送由资讯守护负责：打开 Telegram 后守护随 Cockpit 起停；同一轮的普通提醒合并成一条、P0 单独发、每秒最多一条；发出去没收到回复记「不确定」，只有 P0 重试一次；事件过了未送出即作废。只出不进：不收消息、不做机器人命令。",
         crate::ui::pal::dim(),
     ));
     crate::ui::scroll(col).width(Length::Fill).height(Length::Fill).into()
