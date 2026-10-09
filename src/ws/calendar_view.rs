@@ -51,7 +51,7 @@ thread_local! {
     static STREAM_ROWS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-const STREAM_COL_DETAIL: usize = 9;
+const STREAM_COL_DETAIL: usize = 12;
 
 /// 事件流表的操作格 → 动作。
 pub(crate) fn stream_action(row: usize, col: usize) -> Option<CalMsg> {
@@ -61,8 +61,6 @@ pub(crate) fn stream_action(row: usize, col: usize) -> Option<CalMsg> {
     STREAM_ROWS.with(|r| r.borrow().get(row).cloned()).map(CalMsg::PickEvent)
 }
 
-/// 「整年公布」之外的滚动源：覆盖期天然很短，不能按覆盖期标红（docs/43 §13.3 第 4 条）。
-const ROLLING_SOURCES: [&str; 3] = ["treasury-auctions", "binance-exchangeinfo", "calendar-rules"];
 
 // ── 小件 ───────────────────────────────────────────────────────────
 
@@ -115,7 +113,11 @@ fn weekday_cn(w: Weekday) -> &'static str {
 fn marks(e: &Ev) -> String {
     let mut s = String::new();
     if let Some(st) = ro::status_label(&e.status) {
-        s.push_str(if e.status == "unlisted" { "⊘ " } else { "⚠ " });
+        s.push_str(match e.status.as_str() {
+            "unlisted" => "⊘ ",
+            "released" => "✓ ",
+            _ => "⚠ ",
+        });
         s.push_str(st);
         s.push(' ');
     }
@@ -139,7 +141,8 @@ fn event_color(e: &Ev) -> Color {
 fn not_published_yet(snap: &CalReadout, d: NaiveDate) -> Vec<&ro::CalSource> {
     snap.sources
         .iter()
-        .filter(|s| !ROLLING_SOURCES.contains(&s.id.as_str()))
+        // 滚动源（国债一周、Nasdaq 两周…）覆盖期短是常态，由守护在快照里标（docs/43 §13.3 第 4 条）
+        .filter(|s| !s.rolling)
         .filter(|s| {
             s.coverage_to
                 .as_deref()
@@ -345,12 +348,17 @@ fn event_row<'a>(e: &Ev, tz: DispTz, picked: bool) -> Element<'a, CalMsg> {
         title.push_str(&format!("（会期 {} 起）", sp.format("%m-%d")));
     }
     let m = marks(e);
+    let vals = e.headline().map(ro::value_text).filter(|t| !t.is_empty());
+    let mut title_col = column![small(title, event_color(e))];
+    if let Some(v) = vals {
+        title_col = title_col.push(meta(v, crate::ui::pal::txt()));
+    }
     let r = row![
         container(small(ro::display_time(e, tz), crate::ui::pal::txt())).width(Length::Fixed(96.0)),
         container(small(format!("{g} {}", ro::importance_label(e.importance)), ic)).width(Length::Fixed(40.0)),
         container(small(ro::country_label(&e.country).to_string(), crate::ui::pal::dim())).width(Length::Fixed(40.0)),
-        container(small(title, event_color(e))).width(Length::Fill),
-        meta(m, if e.status == "scheduled" { crate::ui::pal::dim() } else { crate::ui::pal::warn() }),
+        container(title_col).width(Length::Fill),
+        meta(m, if matches!(e.status.as_str(), "scheduled" | "released") { crate::ui::pal::dim() } else { crate::ui::pal::warn() }),
     ]
     .spacing(crate::ui::metrics::space(2))
     .align_y(Alignment::Center);
@@ -537,6 +545,9 @@ fn stream_view<'a>(snap: &CalReadout, f: &Filter) -> Element<'a, CalMsg> {
         Column::text("重要性", 60.0).groupable(),
         Column::text("事件", 320.0),
         Column::text("类别", 84.0).groupable(),
+        Column::text("实际", 80.0),
+        Column::text("预期", 80.0),
+        Column::text("前值", 80.0),
         Column::text("确定性", 90.0),
         Column::text("来源", 200.0),
         Column::text("", 60.0),
@@ -562,7 +573,18 @@ fn stream_view<'a>(snap: &CalReadout, f: &Filter) -> Element<'a, CalMsg> {
             Cell::Colored(format!("{g} {}", ro::importance_label(e.importance)), ic),
             Cell::Colored(ro::display_title(e), event_color(e)),
             Cell::Text(ro::kind_label(&e.kind).to_string()),
-            Cell::Colored(prec, if e.precision == "exact" && e.status == "scheduled" { crate::ui::pal::dim() } else { crate::ui::pal::warn() }),
+            Cell::Text(e.headline().and_then(|v| v.actual.clone()).unwrap_or_default()),
+            Cell::Text(e.headline().and_then(|v| v.consensus.clone()).unwrap_or_default()),
+            Cell::Text(e.headline().and_then(|v| v.previous.clone()).unwrap_or_default()),
+            Cell::Colored(
+                prec,
+                // 只有「需要留意」的才用警示色：预计、按惯例、撤下、不符。仅日期是财报 / 休市的常态
+                if matches!(e.precision.as_str(), "exact" | "date_only") && matches!(e.status.as_str(), "scheduled" | "released") {
+                    crate::ui::pal::dim()
+                } else {
+                    crate::ui::pal::warn()
+                },
+            ),
             Cell::Text(src.join(" · ")),
             Cell::Action("详情".into(), Tone::Neutral),
         ]);
@@ -668,6 +690,14 @@ fn props_view<'a>(snap: &CalReadout, f: &Filter) -> Element<'a, CalMsg> {
     if let Some(n) = &e.note {
         col = col.push(kv("备注", n.clone(), crate::ui::pal::dim()));
     }
+    if !e.values.is_empty() {
+        col = col.push(crate::ui::widgets::section("数值"));
+        for v in &e.values {
+            let label = if v.label.is_empty() { "—".to_string() } else { v.label.clone() };
+            col = col.push(kv(&label, ro::value_text(v), if v.actual.is_some() { crate::ui::pal::txt() } else { crate::ui::pal::dim() }));
+        }
+        col = col.push(meta("同一名字出现两次时（CPI 环比与同比都叫 CPI），第二行记为「·2」：来源没有字段区分口径", crate::ui::pal::dim()));
+    }
     if let Some(u) = &e.url {
         col = col.push(crate::ui::widgets::kv(
             "原文",
@@ -737,7 +767,7 @@ fn data_view<'a>(snap: &CalReadout) -> Element<'a, CalMsg> {
     ));
     col = col.push(crate::ui::widgets::section("各源覆盖到哪天"));
     for s in &snap.sources {
-        let rolling = ROLLING_SOURCES.contains(&s.id.as_str());
+        let rolling = s.rolling;
         let (txt, c) = match (s.coverage_to.as_deref(), s.coverage_days_left) {
             (Some(to), Some(l)) if !rolling && l < 30 => (format!("到 {to}（只剩 {l} 天）"), crate::ui::pal::warn()),
             (Some(to), Some(l)) => (format!("到 {to}（{l} 天）{}", if rolling { " · 滚动发布" } else { "" }), crate::ui::pal::dim()),
@@ -762,7 +792,7 @@ mod tests {
     use super::*;
 
     fn src(id: &str, to: &str) -> ro::CalSource {
-        ro::CalSource { id: id.into(), label: id.into(), coverage_to: Some(to.into()), ..Default::default() }
+        ro::CalSource { id: id.into(), label: id.into(), coverage_to: Some(to.into()), rolling: id != "bls-schedule", ..Default::default() }
     }
 
     #[test]

@@ -42,6 +42,23 @@ pub struct Ev {
     pub owner_tier: String,
     pub sources: Vec<String>,
     pub revisions: i64,
+    pub values: Vec<ValueRow>,
+}
+
+impl Ev {
+    /// 列表里显示的那一行数值（第一行）。
+    pub fn headline(&self) -> Option<&ValueRow> {
+        self.values.first()
+    }
+}
+
+/// 一行数值：预期 / 前值 / 实际（CPI 有环比、同比、核心几行）。缺的就是 `None`。
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ValueRow {
+    pub label: String,
+    pub actual: Option<String>,
+    pub consensus: Option<String>,
+    pub previous: Option<String>,
 }
 
 /// 一个日历源的覆盖情况（健康状态在新闻快照的源行里）。
@@ -53,6 +70,8 @@ pub struct CalSource {
     pub coverage_to: Option<String>,
     pub coverage_days_left: Option<i64>,
     pub last_report: String,
+    /// 滚动发布（国债、Nasdaq、币安、规则）：覆盖期短是常态，不说「尚未公布」、不标黄。守护在快照里给。
+    pub rolling: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -115,6 +134,20 @@ pub fn parse(v: &serde_json::Value) -> CalReadout {
                         .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
                         .unwrap_or_default(),
                     revisions: e.get("revisions").and_then(|x| x.as_i64()).unwrap_or(0),
+                    values: e
+                        .get("values")
+                        .and_then(|x| x.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .map(|v| ValueRow {
+                                    label: s(v, "label"),
+                                    actual: os(v, "actual"),
+                                    consensus: os(v, "consensus"),
+                                    previous: os(v, "previous"),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 })
                 .collect()
         })
@@ -131,6 +164,7 @@ pub fn parse(v: &serde_json::Value) -> CalReadout {
                     coverage_to: os(r, "coverage_to"),
                     coverage_days_left: r.get("coverage_days_left").and_then(|x| x.as_i64()),
                     last_report: s(r, "last_report"),
+                    rolling: r.get("rolling").and_then(|x| x.as_bool()).unwrap_or(false),
                 })
                 .collect()
         })
@@ -385,8 +419,24 @@ pub fn status_label(s: &str) -> Option<&'static str> {
     match s {
         "unlisted" => Some("来源已撤下"),
         "conflict" => Some("与官方不符"),
+        "released" => Some("已发布"),
         _ => None,
     }
+}
+
+/// 数值行的一句话：「实际 0.4% · 预期 0.3% · 前值 0.4%」。没有的项不写。
+pub fn value_text(v: &ValueRow) -> String {
+    let mut parts = Vec::new();
+    if let Some(a) = &v.actual {
+        parts.push(format!("实际 {a}"));
+    }
+    if let Some(c) = &v.consensus {
+        parts.push(format!("预期 {c}"));
+    }
+    if let Some(p) = &v.previous {
+        parts.push(format!("前值 {p}"));
+    }
+    parts.join(" · ")
 }
 
 pub fn importance_label(i: u8) -> &'static str {
@@ -408,11 +458,32 @@ pub fn kind_label(k: &str) -> &'static str {
         "holiday" => "休市",
         "early_close" => "提前收市",
         "period_end" => "月末 / 季末",
+        "earnings" => "财报",
+        "dividend" => "除息",
+        "ipo" => "新股",
+        "listing" => "上新",
+        "delisting" => "下架",
+        "maintenance" => "维护",
         _ => "其他",
     }
 }
 
-pub const KINDS: [&str; 8] = ["central_bank", "macro", "auction", "expiry", "delivery", "holiday", "early_close", "period_end"];
+pub const KINDS: [&str; 14] = [
+    "central_bank",
+    "macro",
+    "auction",
+    "expiry",
+    "delivery",
+    "holiday",
+    "early_close",
+    "period_end",
+    "earnings",
+    "dividend",
+    "ipo",
+    "listing",
+    "delisting",
+    "maintenance",
+];
 
 pub fn country_label(c: &str) -> &str {
     match c {
@@ -420,6 +491,23 @@ pub fn country_label(c: &str) -> &str {
         "EU" => "欧元区",
         "CRYPTO" => "加密",
         "GLOBAL" => "全球",
+        "DE" => "德国",
+        "GB" => "英国",
+        "FR" => "法国",
+        "IT" => "意大利",
+        "ES" => "西班牙",
+        "JP" => "日本",
+        "CN" => "中国",
+        "CA" => "加拿大",
+        "AU" => "澳大利亚",
+        "NZ" => "新西兰",
+        "CH" => "瑞士",
+        "IN" => "印度",
+        "KR" => "韩国",
+        "BR" => "巴西",
+        "RU" => "俄罗斯",
+        "SG" => "新加坡",
+        "ZA" => "南非",
         other => other,
     }
 }
