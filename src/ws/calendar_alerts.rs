@@ -124,7 +124,7 @@ pub enum Channel {
     InApp,
     /// 桌面通知（`notify-send`）。
     Desktop,
-    /// Telegram：Cockpit 只写「待送」，资讯守护发（K4b）。
+    /// Telegram：Cockpit 只写「待送」，发送进程 `ws-telegram` 发（docs/43 §17）。
     Telegram,
 }
 
@@ -627,18 +627,29 @@ fn str_or_num<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error
     })
 }
 
-/// Telegram 开着时，资讯守护得在跑（发送在守护里，docs/43 §12 第 2 条：启用 Telegram 后守护随 Cockpit 起停）。
+/// 发送 Telegram 的独立进程（docs/43 §17）：只发提醒、不抓新闻。
+pub const SENDER_UNIT: &str = "ws-telegram";
+
+/// Telegram 开着时，发送进程 `ws-telegram` 得在跑（随 Cockpit 起停）。
+///
+/// 不再拉起资讯守护：启动策略「对外连接关闭」（默认）会停掉它，为了发几条提醒让它当例外，
+/// 等于全天轮询几十个新闻源（2026-10-09 用户选了单独的发送进程）。
 /// 幂等：已经在跑就什么都不做。**必须 --no-block**（systemctl start 会等单元就绪，冻住调用方）。
 pub fn ensure_sender_running() {
     let tg = telegram();
     if !(tg.enabled && tg.configured()) {
         return;
     }
-    if super::svcctl::query(super::news_readout::SERVICE).active {
+    if super::svcctl::query(SENDER_UNIT).active {
         return;
     }
-    let _ = std::process::Command::new("systemctl").args(["--user", "start", "--no-block", super::news_readout::SERVICE]).status();
-    log::info!("[calendar-alerts] Telegram 开着：拉起资讯守护（发送在守护里）");
+    let _ = std::process::Command::new("systemctl").args(["--user", "start", "--no-block", SENDER_UNIT]).status();
+    log::info!("[calendar-alerts] Telegram 开着：拉起发送进程 {SENDER_UNIT}");
+}
+
+/// 关掉 Telegram 时停掉发送进程（它关着时本来也不发，停掉是为了出口总闸上那一行如实显示「没在跑」）。
+pub fn stop_sender() {
+    let _ = std::process::Command::new("systemctl").args(["--user", "stop", "--no-block", SENDER_UNIT]).status();
 }
 
 /// 「发一条测试消息」：写一条测试任务 + 一行 Telegram 待送，交给守护发。返回给界面的一句话。
@@ -667,7 +678,7 @@ pub fn queue_test_message(c: &Connection) -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     ensure_sender_running();
-    Ok("✔ 测试消息已交给资讯守护发送（几秒内到；结果看下面通知中心的「渠道」列）".into())
+    Ok("✔ 测试消息已交给发送进程 ws-telegram（几秒内到；结果看下面通知中心的「渠道」列）".into())
 }
 
 pub fn telegram_path() -> std::path::PathBuf {
@@ -766,7 +777,7 @@ pub fn fire_due(c: &Connection, now: i64, dry: bool) -> rusqlite::Result<usize> 
                     Ok(()) => ("sent", None),
                     Err(e) => ("failed", Some(e)),
                 },
-                // 联网渠道：Cockpit 只写「待送」，资讯守护发。没配置 / 关着 / 不够重要的直接记下原因
+                // 联网渠道：Cockpit 只写「待送」，ws-telegram 发。没配置 / 关着 / 不够重要的直接记下原因
                 Channel::Telegram if !tg.configured() => ("disabled", Some("未配置".into())),
                 Channel::Telegram if !tg.enabled => ("disabled", Some("已关（出口总闸 / 配置）".into())),
                 Channel::Telegram if imp > tg.min_importance => ("disabled", Some(format!("重要性低于 Telegram 门槛 {}", importance_tag(tg.min_importance)))),

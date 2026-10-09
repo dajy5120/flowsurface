@@ -224,10 +224,11 @@ pub static ALL: &[Source] = &[
         key: "telegram",
         label: "Telegram 提醒",
         // 只出不进：不收消息、不做机器人命令（那会变成一个能从外面操作本机的入口）
-        what: "api.telegram.org——金融日历提醒的 Telegram 渠道，由资讯守护发送（docs/43 §6.4）；默认关，只出不进；打开时会拉起资讯守护",
+        what: "api.telegram.org——金融日历提醒的 Telegram 渠道（docs/43 §17）；由独立的发送进程 ws-telegram 发，不抓新闻；默认关，只出不进；开着时随 Cockpit 起停，不受「启动时对外连接」影响",
         kind: Kind::Switch,
         scope: Scope::External,
-        unit: "",
+        // 开关背后的进程：数连接、显示在不在跑用。开关本身是配置里的 enabled
+        unit: "ws-telegram",
     },
     Source {
         key: "news",
@@ -554,10 +555,11 @@ pub fn action(key: &str, act: &str) -> String {
         return match super::calendar_alerts::set_telegram_enabled(on) {
             Ok(()) => {
                 if on {
-                    // 发送在资讯守护里：打开时把它拉起来
                     super::calendar_alerts::ensure_sender_running();
+                } else {
+                    super::calendar_alerts::stop_sender();
                 }
-                format!("✔ {} 已{}{}", s.label, if on { "打开" } else { "关闭" }, if on { "（资讯守护会随 Cockpit 起停）" } else { "" })
+                format!("✔ {} 已{}{}", s.label, if on { "打开" } else { "关闭" }, if on { "（发送进程 ws-telegram 随 Cockpit 起停）" } else { "" })
             }
             Err(e) => format!("✗ {} 写配置失败：{e}", s.label),
         };
@@ -602,20 +604,24 @@ fn verb(act: &str) -> &'static str {
 ///
 /// 返回 `(停了几路, 回执)`。
 pub fn stop_all() -> (usize, String) {
-    let n = stop_external();
+    let n = stop_external(true);
     waker().request();
     (n, format!("已停 {n} 路对外连接（内部连接没动）。开机自启没动——那是另一件事，要单独关"))
 }
 
-fn stop_external() -> usize {
+/// `switches`：连开关类（Telegram 提醒）也关。**只有用户点「对外全部停止」时为 true**——
+/// 启动策略「对外连接关闭」只停正在跑的连接，不改用户的偏好设置：K4 里它连开关一起关、还写回了配置，
+/// 结果用户打开的 Telegram 每次重启 Cockpit 都被关掉（2026-10-09 K4b 重启时发现）。
+fn stop_external(switches: bool) -> usize {
     let mut n = 0;
     for s in ALL.iter().filter(|s| s.scope == Scope::External) {
         match s.kind {
             // 本项目之外的东西不碰
             Kind::Foreign => {}
             Kind::Switch => {
-                if s.key == "telegram" && super::calendar_alerts::telegram().enabled {
+                if switches && s.key == "telegram" && super::calendar_alerts::telegram().enabled {
                     let _ = super::calendar_alerts::set_telegram_enabled(false);
+                    super::calendar_alerts::stop_sender();
                     n += 1;
                 }
             }
@@ -724,7 +730,7 @@ pub fn apply_startup() {
         set_streams_enabled(false);
     }
     super::spawn_named("ws-egress", move || {
-        let n = if on { start_external() } else { stop_external() };
+        let n = if on { start_external() } else { stop_external(false) };
         set_note(&if on {
             if n > 0 { format!("启动设置「对外连接开启」：补开了 {n} 路") } else { String::new() }
         } else {
@@ -1019,8 +1025,10 @@ fn collect(prev: &mut Prev) -> Vec<Row> {
             // 连接统一记在行情图那一行；检查期间的那十几个 HTTP 请求也会落在那一行
             Kind::InProcess if s.key == "deps-check" => 0,
             Kind::InProcess => std::process::id(),
-            // 开关类没有常开连接（发一条、断一次），数连接没有意义
-            Kind::Switch => 0,
+            // 开关类：数它背后那个进程（发送时才有连接）
+            Kind::Switch => {
+                if u.active { u.main_pid } else { 0 }
+            }
             Kind::Service => {
                 if u.active { u.main_pid } else { 0 }
             }
@@ -1064,6 +1072,10 @@ fn collect(prev: &mut Prev) -> Vec<Row> {
                         let tg = super::calendar_alerts::telegram();
                         tg.enabled && tg.configured()
                     },
+                    conns: u.active.then_some(conns),
+                    bps,
+                    today,
+                    uptime_secs: u.uptime_secs,
                     ..Default::default()
                 },
                 Kind::InProcess if s.key == "deps-check" => Row {
@@ -1465,7 +1477,8 @@ mod tests {
             assert!(!s.label.is_empty() && !s.what.is_empty(), "{} 缺说明", s.key);
             match s.kind {
                 Kind::InProcess => assert!(s.unit.is_empty(), "{} 进程内的不该有单元名", s.key),
-                Kind::Switch => assert!(s.unit.is_empty(), "{} 开关类不对应单元", s.key),
+                // 开关类：开关在配置里，单元是它背后的进程（数连接用）
+                Kind::Switch => assert!(!s.unit.is_empty(), "{} 开关类要写背后的进程", s.key),
                 // 只列不动：给它停止按钮就是越界，停掉本机代理机器上别的东西全断
                 Kind::Foreign => {
                     assert!(!s.unit.is_empty(), "{} 要有进程名才数得出连接", s.key);
