@@ -789,12 +789,33 @@ pub fn set_alert_note(t: impl Into<String>) {
 }
 
 /// Telegram 表单：（令牌草稿, 会话 ID, 只发到哪一档）。会话与档位没改过就用已保存的。
+///
+/// **会话跟着机器人走**：令牌框里贴的是另一个机器人时，会话显示那个机器人记住的（没有就空），
+/// 不显示当前机器人的会话（用户报：换了新机器人，会话 ID 还是上一个的）。
 pub fn tg_form(saved: &super::calendar_alerts::TelegramConfig) -> (String, String, u8) {
-    with_ui(|u| (u.tg_token.clone(), u.tg_chat.clone().unwrap_or_else(|| saved.chat_id.clone()), u.tg_imp.unwrap_or(saved.min_importance)))
+    use super::calendar_alerts::bot_id;
+    with_ui(|u| {
+        let chat = match &u.tg_chat {
+            Some(c) => c.clone(),
+            None => {
+                let draft = u.tg_token.trim();
+                let bot = if draft.is_empty() { bot_id(&saved.bot_token) } else { bot_id(draft) };
+                saved.chat_of(&bot).unwrap_or_default()
+            }
+        };
+        (u.tg_token.clone(), chat, u.tg_imp.unwrap_or(saved.min_importance))
+    })
 }
 
+/// 令牌框在打字。贴进的是另一个机器人的令牌时，会话草稿作废（会话属于机器人）。
 pub fn set_tg_token(t: String) {
-    with_ui(|u| u.tg_token = t);
+    use super::calendar_alerts::bot_id;
+    with_ui(|u| {
+        if bot_id(&t) != bot_id(&u.tg_token) {
+            u.tg_chat = None;
+        }
+        u.tg_token = t;
+    });
 }
 
 pub fn set_tg_chat(t: String) {

@@ -228,6 +228,18 @@ pub fn handle(m: CalMsg) {
                 Err(e) => ro::set_alert_note(format!("✗ {e}")),
             }
         }
+        CalMsg::TgPickChat(id) => {
+            // 读会话之前已经把令牌存上了（TgDetect）：这里只换会话，绑到已保存的那个机器人
+            let saved = al::telegram();
+            let (_, _, imp) = ro::tg_form(&saved);
+            match al::save_telegram(None, &id, imp) {
+                Ok(_) => {
+                    ro::clear_tg_form();
+                    ro::set_alert_note(format!("✔ 会话 {id} 已保存，属于机器人 {}", al::bot_id(&saved.bot_token)));
+                }
+                Err(e) => ro::set_alert_note(format!("✗ {e}")),
+            }
+        }
         CalMsg::TgEnable(on) => {
             // 与出口总闸「Telegram 提醒」那一行同一个开关
             ro::set_alert_note(super::egress::action("telegram", if on { "start" } else { "stop" }));

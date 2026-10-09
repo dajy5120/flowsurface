@@ -74,6 +74,8 @@ pub enum CalMsg {
     /// 让 ws-telegram 从最近消息里读会话 ID（getUpdates）。
     TgDetect,
     TgEnable(bool),
+    /// 点了「从最近消息读取」列出的一个会话：立即保存，绑到当前机器人。
+    TgPickChat(String),
     RulesTable(crate::ui::grid::GridMsg),
     NoticesTable(crate::ui::grid::GridMsg),
     /// 事件流表（ui::grid）。
@@ -1129,6 +1131,9 @@ fn telegram_section<'a>(tg: &super::calendar_alerts::TelegramConfig) -> Element<
     let kv = |k: &str, v: Element<'a, CalMsg>| crate::ui::widgets::kv(k.to_string(), v, 72.0);
     let (token, chat, imp) = ro::tg_form(tg);
     let st = al::tg_status();
+    // 结果属于哪个机器人：令牌框里贴了新令牌就看新的，否则看已保存的。对不上的旧结果不显示（会话不能错配）
+    let cur_bot = if token.trim().is_empty() { al::bot_id(&tg.bot_token) } else { al::bot_id(&token) };
+    let st_mine = !st.bot_id.is_empty() && st.bot_id == cur_bot;
     let private = al::telegram_file_private();
     let mut col = column![crate::ui::widgets::section("Telegram")].spacing(crate::ui::metrics::space(2));
 
@@ -1141,11 +1146,22 @@ fn telegram_section<'a>(tg: &super::calendar_alerts::TelegramConfig) -> Element<
         ("已配置、没启用".to_string(), crate::ui::pal::warn())
     };
     let mut head = row![meta(state, c)].spacing(crate::ui::metrics::space(3)).align_y(Alignment::Center);
+    // 当前是哪个机器人：换了令牌一眼看得出（名字来自最近一次属于它的测试结果）
+    if !tg.bot_token.trim().is_empty() {
+        let name = if st_mine && !st.bot.is_empty() { format!("@{}", st.bot) } else { "（测试一次连通显示名字）".into() };
+        head = head.push(meta(format!("当前机器人 {} · 编号 {}", name, al::bot_id(&tg.bot_token)), crate::ui::pal::txt()));
+    }
     if tg.configured() {
         head = head.push(chip_on(if tg.enabled { "启用中（点一下停用）" } else { "启用 Telegram" }, tg.enabled, CalMsg::TgEnable(!tg.enabled)));
     }
     if private == Some(false) {
         head = head.push(meta("⚠ 配置文件别人也能读（令牌在里面）——点「保存」会改回 600", crate::ui::pal::warn()));
+    }
+    if tg.chat_mismatch() {
+        head = head.push(meta(
+            format!("⚠ 已保存的会话属于另一个机器人（{}），当前机器人（{}）还没有会话——点「从最近消息读取」重新选；在这之前不会发", tg.chat_bot_id, al::bot_id(&tg.bot_token)),
+            crate::ui::pal::warn(),
+        ));
     }
     col = col.push(kv("状态", head.wrap().into()));
 
@@ -1177,15 +1193,17 @@ fn telegram_section<'a>(tg: &super::calendar_alerts::TelegramConfig) -> Element<
     ]
     .spacing(crate::ui::metrics::space(2))
     .align_y(Alignment::Center);
-    if st.action == "detect" && !st.chats.is_empty() {
+    if st_mine && st.action == "detect" && !st.chats.is_empty() {
         for (id, kind, name) in &st.chats {
-            let k = match kind.as_str() {
-                "private" => "私聊",
-                "channel" => "频道",
-                "group" | "supergroup" => "群组",
-                _ => "",
+            // 私聊的会话 ID 就是对方的 Telegram 用户 ID——换哪个机器人都一样，不是没读新的
+            let label = match kind.as_str() {
+                "private" => format!("{name}（私聊 · 你的用户 ID {id}）"),
+                "channel" => format!("{name}（频道 {id}）"),
+                "group" | "supergroup" => format!("{name}（群组 {id}）"),
+                _ => format!("{name}（{id}）"),
             };
-            chat_row = chat_row.push(chip_on(format!("{name}（{k} {id}）"), *id == chat, CalMsg::TgChat(id.clone())));
+            // 点了就保存、绑到这个机器人
+            chat_row = chat_row.push(chip_on(label, *id == chat, CalMsg::TgPickChat(id.clone())));
         }
     }
     col = col.push(kv("会话 ID", chat_row.wrap().into()));
@@ -1211,7 +1229,7 @@ fn telegram_section<'a>(tg: &super::calendar_alerts::TelegramConfig) -> Element<
     let result: Option<(String, Color)> = match waiting {
         Some((_, secs)) if secs >= 20 => Some(("✗ 20 秒没有回应：发送进程 ws-telegram 没起来？在「资源｜进程」里看看".into(), crate::ui::pal::bad())),
         Some(_) => Some(("测试中…（ws-telegram 正在问 api.telegram.org）".into(), crate::ui::pal::info())),
-        None if !st.message.is_empty() => Some((
+        None if st_mine && !st.message.is_empty() => Some((
             format!("{} · {}", st.at, st.message),
             if st.ok { crate::ui::pal::ok() } else { crate::ui::pal::warn() },
         )),
@@ -1222,7 +1240,8 @@ fn telegram_section<'a>(tg: &super::calendar_alerts::TelegramConfig) -> Element<
     }
     col = col.push(meta(
         "怎么配：① 在 Telegram 找 @BotFather 发 /newbot，复制它给的令牌贴到上面；② 打开你的新机器人、随便发一条消息；\
-         ③ 点「从最近消息读取」选你的会话；④「保存并测试连通」（只检查、不发消息）；⑤「启用 Telegram」，再「发一条测试消息」确认能收到。",
+         ③ 点「从最近消息读取」选你的会话；④「保存并测试连通」（只检查、不发消息）；⑤「启用 Telegram」，再「发一条测试消息」确认能收到。\
+         换机器人时会话跟着机器人走（不沿用上一个的）；但私聊的会话 ID 就是你的 Telegram 用户 ID，换哪个机器人都一样——群组和频道才各不相同。",
         crate::ui::pal::dim(),
     ));
     col = col.push(meta(

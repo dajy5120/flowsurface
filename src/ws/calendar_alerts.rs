@@ -612,6 +612,21 @@ pub struct TelegramConfig {
     /// 只发重要性 ≤ 这一档的（缺省 1 = P0 + P1）。
     #[serde(default = "one")]
     pub min_importance: u8,
+    /// **`chat_id` 属于哪个机器人**（机器人编号 = 令牌冒号前的数字，公开的，不是机密）。
+    ///
+    /// 2026-10-09 用户报：换了新机器人，会话 ID 还是上一个的——会话只对它所属的机器人有效，
+    /// 新机器人配旧会话，消息要么发不出去，要么发到不该去的地方。对不上就当「未配置」，不发。
+    /// 空 = 绑定以前保存的旧配置，按「属于当前机器人」处理，下次保存时补上。
+    #[serde(default)]
+    pub chat_bot_id: String,
+    /// 每个机器人各自的会话（机器人编号 → 会话 ID）：换回以前用过的机器人时自动带回它的会话。
+    #[serde(default)]
+    pub chats: std::collections::BTreeMap<String, String>,
+}
+
+/// 机器人编号：令牌冒号前的数字（`123456:AA…` → `123456`）。
+pub fn bot_id(token: &str) -> String {
+    token.trim().split(':').next().unwrap_or("").to_string()
 }
 
 fn one() -> u8 {
@@ -686,6 +701,8 @@ pub fn request_telegram(action: &str) -> Result<i64, String> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TgStatus {
     pub nonce: i64,
+    /// 这个结果是哪个机器人的（与当前令牌对不上的旧结果不显示）。
+    pub bot_id: String,
     pub action: String,
     pub ok: bool,
     pub message: String,
@@ -709,6 +726,7 @@ pub fn poll_tg_status() {
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .map(|v| TgStatus {
             nonce: v["nonce"].as_i64().unwrap_or(0),
+            bot_id: v["bot_id"].as_str().unwrap_or("").into(),
             action: v["action"].as_str().unwrap_or("").into(),
             ok: v["ok"].as_bool().unwrap_or(false),
             message: v["message"].as_str().unwrap_or("").into(),
@@ -772,10 +790,22 @@ pub fn save_telegram(token: Option<&str>, chat: &str, min_importance: u8) -> Res
     if !chat.is_empty() && !chat_looks_valid(chat) {
         return Err("会话 ID 应该是数字（私聊是正数，群组 / 频道是 -100 开头的负数）或 @频道名".into());
     }
+    let bot = bot_id(&token);
+    // 会话跟着机器人走：填了就绑到这个机器人；没填就用这个机器人以前记住的，**绝不沿用别的机器人的会话**
+    let chat = if chat.is_empty() { old.chat_of(&bot).unwrap_or_default() } else { chat.to_string() };
     let p = telegram_path();
     let mut v: serde_json::Value = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::json!({}));
+    // 换机器人之前，把旧机器人的会话记下来（旧配置没有绑定字段时，它属于旧令牌）
+    let old_bot = bot_id(&old.bot_token);
+    if !old_bot.is_empty() && old.chat_for_bot() && !old.chat_id.trim().is_empty() {
+        v["chats"][old_bot.as_str()] = serde_json::Value::from(old.chat_id.clone());
+    }
+    if !chat.is_empty() && !bot.is_empty() {
+        v["chats"][bot.as_str()] = serde_json::Value::from(chat.clone());
+    }
     v["bot_token"] = serde_json::Value::from(token);
-    v["chat_id"] = serde_json::Value::from(chat.to_string());
+    v["chat_id"] = serde_json::Value::from(chat.clone());
+    v["chat_bot_id"] = serde_json::Value::from(if chat.is_empty() { String::new() } else { bot });
     v["min_importance"] = serde_json::Value::from(min_importance.min(3));
     if v.get("enabled").is_none() {
         v["enabled"] = serde_json::Value::Bool(false);
@@ -834,8 +864,24 @@ pub fn telegram() -> TelegramConfig {
 }
 
 impl TelegramConfig {
+    /// 会话是不是当前这个机器人的。
+    pub fn chat_for_bot(&self) -> bool {
+        self.chat_bot_id.is_empty() || self.chat_bot_id == bot_id(&self.bot_token)
+    }
+    /// 填了会话、但它属于另一个机器人（换了令牌没重新选会话）。
+    pub fn chat_mismatch(&self) -> bool {
+        !self.chat_id.trim().is_empty() && !self.chat_for_bot()
+    }
+    /// 令牌与**属于它的**会话都有了，才算配置好。
     pub fn configured(&self) -> bool {
-        !self.bot_token.trim().is_empty() && !self.chat_id.trim().is_empty()
+        !self.bot_token.trim().is_empty() && !self.chat_id.trim().is_empty() && self.chat_for_bot()
+    }
+    /// 某个机器人记住的会话。
+    pub fn chat_of(&self, bot: &str) -> Option<String> {
+        if bot == bot_id(&self.bot_token) && self.chat_for_bot() && !self.chat_id.trim().is_empty() {
+            return Some(self.chat_id.clone());
+        }
+        self.chats.get(bot).cloned()
     }
 }
 
@@ -1330,6 +1376,25 @@ mod tests {
         assert!(!token_looks_valid("1234:short") && !token_looks_valid("abc:AAH1234567890abcdefghijklmnopqrstuv"));
         assert!(chat_looks_valid("123456789") && chat_looks_valid("-1001234567890") && chat_looks_valid("@my_channel"));
         assert!(!chat_looks_valid("https://t.me/x") && !chat_looks_valid("@"));
+    }
+
+    #[test]
+    fn a_chat_belongs_to_its_bot() {
+        // 用户报：换了新机器人，会话 ID 还是上一个的
+        let tok_a = "111:AAH1234567890abcdefghijklmnopqrstuv";
+        let mut c = TelegramConfig { bot_token: tok_a.into(), chat_id: "42".into(), chat_bot_id: "111".into(), ..Default::default() };
+        assert!(c.configured());
+        // 换成新机器人 222，会话还是 111 的：不算配置好、要提示
+        c.bot_token = "222:BBH1234567890abcdefghijklmnopqrstuv".into();
+        assert!(!c.configured() && c.chat_mismatch());
+        assert_eq!(c.chat_of("222"), None);
+        // 以前给 222 记过会话：带回来
+        c.chats.insert("222".into(), "77".into());
+        assert_eq!(c.chat_of("222").as_deref(), Some("77"));
+        // 旧配置没有绑定字段：当作属于当前机器人
+        let legacy = TelegramConfig { bot_token: tok_a.into(), chat_id: "42".into(), ..Default::default() };
+        assert!(legacy.configured() && !legacy.chat_mismatch());
+        assert_eq!(bot_id(tok_a), "111");
     }
 
     #[test]
