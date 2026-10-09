@@ -11,7 +11,7 @@
 //! 都和已确认的画得不一样（docs/43 §5）。
 
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, pick_list, row, text, text_input};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding};
 
 use super::calendar_readout::{self as ro, CalReadout, DispTz, Ev, Filter, View, YearMode};
@@ -42,6 +42,29 @@ pub enum CalMsg {
     YearMode(YearMode),
     PrevYear,
     NextYear,
+    // ── 提醒（docs/43 K4）──
+    /// 一键启用预设模板（序号）。
+    AlertPreset(usize),
+    AlertToggle(i64, bool),
+    AlertDelete(i64),
+    /// 为选中的事件单独设提醒（检查器详情里的按钮）。
+    AlertForEvent(String),
+    DraftScope(super::calendar_alerts::Scope),
+    DraftTarget(String),
+    DraftImportance(u8),
+    DraftOffset(i64),
+    DraftChannel(super::calendar_alerts::Channel),
+    DraftOnChange(bool),
+    DraftOnRelease(bool),
+    DraftAdd,
+    /// 通知中心里「错过」的标已读。
+    AckMissed,
+    QuietFrom(String),
+    QuietTo(String),
+    QuietP0(bool),
+    QuietSave,
+    RulesTable(crate::ui::grid::GridMsg),
+    NoticesTable(crate::ui::grid::GridMsg),
     /// 事件流表（ui::grid）。
     Table(crate::ui::grid::GridMsg),
 }
@@ -49,6 +72,21 @@ pub enum CalMsg {
 thread_local! {
     /// 事件流表每一行的事件 id（与表的数据行同序，操作格按行号找回）。
     static STREAM_ROWS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// 规则表每一行的（规则 id, 启用着吗）。
+    static RULE_ROWS: std::cell::RefCell<Vec<(i64, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+const RULE_COL_TOGGLE: usize = 7;
+const RULE_COL_DELETE: usize = 8;
+
+/// 规则表的操作格 → 动作。
+pub(crate) fn rule_action(row: usize, col: usize) -> Option<CalMsg> {
+    let (id, on) = RULE_ROWS.with(|r| r.borrow().get(row).copied())?;
+    match col {
+        RULE_COL_TOGGLE => Some(CalMsg::AlertToggle(id, !on)),
+        RULE_COL_DELETE => Some(CalMsg::AlertDelete(id)),
+        _ => None,
+    }
 }
 
 const STREAM_COL_DETAIL: usize = 12;
@@ -81,10 +119,20 @@ fn clip(s: &str, n: usize) -> String {
     format!("{}…", s.chars().take(n).collect::<String>())
 }
 
+/// 可多选的小按钮。选中的**前面打 ✓**、强调色淡底——只靠底色深浅，选没选几乎看不出来（K4 截图里实测），
+/// 而且颜色不能单独承载意义。
 fn chip_on<'a>(label: impl Into<String>, active: bool, msg: CalMsg) -> Element<'a, CalMsg> {
-    button(text(label.into()).size(crate::ui::text::s_small()))
+    let label: String = label.into();
+    let shown = if active { format!("✓ {label}") } else { label };
+    button(text(shown).size(crate::ui::text::s_small()))
         .padding(crate::ui::metrics::pad2(0, 2))
-        .style(move |t, st| crate::style::button::modifier(t, st, active))
+        .style(move |t, st| {
+            let mut s = crate::style::button::modifier(t, st, active);
+            if active {
+                s.background = Some(Background::Color(crate::ui::color(crate::ui::core().accent_soft)));
+            }
+            s
+        })
         .on_press(msg)
         .into()
 }
@@ -178,7 +226,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, CalMsg> {
     let v = ro::view();
     if lock.is_none() {
         body = body.push(crate::ui::widgets::segmented(
-            &[("月历", View::Month), ("全年", View::Year), ("事件流", View::Stream)],
+            &[("月历", View::Month), ("全年", View::Year), ("事件流", View::Stream), ("提醒", View::Alerts)],
             &v,
             CalMsg::SetView,
         ));
@@ -194,6 +242,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, CalMsg> {
         View::Month => month_view(&snap, &f),
         View::Year => year_view(&snap, &f),
         View::Stream => stream_view(&snap, &f),
+        View::Alerts => alerts_view(&snap),
     };
     body.push(content).width(Length::Fill).height(Length::Fill).into()
 }
@@ -705,6 +754,11 @@ fn props_view<'a>(snap: &CalReadout, f: &Filter) -> Element<'a, CalMsg> {
             72.0,
         ));
     }
+    col = col.push(crate::ui::widgets::kv(
+        "提醒",
+        crate::ui::widgets::btn("为这个事件设提醒", crate::ui::widgets::Kind::Standard, Some(CalMsg::AlertForEvent(e.id.clone()))),
+        72.0,
+    ));
     let revs = ro::selected_revisions();
     col = col.push(crate::ui::widgets::section(format!("修订历史（{}）", e.revisions)));
     if revs.is_empty() {
@@ -785,6 +839,287 @@ fn data_view<'a>(snap: &CalReadout) -> Element<'a, CalMsg> {
     }
     col = col.push(meta("源的启停、测试、加 ICS 订阅在「新闻资讯｜源管理」（按机构分组，用途列可筛「日历」）。", crate::ui::pal::dim()));
     col.into()
+}
+
+
+// ── 提醒（docs/43 K4）──────────────────────────────────────────────
+
+/// 下拉里的一项（规则的目标）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetOpt {
+    pub key: String,
+    pub label: String,
+}
+
+impl std::fmt::Display for TargetOpt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// 某个范围下可选的目标（系列 / 类别 / 地区），从当前快照里的事件取。
+fn targets(snap: &CalReadout, scope: super::calendar_alerts::Scope) -> Vec<TargetOpt> {
+    use super::calendar_alerts::Scope;
+    let mut v: Vec<TargetOpt> = match scope {
+        Scope::Series => {
+            let mut m: std::collections::BTreeMap<String, String> = Default::default();
+            for e in &snap.events {
+                if let Some(sr) = &e.series {
+                    m.entry(sr.clone()).or_insert_with(|| e.series_name.clone().unwrap_or_else(|| sr.clone()));
+                }
+            }
+            m.into_iter().map(|(key, label)| TargetOpt { key, label }).collect()
+        }
+        Scope::Kind => ro::KINDS.iter().map(|k| TargetOpt { key: (*k).into(), label: ro::kind_label(k).into() }).collect(),
+        Scope::Country => {
+            let mut cs: Vec<&str> = snap.events.iter().map(|e| e.country.as_str()).collect();
+            cs.sort_unstable();
+            cs.dedup();
+            cs.into_iter().map(|c| TargetOpt { key: c.into(), label: ro::country_label(c).into() }).collect()
+        }
+        Scope::All | Scope::Event => Vec::new(),
+    };
+    v.sort_by(|a, b| a.label.cmp(&b.label));
+    v
+}
+
+/// 规则的目标写成人话。
+fn target_label(snap: &CalReadout, r: &super::calendar_alerts::Rule) -> String {
+    use super::calendar_alerts::Scope;
+    match r.scope {
+        Scope::All => format!("重要性 ≤ {}", ro::importance_label(r.max_importance)),
+        Scope::Series => targets(snap, Scope::Series).into_iter().find(|t| t.key == r.target).map_or_else(|| r.target.clone(), |t| t.label),
+        Scope::Event => snap.events.iter().find(|e| e.id == r.target).map_or_else(|| r.target.clone(), ro::display_title),
+        Scope::Kind => format!("{} · ≤ {}", ro::kind_label(&r.target), ro::importance_label(r.max_importance)),
+        Scope::Country => format!("{} · ≤ {}", ro::country_label(&r.target), ro::importance_label(r.max_importance)),
+    }
+}
+
+fn notice_state(s: &str) -> (&'static str, Color) {
+    match s {
+        "fired" => ("已发", crate::ui::pal::ok()),
+        "missed" => ("错过（Cockpit 关着）", crate::ui::pal::warn()),
+        "missed_ack" => ("错过 · 已读", crate::ui::pal::dim()),
+        "cancelled" => ("已撤", crate::ui::pal::dim()),
+        "suppressed" => ("免打扰挡掉", crate::ui::pal::dim()),
+        "pending" => ("待发", crate::ui::pal::info()),
+        _ => ("?", crate::ui::pal::dim()),
+    }
+}
+
+fn delivery_text(d: &[(String, String, Option<String>)]) -> String {
+    d.iter()
+        .map(|(ch, st, err)| {
+            let name = super::calendar_alerts::Channel::from_key(ch).map_or(ch.as_str(), |c| c.label());
+            let mark = match st.as_str() {
+                "sent" => "✓".to_string(),
+                "pending" => "待送".to_string(),
+                "expired" => "过期未送".to_string(),
+                "failed" => format!("✗ {}", err.clone().unwrap_or_default()),
+                "disabled" => err.clone().unwrap_or_else(|| "关".into()),
+                other => other.to_string(),
+            };
+            format!("{name} {mark}")
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn alerts_view<'a>(snap: &CalReadout) -> Element<'a, CalMsg> {
+    use super::calendar_alerts::{self as al, Channel, Scope};
+    use crate::ui::grid::{Cell, Column, Fit};
+    let a = al::snapshot();
+    let st = al::status();
+    let kv = |k: &str, v: Element<'a, CalMsg>| crate::ui::widgets::kv(k.to_string(), v, 72.0);
+
+    // ── 顶部：预设 + 状态 ──
+    let mut head = row![meta("一键启用：", crate::ui::pal::dim())].spacing(crate::ui::metrics::space(2)).align_y(Alignment::Center);
+    for (i, (name, _)) in al::presets().iter().enumerate() {
+        head = head.push(crate::ui::widgets::btn(*name, crate::ui::widgets::Kind::Subtle, Some(CalMsg::AlertPreset(i))));
+    }
+    let state_txt = if !st.running {
+        if st.last_error.is_empty() { "提醒线程没在跑".to_string() } else { st.last_error.clone() }
+    } else {
+        let next = st
+            .next_due
+            .and_then(|t| chrono::TimeZone::timestamp_millis_opt(&chrono::Local, t).single())
+            .map(|t| format!(" · 下一条 {}", t.format("%m-%d %H:%M")))
+            .unwrap_or_default();
+        format!("待发 {}{next} · 错过 {}", st.pending, st.missed)
+    };
+    head = head.push(meta(state_txt, if st.missed > 0 { crate::ui::pal::warn() } else { crate::ui::pal::dim() }));
+    if st.missed > 0 {
+        head = head.push(crate::ui::widgets::btn("知道了", crate::ui::widgets::Kind::Ghost, Some(CalMsg::AckMissed)));
+    }
+    let note = ro::alert_note();
+    if !note.is_empty() {
+        head = head.push(meta(note.clone(), if note.starts_with('✗') { crate::ui::pal::bad() } else { crate::ui::pal::ok() }));
+    }
+    let mut col = column![head.wrap(), crate::ui::mark::here()].spacing(crate::ui::metrics::space(3));
+
+    // ── 规则 ──
+    col = col.push(crate::ui::widgets::section(format!("规则（{}）", a.rules.len())));
+    if a.rules.is_empty() {
+        col = col.push(meta("还没有规则：点上面的预设一键启用，或在下面新建。提醒只在 Cockpit 开着时发；关着时到点的，下次打开记为「错过」，不补弹。", crate::ui::pal::dim()));
+    } else {
+        let cols = vec![
+            Column::text("名称", 160.0),
+            Column::text("范围", 70.0),
+            Column::text("目标", 200.0),
+            Column::text("提前", 200.0),
+            Column::text("渠道", 150.0),
+            Column::text("改期 / 撤下", 80.0),
+            Column::text("公布", 50.0),
+            Column::text("", 60.0),
+            Column::text("", 60.0),
+        ];
+        let mut data = Vec::new();
+        let mut ids = Vec::new();
+        for r in &a.rules {
+            let c = if r.enabled { crate::ui::pal::txt() } else { crate::ui::pal::dim() };
+            data.push(vec![
+                Cell::Colored(r.name.clone(), c),
+                Cell::Text(r.scope.label().into()),
+                Cell::Text(target_label(snap, r)),
+                Cell::Text(r.offsets.iter().map(|m| al::offset_label(*m)).collect::<Vec<_>>().join("、")),
+                Cell::Text(r.channels.iter().map(|c| c.label()).collect::<Vec<_>>().join(" · ")),
+                Cell::Text(if r.on_change { "通知".into() } else { String::new() }),
+                Cell::Text(if r.on_release { "通知".into() } else { String::new() }),
+                Cell::Action(if r.enabled { "停用".into() } else { "启用".into() }, Tone::Neutral),
+                Cell::Action("删除".into(), Tone::Danger),
+            ]);
+            ids.push((r.id, r.enabled));
+        }
+        RULE_ROWS.with(|x| *x.borrow_mut() = ids);
+        col = col.push(crate::ui::grid::named("calendar.rules", cols, data, Fit::Rows(8), None, CalMsg::RulesTable));
+    }
+
+    // ── 新建规则 ──
+    let d = ro::draft();
+    col = col.push(crate::ui::widgets::section("新建规则"));
+    col = col.push(kv(
+        "范围",
+        crate::ui::widgets::segmented(
+            &[("系列", Scope::Series), ("全部事件", Scope::All), ("类别", Scope::Kind), ("地区", Scope::Country)],
+            &d.scope,
+            CalMsg::DraftScope,
+        ),
+    ));
+    if matches!(d.scope, Scope::Series | Scope::Kind | Scope::Country) {
+        let opts = targets(snap, d.scope);
+        let sel = opts.iter().find(|o| o.key == d.target).cloned();
+        col = col.push(kv(
+            "目标",
+            pick_list(opts, sel, |o: TargetOpt| CalMsg::DraftTarget(o.key))
+                .placeholder("选一个")
+                .text_size(crate::ui::text::s_small())
+                .padding(crate::ui::metrics::pad2(0, 2))
+                .into(),
+        ));
+    }
+    if matches!(d.scope, Scope::All | Scope::Kind | Scope::Country) {
+        col = col.push(kv(
+            "重要性",
+            crate::ui::widgets::segmented(&[("P0", 0_u8), ("≤P1", 1), ("≤P2", 2), ("全部", 3)], &d.max_importance, CalMsg::DraftImportance),
+        ));
+    }
+    let mut offs = row![].spacing(crate::ui::metrics::space(1));
+    for m in al::OFFSET_CHOICES {
+        offs = offs.push(chip_on(al::offset_label(m), d.offsets.contains(&m), CalMsg::DraftOffset(m)));
+    }
+    col = col.push(kv("提前", offs.wrap().into()));
+    let tg = al::telegram();
+    let mut chs = row![].spacing(crate::ui::metrics::space(1));
+    for c in Channel::ALL {
+        let label = if c == Channel::Telegram && !tg.configured() { "Telegram（未配置）".to_string() } else { c.label().to_string() };
+        chs = chs.push(chip_on(label, d.channels.contains(&c), CalMsg::DraftChannel(c)));
+    }
+    col = col.push(kv("渠道", chs.wrap().into()));
+    col = col.push(kv(
+        "另外",
+        row![
+            chip_on("改期 / 撤下时通知", d.on_change, CalMsg::DraftOnChange(!d.on_change)),
+            chip_on("实际值公布时通知（只报数）", d.on_release, CalMsg::DraftOnRelease(!d.on_release)),
+        ]
+        .spacing(crate::ui::metrics::space(1))
+        .wrap()
+        .into(),
+    ));
+    col = col.push(row![
+        crate::ui::widgets::btn("添加规则", crate::ui::widgets::Kind::Primary, Some(CalMsg::DraftAdd)),
+        meta("没有时刻的事件（仅日期 / 预计）只按「提前 N 天」提醒，在当天早上 09:00；「提前 30 分钟」这类不建——不编时刻", crate::ui::pal::dim()),
+    ]
+    .spacing(crate::ui::metrics::space(3))
+    .align_y(Alignment::Center)
+    .wrap());
+
+    // ── 通知中心 ──
+    col = col.push(crate::ui::widgets::section(format!("通知中心（最近 {}）", a.notices.len())));
+    if a.notices.is_empty() {
+        col = col.push(meta("还没有通知", crate::ui::pal::dim()));
+    } else {
+        let cols = vec![
+            Column::text("时间", 100.0),
+            Column::text("事件", 280.0),
+            Column::text("内容", 300.0),
+            Column::text("状态", 140.0).groupable(),
+            Column::text("渠道", 320.0),
+        ];
+        let data: Vec<Vec<Cell>> = a
+            .notices
+            .iter()
+            .map(|n| {
+                let (stl, stc) = notice_state(&n.state);
+                let t = n.fired_at.unwrap_or(n.fire_at);
+                let when = chrono::TimeZone::timestamp_millis_opt(&chrono::Local, t).single().map(|x| x.format("%m-%d %H:%M").to_string()).unwrap_or_default();
+                let stl = match &n.note {
+                    Some(x) if n.state == "pending" || n.state == "fired" => format!("{stl} · {x}"),
+                    _ => stl.to_string(),
+                };
+                vec![Cell::Text(when), Cell::Text(n.title.clone()), Cell::Text(n.body.clone()), Cell::Colored(stl, stc), Cell::Text(delivery_text(&n.deliveries))]
+            })
+            .collect();
+        col = col.push(crate::ui::grid::named("calendar.notices", cols, data, Fit::Rows(12), None, CalMsg::NoticesTable));
+    }
+
+    // ── 免打扰与渠道 ──
+    col = col.push(crate::ui::widgets::section("免打扰与渠道"));
+    let (qf, qt, qp) = ro::quiet_edit(&a.quiet);
+    col = col.push(kv(
+        "免打扰",
+        row![
+            text_input("23:00", &qf).on_input(CalMsg::QuietFrom).size(crate::ui::text::s_small()).padding(crate::ui::metrics::pad2(0, 2)).width(Length::Fixed(64.0)),
+            meta("至", crate::ui::pal::dim()),
+            text_input("07:00", &qt).on_input(CalMsg::QuietTo).size(crate::ui::text::s_small()).padding(crate::ui::metrics::pad2(0, 2)).width(Length::Fixed(64.0)),
+            chip_on("P0 例外", qp, CalMsg::QuietP0(!qp)),
+            crate::ui::widgets::btn("保存", crate::ui::widgets::Kind::Standard, Some(CalMsg::QuietSave)),
+            meta(
+                if a.quiet.on() { format!("现在：{}–{}{}", a.quiet.from, a.quiet.to, if a.quiet.p0_exempt { "，P0 照常提醒" } else { "" }) } else { "现在：关（开始与结束相同 = 关）".into() },
+                crate::ui::pal::dim()
+            ),
+        ]
+        .spacing(crate::ui::metrics::space(2))
+        .align_y(Alignment::Center)
+        .wrap()
+        .into(),
+    ));
+    let private = al::telegram_file_private();
+    let tg_line = if !tg.configured() {
+        format!("未配置——在 {} 写 bot_token、chat_id（权限 600）", al::telegram_path().display())
+    } else {
+        format!(
+            "已配置 · {} · 只发 ≤ {}{}",
+            if tg.enabled { "开着" } else { "关着" },
+            ro::importance_label(tg.min_importance),
+            if private == Some(false) { " · ⚠ 配置文件别人也能读（令牌在里面），chmod 600" } else { "" }
+        )
+    };
+    col = col.push(kv("Telegram", meta(tg_line, if private == Some(false) { crate::ui::pal::warn() } else { crate::ui::pal::dim() }).into()));
+    col = col.push(meta(
+        "Telegram 的开关在「资源｜网络出口」（出口总闸，默认关）；发送由资讯守护负责，K4b 接通——现在只记「待送」，事件过了未送出即作废。只出不进：不收消息、不做机器人命令。",
+        crate::ui::pal::dim(),
+    ));
+    crate::ui::scroll(col).width(Length::Fill).height(Length::Fill).into()
 }
 
 #[cfg(test)]

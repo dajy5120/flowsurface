@@ -122,6 +122,9 @@ fn source_cells(s: &egress::Source, r: &egress::Row) -> Vec<Cell> {
         // 用同一个词会让人以为它一直在耗流量
         (Kind::Timer, true) => ("⏱ 会触发", crate::ui::pal::warn()),
         (Kind::Timer, false) => ("○ 不触发", crate::ui::pal::dim()),
+        // 开关类：没有常开连接，「在跑」说的是「这一路开着、到时候会发」
+        (Kind::Switch, true) => ("● 开着", crate::ui::pal::warn()),
+        (Kind::Switch, false) => ("○ 关着", crate::ui::pal::dim()),
         (_, true) => ("● 在跑", if external { crate::ui::pal::warn() } else { crate::ui::pal::ok() }),
         (_, false) => ("○ 停着", crate::ui::pal::dim()),
     };
@@ -163,7 +166,7 @@ fn source_cells(s: &egress::Source, r: &egress::Row) -> Vec<Cell> {
         // 开机自启
         match s.kind {
             // 进程内连接、外部程序没有「开机自启」这回事：不适用
-            Kind::InProcess | Kind::Foreign => Cell::Colored(crate::ui::fmt::na(), dim),
+            Kind::InProcess | Kind::Foreign | Kind::Switch => Cell::Colored(crate::ui::fmt::na(), dim),
             _ if r.enabled => Cell::Action("关自启".into(), Tone::Neutral),
             _ => Cell::Action("设自启".into(), Tone::Neutral),
         },

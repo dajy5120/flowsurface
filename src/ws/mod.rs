@@ -43,6 +43,7 @@ pub mod observatory_readout;
 pub mod observatory_table;
 pub mod observatory_view;
 pub mod calendar;
+pub mod calendar_alerts;
 pub mod calendar_readout;
 pub mod calendar_view;
 pub mod news;

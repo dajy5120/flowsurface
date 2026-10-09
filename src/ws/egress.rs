@@ -93,6 +93,9 @@ pub enum Kind {
     Timer,
     /// Cockpit 进程内：systemctl 管不着。
     InProcess,
+    /// **开关**：不对应一个服务，而是某个进程里的一路出口，状态与启停是一个配置开关。
+    /// 例：Telegram 提醒（资讯守护里发，docs/43 §6.4）——要能单独掐掉它，而不是停掉整个资讯守护（新闻也跟着停）。
+    Switch,
     /// **不是本项目的东西**，但它持着外网连接。只列不动。
     ///
     /// 不列的话这一页的总数对不上机器的实际情况，用户会以为「都停了」；
@@ -216,6 +219,15 @@ pub static ALL: &[Source] = &[
         kind: Kind::Service,
         scope: Scope::Internal,
         unit: "ws-redis",
+    },
+    Source {
+        key: "telegram",
+        label: "Telegram 提醒",
+        // 只出不进：不收消息、不做机器人命令（那会变成一个能从外面操作本机的入口）
+        what: "api.telegram.org——金融日历提醒的 Telegram 渠道，由资讯守护发送（docs/43 §6.4，K4b 接通）；默认关，只出不进",
+        kind: Kind::Switch,
+        scope: Scope::External,
+        unit: "",
     },
     Source {
         key: "news",
@@ -529,6 +541,21 @@ pub fn action(key: &str, act: &str) -> String {
             s.label
         );
     }
+    if s.kind == Kind::Switch {
+        let on = act == "start" || act == "enable";
+        let tg = super::calendar_alerts::telegram();
+        if on && !tg.configured() {
+            return format!(
+                "✗ {} 还没配置：在 {} 里写 bot_token 与 chat_id（文件权限 600），再打开",
+                s.label,
+                super::calendar_alerts::telegram_path().display()
+            );
+        }
+        return match super::calendar_alerts::set_telegram_enabled(on) {
+            Ok(()) => format!("✔ {} 已{}", s.label, if on { "打开" } else { "关闭" }),
+            Err(e) => format!("✗ {} 写配置失败：{e}", s.label),
+        };
+    }
     if s.kind == Kind::InProcess {
         set_streams_enabled(act == "start" || act == "enable");
         return format!(
@@ -580,6 +607,12 @@ fn stop_external() -> usize {
         match s.kind {
             // 本项目之外的东西不碰
             Kind::Foreign => {}
+            Kind::Switch => {
+                if s.key == "telegram" && super::calendar_alerts::telegram().enabled {
+                    let _ = super::calendar_alerts::set_telegram_enabled(false);
+                    n += 1;
+                }
+            }
             Kind::InProcess => {
                 // 「依赖版本检查」只在点按钮时发一次，没有可停的；
                 // 行情订阅那一路才是常开的
@@ -616,6 +649,9 @@ fn start_external() -> usize {
     for s in ALL.iter().filter(|s| s.scope == Scope::External) {
         match s.kind {
             Kind::Foreign => {}
+            // 开关类（Telegram 提醒）**不跟着「全部开启」打开**：发不发消息是用户的选择，
+            // 一键全开不该替用户把消息渠道打开
+            Kind::Switch => {}
             Kind::InProcess => {
                 if s.key == "cockpit" && !streams_enabled() {
                     set_streams_enabled(true);
@@ -977,6 +1013,8 @@ fn collect(prev: &mut Prev) -> Vec<Row> {
             // 连接统一记在行情图那一行；检查期间的那十几个 HTTP 请求也会落在那一行
             Kind::InProcess if s.key == "deps-check" => 0,
             Kind::InProcess => std::process::id(),
+            // 开关类没有常开连接（发一条、断一次），数连接没有意义
+            Kind::Switch => 0,
             Kind::Service => {
                 if u.active { u.main_pid } else { 0 }
             }
@@ -1012,6 +1050,14 @@ fn collect(prev: &mut Prev) -> Vec<Row> {
                     conns: (pid != 0).then_some(conns),
                     bps,
                     today,
+                    ..Default::default()
+                },
+                Kind::Switch => Row {
+                    key: s.key.into(),
+                    on: {
+                        let tg = super::calendar_alerts::telegram();
+                        tg.enabled && tg.configured()
+                    },
                     ..Default::default()
                 },
                 Kind::InProcess if s.key == "deps-check" => Row {
@@ -1413,6 +1459,7 @@ mod tests {
             assert!(!s.label.is_empty() && !s.what.is_empty(), "{} 缺说明", s.key);
             match s.kind {
                 Kind::InProcess => assert!(s.unit.is_empty(), "{} 进程内的不该有单元名", s.key),
+                Kind::Switch => assert!(s.unit.is_empty(), "{} 开关类不对应单元", s.key),
                 // 只列不动：给它停止按钮就是越界，停掉本机代理机器上别的东西全断
                 Kind::Foreign => {
                     assert!(!s.unit.is_empty(), "{} 要有进程名才数得出连接", s.key);

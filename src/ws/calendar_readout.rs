@@ -521,15 +521,18 @@ pub enum View {
     Month,
     Year,
     Stream,
+    /// 提醒：规则、通知中心、免打扰与渠道（docs/43 K4）。
+    Alerts,
 }
 
 impl View {
-    pub const ALL: [View; 3] = [View::Month, View::Year, View::Stream];
+    pub const ALL: [View; 4] = [View::Month, View::Year, View::Stream, View::Alerts];
     pub fn label(self) -> &'static str {
         match self {
             View::Month => "月历",
             View::Year => "全年",
             View::Stream => "事件流",
+            View::Alerts => "提醒",
         }
     }
 }
@@ -644,6 +647,12 @@ struct Ui {
     year_mode: YearMode,
     /// 自然年模式显示哪一年（`None` = 今年）。
     year: Option<i32>,
+    /// 「新建规则」表单的草稿。
+    draft: Option<super::calendar_alerts::Rule>,
+    /// 免打扰的编辑值（保存前）：`(开始, 结束, P0 例外)`。
+    quiet_edit: Option<(String, String, bool)>,
+    /// 提醒页最近一次操作的回执。
+    alert_note: String,
 }
 
 static UI: Mutex<Option<Ui>> = Mutex::new(None);
@@ -720,6 +729,56 @@ pub fn shift_year(snap: &CalReadout, delta: i32) {
 /// 快照覆盖的日期范围（守护写的 `from` / `to`）。
 pub fn window(snap: &CalReadout) -> Option<(NaiveDate, NaiveDate)> {
     Some((snap.from?, snap.to?))
+}
+
+/// 新建规则的缺省草稿：系列「美国 CPI」、提前 1 天与 30 分钟、应用内 + 桌面。
+pub fn default_draft() -> super::calendar_alerts::Rule {
+    use super::calendar_alerts::{Channel, Rule, Scope};
+    Rule {
+        id: 0,
+        name: String::new(),
+        scope: Scope::Series,
+        target: "us-cpi".into(),
+        max_importance: 1,
+        offsets: vec![1440, 30],
+        channels: vec![Channel::InApp, Channel::Desktop],
+        on_change: true,
+        on_release: false,
+        enabled: true,
+    }
+}
+
+pub fn draft() -> super::calendar_alerts::Rule {
+    with_ui(|u| u.draft.clone()).unwrap_or_else(default_draft)
+}
+
+pub fn update_draft(f: impl FnOnce(&mut super::calendar_alerts::Rule)) {
+    with_ui(|u| f(u.draft.get_or_insert_with(default_draft)));
+}
+
+pub fn reset_draft() {
+    with_ui(|u| u.draft = None);
+}
+
+pub fn quiet_edit(saved: &super::calendar_alerts::Quiet) -> (String, String, bool) {
+    with_ui(|u| u.quiet_edit.clone()).unwrap_or_else(|| (saved.from.clone(), saved.to.clone(), saved.p0_exempt))
+}
+
+pub fn set_quiet_edit(v: (String, String, bool)) {
+    with_ui(|u| u.quiet_edit = Some(v));
+}
+
+pub fn clear_quiet_edit() {
+    with_ui(|u| u.quiet_edit = None);
+}
+
+pub fn alert_note() -> String {
+    with_ui(|u| u.alert_note.clone())
+}
+
+pub fn set_alert_note(t: impl Into<String>) {
+    let t = t.into();
+    with_ui(|u| u.alert_note = t);
 }
 
 pub fn selected_event() -> Option<String> {

@@ -43,9 +43,12 @@ pub fn status(content: &Content) -> Option<(String, Color)> {
             let now = chrono::Local::now().timestamp_millis();
             let h = (now - r.generated_ms) / 3_600_000;
             let stale = super::calendar_readout::needs_refresh(true, r.generated_ms, now);
+            // 错过的提醒（Cockpit 关着时到点的）：在状态里说出来，通知中心里点「知道了」消掉
+            let missed = super::calendar_alerts::status().missed;
+            let tail = if missed > 0 { format!(" · 错过 {missed} 条提醒") } else { String::new() };
             Some((
-                format!("{} {} 个事件 · 数据 {h} 小时前", if stale { "▲" } else { "●" }, r.events.len()),
-                if stale { pal::warn() } else { pal::ok() },
+                format!("{} {} 个事件 · 数据 {h} 小时前{tail}", if stale { "▲" } else { "●" }, r.events.len()),
+                if stale || missed > 0 { pal::warn() } else { pal::ok() },
             ))
         }
         Content::MarketMap => {

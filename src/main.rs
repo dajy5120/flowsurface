@@ -407,6 +407,11 @@ impl Flowsurface {
         // 跨进程命令（Studio「在 Cockpit 中查看本次回测」）。样张模式不监听：不和正在用的实例抢
         if state.specimen.is_none() {
             ws::bridge::start();
+            // 金融日历的提醒（docs/43 K4）：随 Cockpit 常驻，不依赖日历面板开没开。样张实例不起（不弹真通知）
+            ws::calendar_alerts::start();
+        }
+        if state.specimen.is_some() {
+            ws::calendar_alerts::load_snapshot_only();
         }
         if state.specimen.is_some() && std::env::var_os("WS_UI_SPECIMEN_SHELL").is_some() {
             state.shell.bottom = true;
