@@ -8,6 +8,7 @@ use iced::{Alignment, Element, Length};
 
 use super::strategy_center::{Entry, Param, RunRow, ScMsg, Summary, Tab, View, default_text};
 use super::strategy_center_cmp::{self as sc, Cmp};
+use super::strategy_center_mod::{self as sm, Module};
 use super::strategy_center_opt::{self as so, Gate, Heat, StudyRow};
 use super::strategy_center_val::{self as sv, ExpRow, ValRow};
 use crate::ui::fmt::{Rounding, opt};
@@ -556,7 +557,7 @@ fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
     let mut col = column![
         w::panel_header(
             "",
-            Some(w::tabs(&[("运行记录", Tab::Runs), (study_tab, Tab::Studies), (check_tab, Tab::Checks), (cmp_tab, Tab::Compare)], &v.tab, ScMsg::Tab)),
+            Some(w::tabs(&[("运行记录", Tab::Runs), (study_tab, Tab::Studies), (check_tab, Tab::Checks), (cmp_tab, Tab::Compare), ("模块", Tab::Modules)], &v.tab, ScMsg::Tab)),
             vec![w::btn("跟随最新结果", if pinned { Kind::Standard } else { Kind::Ghost }, pinned.then_some(ScMsg::FollowLatest))],
         )
     ]
@@ -569,6 +570,9 @@ fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
     }
     if v.tab == Tab::Checks {
         return container(col.push(crate::ui::scroll(checks(v)).height(Length::Fill))).width(Length::FillPortion(5)).height(Length::Fill).into();
+    }
+    if v.tab == Tab::Modules {
+        return container(col.push(crate::ui::scroll(modules(v)).height(Length::Fill))).width(Length::FillPortion(5)).height(Length::Fill).into();
     }
     if !v.db_err.is_empty() {
         col = col.push(t::metadata(v.db_err.clone()).color(pal::dim()));
@@ -1168,6 +1172,156 @@ fn checks<'a>(v: &View) -> Element<'a, ScMsg> {
         col = col.push(val_item(r));
     }
     col = col.push(experiment_block(v));
+    col.into()
+}
+
+// ── 右栏：模块库（docs/44 W6）───────────────────────────────────────
+
+fn module_verdict_badge<'a>(m: &Module) -> Element<'a, ScMsg> {
+    if !m.error.is_empty() {
+        return w::badge("有误", Tone::Danger);
+    }
+    // 取「最强」的一条：存活 > 已证伪 > 行为一致 > 没有记录
+    let pick = |v: &str| m.validations.iter().any(|x| x.verdict == v);
+    let (label, tone) = if pick("alive") {
+        ("存活", Tone::Success)
+    } else if pick("falsified") {
+        ("已证伪", Tone::Danger)
+    } else if pick("parity") {
+        ("行为一致", Tone::Info)
+    } else {
+        ("未验证", Tone::Neutral)
+    };
+    w::badge(label, tone)
+}
+
+fn module_detail<'a>(m: &Module) -> Element<'a, ScMsg> {
+    let mut c = column![].spacing(space(1));
+    if !m.error.is_empty() {
+        c = c.push(t::metadata(m.error.clone()).color(pal::bad()));
+    }
+    if !m.doc.is_empty() {
+        c = c.push(t::caption(m.doc.clone()));
+    }
+    c = c.push(t::metadata(format!("{} · {}", m.path, sm::category_label(&m.category))).color(pal::dim()));
+    if !m.params.is_empty() {
+        c = c.push(t::metadata("参数（★ = 值得优化）").color(pal::dim()));
+        for p in &m.params {
+            let dv = if p.required { "必填".to_string() } else { p.default.clone() };
+            c = c.push(
+                row![
+                    container(t::code(format!("{}{}", if p.optimize { "★ " } else { "  " }, p.name))).width(Length::Fixed(176.0)),
+                    container(t::numeric(dv)).width(Length::Fixed(84.0)),
+                    t::metadata(p.description.clone()).color(pal::dim()),
+                ]
+                .spacing(space(2))
+                .align_y(Alignment::Center)
+                .wrap(),
+            );
+        }
+    }
+    c = c.push(t::metadata(format!("被引用（{}）", m.used_by.len())).color(pal::dim()));
+    c = c.push(t::caption(if m.used_by.is_empty() { "没有工作流在用".to_string() } else { m.used_by.join("、") }));
+    c = c.push(t::metadata(format!("验证记录（{}）", m.validations.len())).color(pal::dim()));
+    if m.validations.is_empty() {
+        c = c.push(t::caption("没有。这个模块在任何市场、任何数据上都还没有验证过。").color(pal::warn()));
+    }
+    for x in &m.validations {
+        c = c.push(
+            row![
+                w::badge(sm::verdict_label(&x.verdict), if x.verdict == "alive" { Tone::Success } else if x.verdict == "falsified" { Tone::Danger } else { Tone::Info }),
+                t::metadata(format!("{} · {} · {}", x.market, x.data, x.date)).color(pal::dim()),
+            ]
+            .spacing(space(2))
+            .align_y(Alignment::Center)
+            .wrap(),
+        );
+        c = c.push(t::caption(x.evidence.clone()));
+    }
+    container(c).padding(space(2)).width(Length::Fill).into()
+}
+
+fn module_item<'a>(m: &Module, picked: bool) -> Element<'a, ScMsg> {
+    let head = row![
+        t::body(m.refer.clone()),
+        Space::new().width(Length::Fill),
+        t::metadata(format!("引用 {}", m.used_by.len())).color(if m.used_by.is_empty() { pal::warn() } else { pal::dim() }),
+        module_verdict_badge(m),
+    ]
+    .spacing(space(2))
+    .align_y(Alignment::Center);
+    let item = button(head)
+        .width(Length::Fill)
+        .on_press(ScMsg::ModPick(m.refer.clone()))
+        .style(move |th, st| w::button_style(if picked { Kind::Standard } else { Kind::Ghost }, th, st));
+    if picked { column![item, module_detail(m)].spacing(0).into() } else { item.into() }
+}
+
+fn modules<'a>(v: &View) -> Element<'a, ScMsg> {
+    let mut col = column![
+        row![
+            w::section("策略工作流引擎的模块库"),
+            Space::new().width(Length::Fill),
+            w::btn_busy("刷新", Kind::Ghost, Some(ScMsg::ModsRefresh), v.mods_loading)
+        ]
+        .align_y(Alignment::Center),
+        t::metadata("按环节列出全部模块：一个模块一个文件，工作流用「id@版本」引用。这一页与左栏选中的策略无关。").color(pal::dim()),
+    ]
+    .spacing(space(2));
+    if !v.mods_err.is_empty() {
+        col = col.push(t::metadata(v.mods_err.clone()).color(pal::bad()));
+    }
+    let Some(reg) = &v.mods else {
+        return col.push(if v.mods_loading { w::loading("模块库") } else { w::empty("还没读到模块库", "点「刷新」") }).into();
+    };
+    let n_valid = reg.modules.iter().filter(|m| m.validations.iter().any(|x| x.verdict == "alive")).count();
+    col = col.push(
+        t::caption(format!(
+            "{} 个模块，其中 {} 个有「存活」的验证记录。「行为一致」只说明拆分没改行为，不说明模块有优势。",
+            reg.modules.len(),
+            n_valid
+        ))
+        .color(if n_valid == 0 { pal::warn() } else { pal::ok() }),
+    );
+    for (label, ms) in reg.grouped() {
+        col = col.push(w::section(format!("{label}（{}）", ms.len())));
+        for m in ms {
+            col = col.push(module_item(m, v.mod_picked.as_deref() == Some(m.refer.as_str())));
+        }
+    }
+    // 消融流水账
+    col = col.push(w::section(format!("消融对比（共 {} 次，最近 {}）", reg.n_ablations, reg.ablations.len())));
+    col = col.push(
+        t::metadata("每跑一个变体就是一次试验。命令行的消融不进研究库，不在全局试验计数里——别拿最好的那一个当结论。").color(pal::warn()),
+    );
+    if reg.ablations.is_empty() {
+        col = col.push(t::metadata("（还没有）").color(pal::dim()));
+    }
+    for a in &reg.ablations {
+        let what = a.swap.iter().chain(a.set.iter()).cloned().collect::<Vec<_>>().join("；");
+        let wf = a.workflow.rsplit('/').next().unwrap_or(&a.workflow).to_string();
+        col = col.push(
+            column![
+                row![t::caption(format!("{}  {}", when(a.ts), wf)), Space::new().width(Length::Fill), t::metadata(a.range.join(" → ")).color(pal::dim())]
+                    .spacing(space(2))
+                    .align_y(Alignment::Center),
+                t::code(what),
+                row![
+                    t::metadata("期末净值").color(pal::dim()),
+                    t::numeric(format!("{} → {}", sm::num(&a.base, "equity_end", 2), sm::num(&a.variant, "equity_end", 2))),
+                    t::metadata("最大回撤 %").color(pal::dim()),
+                    t::numeric(format!("{} → {}", sm::num(&a.base, "max_equity_drawdown_pct", 2), sm::num(&a.variant, "max_equity_drawdown_pct", 2))),
+                    t::metadata("笔数").color(pal::dim()),
+                    t::numeric(format!("{} → {}", sm::num(&a.base, "trades_closed", 0), sm::num(&a.variant, "trades_closed", 0))),
+                ]
+                .spacing(space(2))
+                .align_y(Alignment::Center)
+                .wrap(),
+                t::metadata(a.note.clone()).color(pal::dim()),
+            ]
+            .spacing(space(1)),
+        );
+    }
     col.into()
 }
 

@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use super::strategy_center_ai::{self as ai, Assist};
 use super::strategy_center_cmp::{self as cmp, BasketItem, Cmp};
 use super::strategy_center_lib::{self as lib, LibFilter};
+use super::strategy_center_mod::Registry;
 use super::strategy_center_opt::{self as opt, OptForm, StudyRow};
 use super::strategy_center_val::{self as val, ExpForm, ExpRow, Gates, ValForm, ValRow};
 
@@ -294,6 +295,10 @@ pub enum ScMsg {
     ConcludeText(String),
     Conclude,
     GatesRefresh,
+    // ── 模块（docs/44 W6）──
+    ModsRefresh,
+    /// 选中一个模块看详情（再点一次收起）
+    ModPick(String),
     // ── 对比与组合 ──
     /// 放进 / 拿出对比篮（可跨策略）
     CmpToggle(String),
@@ -323,6 +328,8 @@ pub enum Tab {
     Studies,
     Checks,
     Compare,
+    /// 策略工作流引擎的模块库（与选中的策略无关）
+    Modules,
 }
 
 // ── 状态 ────────────────────────────────────────────────────────────────
@@ -357,6 +364,10 @@ struct St {
     gates: Option<Gates>,
     gates_loading: bool,
     gates_err: String,
+    mods: Option<Registry>,
+    mods_loading: bool,
+    mods_err: String,
+    mod_picked: Option<String>,
     /// 研究库里本策略的「指纹」（各表行数 + 最近完成时间）：变了才重算闸门
     gates_key: String,
     vform: ValForm,
@@ -437,6 +448,10 @@ pub struct View {
     pub gates: Option<Gates>,
     pub gates_loading: bool,
     pub gates_err: String,
+    pub mods: Option<Registry>,
+    pub mods_loading: bool,
+    pub mods_err: String,
+    pub mod_picked: Option<String>,
     pub vform: ValForm,
     pub eform: ExpForm,
     pub basket: Vec<BasketItem>,
@@ -509,6 +524,10 @@ pub fn view() -> View {
         gates: g.gates.clone(),
         gates_loading: g.gates_loading,
         gates_err: g.gates_err.clone(),
+        mods: g.mods.clone(),
+        mods_loading: g.mods_loading,
+        mods_err: g.mods_err.clone(),
+        mod_picked: g.mod_picked.clone(),
         vform: g.vform.clone(),
         eform: g.eform.clone(),
         basket: g.basket.clone(),
@@ -795,6 +814,42 @@ fn load_gates() {
                     }
                     Err(e) => g.gates_err = e,
                 }
+            }
+        });
+    });
+}
+
+/// 模块库：登记、引用、验证记录都只在 Python（strategies.swe.module）一处，这里只跑它、读 JSON。
+fn load_mods() {
+    let go = with(|g| {
+        if g.mods_loading {
+            return false;
+        }
+        g.mods_loading = true;
+        true
+    })
+    .unwrap_or(false);
+    if !go {
+        return;
+    }
+    super::spawn_named("ws-stratmods", move || {
+        let out = std::process::Command::new(super::paths::python())
+            .args(["-m", "strategies.swe.module", "--json"])
+            .current_dir(super::paths::repo_root())
+            .output();
+        let parsed: Result<Registry, String> = match out {
+            Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).map_err(|e| format!("模块库 JSON 解析失败：{e}")),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("模块库读取失败").to_string()),
+            Err(e) => Err(format!("起不来 Python：{e}")),
+        };
+        with(|g| {
+            g.mods_loading = false;
+            match parsed {
+                Ok(x) => {
+                    g.mods = Some(x);
+                    g.mods_err.clear();
+                }
+                Err(e) => g.mods_err = e,
             }
         });
     });
@@ -1212,6 +1267,9 @@ pub fn handle(m: ScMsg) {
             if t == Tab::Compare {
                 maybe_compare();
             }
+            if t == Tab::Modules && with(|g| g.mods.is_none()).unwrap_or(false) {
+                load_mods(); // 第一次切进来才读；之后点「刷新」
+            }
             KICK.store(true, Ordering::Relaxed);
         }
         ScMsg::CmpToggle(run_id) => {
@@ -1306,6 +1364,10 @@ pub fn handle(m: ScMsg) {
         ScMsg::CmpRun => {
             with(|g| g.cmp_key.clear());
             load_compare();
+        }
+        ScMsg::ModsRefresh => load_mods(),
+        ScMsg::ModPick(r) => {
+            with(|g| g.mod_picked = if g.mod_picked.as_deref() == Some(r.as_str()) { None } else { Some(r) });
         }
         ScMsg::GatesRefresh => {
             with(|g| g.gates_key.clear());

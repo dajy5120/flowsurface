@@ -13,6 +13,7 @@ pub mod strategy_center;
 pub mod strategy_center_ai;
 pub mod strategy_center_cmp;
 pub mod strategy_center_lib;
+pub mod strategy_center_mod;
 pub mod strategy_center_opt;
 pub mod strategy_center_val;
 pub mod strategy_center_view;
