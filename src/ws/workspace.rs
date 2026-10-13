@@ -116,7 +116,7 @@ pub const PAGES: [(&str, &[&str]); 12] = [
     (WS_TARDIS, &["历史面板", "预测市场回放", "自有数据图"]),
     (WS_FEATURES, &["特征矩阵", "图表参数", "引擎健康", "图表"]),
     (WS_OFMS, &["层析时间轴", "响应表", "入场形态矩阵", "特征字典"]),
-    (WS_STRATEGY, &["策略库", "七层"]),
+    (WS_STRATEGY, &["策略库", "七层", "画布"]),
     (WS_FACTORY, &["Alpha Factory", "特征库"]),
     (WS_PREDICTION, &["币安钱包", "Polymarket"]),
     (WS_BACKTEST, &["运行", "结果报告", "订单明细"]),
@@ -141,6 +141,7 @@ fn page_template(layout: &str) -> Option<String> {
         WS_OFMS => locked("OfmsLab", t),
         WS_FEATURES if t != "图表" => locked("FeatureMatrix", t),
         WS_STRATEGY if t == "七层" => locked("StrategyLayers", t),
+        WS_STRATEGY if t == "画布" => locked("StrategyFlow", t),
         // 策略库：左策略库 / 详情 / 运行记录 ∣ 右回测结果（七层是单独一页）
         WS_STRATEGY => r#"{"Split":{"axis":"Vertical","ratio":0.64,"a":{"StrategyCenter":{"settings":{},"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}"#.to_string(),
         WS_FACTORY if t == "特征库" => locked("FeatureLab", t),
@@ -641,7 +642,7 @@ mod tests {
         let templates: String = all_layouts().iter().map(|n| pane_template(n)).collect();
         // 只读面板类：没有 ticker、不吃行情流，各自是一个独立用途的页面。
         for kind in [
-            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "FeatureMatrix", "StrategyCenter", "StrategyLayers", "OfmsLab", "TardisBoard",
+            "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "FeatureMatrix", "StrategyCenter", "StrategyLayers", "StrategyFlow", "OfmsLab", "TardisBoard",
             "MarketMap", "Observatory", "NetEgress", "Procs", "News", "Calendar",
         ] {
             assert!(

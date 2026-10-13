@@ -143,6 +143,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    StrategyFlow {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     OfmsLab {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -401,6 +407,7 @@ pub enum ContentKind {
     StrategyCenter,
     /// 七层（docs/39）：大师策略的七层流水线 + 共用件矩阵，跟随策略中心当前选中的策略与运行。
     StrategyLayers,
+    StrategyFlow,
     /// 订单流层析（docs/40）：OFMS-10 事件 · 因果链 · 价格响应；数据由 `factory.ofms.run` 回放生成并按窗口缓存。
     OfmsLab,
     /// 全市场雷达（docs/22 P0）：加密全市场树图 + 涨跌速度/量异常排行。
@@ -450,7 +457,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 32] = [
+    pub const ALL: [ContentKind; 33] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -471,6 +478,7 @@ impl ContentKind {
         ContentKind::FeatureMatrix,
         ContentKind::StrategyCenter,
         ContentKind::StrategyLayers,
+        ContentKind::StrategyFlow,
         ContentKind::OfmsLab,
         ContentKind::MarketMap,
         ContentKind::Observatory,
@@ -509,6 +517,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::FeatureMatrix => "特征矩阵",
             ContentKind::StrategyCenter => "策略中心",
             ContentKind::StrategyLayers => "七层",
+            ContentKind::StrategyFlow => "策略画布",
             ContentKind::OfmsLab => "订单流层析",
             ContentKind::MarketMap => "全市场雷达",
             ContentKind::Observatory => "接口观察终端",
@@ -602,6 +611,7 @@ impl PaneSetup {
                 | ContentKind::FeatureMatrix
                 | ContentKind::StrategyCenter
                 | ContentKind::StrategyLayers
+                | ContentKind::StrategyFlow
                 | ContentKind::OfmsLab
                 | ContentKind::MarketMap
                 | ContentKind::Observatory
@@ -647,6 +657,7 @@ impl PaneSetup {
             | ContentKind::FeatureMatrix
             | ContentKind::StrategyCenter
                 | ContentKind::StrategyLayers
+                | ContentKind::StrategyFlow
                 | ContentKind::OfmsLab
             | ContentKind::MarketMap
             | ContentKind::Observatory

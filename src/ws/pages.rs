@@ -137,8 +137,8 @@ use data::layout::pane::ContentKind;
 
 /// 单实例面板：交互状态（选中、表单、列宽、筛选）只有一份，同一页里放两个会互相牵动——
 /// 面板库加它时，本页已有就跳过去（别的页里有不算，几页不会同时显示）。
-pub const SINGLE_INSTANCE: [ContentKind; 4] =
-    [ContentKind::StrategyCenter, ContentKind::StrategyLayers, ContentKind::FeatureMatrix, ContentKind::Orders];
+pub const SINGLE_INSTANCE: [ContentKind; 5] =
+    [ContentKind::StrategyCenter, ContentKind::StrategyLayers, ContentKind::StrategyFlow, ContentKind::FeatureMatrix, ContentKind::Orders];
 
 pub fn single_instance(k: ContentKind) -> bool {
     SINGLE_INSTANCE.contains(&k)
@@ -166,7 +166,7 @@ pub fn category(k: ContentKind) -> &'static str {
     match k {
         K::HeatmapChart | K::ShaderHeatmap | K::FootprintChart | K::CandlestickChart | K::ComparisonChart | K::TimeAndSales | K::Ladder => "行情",
         K::FeatureMatrix | K::OfmsLab | K::FeatureLab => "订单流",
-        K::Factory | K::C4Shadow | K::OptionsBoard | K::PredictionBoard | K::PmBinance | K::PmReplay | K::StrategyCenter | K::StrategyLayers => "研究",
+        K::Factory | K::C4Shadow | K::OptionsBoard | K::PredictionBoard | K::PmBinance | K::PmReplay | K::StrategyCenter | K::StrategyLayers | K::StrategyFlow => "研究",
         K::WealthSpring | K::SelfChart | K::BacktestResult | K::Orders => "策略",
         K::MarketMap | K::News | K::Calendar | K::Recorder | K::TardisReplay | K::TardisBoard | K::Observatory => "数据与资讯",
         K::Procs | K::NetEgress => "系统",
