@@ -137,6 +137,22 @@ pub struct Node {
     /// 入场节点带着这条线的属性：name / entry_tf / exit_tf / entry_on
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lane: Option<Map<String, Value>>,
+    /// 属于哪个子图（docs/45 C4）。只影响显示
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// 无线引用：它的输出不画线，用它的节点在端口旁标一个名字。只影响显示
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub wireless: bool,
+}
+
+/// 子图 / 分组框（docs/45 §4.2）：一组节点。展开时画一个框，折叠时顶层只占一个节点，可以进去看。
+/// **只影响显示**——编译时不看分组。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Group {
+    pub id: String,
+    pub title: String,
+    pub collapsed: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -164,11 +180,12 @@ pub struct Graph {
     pub settings: Value,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
+    pub groups: Vec<Group>,
 }
 
 pub const EXEC: &str = "kernel.exec";
 /// 这份代码写出的图格式版本，与 `strategies/swe/graph.py` 的 FORMAT 一致（Python 端拒绝比它新的）。
-pub const GRAPH_FORMAT: u32 = 2;
+pub const GRAPH_FORMAT: u32 = 3;
 /// 撤销栈的深度。
 const UNDO_DEPTH: usize = 100;
 /// 停手多久之后自动检查。
@@ -214,6 +231,69 @@ impl Graph {
     pub fn remove_node(&mut self, id: &str) {
         self.nodes.retain(|n| n.id != id);
         self.edges.retain(|e| e.from != id && e.to != id);
+        self.prune_groups();
+    }
+
+    /// 没有成员的子图去掉。
+    fn prune_groups(&mut self) {
+        let used: Vec<String> = self.nodes.iter().filter_map(|n| n.group.clone()).collect();
+        self.groups.retain(|g| used.contains(&g.id));
+    }
+
+    pub fn group(&self, id: &str) -> Option<&Group> {
+        self.groups.iter().find(|g| g.id == id)
+    }
+
+    pub fn members(&self, gid: &str) -> Vec<String> {
+        self.nodes.iter().filter(|n| n.group.as_deref() == Some(gid)).map(|n| n.id.clone()).collect()
+    }
+
+    /// 把这些节点编成一个新的子图（原来各自的分组作废）。返回新子图的 id。
+    pub fn make_group(&mut self, ids: &[String], title: &str) -> Option<String> {
+        if !self.nodes.iter().any(|n| ids.contains(&n.id)) {
+            return None;
+        }
+        let max = self.groups.iter().filter_map(|g| g.id.strip_prefix('g').and_then(|s| s.parse::<u32>().ok())).max().unwrap_or(0);
+        let gid = format!("g{}", max + 1);
+        for n in self.nodes.iter_mut().filter(|n| ids.contains(&n.id)) {
+            n.group = Some(gid.clone());
+        }
+        self.groups.push(Group { id: gid.clone(), title: title.to_string(), collapsed: false });
+        self.prune_groups();
+        Some(gid)
+    }
+
+    /// 解散子图：节点留着，只是不再属于它。
+    pub fn dissolve(&mut self, gid: &str) {
+        for n in self.nodes.iter_mut().filter(|n| n.group.as_deref() == Some(gid)) {
+            n.group = None;
+        }
+        self.groups.retain(|g| g.id != gid);
+    }
+
+    /// 搜索（docs/45 §4.2）：模块名、标题、线名、状态名、参数的值里含这段文字的节点。
+    pub fn find(&self, query: &str, palette: Option<&Palette>) -> Vec<String> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        self.nodes
+            .iter()
+            .filter(|n| {
+                let def = palette.and_then(|p| p.get(&n.module));
+                let mut hay = vec![n.module.to_lowercase(), n.name.clone().unwrap_or_default().to_lowercase()];
+                if let Some(d) = def {
+                    hay.push(d.title.to_lowercase());
+                    hay.push(d.kind_label.to_lowercase());
+                }
+                hay.extend(n.params.iter().map(|(k, v)| format!("{k}={}", value_text(v)).to_lowercase()));
+                if let Some(l) = &n.lane {
+                    hay.extend(l.values().map(|v| value_text(v).to_lowercase()));
+                }
+                hay.iter().any(|h| h.contains(&q))
+            })
+            .map(|n| n.id.clone())
+            .collect()
     }
 
     /// 取出一组节点和它们**之间**的线（复制用）。「执行」节点不复制——每张图只能有一个。
@@ -234,6 +314,7 @@ impl Graph {
             n2.id = id.clone();
             n2.x = n.x - x0 + at.0;
             n2.y = n.y - y0 + at.1;
+            n2.group = None; // 贴出来的是散着的节点，要分组自己再编
             if let Some(name) = n2.lane.as_ref().and_then(|l| l.get("name")).and_then(Value::as_str).map(str::to_string) {
                 let taken: Vec<String> = self.nodes.iter().filter_map(|x| x.lane.as_ref().and_then(|l| l.get("name")).and_then(Value::as_str).map(str::to_string)).collect();
                 if let Some(l) = n2.lane.as_mut() {
@@ -381,6 +462,25 @@ pub enum FlMsg {
     TableEdit(String, String, usize, usize, String),
     TableAdd(String, String),
     TableDel(String, String, usize),
+    /// Ctrl / Shift 点一个折叠的子图：成员一起加选 / 减选
+    SelectToggleMany(Vec<String>),
+    /// 把选中的节点编成一个子图
+    GroupSelected,
+    Ungroup(String),
+    ToggleCollapse(String),
+    GroupTitle(String, String),
+    /// 进入一个子图只看它里面（None = 回顶层）
+    Focus(Option<String>),
+    Wireless(String, bool),
+    /// 画布告诉这边它现在多大（搜索跳转、看全要用）
+    Viewport(f32, f32),
+    SetPan(f32, f32),
+    FindQuery(String),
+    FindNext,
+    /// 自动整理（选中了就只整理选中的）
+    Tidy,
+    /// 模块库左栏：展开 / 收起一个分类
+    LibToggle(String),
     /// 表单（docs/45 §3.5）：(段 backtest / envelope / settings, 项, 文字)。不是节点——运行配置与账户底线
     Config(String, String, String),
     /// 从一次运行的结果目录打开当时的图
@@ -412,6 +512,13 @@ struct St {
     undo_tag: Option<(String, Instant)>,
     quick: Option<Quick>,
     lib_query: String,
+    /// 模块库里展开着的分类
+    lib_open: Vec<String>,
+    /// 正在看哪个子图里面（None = 顶层）
+    focus: Option<String>,
+    view_size: (f32, f32),
+    find: String,
+    find_i: usize,
     /// 表格参数正在编辑的行：键同 `form`。每行 [外层键, 内层键, 值]
     tables: BTreeMap<String, Vec<[String; 3]>>,
     /// 最近一次改动的时刻（自动检查用）；检查过了清掉
@@ -457,6 +564,11 @@ impl Default for St {
             undo_tag: None,
             quick: None,
             lib_query: String::new(),
+            lib_open: Vec::new(),
+            focus: None,
+            view_size: (1280.0, 800.0),
+            find: String::new(),
+            find_i: 0,
             tables: BTreeMap::new(),
             touched: None,
             auto_on: false,
@@ -507,6 +619,11 @@ pub struct View {
     pub can_paste: bool,
     pub quick: Option<Quick>,
     pub lib_query: String,
+    pub lib_open: Vec<String>,
+    pub focus: Option<String>,
+    pub find: String,
+    /// 搜索命中了几个、现在是第几个
+    pub find_hits: (usize, usize),
     pub tables: BTreeMap<String, Vec<[String; 3]>>,
     pub form: BTreeMap<String, String>,
     pub issues: Vec<Issue>,
@@ -541,6 +658,10 @@ pub fn view() -> View {
         can_paste: clip().lock().map(|c| !c.nodes.is_empty()).unwrap_or(false),
         quick: g.quick.clone(),
         lib_query: g.lib_query.clone(),
+        lib_open: g.lib_open.clone(),
+        focus: g.focus.clone(),
+        find: g.find.clone(),
+        find_hits: (g.graph.find(&g.find, g.palette.as_ref()).len(), g.find_i),
         tables: g.tables.clone(),
         form: g.form.clone(),
         issues: g.issues.clone(),
@@ -563,6 +684,13 @@ pub fn view() -> View {
 }
 
 impl View {
+    /// 选中的恰好是某个子图的全部成员 → 那个子图（检查器显示它的操作）。
+    pub fn selected_group(&self) -> Option<&Group> {
+        let gid = self.graph.node(self.selected.first()?)?.group.as_deref()?;
+        let members = self.graph.members(gid);
+        (members.len() == self.selected.len() && members.iter().all(|m| self.selected.contains(m))).then(|| self.graph.group(gid)).flatten()
+    }
+
     /// 检查器显示的那个节点：只选了一个时才有。
     pub fn primary(&self) -> Option<&Node> {
         match self.selected.as_slice() {
@@ -714,6 +842,19 @@ fn ensure_started() {
                         g.end = "2026-06-02".into();
                     });
                     handle(FlMsg::Run);
+                });
+            }
+            // 样张截图用：`WS_FLOW_FOCUS=<子图 id>` 进入那个子图；`WS_FLOW_EXPAND=<子图 id>` 把它展开
+            if let Ok(gid) = std::env::var("WS_FLOW_FOCUS") {
+                super::spawn_named("ws-flowfocus", move || {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    handle(FlMsg::Focus(Some(gid)));
+                });
+            }
+            if let Ok(gid) = std::env::var("WS_FLOW_EXPAND") {
+                super::spawn_named("ws-flowexp", move || {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    handle(FlMsg::ToggleCollapse(gid));
                 });
             }
             // 样张截图用：`WS_FLOW_SELECT=<模块 id 的一段>` 选中第一个匹配的节点（看检查器里的参数控件）；
@@ -1121,13 +1262,17 @@ fn open(item: FileItem) {
 
 /// 把视野调到能看见全部节点（画布的实际大小这里不知道，按常见的面板大小估）。
 fn fit(g: &mut St) {
-    const VIEW: (f32, f32) = (1280.0, 800.0);
     const NODE: (f32, f32) = (168.0, 120.0);
-    if g.graph.nodes.is_empty() {
+    let view = g.view_size;
+    #[allow(non_snake_case)]
+    let VIEW = (view.0.max(200.0), view.1.max(200.0));
+    // 进了子图就只看它的成员
+    let shown: Vec<&Node> = g.graph.nodes.iter().filter(|n| g.focus.is_none() || n.group == g.focus).collect();
+    if shown.is_empty() {
         return;
     }
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for n in &g.graph.nodes {
+    for n in shown {
         x0 = x0.min(n.x);
         y0 = y0.min(n.y);
         x1 = x1.max(n.x + NODE.0);
@@ -1205,6 +1350,8 @@ fn reset_editing(g: &mut St) {
     g.tables.clear();
     g.touched = None;
     g.envelope_hit = None;
+    g.focus = None;
+    g.find_i = 0;
 }
 
 /// 撤销 / 重做之后：输入框里的原文作废（照图上的值重显），选择里去掉已经不在的节点。
@@ -1303,6 +1450,120 @@ pub fn handle(m: FlMsg) {
             });
         }
         FlMsg::Open(item) => open(item),
+        FlMsg::SelectToggleMany(ids) => {
+            with(|g| {
+                if ids.iter().all(|i| g.selected.contains(i)) {
+                    g.selected.retain(|s| !ids.contains(s));
+                } else {
+                    for id in ids {
+                        if !g.selected.contains(&id) {
+                            g.selected.push(id);
+                        }
+                    }
+                }
+            });
+        }
+        FlMsg::GroupSelected => {
+            with(|g| {
+                // 「执行」节点不进子图：它是全图唯一的出口
+                let ids: Vec<String> = g.selected.iter().filter(|id| g.graph.node(id).is_some_and(|n| n.module != EXEC)).cloned().collect();
+                if ids.len() < 2 {
+                    g.msg = "先选中至少两个节点（Shift 拖空白框选），再编成子图".to_string();
+                    return;
+                }
+                record(g, "");
+                g.dirty = true;
+                let n = g.graph.groups.len() + 1;
+                g.graph.make_group(&ids, &format!("子图 {n}"));
+                g.selected = ids;
+            });
+        }
+        FlMsg::Ungroup(gid) => {
+            with(|g| {
+                record(g, "");
+                g.dirty = true;
+                g.graph.dissolve(&gid);
+                if g.focus.as_deref() == Some(gid.as_str()) {
+                    g.focus = None;
+                }
+            });
+        }
+        FlMsg::ToggleCollapse(gid) => {
+            with(|g| {
+                record(g, "");
+                g.dirty = true;
+                if let Some(x) = g.graph.groups.iter_mut().find(|x| x.id == gid) {
+                    x.collapsed = !x.collapsed;
+                }
+            });
+        }
+        FlMsg::GroupTitle(gid, text) => {
+            with(|g| {
+                record(g, &format!("g.{gid}"));
+                g.dirty = true;
+                if let Some(x) = g.graph.groups.iter_mut().find(|x| x.id == gid) {
+                    x.title = text;
+                }
+            });
+        }
+        FlMsg::Focus(gid) => {
+            with(|g| {
+                g.focus = gid.filter(|id| g.graph.group(id).is_some());
+                g.quick = None;
+                fit(g);
+            });
+        }
+        FlMsg::Wireless(id, on) => {
+            with(|g| {
+                record(g, "");
+                g.dirty = true;
+                if let Some(n) = g.graph.node_mut(&id) {
+                    n.wireless = on;
+                }
+            });
+        }
+        FlMsg::Viewport(w, h) => {
+            with(|g| g.view_size = (w, h));
+        }
+        FlMsg::SetPan(x, y) => {
+            with(|g| g.pan = (x, y));
+        }
+        FlMsg::FindQuery(s) => {
+            with(|g| {
+                g.find = s;
+                g.find_i = 0;
+            });
+        }
+        FlMsg::FindNext => {
+            with(|g| {
+                let hits = g.graph.find(&g.find, g.palette.as_ref());
+                if hits.is_empty() {
+                    g.msg = if g.find.trim().is_empty() { String::new() } else { format!("没找到「{}」", g.find.trim()) };
+                    return;
+                }
+                g.find_i = g.find_i % hits.len() + 1;
+                let id = hits[g.find_i - 1].clone();
+                let Some(n) = g.graph.node(&id).cloned() else { return };
+                // 在折叠的子图里：进去看；在别的子图里看着：换过去
+                let collapsed = n.group.as_ref().is_some_and(|gid| g.graph.group(gid).is_some_and(|x| x.collapsed));
+                if g.focus != n.group && (g.focus.is_some() || collapsed) {
+                    g.focus = if collapsed || g.focus.is_some() { n.group.clone() } else { None };
+                }
+                g.selected = vec![id];
+                g.zoom = g.zoom.max(0.8);
+                g.pan = (g.view_size.0 / 2.0 - (n.x + 84.0) * g.zoom, g.view_size.1 / 2.0 - (n.y + 40.0) * g.zoom);
+            });
+        }
+        FlMsg::Tidy => tidy_async(),
+        FlMsg::LibToggle(label) => {
+            with(|g| {
+                if let Some(i) = g.lib_open.iter().position(|x| *x == label) {
+                    g.lib_open.remove(i);
+                } else {
+                    g.lib_open.push(label);
+                }
+            });
+        }
         FlMsg::Config(section, name, text) => {
             with(|g| {
                 let ty = g
@@ -1708,6 +1969,47 @@ fn set_table(g: &mut St, id: &str, name: &str, rows: Vec<[String; 3]>, tag: &str
     }
 }
 
+/// 自动整理：位置由 Python 算（`graph layout`，排版只有一份），这里只是把结果放回去。
+fn tidy_async() {
+    let Some((graph, ids)) = with(|g| {
+        if g.busy {
+            return None;
+        }
+        g.busy = true;
+        // 选中了就只整理选中的；进了子图就整理它的成员；否则全图
+        let ids: Option<Vec<String>> = if g.selected.len() > 1 { Some(g.selected.clone()) } else { g.focus.as_ref().map(|f| g.graph.members(f)) };
+        Some((g.graph.clone(), ids))
+    })
+    .flatten() else {
+        return;
+    };
+    super::spawn_named("ws-flowtidy", move || {
+        let body = serde_json::to_vec(&serde_json::json!({"graph": graph, "ids": ids})).unwrap_or_default();
+        let r = python(&["-m", "strategies.swe.graph", "layout", "-"], Some(&body))
+            .and_then(|b| serde_json::from_slice::<HashMap<String, (f32, f32)>>(&b).map_err(|e| format!("整理结果解析失败：{e}")));
+        with(|g| {
+            g.busy = false;
+            match r {
+                Ok(pos) => {
+                    record(g, "");
+                    g.dirty = true;
+                    for n in g.graph.nodes.iter_mut() {
+                        if let Some((x, y)) = pos.get(&n.id) {
+                            n.x = *x;
+                            n.y = *y;
+                        }
+                    }
+                    if ids.is_none() {
+                        fit(g);
+                    }
+                    g.msg = format!("整理了 {} 个节点（Ctrl Z 撤销）", pos.len());
+                }
+                Err(e) => g.msg = format!("整理失败：{e}"),
+            }
+        });
+    });
+}
+
 /// 有回测在跑（给页签上的状态点用）。
 pub fn busy() -> bool {
     with(|g| g.running).unwrap_or(false)
@@ -1838,6 +2140,44 @@ mod tests {
         assert_eq!((v.in_type("a"), v.in_type("b"), v.out_type("out")), ("flag", "series", "flag"));
         assert_eq!(v.first_in("series").map(String::as_str), Some("b"));
         assert_eq!((port_type("n_feature"), port_type("feature"), port_type("signal")), ("feature", "feature", "signal"));
+    }
+
+    #[test]
+    fn groups_are_display_only_bookkeeping() {
+        let mut g = Graph::blank();
+        for (i, m) in ["setup.a@1", "entry.b@1", "exit.c@1"].iter().enumerate() {
+            g.nodes.push(Node { id: format!("n{}", i + 2), module: m.to_string(), ..Default::default() });
+        }
+        let gid = g.make_group(&["n2".into(), "n3".into()], "线 S1").unwrap();
+        assert_eq!((gid.as_str(), g.members(&gid)), ("g1", vec!["n2".to_string(), "n3".to_string()]));
+        // 重新编组：节点换到新的子图，空了的旧子图自动去掉
+        let g2 = g.make_group(&["n2".into(), "n3".into(), "n4".into()], "大的").unwrap();
+        assert_eq!(g.groups.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), [g2.as_str()]);
+        g.remove_node("n4");
+        assert_eq!(g.members(&g2).len(), 2);
+        // 贴出来的节点不带分组
+        let clip = g.excerpt(&["n2".into(), "n3".into()]);
+        let new = g.paste(&clip, (0.0, 0.0));
+        assert!(new.iter().all(|id| g.node(id).unwrap().group.is_none()));
+        g.dissolve(&g2);
+        assert!(g.groups.is_empty() && g.nodes.iter().all(|n| n.group.is_none()));
+        // 没有成员的子图不落盘；分组与无线标记不写进没用到它们的节点
+        let v = serde_json::to_value(&g).unwrap();
+        assert!(v["nodes"][0].get("group").is_none() && v["nodes"][0].get("wireless").is_none());
+    }
+
+    #[test]
+    fn search_matches_module_title_lane_and_parameter_values() {
+        let mut g = Graph::blank();
+        let lane: Map<String, Value> = [("name".to_string(), Value::String("S7".into()))].into_iter().collect();
+        g.nodes.push(Node { id: "n2".into(), module: "entry.stop_ladder@1.0".into(), lane: Some(lane), ..Default::default() });
+        g.nodes.push(Node { id: "n3".into(), module: "value.ema".into(), params: [("n".to_string(), Value::from(200))].into_iter().collect(), ..Default::default() });
+        g.nodes.push(Node { id: "n4".into(), module: "regime.er@1".into(), name: Some("Trend".into()), ..Default::default() });
+        assert_eq!(g.find("LADDER", None), ["n2"]);
+        assert_eq!(g.find("s7", None), ["n2"]);
+        assert_eq!(g.find("n=200", None), ["n3"]);
+        assert_eq!(g.find("trend", None), ["n4"]);
+        assert!(g.find("  ", None).is_empty() && g.find("zzz", None).is_empty());
     }
 
     #[test]

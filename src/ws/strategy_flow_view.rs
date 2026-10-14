@@ -110,9 +110,15 @@ fn live_label(kind: &str) -> &'static str {
     }
 }
 
+/// 画布上的一个方块：一个节点，或者一个折叠起来的子图。
 #[derive(Clone)]
 struct Geom {
+    /// 节点 id；折叠的子图是 `g:<子图 id>`
     id: String,
+    /// 折叠的子图：它的 id
+    group: Option<String>,
+    /// 它代表哪些节点（节点 = 自己一个）
+    members: Vec<String>,
     x: f32,
     y: f32,
     h: f32,
@@ -120,9 +126,16 @@ struct Geom {
     outs: Vec<String>,
     in_types: Vec<String>,
     out_types: Vec<String>,
+    /// 端口实际是哪个节点的哪个端口（折叠的子图把成员对外的端口露出来）
+    in_ref: Vec<(String, String)>,
+    out_ref: Vec<(String, String)>,
     kind_label: String,
     title: String,
     sub: String,
+    /// 无线引用的发布者
+    wireless: bool,
+    bad: usize,
+    live: Option<NodeLive>,
 }
 
 impl Geom {
@@ -131,7 +144,7 @@ impl Geom {
         let in_types = ins.iter().map(|p| def.map_or(sf::port_type(p), |d| d.in_type(p)).to_string()).collect();
         let out_types = outs.iter().map(|p| def.map_or(sf::port_type(p), |d| d.out_type(p)).to_string()).collect();
         // 数值节点把最要紧的参数直接写在底栏上（N、常数的值、特征名、表达式）
-        let brief = ["n", "value", "name", "tf", "expr"].iter().filter_map(|k| n.params.get(*k).map(|v| value_text(v))).collect::<Vec<_>>().join(" · ");
+        let brief = ["n", "value", "name", "tf", "expr"].iter().filter_map(|k| n.params.get(*k).map(value_text)).collect::<Vec<_>>().join(" · ");
         let rows = ins.len().max(outs.len()).max(1) as f32;
         let sub = n
             .lane
@@ -141,9 +154,13 @@ impl Geom {
             .unwrap_or_else(|| if def.is_some_and(|d| d.kind == "value") { brief.chars().take(22).collect() } else { String::new() });
         Geom {
             id: n.id.clone(),
+            group: None,
+            members: vec![n.id.clone()],
             x: n.x,
             y: n.y,
             h: HEAD_H + rows * ROW_H + FOOT_H,
+            in_ref: ins.iter().map(|p| (n.id.clone(), p.clone())).collect(),
+            out_ref: outs.iter().map(|p| (n.id.clone(), p.clone())).collect(),
             ins,
             outs,
             in_types,
@@ -151,6 +168,9 @@ impl Geom {
             kind_label: def.map(|d| d.kind_label.clone()).unwrap_or_else(|| "未知模块".into()),
             title: def.map(|d| d.title.clone()).unwrap_or_else(|| n.module.clone()),
             sub,
+            wireless: n.wireless,
+            bad: 0,
+            live: None,
         }
     }
 
@@ -177,14 +197,200 @@ fn near(a: Point, b: Point, r: f32) -> bool {
     (a.x - b.x).powi(2) + (a.y - b.y).powi(2) <= r * r
 }
 
+/// 展开着的子图画的框。
+#[derive(Clone)]
+struct GroupFrame {
+    id: String,
+    title: String,
+    members: Vec<String>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+impl GroupFrame {
+    /// 标题条（点它 = 选中整个子图，拖它 = 整个挪）。
+    fn title_hit(&self, p: Point) -> bool {
+        p.x >= self.x && p.x <= self.x + self.w && p.y >= self.y && p.y <= self.y + FRAME_HEAD
+    }
+}
+
+/// 画出来的一根线：两头是方块的第几个端口。
+#[derive(Clone)]
+struct Link {
+    a: usize,
+    ka: usize,
+    b: usize,
+    kb: usize,
+    ty: String,
+}
+
+/// 端口旁的小标签：无线引用（↯ 名字），或者进了子图之后通到外面的线。
+#[derive(Clone)]
+struct Stub {
+    geom: usize,
+    port: usize,
+    input: bool,
+    label: String,
+    ty: String,
+    /// 另一头的节点（选中它时这个标签高亮）
+    other: String,
+}
+
+/// 这一帧画什么：由图 + 折叠状态 + 正在看的子图算出来（纯函数，好测）。
+#[derive(Clone, Default)]
+struct Scene {
+    geoms: Vec<Geom>,
+    frames: Vec<GroupFrame>,
+    links: Vec<Link>,
+    stubs: Vec<Stub>,
+}
+
+const FRAME_HEAD: f32 = 22.0;
+const FRAME_PAD: f32 = 10.0;
+
+fn build_scene(v: &View, pal_: &Palette) -> Scene {
+    let g = &v.graph;
+    let mut bad: HashMap<&str, usize> = HashMap::new();
+    for i in v.issues.iter().filter(|i| !i.node.is_empty()) {
+        *bad.entry(i.node.as_str()).or_default() += 1;
+    }
+    let title_of = |n: &Node| n.name.clone().or_else(|| pal_.get(&n.module).map(|d| d.title.clone())).unwrap_or_else(|| n.module.clone());
+    let collapsed = |n: &Node| v.focus.is_none() && n.group.as_ref().is_some_and(|gid| g.group(gid).is_some_and(|x| x.collapsed));
+    let visible = |n: &Node| v.focus.is_none() || n.group == v.focus;
+    let mut sc = Scene::default();
+    // 1. 方块：看得见的节点各一个；折叠的子图合成一个
+    let mut where_: HashMap<&str, usize> = HashMap::new(); // 节点 → 它在哪个方块里
+    for n in g.nodes.iter().filter(|n| visible(n) && !collapsed(n)) {
+        let mut ge = Geom::of(n, pal_.get(&n.module));
+        ge.bad = bad.get(n.id.as_str()).copied().unwrap_or(0);
+        ge.live = v.live.get(&n.id).cloned();
+        where_.insert(n.id.as_str(), sc.geoms.len());
+        sc.geoms.push(ge);
+    }
+    if v.focus.is_none() {
+        for gr in g.groups.iter().filter(|x| x.collapsed) {
+            let members: Vec<&Node> = g.nodes.iter().filter(|n| n.group.as_deref() == Some(gr.id.as_str())).collect();
+            if members.is_empty() {
+                continue;
+            }
+            let inside = |id: &str| members.iter().any(|m| m.id == id);
+            // 对外的端口：有线通到子图外面的那些，按成员的上下位置排
+            let mut ins: Vec<(f32, String, String, String)> = Vec::new();
+            let mut outs: Vec<(f32, String, String, String)> = Vec::new();
+            for e in &g.edges {
+                if inside(&e.to) && !inside(&e.from) && !ins.iter().any(|x| x.1 == e.to && x.2 == e.inp) {
+                    let m = members.iter().find(|m| m.id == e.to).expect("成员");
+                    let ty = pal_.get(&m.module).map_or(sf::port_type(&e.inp), |d| d.in_type(&e.inp)).to_string();
+                    ins.push((m.y, e.to.clone(), e.inp.clone(), ty));
+                }
+                if inside(&e.from) && !inside(&e.to) && !outs.iter().any(|x| x.1 == e.from && x.2 == e.out) {
+                    let m = members.iter().find(|m| m.id == e.from).expect("成员");
+                    let ty = pal_.get(&m.module).map_or(sf::port_type(&e.out), |d| d.out_type(&e.out)).to_string();
+                    outs.push((m.y, e.from.clone(), e.out.clone(), ty));
+                }
+            }
+            ins.sort_by(|a, b| a.0.total_cmp(&b.0));
+            outs.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let rows = ins.len().max(outs.len()).max(1) as f32;
+            let live = members.iter().filter_map(|m| v.live.get(&m.id)).fold(None::<NodeLive>, |acc, l| match acc {
+                None => Some(l.clone()),
+                Some(mut a) => {
+                    let (n, nb) = (a.n + l.n, a.n_blocked + l.n_blocked);
+                    if l.at > a.at {
+                        a = l.clone();
+                    }
+                    a.n = n;
+                    a.n_blocked = nb;
+                    Some(a)
+                }
+            });
+            let idx = sc.geoms.len();
+            for m in &members {
+                where_.insert(m.id.as_str(), idx);
+            }
+            sc.geoms.push(Geom {
+                id: format!("g:{}", gr.id),
+                group: Some(gr.id.clone()),
+                members: members.iter().map(|m| m.id.clone()).collect(),
+                x: members.iter().map(|m| m.x).fold(f32::MAX, f32::min),
+                y: members.iter().map(|m| m.y).fold(f32::MAX, f32::min),
+                h: HEAD_H + rows * ROW_H + FOOT_H,
+                ins: ins.iter().map(|x| x.2.clone()).collect(),
+                outs: outs.iter().map(|x| x.2.clone()).collect(),
+                in_types: ins.iter().map(|x| x.3.clone()).collect(),
+                out_types: outs.iter().map(|x| x.3.clone()).collect(),
+                in_ref: ins.into_iter().map(|x| (x.1, x.2)).collect(),
+                out_ref: outs.into_iter().map(|x| (x.1, x.2)).collect(),
+                kind_label: "子图".into(),
+                title: gr.title.clone(),
+                sub: format!("{} 个节点 · 双击进去看", members.len()),
+                wireless: false,
+                bad: members.iter().map(|m| bad.get(m.id.as_str()).copied().unwrap_or(0)).sum(),
+                live,
+            });
+        }
+        // 2. 展开着的子图：一个框
+        for gr in g.groups.iter().filter(|x| !x.collapsed) {
+            let ms: Vec<&Geom> = sc.geoms.iter().filter(|ge| ge.group.is_none() && g.node(&ge.id).is_some_and(|n| n.group.as_deref() == Some(gr.id.as_str()))).collect();
+            if ms.is_empty() {
+                continue;
+            }
+            let (x0, y0) = (ms.iter().map(|m| m.x).fold(f32::MAX, f32::min), ms.iter().map(|m| m.y).fold(f32::MAX, f32::min));
+            let (x1, y1) = (ms.iter().map(|m| m.x + NODE_W).fold(f32::MIN, f32::max), ms.iter().map(|m| m.y + m.h).fold(f32::MIN, f32::max));
+            sc.frames.push(GroupFrame {
+                id: gr.id.clone(),
+                title: gr.title.clone(),
+                members: ms.iter().map(|m| m.id.clone()).collect(),
+                x: x0 - FRAME_PAD,
+                y: y0 - FRAME_PAD - FRAME_HEAD,
+                w: x1 - x0 + 2.0 * FRAME_PAD,
+                h: y1 - y0 + 2.0 * FRAME_PAD + FRAME_HEAD,
+            });
+        }
+    }
+    // 3. 线：两头都看得见就画线（无线引用画标签）；有一头在外面（进了子图时）画标签
+    for e in &g.edges {
+        let (a, b) = (where_.get(e.from.as_str()).copied(), where_.get(e.to.as_str()).copied());
+        let (from_n, to_n) = (g.node(&e.from), g.node(&e.to));
+        match (a, b) {
+            (Some(a), Some(b)) if a == b => {} // 折叠的子图内部的线
+            (Some(a), Some(b)) => {
+                let (Some(ka), Some(kb)) = (sc.geoms[a].out_ref.iter().position(|r| r.0 == e.from && r.1 == e.out), sc.geoms[b].in_ref.iter().position(|r| r.0 == e.to && r.1 == e.inp)) else { continue };
+                let ty = sc.geoms[a].out_types[ka].clone();
+                if from_n.is_some_and(|n| n.wireless) {
+                    let label = format!("↯ {}", from_n.map(title_of).unwrap_or_default());
+                    sc.stubs.push(Stub { geom: b, port: kb, input: true, label, ty, other: e.from.clone() });
+                } else {
+                    sc.links.push(Link { a, ka, b, kb, ty });
+                }
+            }
+            (Some(a), None) => {
+                if let Some(ka) = sc.geoms[a].out_ref.iter().position(|r| r.0 == e.from && r.1 == e.out) {
+                    let label = format!("→ {}", to_n.map(title_of).unwrap_or_default());
+                    sc.stubs.push(Stub { geom: a, port: ka, input: false, label, ty: sc.geoms[a].out_types[ka].clone(), other: e.to.clone() });
+                }
+            }
+            (None, Some(b)) => {
+                if let Some(kb) = sc.geoms[b].in_ref.iter().position(|r| r.0 == e.to && r.1 == e.inp) {
+                    let mark = if from_n.is_some_and(|n| n.wireless) { "↯" } else { "←" };
+                    let label = format!("{mark} {}", from_n.map(title_of).unwrap_or_default());
+                    sc.stubs.push(Stub { geom: b, port: kb, input: true, label, ty: sc.geoms[b].in_types[kb].clone(), other: e.from.clone() });
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    sc
+}
+
 // ── 画布 ────────────────────────────────────────────────────────────────
 
 struct FlowCanvas {
-    geoms: Vec<Geom>,
+    scene: Scene,
     edges: Vec<Edge>,
     selected: Vec<String>,
-    bad: HashMap<String, usize>,
-    live: HashMap<String, NodeLive>,
     pan: (f32, f32),
     zoom: f32,
     now: Instant,
@@ -203,12 +409,14 @@ enum Drag {
         port: String,
         /// 端口类型（决定能接到哪）
         ty: String,
+        /// 从方块的哪个位置画出去
+        origin: Point,
         at: Point,
     },
     Pan {
         last: Point,
     },
-    /// 框选（世界坐标）；`add` = 加到现有选择上
+    /// 框选（世界坐标）
     Box {
         start: Point,
         at: Point,
@@ -221,7 +429,17 @@ struct CanvasState {
     mods: keyboard::Modifiers,
     /// 最后一次按下鼠标是在画布里：键盘快捷键只在这时生效
     armed: bool,
+    /// 上一次点的是什么、什么时候（认双击用）
+    last_click: Option<(String, Instant)>,
+    size: Size,
 }
+
+/// 小地图（右下角）的大小。
+const MAP: Size = Size::new(168.0, 104.0);
+const MAP_PAD: f32 = 8.0;
+/// 缩到多小就不画端口文字与底栏 / 只画标题。
+const LOD_PLAIN: f32 = 0.5;
+const LOD_TINY: f32 = 0.3;
 
 impl FlowCanvas {
     fn to_world(&self, p: Point) -> Point {
@@ -232,15 +450,11 @@ impl FlowCanvas {
         Point::new(p.x * self.zoom + self.pan.0, p.y * self.zoom + self.pan.1)
     }
 
-    fn geom(&self, id: &str) -> Option<&Geom> {
-        self.geoms.iter().find(|g| g.id == id)
-    }
-
     fn out_at(&self, p: Point) -> Option<(String, String, String, Point)> {
-        for g in self.geoms.iter().rev() {
-            for (k, port) in g.outs.iter().enumerate() {
+        for g in self.scene.geoms.iter().rev() {
+            for k in 0..g.outs.len() {
                 if near(p, g.out_pos(k), PORT_HIT / self.zoom.max(0.5)) {
-                    return Some((g.id.clone(), port.clone(), g.out_types[k].clone(), g.out_pos(k)));
+                    return Some((g.out_ref[k].0.clone(), g.out_ref[k].1.clone(), g.out_types[k].clone(), g.out_pos(k)));
                 }
             }
         }
@@ -248,10 +462,10 @@ impl FlowCanvas {
     }
 
     fn in_at(&self, p: Point) -> Option<(String, String, String)> {
-        for g in self.geoms.iter().rev() {
-            for (k, port) in g.ins.iter().enumerate() {
+        for g in self.scene.geoms.iter().rev() {
+            for k in 0..g.ins.len() {
                 if near(p, g.in_pos(k), PORT_HIT / self.zoom.max(0.5)) {
-                    return Some((g.id.clone(), port.clone(), g.in_types[k].clone()));
+                    return Some((g.in_ref[k].0.clone(), g.in_ref[k].1.clone(), g.in_types[k].clone()));
                 }
             }
         }
@@ -259,12 +473,16 @@ impl FlowCanvas {
     }
 
     fn node_at(&self, p: Point) -> Option<&Geom> {
-        self.geoms.iter().rev().find(|g| g.contains(p))
+        self.scene.geoms.iter().rev().find(|g| g.contains(p))
     }
 
-    /// 这个节点现在有多亮（0..1）以及用什么颜色。
-    fn glow(&self, id: &str) -> Option<(f32, Color)> {
-        let l = self.live.get(id)?;
+    fn is_selected(&self, g: &Geom) -> bool {
+        !g.members.is_empty() && g.members.iter().all(|m| self.selected.contains(m))
+    }
+
+    /// 这个方块现在有多亮（0..1）以及用什么颜色。
+    fn glow(&self, g: &Geom) -> Option<(f32, Color)> {
+        let l = g.live.as_ref()?;
         let age = self.now.saturating_duration_since(l.at).as_secs_f32();
         (age < GLOW_SECS).then(|| (1.0 - age / GLOW_SECS, live_color(&l.kind)))
     }
@@ -285,10 +503,6 @@ impl FlowCanvas {
         } else {
             frame.fill(&Path::circle(c, r), port_color(ty));
         }
-    }
-
-    fn wire(&self, frame: &mut Frame, a: Point, b: Point, color: Color, width: f32) {
-        self.wire_of(frame, a, b, color, width, "");
     }
 
     /// 数值线细、条件线虚、决策层的线照旧。
@@ -315,18 +529,18 @@ impl FlowCanvas {
         let z = self.zoom;
         let tl = self.to_screen(Point::new(g.x, g.y));
         let size = Size::new(NODE_W * z, g.h * z);
-        let glow = self.glow(&g.id);
+        let glow = self.glow(g);
         let body = Path::rounded_rectangle(tl, size, (5.0 * z).into());
         frame.fill(&body, pal::card_bg());
         if let Some((k, c)) = glow {
             frame.fill(&body, pal::alpha(c, 0.28 * k));
         }
-        // 标题条
+        // 标题条（折叠的子图用强调色，一眼看得出它不是一个模块）
         let head = Path::rounded_rectangle(tl, Size::new(NODE_W * z, HEAD_H * z), (5.0 * z).into());
-        frame.fill(&head, pal::band());
+        frame.fill(&head, if g.group.is_some() { pal::alpha(pal::accent(), 0.35) } else { pal::band() });
         // 边框：出错 > 运行中的高亮 > 选中 > 平常
-        let selected = self.selected.contains(&g.id);
-        let (color, width) = if self.bad.contains_key(&g.id) {
+        let selected = self.is_selected(g);
+        let (color, width) = if g.bad > 0 {
             (pal::bad(), 2.0)
         } else if let Some((k, c)) = glow {
             (pal::mix(pal::line(), c, k), 1.0 + 2.5 * k)
@@ -339,9 +553,31 @@ impl FlowCanvas {
         if selected && glow.is_some() {
             frame.stroke(&body, Stroke::default().with_width(1.0).with_color(pal::accent()));
         }
+        if g.group.is_some() {
+            // 叠一层边，看着像一摞
+            let back = Path::rounded_rectangle(Point::new(tl.x + 4.0 * z, tl.y + 4.0 * z), size, (5.0 * z).into());
+            frame.stroke(&back, Stroke::default().with_width(1.0).with_color(pal::alpha(pal::line(), 0.7)));
+        }
         let small = t::s_meta();
+        if z < LOD_TINY {
+            return; // 太小了：只剩色块
+        }
+        if z < LOD_PLAIN {
+            // 缩小了：只写一个大一点的标题，不画端口文字与底栏
+            self.label(frame, g.title.clone(), Point::new(g.x + 8.0, g.y + 4.0), pal::head(), small * 1.6);
+            for k in 0..g.ins.len() {
+                self.port_mark(frame, g.in_pos(k), &g.in_types[k]);
+            }
+            for k in 0..g.outs.len() {
+                self.port_mark(frame, g.out_pos(k), &g.out_types[k]);
+            }
+            return;
+        }
         self.label(frame, g.kind_label.clone(), Point::new(g.x + 8.0, g.y + 5.0), pal::dim(), small);
         self.label(frame, g.title.clone(), Point::new(g.x + 8.0 + 13.0 * g.kind_label.chars().count() as f32, g.y + 5.0), pal::head(), small);
+        if g.wireless {
+            self.label(frame, "↯", Point::new(g.x + NODE_W - 16.0, g.y + 5.0), pal::accent(), small);
+        }
         // 端口
         for (k, port) in g.ins.iter().enumerate() {
             let p = g.in_pos(k);
@@ -355,7 +591,7 @@ impl FlowCanvas {
         }
         // 底栏：线名 / 状态名；运行时换成最近一次决策与计数
         let foot_y = g.y + g.h - FOOT_H + 3.0;
-        match self.live.get(&g.id) {
+        match &g.live {
             Some(l) => {
                 let c = glow.map(|(_, c)| c).unwrap_or_else(pal::dim);
                 let mut s = format!("{} ×{}", live_label(&l.kind), l.n);
@@ -368,17 +604,61 @@ impl FlowCanvas {
                 self.label(frame, s, Point::new(g.x + 8.0, foot_y), c, small);
             }
             None => {
-                let s = match self.bad.get(&g.id) {
-                    Some(n) => format!("{n} 个问题"),
-                    None => g.sub.clone(),
-                };
-                self.label(frame, s, Point::new(g.x + 8.0, foot_y), if self.bad.contains_key(&g.id) { pal::bad() } else { pal::dim() }, small);
+                let s = if g.bad > 0 { format!("{} 个问题", g.bad) } else { g.sub.clone() };
+                self.label(frame, s, Point::new(g.x + 8.0, foot_y), if g.bad > 0 { pal::bad() } else { pal::dim() }, small);
             }
         }
     }
-}
 
-impl FlowCanvas {
+    /// 小地图的换算：世界坐标的包围盒 → 小地图里的位置与比例。
+    fn map_geometry(&self, bounds: Size) -> Option<(Point, f32, Point)> {
+        let gs = &self.scene.geoms;
+        if gs.len() < 6 {
+            return None; // 几个节点一眼看得全，不用小地图
+        }
+        let (x0, y0) = (gs.iter().map(|g| g.x).fold(f32::MAX, f32::min), gs.iter().map(|g| g.y).fold(f32::MAX, f32::min));
+        let (x1, y1) = (gs.iter().map(|g| g.x + NODE_W).fold(f32::MIN, f32::max), gs.iter().map(|g| g.y + g.h).fold(f32::MIN, f32::max));
+        let k = ((MAP.width - 8.0) / (x1 - x0).max(1.0)).min((MAP.height - 8.0) / (y1 - y0).max(1.0));
+        let origin = Point::new(bounds.width - MAP.width - MAP_PAD, bounds.height - MAP.height - MAP_PAD);
+        Some((origin, k, Point::new(x0, y0)))
+    }
+
+    /// 点在小地图上 → 把那个位置挪到画布正中要用的平移量。
+    fn map_click(&self, screen: Point, bounds: Size) -> Option<FlMsg> {
+        let (origin, k, min) = self.map_geometry(bounds)?;
+        if screen.x < origin.x || screen.y < origin.y || screen.x > origin.x + MAP.width || screen.y > origin.y + MAP.height {
+            return None;
+        }
+        let world = Point::new(min.x + (screen.x - origin.x - 4.0) / k, min.y + (screen.y - origin.y - 4.0) / k);
+        Some(FlMsg::SetPan(bounds.width / 2.0 - world.x * self.zoom, bounds.height / 2.0 - world.y * self.zoom))
+    }
+
+    fn draw_map(&self, frame: &mut Frame, bounds: Size) {
+        let Some((origin, k, min)) = self.map_geometry(bounds) else { return };
+        let bg = Path::rectangle(origin, MAP);
+        frame.fill(&bg, pal::alpha(pal::card_bg(), 0.92));
+        frame.stroke(&bg, Stroke::default().with_width(1.0).with_color(pal::line()));
+        let at = |x: f32, y: f32| Point::new(origin.x + 4.0 + (x - min.x) * k, origin.y + 4.0 + (y - min.y) * k);
+        for g in &self.scene.geoms {
+            let c = if g.bad > 0 {
+                pal::bad()
+            } else if self.is_selected(g) {
+                pal::accent()
+            } else if g.group.is_some() {
+                pal::alpha(pal::accent(), 0.55)
+            } else {
+                pal::dim()
+            };
+            frame.fill(&Path::rectangle(at(g.x, g.y), Size::new((NODE_W * k).max(2.0), (g.h * k).max(2.0))), c);
+        }
+        // 当前视野
+        let (a, b) = (self.to_world(Point::ORIGIN), self.to_world(Point::new(bounds.width, bounds.height)));
+        let (p, q) = (at(a.x, a.y), at(b.x, b.y));
+        let (x0, y0) = (p.x.clamp(origin.x, origin.x + MAP.width), p.y.clamp(origin.y, origin.y + MAP.height));
+        let (x1, y1) = (q.x.clamp(origin.x, origin.x + MAP.width), q.y.clamp(origin.y, origin.y + MAP.height));
+        frame.stroke(&Path::rectangle(Point::new(x0, y0), Size::new((x1 - x0).max(1.0), (y1 - y0).max(1.0))), Stroke::default().with_width(1.0).with_color(pal::head()));
+    }
+
     fn key(&self, state: &CanvasState, key: &Key, mods: keyboard::Modifiers, cursor_world: Option<Point>) -> Option<FlMsg> {
         let ctrl = mods.command() || mods.control();
         match key.as_ref() {
@@ -392,6 +672,7 @@ impl FlowCanvas {
                 ("v", true, _) => Some(FlMsg::Paste(cursor_world.map(|p| (p.x, p.y)))),
                 ("d", true, _) => Some(FlMsg::Duplicate),
                 ("a", true, _) => Some(FlMsg::SelectAll),
+                ("g", true, false) => Some(FlMsg::GroupSelected),
                 ("f", false, false) if matches!(state.drag, Drag::None) => Some(FlMsg::ResetView),
                 _ => None,
             },
@@ -405,6 +686,11 @@ impl canvas::Program<FlMsg> for FlowCanvas {
 
     fn update(&self, state: &mut CanvasState, event: &iced::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<FlMsg>> {
         use iced::Event::{Keyboard, Mouse};
+        if state.size != bounds.size() {
+            // 画布大小变了：告诉状态那边（搜索跳转、看全要用）
+            state.size = bounds.size();
+            return Some(canvas::Action::publish(FlMsg::Viewport(bounds.width, bounds.height)));
+        }
         match event {
             Keyboard(keyboard::Event::ModifiersChanged(m)) => {
                 state.mods = *m;
@@ -427,9 +713,12 @@ impl canvas::Program<FlMsg> for FlowCanvas {
                     state.drag = Drag::Pan { last: screen };
                     return Some(canvas::Action::capture());
                 }
+                if let Some(m) = self.map_click(screen, bounds.size()) {
+                    return Some(canvas::Action::publish(m).and_capture());
+                }
                 let p = self.to_world(screen);
                 if let Some((from, port, ty, at)) = self.out_at(p) {
-                    state.drag = Drag::Wire { from, port, ty, at };
+                    state.drag = Drag::Wire { from, port, ty, origin: at, at };
                     return Some(canvas::Action::request_redraw().and_capture());
                 }
                 if let Some((to, port, _)) = self.in_at(p) {
@@ -440,16 +729,34 @@ impl canvas::Program<FlMsg> for FlowCanvas {
                     return Some(canvas::Action::capture());
                 }
                 let multi = state.mods.shift() || state.mods.control() || state.mods.command();
+                // 双击：折叠的子图 = 进去看；展开的子图的标题 = 折叠起来
+                let double = |state: &mut CanvasState, what: &str| {
+                    let hit = state.last_click.as_ref().is_some_and(|(id, at)| id == what && at.elapsed().as_millis() < 400);
+                    state.last_click = if hit { None } else { Some((what.to_string(), Instant::now())) };
+                    hit
+                };
                 if let Some(g) = self.node_at(p) {
                     if multi {
-                        return Some(canvas::Action::publish(FlMsg::SelectToggle(g.id.clone())).and_capture());
+                        return Some(canvas::Action::publish(FlMsg::SelectToggleMany(g.members.clone())).and_capture());
+                    }
+                    if let Some(gid) = &g.group
+                        && double(state, &g.id)
+                    {
+                        return Some(canvas::Action::publish(FlMsg::Focus(Some(gid.clone()))).and_capture());
                     }
                     state.drag = Drag::Nodes { last: p };
                     // 点的是已选中的一群里的一个：保持选择，好一起拖
-                    if self.selected.contains(&g.id) {
+                    if self.selected.iter().any(|s| g.members.contains(s)) && g.members.iter().all(|m| self.selected.contains(m)) {
                         return Some(canvas::Action::capture());
                     }
-                    return Some(canvas::Action::publish(FlMsg::Select(Some(g.id.clone()))).and_capture());
+                    return Some(canvas::Action::publish(FlMsg::SelectBox(g.members.clone(), false)).and_capture());
+                }
+                if let Some(f) = self.scene.frames.iter().rev().find(|f| f.title_hit(p)) {
+                    if double(state, &f.id) {
+                        return Some(canvas::Action::publish(FlMsg::ToggleCollapse(f.id.clone())).and_capture());
+                    }
+                    state.drag = Drag::Nodes { last: p };
+                    return Some(canvas::Action::publish(FlMsg::SelectBox(f.members.clone(), multi)).and_capture());
                 }
                 if state.mods.shift() {
                     state.drag = Drag::Box { start: p, at: p };
@@ -481,23 +788,23 @@ impl canvas::Program<FlMsg> for FlowCanvas {
             }
             Mouse(mouse::Event::ButtonReleased(mouse::Button::Left | mouse::Button::Middle)) => {
                 match std::mem::take(&mut state.drag) {
-                    Drag::Wire { from, port, ty, at } => {
-                        // 松手在同类型的输入端口上，或者直接松在一个有这种输入的节点身上
+                    Drag::Wire { from, port, ty, at, .. } => {
+                        // 松手在同类型的输入端口上，或者直接松在一个有这种输入的方块身上
                         let target = self
                             .in_at(at)
                             .filter(|(_, _, t)| *t == ty)
                             .map(|(id, inp, _)| (id, inp))
-                            .or_else(|| self.node_at(at).and_then(|g| g.in_types.iter().position(|t| *t == ty).map(|k| (g.id.clone(), g.ins[k].clone()))));
+                            .or_else(|| self.node_at(at).and_then(|g| g.in_types.iter().position(|t| *t == ty).map(|k| g.in_ref[k].clone())));
                         match target {
                             Some((to, inp)) if to != from => Some(canvas::Action::publish(FlMsg::Connect(Edge { from, out: port, to, inp })).and_capture()),
                             Some(_) => Some(canvas::Action::request_redraw()),
-                            // 松在别的节点上（类型不对）：什么也不做；松在空白处：问「接什么」
+                            // 松在别的方块上（类型不对）：什么也不做；松在空白处：问「接什么」
                             None if self.node_at(at).is_some() => Some(canvas::Action::request_redraw()),
                             None => Some(canvas::Action::publish(FlMsg::QuickOpen(Quick { from, port, ty, x: at.x, y: at.y - HEAD_H, query: String::new() })).and_capture()),
                         }
                     }
                     Drag::Box { start, at } => {
-                        let ids = self.geoms.iter().filter(|g| g.touches(start, at)).map(|g| g.id.clone()).collect();
+                        let ids = self.scene.geoms.iter().filter(|g| g.touches(start, at)).flat_map(|g| g.members.clone()).collect();
                         Some(canvas::Action::publish(FlMsg::SelectBox(ids, state.mods.control() || state.mods.command())).and_capture())
                     }
                     _ => None,
@@ -517,30 +824,52 @@ impl canvas::Program<FlMsg> for FlowCanvas {
 
     fn draw(&self, state: &CanvasState, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        // 连线在节点下面
-        for e in &self.edges {
-            let (Some(a), Some(b)) = (self.geom(&e.from), self.geom(&e.to)) else { continue };
-            let (Some(ka), Some(kb)) = (a.outs.iter().position(|p| *p == e.out), b.ins.iter().position(|p| *p == e.inp)) else { continue };
-            // 上游节点刚做出决策时，这根线跟着亮一下
-            let ty = a.out_types[ka].as_str();
-            let (color, width) = match self.glow(&e.from) {
-                Some((k, c)) => (pal::mix(pal::alpha(port_color(ty), 0.75), c, k), 1.5 + 2.0 * k),
-                None => (pal::alpha(port_color(ty), 0.75), 1.5),
-            };
-            self.wire_of(&mut frame, a.out_pos(ka), b.in_pos(kb), color, width, ty);
+        let sc = &self.scene;
+        let small = t::s_meta();
+        // 展开着的子图的框在最下面
+        for f in &sc.frames {
+            let tl = self.to_screen(Point::new(f.x, f.y));
+            let rect = Path::rounded_rectangle(tl, Size::new(f.w * self.zoom, f.h * self.zoom), (6.0 * self.zoom).into());
+            let picked = f.members.iter().all(|m| self.selected.contains(m));
+            frame.fill(&rect, pal::alpha(pal::accent(), 0.05));
+            frame.stroke(&rect, Stroke::default().with_width(if picked { 2.0 } else { 1.0 }).with_color(pal::alpha(pal::accent(), if picked { 0.9 } else { 0.45 })));
+            if self.zoom >= LOD_TINY {
+                self.label(&mut frame, f.title.clone(), Point::new(f.x + 8.0, f.y + 4.0), pal::head(), small * if self.zoom < LOD_PLAIN { 1.6 } else { 1.0 });
+            }
         }
-        for g in &self.geoms {
+        // 连线在方块下面
+        for l in &sc.links {
+            let (a, b) = (&sc.geoms[l.a], &sc.geoms[l.b]);
+            // 上游刚做出决策时，这根线跟着亮一下
+            let (color, width) = match self.glow(a) {
+                Some((k, c)) => (pal::mix(pal::alpha(port_color(&l.ty), 0.75), c, k), 1.5 + 2.0 * k),
+                None => (pal::alpha(port_color(&l.ty), 0.75), 1.5),
+            };
+            self.wire_of(&mut frame, a.out_pos(l.ka), b.in_pos(l.kb), color, width, &l.ty);
+        }
+        for g in &sc.geoms {
             self.draw_node(&mut frame, g);
         }
+        // 端口旁的标签：无线引用、通到子图外面的线。选中另一头时高亮
+        if self.zoom >= LOD_PLAIN {
+            for s in &sc.stubs {
+                let g = &sc.geoms[s.geom];
+                let lit = self.selected.contains(&s.other);
+                let color = if lit { pal::accent() } else { pal::alpha(port_color(&s.ty), 0.9) };
+                let text: String = s.label.chars().take(14).collect();
+                let w = 7.0 * text.chars().count() as f32 + 6.0;
+                let p = if s.input { g.in_pos(s.port) } else { g.out_pos(s.port) };
+                let at = if s.input { Point::new(p.x - w - 8.0, p.y - 6.5) } else { Point::new(p.x + 10.0, p.y - 6.5) };
+                let (a, b) = if s.input { (Point::new(p.x - 8.0, p.y), p) } else { (p, Point::new(p.x + 8.0, p.y)) };
+                frame.stroke(&Path::line(self.to_screen(a), self.to_screen(b)), Stroke::default().with_width(1.5).with_color(color));
+                self.label(&mut frame, text, at, color, small);
+            }
+        }
         match &state.drag {
-            Drag::Wire { from, port, ty, at } => {
-                if let Some(a) = self.geom(from)
-                    && let Some(k) = a.outs.iter().position(|p| p == port)
-                {
-                    self.wire(&mut frame, a.out_pos(k), *at, port_color(ty), 2.0);
-                }
+            Drag::Wire { ty, origin, at, .. } => {
+                self.wire_of(&mut frame, *origin, *at, port_color(ty), 2.0, "");
                 // 拖线时把能接的输入端口圈出来
-                for g in &self.geoms {
+                for g in &sc.geoms {
                     for (k, _) in g.in_types.iter().enumerate().filter(|(_, t)| *t == ty) {
                         frame.stroke(&Path::circle(self.to_screen(g.in_pos(k)), (PORT_R + 3.0) * self.zoom), Stroke::default().with_width(1.5).with_color(port_color(ty)));
                     }
@@ -554,7 +883,7 @@ impl canvas::Program<FlMsg> for FlowCanvas {
             }
             _ => {}
         }
-        if self.geoms.len() <= 1 {
+        if sc.geoms.len() <= 1 {
             frame.fill_text(Text {
                 content: "从左边的模块库点模块加节点；从右侧端口拖到另一个节点左侧的同色端口连线，拖到空白处松手可以直接选要接的模块".to_string(),
                 position: Point::new(24.0, bounds.height / 2.0),
@@ -563,6 +892,7 @@ impl canvas::Program<FlMsg> for FlowCanvas {
                 ..Default::default()
             });
         }
+        self.draw_map(&mut frame, bounds.size());
         vec![frame.into_geometry()]
     }
 
@@ -572,8 +902,9 @@ impl canvas::Program<FlMsg> for FlowCanvas {
         match &state.drag {
             Drag::Nodes { .. } | Drag::Pan { .. } => mouse::Interaction::Grabbing,
             Drag::Wire { .. } | Drag::Box { .. } => mouse::Interaction::Crosshair,
+            Drag::None if self.map_click(screen, bounds.size()).is_some() => mouse::Interaction::Pointer,
             Drag::None if self.out_at(p).is_some() || self.in_at(p).is_some() => mouse::Interaction::Crosshair,
-            Drag::None if self.node_at(p).is_some() => mouse::Interaction::Grab,
+            Drag::None if self.node_at(p).is_some() || self.scene.frames.iter().any(|f| f.title_hit(p)) => mouse::Interaction::Grab,
             Drag::None => mouse::Interaction::default(),
         }
     }
@@ -587,18 +918,41 @@ fn palette_col<'a>(v: &View) -> Element<'a, FlMsg> {
         return col.push(if v.palette_loading { w::loading("模块库") } else { w::empty("没读到模块库", "点「刷新」") }).into();
     };
     let q = v.lib_query.trim().to_lowercase();
-    let mut last = String::new();
-    for m in pal_.modules.iter().filter(|m| q.is_empty() || m.title.to_lowercase().contains(&q) || m.kind_label.contains(&q) || m.summary.to_lowercase().contains(&q)) {
-        if m.kind_label != last {
-            last = m.kind_label.clone();
-            col = col.push(t::metadata(last.clone()).color(pal::dim()));
+    // 分类一行一个，点开才列出里面的模块（八十多项全摊开找不到东西）；搜索时全部摊开
+    let mut labels: Vec<&str> = Vec::new();
+    for m in &pal_.modules {
+        if !labels.contains(&m.kind_label.as_str()) {
+            labels.push(&m.kind_label);
         }
+    }
+    for label in labels {
+        let hits: Vec<&ModDef> = pal_
+            .modules
+            .iter()
+            .filter(|m| m.kind_label == label)
+            .filter(|m| q.is_empty() || m.title.to_lowercase().contains(&q) || m.kind_label.contains(&q) || m.summary.to_lowercase().contains(&q))
+            .collect();
+        if hits.is_empty() {
+            continue;
+        }
+        let open = !q.is_empty() || v.lib_open.iter().any(|x| x == label);
         col = col.push(
-            button(column![t::label(m.title.clone()), t::metadata(m.summary.chars().take(22).collect::<String>()).color(pal::dim())].spacing(0))
+            button(row![t::label(format!("{} {label}", if open { "▾" } else { "▸" })), Space::new().width(Length::Fill), t::metadata(hits.len().to_string()).color(pal::dim())].align_y(Alignment::Center))
                 .width(Length::Fill)
-                .on_press(FlMsg::AddNode(m.refer.clone()))
+                .on_press(FlMsg::LibToggle(label.to_string()))
                 .style(|th, st| w::button_style(Kind::Ghost, th, st)),
         );
+        if !open {
+            continue;
+        }
+        for m in hits {
+            col = col.push(
+                button(column![t::label(m.title.clone()), t::metadata(m.summary.chars().take(22).collect::<String>()).color(pal::dim())].spacing(0))
+                    .width(Length::Fill)
+                    .on_press(FlMsg::AddNode(m.refer.clone()))
+                    .style(|th, st| w::button_style(Kind::Ghost, th, st)),
+            );
+        }
     }
     crate::ui::scroll(col).height(Length::Fill).into()
 }
@@ -704,8 +1058,28 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
     let v = sf::view();
     let v = &v;
     let mut col = column![].spacing(space(2)).width(Length::Fill);
+    if let Some(gr) = v.selected_group() {
+        // 选中的是一整个子图
+        let gid = gr.id.clone();
+        col = col.push(w::section(format!("子图（{} 个节点）", v.selected.len())));
+        let g1 = gid.clone();
+        col = col.push(field("名字".into(), "", gr.title.clone(), move |s| FlMsg::GroupTitle(g1.clone(), s), String::new()));
+        col = col.push(
+            row![
+                w::btn(if gr.collapsed { "展开" } else { "折叠" }, Kind::Standard, Some(FlMsg::ToggleCollapse(gid.clone()))),
+                w::btn("进去看", Kind::Standard, Some(FlMsg::Focus(Some(gid.clone())))),
+                w::btn("解散", Kind::Ghost, Some(FlMsg::Ungroup(gid))),
+            ]
+            .spacing(space(2))
+            .wrap(),
+        );
+        col = col.push(t::metadata("子图只影响怎么画：折叠、解散都不会改变策略。折叠后顶层只占一个节点，对外的线照常画；双击它进去看。解散只是不再分组，节点都留着。").color(pal::dim()));
+        col = col.push(row![w::btn("复制", Kind::Ghost, Some(FlMsg::Copy)), w::btn("删除里面的节点", Kind::Ghost, Some(FlMsg::DeleteSelected))].spacing(space(2)).wrap());
+        return col.into();
+    }
     if v.selected.len() > 1 {
         col = col.push(w::section(format!("选中了 {} 个节点", v.selected.len())));
+        col = col.push(w::btn("编成子图（Ctrl G）", Kind::Standard, Some(FlMsg::GroupSelected)));
         col = col.push(
             row![
                 w::btn("复制", Kind::Standard, Some(FlMsg::Copy)),
@@ -770,6 +1144,8 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
             "Ctrl C / X / V 复制 / 剪切 / 粘贴 · Ctrl D 再来一份",
             "Ctrl 点 = 加选 · Shift 拖空白 = 框选 · Ctrl A 全选",
             "拖线到空白处松手 = 选要接的模块",
+            "Ctrl G 把选中的编成子图 · 双击折叠的子图 = 进去看 · 双击框的标题 = 折叠",
+            "右下角小地图：点哪里跳到哪里；工具条的「整理」自动排版",
         ] {
             col = col.push(t::metadata(line).color(pal::dim()));
         }
@@ -820,6 +1196,15 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
         for pd in d.params.iter().filter(|pd| !d.ins.contains(&pd.name)) {
             col = col.push(param_field(v, n, pd));
         }
+    }
+    if def.is_some_and(|d| !d.outs.is_empty() && d.kind != "value") {
+        // 无线引用（docs/45 §4.2）：一个输出给很多个用时不画线，用它的节点在端口旁标名字
+        let nid = id.clone();
+        col = col.push(labelled(
+            "无线输出".into(),
+            row![checkbox(n.wireless).on_toggle(move |b| FlMsg::Wireless(nid.clone(), b)).size(t::s_body()), t::caption(if n.wireless { "不画线" } else { "画线" })].spacing(space(2)).align_y(Alignment::Center).into(),
+            "给很多节点用的输出（市场状态、特征）开着它，图上少一把线。只影响怎么画".into(),
+        ));
     }
     if let Some(l) = v.live.get(&n.id) {
         col = col.push(w::section("运行中"));
@@ -897,6 +1282,9 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
         text_input("3600", &v.pace).on_input(FlMsg::Pace).size(t::s_small()).width(Length::Fixed(64.0)),
         if v.running { w::btn("■ 停止", Kind::Standard, Some(FlMsg::Stop)) } else { w::btn("▶ 运行", Kind::Primary, idle.then_some(FlMsg::Run)) },
         Space::new().width(Length::Fill),
+        text_input("搜节点，回车跳过去", &v.find).on_input(FlMsg::FindQuery).on_submit(FlMsg::FindNext).size(t::s_small()).width(Length::Fixed(150.0)),
+        t::metadata(if v.find.trim().is_empty() { String::new() } else { format!("{}/{}", v.find_hits.1, v.find_hits.0) }).color(pal::dim()),
+        w::btn("整理", Kind::Ghost, idle.then_some(FlMsg::Tidy)),
         state,
         w::btn(format!("{:.0}%", v.zoom * 100.0), Kind::Ghost, Some(FlMsg::ResetView)),
         w::btn("刷新", Kind::Ghost, Some(FlMsg::Refresh)),
@@ -914,16 +1302,10 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
     let v = sf::view();
     let empty = Palette::default();
     let pal_ = v.palette.as_ref().unwrap_or(&empty);
-    let mut bad: HashMap<String, usize> = HashMap::new();
-    for i in v.issues.iter().filter(|i| !i.node.is_empty()) {
-        *bad.entry(i.node.clone()).or_default() += 1;
-    }
     let program = FlowCanvas {
-        geoms: v.graph.nodes.iter().map(|n| Geom::of(n, pal_.get(&n.module))).collect(),
+        scene: build_scene(&v, pal_),
         edges: v.graph.edges.clone(),
         selected: v.selected.clone(),
-        bad,
-        live: v.live.clone(),
         pan: v.pan,
         zoom: v.zoom,
         now: Instant::now(),
@@ -942,6 +1324,18 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
     .spacing(space(2))
     .height(Length::Fill);
     let mut col = column![w::panel_header(title, None, vec![]), toolbar(&v)].spacing(space(2));
+    if let Some(gr) = v.focus.as_ref().and_then(|f| v.graph.group(f)) {
+        // 进了子图：面包屑，点「顶层」回去
+        col = col.push(
+            row![
+                w::btn("← 顶层", Kind::Standard, Some(FlMsg::Focus(None))),
+                t::caption(format!("› {}（{} 个节点）", gr.title, v.graph.members(&gr.id).len())),
+                t::metadata("通到外面的线画成端口旁的标签").color(pal::dim()),
+            ]
+            .spacing(space(2))
+            .align_y(Alignment::Center),
+        );
+    }
     if let Some((what, reason, n)) = &v.envelope_hit {
         // 强制风控层出手了：它不是节点，所以不是哪个节点亮，而是这里一条横幅
         let label = match what.as_str() {
