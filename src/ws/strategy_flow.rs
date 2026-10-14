@@ -86,6 +86,11 @@ pub struct ModDef {
     pub in_types: Vec<String>,
     pub out_types: Vec<String>,
     pub params: Vec<ParamDef>,
+    /// 子图资产（kind = sub）才有：版本、文件、里面有哪些模块、验证记录
+    pub version: String,
+    pub path: String,
+    pub inner: Vec<String>,
+    pub validations: Vec<Value>,
 }
 
 impl ModDef {
@@ -114,6 +119,23 @@ pub struct Palette {
     pub backtest_params: Vec<ParamDef>,
     /// `[workflow]` 里画布上能改的运行设置（采样栅格）
     pub settings_params: Vec<ParamDef>,
+    /// 新建时可选的起步图（docs/45 §4.6）
+    pub templates: Vec<Template>,
+}
+
+/// 一份模板：只是起点，新建出来的图与它不保持关联。
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Template {
+    pub path: String,
+    pub title: String,
+    pub doc: String,
+}
+
+impl std::fmt::Display for Template {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.title)
+    }
 }
 
 impl Palette {
@@ -143,6 +165,9 @@ pub struct Node {
     /// 无线引用：它的输出不画线，用它的节点在端口旁标一个名字。只影响显示
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub wireless: bool,
+    /// 存成子图资产时要暴露的参数：{参数名: 暴露名}（docs/45 §4.3 第 4 条）
+    #[serde(skip_serializing_if = "Map::is_empty")]
+    pub expose: Map<String, Value>,
 }
 
 /// 子图 / 分组框（docs/45 §4.2）：一组节点。展开时画一个框，折叠时顶层只占一个节点，可以进去看。
@@ -153,6 +178,9 @@ pub struct Group {
     pub id: String,
     pub title: String,
     pub collapsed: bool,
+    /// 从哪个子图资产「解除关联」展开来的（`sub.<id>@<大版本>`）：改完可以存回去
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -185,7 +213,7 @@ pub struct Graph {
 
 pub const EXEC: &str = "kernel.exec";
 /// 这份代码写出的图格式版本，与 `strategies/swe/graph.py` 的 FORMAT 一致（Python 端拒绝比它新的）。
-pub const GRAPH_FORMAT: u32 = 3;
+pub const GRAPH_FORMAT: u32 = 4;
 /// 撤销栈的深度。
 const UNDO_DEPTH: usize = 100;
 /// 停手多久之后自动检查。
@@ -258,7 +286,7 @@ impl Graph {
         for n in self.nodes.iter_mut().filter(|n| ids.contains(&n.id)) {
             n.group = Some(gid.clone());
         }
-        self.groups.push(Group { id: gid.clone(), title: title.to_string(), collapsed: false });
+        self.groups.push(Group { id: gid.clone(), title: title.to_string(), collapsed: false, asset: None });
         self.prune_groups();
         Some(gid)
     }
@@ -353,6 +381,97 @@ fn unique_name(base: &str, taken: &[String]) -> String {
     (2..).map(|i| format!("{stem}_{i}")).find(|c| !taken.contains(c)).unwrap_or_else(|| base.to_string())
 }
 
+/// 调试面板的页（docs/45 C5）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DebugTab {
+    #[default]
+    Trades,
+    WhyNot,
+    Breaks,
+}
+
+/// 一笔成交的来龙去脉里的一步。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PathStep {
+    pub ts: i64,
+    pub kind: String,
+    pub module: String,
+    pub reason: String,
+    /// 依据：`why` 里的键值（规则模块还带着条件里各段的值）
+    pub why: String,
+    pub node: Option<String>,
+}
+
+/// 决策轨迹里一个时间戳（纳秒）→ 「月-日 时:分:秒」（UTC）。
+pub fn ts_text(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts.div_euclid(1_000_000_000), ts.rem_euclid(1_000_000_000) as u32).map(|d| d.format("%m-%d %H:%M:%S").to_string()).unwrap_or_default()
+}
+
+fn why_text(v: &Value) -> String {
+    let mut out = Vec::new();
+    if let Some(m) = v.as_object() {
+        for (k, x) in m {
+            match x {
+                Value::Object(inner) => out.extend(inner.iter().map(|(a, b)| format!("{a} = {}", value_text(b)))),
+                other => out.push(format!("{k} = {}", value_text(other))),
+            }
+        }
+    }
+    out.join("；")
+}
+
+/// 「按成交反查」（docs/45 §4.5）：第 `i` 条事件（一笔结束）→ 这一笔从提出意图到平仓经过的每一步，以及它们落在哪些节点上。
+///
+/// 从这一笔往回找同一条线上的事件，找到上一笔结束为止（不含）；意图里带着的来龙去脉（信号、过滤……）也算进去。
+pub fn trade_path(events: &[Value], i: usize, whence: &HashMap<String, String>) -> (Vec<PathStep>, Vec<String>) {
+    const KINDS: [&str; 9] = ["intent", "fill", "close", "move_stop", "move_target", "add", "veto", "trade", "why_not"];
+    let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let Some(end) = events.get(i) else { return (Vec::new(), Vec::new()) };
+    let lane = s(end, "lane");
+    let mut steps = Vec::new();
+    let mut nodes: Vec<String> = Vec::new();
+    for (j, ev) in events[..=i].iter().enumerate().rev() {
+        if s(ev, "lane") != lane {
+            continue;
+        }
+        let kind = s(ev, "kind");
+        if j < i && kind == "trade" {
+            break; // 上一笔
+        }
+        let wanted = KINDS.contains(&kind.as_str()) || kind.starts_with("risk_") || kind.starts_with("envelope_");
+        if !wanted || kind == "why_not" {
+            continue;
+        }
+        let module = s(ev, "module");
+        let node = locate(whence, &lane, &module);
+        // 往回走的，最后整体倒过来：先放这一步，再放它的来龙去脉，倒过来之后依据在前
+        steps.push(PathStep { ts: ev.get("ts").and_then(Value::as_i64).unwrap_or(0), kind, module: module.clone(), reason: s(ev, "reason"), why: ev.get("why").map(why_text).unwrap_or_default(), node });
+        if let Some(trail) = ev.get("trail").and_then(Value::as_array) {
+            // 意图的来龙去脉：信号模块（带着它的依据）、入场模块
+            for o in trail.iter().rev() {
+                let m = o.get(0).and_then(Value::as_str).unwrap_or("");
+                if m.is_empty() || m == module {
+                    continue;
+                }
+                let n = locate(whence, &lane, m);
+                steps.push(PathStep { ts: ev.get("ts").and_then(Value::as_i64).unwrap_or(0), kind: "origin".into(), module: m.to_string(), reason: String::new(), why: o.get(2).map(why_text).unwrap_or_default(), node: n });
+            }
+        }
+        if steps.len() > 60 {
+            break;
+        }
+    }
+    steps.reverse();
+    for st in &steps {
+        if let Some(n) = &st.node
+            && !nodes.contains(n)
+        {
+            nodes.push(n.clone());
+        }
+    }
+    (steps, nodes)
+}
+
 /// 拖线拖到空白处弹出的「接什么」搜索框（docs/45 §2：只列能接的节点）。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Quick {
@@ -416,6 +535,22 @@ impl std::fmt::Display for FileItem {
 pub enum FlMsg {
     Refresh,
     New,
+    /// 从模板新建（docs/45 §4.6）
+    NewFrom(Template),
+    /// 子图资产（docs/45 C6）：存成资产时用的 id、要不要升大版本
+    AssetId(String),
+    AssetMajor(bool),
+    /// 把这个分组存成子图资产（图里换成一个引用它的节点）
+    SaveAsset(String),
+    /// 解除关联：把子图实例展开成一个普通分组
+    Unlink(String),
+    /// 存成资产时暴露这个参数：(节点, 参数, 暴露与否)
+    Expose(String, String, bool),
+    /// 代码节点 = 生成模块（docs/45 §3.4）：环节、名字、生成、契约测试
+    CodeKind(String),
+    CodeName(String),
+    CodeNew,
+    CodeTest,
     Open(FileItem),
     Save,
     Check,
@@ -481,6 +616,15 @@ pub enum FlMsg {
     Tidy,
     /// 模块库左栏：展开 / 收起一个分类
     LibToggle(String),
+    /// 调试面板（docs/45 C5）
+    DebugToggle,
+    DebugTab(DebugTab),
+    /// 点一笔成交（事件序号）→ 亮出它的来龙去脉
+    PickTrade(usize),
+    /// 在这个节点上设 / 取消断点
+    Breakpoint(String, bool),
+    /// 运行控制：pause / run / step
+    Ctl(String),
     /// 表单（docs/45 §3.5）：(段 backtest / envelope / settings, 项, 文字)。不是节点——运行配置与账户底线
     Config(String, String, String),
     /// 从一次运行的结果目录打开当时的图
@@ -545,8 +689,28 @@ struct St {
     live_n: usize,
     /// 这次运行里强制风控层最近一次出手：(拒绝 / 缩量 / 停手, 原因, 共几次)
     envelope_hit: Option<(String, String, u32)>,
+    /// 这次运行收到的决策轨迹（调试面板用；最多留 5 万条）
+    events: Vec<Value>,
+    /// 各条线最新的「为什么没做」计数
+    why_not: BTreeMap<String, Map<String, Value>>,
+    debug_open: bool,
+    debug_tab: DebugTab,
+    picked_trade: Option<usize>,
+    trace_path: Vec<PathStep>,
+    path_nodes: Vec<String>,
+    breakpoints: Vec<String>,
+    /// 回测停在哪（调试器写的那条事件）
+    paused: Option<Value>,
     /// 换一次运行加一：读轨迹的线程发现自己过时了就退出
     generation: u64,
+    asset_id: String,
+    asset_major: bool,
+    code_kind: String,
+    code_name: String,
+    /// 最近生成的代码节点：(模块引用, 文件)
+    code_made: Option<(String, String)>,
+    /// 它的契约测试结果（None = 还没测）
+    code_problems: Option<Vec<String>>,
 }
 
 impl Default for St {
@@ -590,7 +754,22 @@ impl Default for St {
             live: HashMap::new(),
             live_n: 0,
             envelope_hit: None,
+            events: Vec::new(),
+            why_not: BTreeMap::new(),
+            debug_open: false,
+            debug_tab: DebugTab::Trades,
+            picked_trade: None,
+            trace_path: Vec::new(),
+            path_nodes: Vec::new(),
+            breakpoints: Vec::new(),
+            paused: None,
             generation: 0,
+            asset_id: String::new(),
+            asset_major: false,
+            code_kind: "setup".into(),
+            code_name: String::new(),
+            code_made: None,
+            code_problems: None,
         }
     }
 }
@@ -641,7 +820,26 @@ pub struct View {
     pub live: HashMap<String, NodeLive>,
     pub live_n: usize,
     pub envelope_hit: Option<(String, String, u32)>,
+    /// 这次运行的成交（一笔结束）：(事件序号, 事件)
+    pub trades: Vec<(usize, Value)>,
+    pub why_not: BTreeMap<String, Map<String, Value>>,
+    pub debug_open: bool,
+    pub debug_tab: DebugTab,
+    pub picked_trade: Option<usize>,
+    pub trace_path: Vec<PathStep>,
+    pub path_nodes: Vec<String>,
+    pub breakpoints: Vec<String>,
+    pub paused: Option<Value>,
+    pub asset_id: String,
+    pub asset_major: bool,
+    pub code_kind: String,
+    pub code_name: String,
+    pub code_made: Option<(String, String)>,
+    pub code_problems: Option<Vec<String>>,
 }
+
+/// 「新建代码节点」能生成哪些环节（与 `strategies/swe/codegen.py` 的模板一致）。
+pub const CODE_KINDS: [&str; 5] = ["features", "setup", "confirm", "exit", "sizing"];
 
 pub fn view() -> View {
     ensure_started();
@@ -679,6 +877,21 @@ pub fn view() -> View {
         live: g.live.clone(),
         live_n: g.live_n,
         envelope_hit: g.envelope_hit.clone(),
+        trades: g.events.iter().enumerate().filter(|(_, e)| e.get("kind").and_then(Value::as_str) == Some("trade")).map(|(i, e)| (i, e.clone())).collect(),
+        why_not: g.why_not.clone(),
+        debug_open: g.debug_open,
+        debug_tab: g.debug_tab,
+        picked_trade: g.picked_trade,
+        trace_path: g.trace_path.clone(),
+        path_nodes: g.path_nodes.clone(),
+        breakpoints: g.breakpoints.clone(),
+        paused: g.paused.clone(),
+        asset_id: g.asset_id.clone(),
+        asset_major: g.asset_major,
+        code_kind: g.code_kind.clone(),
+        code_name: g.code_name.clone(),
+        code_made: g.code_made.clone(),
+        code_problems: g.code_problems.clone(),
     })
     .expect("策略画布状态锁中毒")
 }
@@ -756,6 +969,9 @@ pub fn form_key(node: &str, param: &str) -> String {
 
 /// 参数值 → 输入框里显示的文字。
 pub fn value_text(v: &Value) -> String {
+    if let Some(r) = param_ref(v) {
+        return format!("={r}");
+    }
     match v {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
@@ -770,6 +986,12 @@ pub fn parse_value(text: &str, ty: &str) -> Option<Value> {
     let t = text.trim();
     if t.is_empty() {
         return None; // 留空 = 用缺省值
+    }
+    // 参数引用（docs/45 §4.3 第 5 条）：`=节点.参数` = 与那个参数相同，改一处全跟着变
+    if let Some(r) = t.strip_prefix('=').map(str::trim)
+        && r.split_once('.').is_some_and(|(a, b)| !a.is_empty() && !b.is_empty())
+    {
+        return Some(serde_json::json!({ "$ref": r }));
     }
     match ty {
         "integer" => t.parse::<i64>().ok().map(Value::from).or_else(|| Some(Value::String(t.to_string()))),
@@ -795,6 +1017,12 @@ pub fn parse_value(text: &str, ty: &str) -> Option<Value> {
         }
         _ => serde_json::from_str(t).ok().or_else(|| Some(Value::String(t.to_string()))),
     }
+}
+
+/// 参数值是引用（`{"$ref": "节点.参数"}`）→ 引用的目标。
+pub fn param_ref(v: &Value) -> Option<&str> {
+    let m = v.as_object()?;
+    (m.len() == 1).then(|| m.get("$ref").and_then(Value::as_str)).flatten()
 }
 
 /// 端口名 → 类型的兜底（模块库没给类型时用；与 graph.py 的 `ptype` 一致）。
@@ -842,6 +1070,17 @@ fn ensure_started() {
                         g.end = "2026-06-02".into();
                     });
                     handle(FlMsg::Run);
+                });
+            }
+            // 样张截图用：`WS_FLOW_PICK=<秒>` 过这么久打开调试面板、点最后一笔成交（配合 WS_FLOW_RUN 看反查路径）
+            if let Some(secs) = std::env::var("WS_FLOW_PICK").ok().and_then(|s| s.parse::<u64>().ok()) {
+                super::spawn_named("ws-flowpick", move || {
+                    std::thread::sleep(std::time::Duration::from_secs(secs));
+                    handle(FlMsg::DebugToggle);
+                    let last = with(|g| g.events.iter().rposition(|e| e.get("kind").and_then(Value::as_str) == Some("trade"))).flatten();
+                    if let Some(i) = last {
+                        handle(FlMsg::PickTrade(i));
+                    }
                 });
             }
             // 样张截图用：`WS_FLOW_FOCUS=<子图 id>` 进入那个子图；`WS_FLOW_EXPAND=<子图 id>` 把它展开
@@ -1043,6 +1282,7 @@ fn run_async() {
         };
         stop();
         let run_id = format!("flow-{}", chrono::Local::now().format("%H%M%S"));
+        write_breakpoints(&run_id); // 回测一起来就要读到，所以在起进程之前写
         let (start, end, pace) = with(|g| (g.start.clone(), g.end.clone(), g.pace.clone())).unwrap_or_default();
         let log = std::env::temp_dir().join(format!("ws-{run_id}.log"));
         let out = std::fs::File::create(&log).ok();
@@ -1069,6 +1309,12 @@ fn run_async() {
                     g.live.clear();
                     g.live_n = 0;
                     g.envelope_hit = None;
+                    g.events.clear();
+                    g.why_not.clear();
+                    g.picked_trade = None;
+                    g.trace_path.clear();
+                    g.path_nodes.clear();
+                    g.paused = None;
                     g.generation += 1;
                     g.msg = format!("运行中：{run_id}（{start} → {end}）");
                     g.generation
@@ -1148,6 +1394,14 @@ fn follow_trace(run_id: String, generation: u64) {
                 Ok(r) => r,
                 Err(_) => return,
             };
+            // 调试器停住时写的「停在哪」
+            let state: Option<String> = conn.get(format!("ws:swe:{run_id}:state")).ok().flatten();
+            let paused = state.and_then(|s| serde_json::from_str::<Value>(&s).ok());
+            with(|g| {
+                if g.generation == generation {
+                    g.paused = paused;
+                }
+            });
             let mut got = Vec::new();
             for k in reply.keys {
                 for id in k.ids {
@@ -1172,6 +1426,15 @@ fn follow_trace(run_id: String, generation: u64) {
                 for v in got {
                     let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
                     let (lane, module, kind, reason) = (s("lane"), s("module"), s("kind"), s("reason"));
+                    if kind == "why_not" {
+                        if let Some(m) = v.get("why").and_then(Value::as_object) {
+                            g.why_not.insert(lane.clone(), m.clone());
+                        }
+                        continue;
+                    }
+                    if g.events.len() < 50_000 {
+                        g.events.push(v.clone());
+                    }
                     g.live_n += 1;
                     // 强制风控层不是节点：它出手时记在横幅上
                     if let Some(what) = kind.strip_prefix("envelope_") {
@@ -1203,6 +1466,7 @@ fn stop() {
         }
         if g.running {
             g.running = false;
+            g.paused = None;
             g.msg = "已停止".to_string();
         }
     });
@@ -1450,6 +1714,39 @@ pub fn handle(m: FlMsg) {
             });
         }
         FlMsg::Open(item) => open(item),
+        FlMsg::NewFrom(t) => {
+            stop();
+            open_template(t);
+        }
+        FlMsg::AssetId(s) => {
+            with(|g| g.asset_id = s);
+        }
+        FlMsg::AssetMajor(b) => {
+            with(|g| g.asset_major = b);
+        }
+        FlMsg::SaveAsset(gid) => save_asset(gid),
+        FlMsg::Unlink(id) => unlink(id),
+        FlMsg::Expose(id, param, on) => {
+            with(|g| {
+                record(g, "");
+                g.dirty = true;
+                if let Some(n) = g.graph.node_mut(&id) {
+                    if on {
+                        n.expose.insert(param.clone(), Value::String(param));
+                    } else {
+                        n.expose.remove(&param);
+                    }
+                }
+            });
+        }
+        FlMsg::CodeKind(k) => {
+            with(|g| g.code_kind = k);
+        }
+        FlMsg::CodeName(s) => {
+            with(|g| g.code_name = s);
+        }
+        FlMsg::CodeNew => code_new(),
+        FlMsg::CodeTest => code_test(),
         FlMsg::SelectToggleMany(ids) => {
             with(|g| {
                 if ids.iter().all(|i| g.selected.contains(i)) {
@@ -1561,6 +1858,49 @@ pub fn handle(m: FlMsg) {
                     g.lib_open.remove(i);
                 } else {
                     g.lib_open.push(label);
+                }
+            });
+        }
+        FlMsg::DebugToggle => {
+            with(|g| g.debug_open = !g.debug_open);
+        }
+        FlMsg::DebugTab(t) => {
+            with(|g| g.debug_tab = t);
+        }
+        FlMsg::PickTrade(i) => {
+            with(|g| {
+                if g.picked_trade == Some(i) {
+                    g.picked_trade = None;
+                    g.trace_path.clear();
+                    g.path_nodes.clear();
+                    return;
+                }
+                let (steps, nodes) = trade_path(&g.events, i, &g.whence);
+                g.picked_trade = Some(i);
+                g.trace_path = steps;
+                g.path_nodes = nodes;
+            });
+        }
+        FlMsg::Breakpoint(id, on) => {
+            let run = with(|g| {
+                g.breakpoints.retain(|b| *b != id);
+                if on {
+                    g.breakpoints.push(id);
+                }
+                g.running.then(|| g.run_id.clone())
+            })
+            .flatten();
+            if let Some(run_id) = run {
+                write_breakpoints(&run_id);
+            }
+        }
+        FlMsg::Ctl(what) => {
+            let Some(run_id) = with(|g| g.running.then(|| g.run_id.clone())).flatten() else { return };
+            super::spawn_named("ws-flowctl", move || {
+                use redis::Commands;
+                let r = redis::Client::open(redis_url()).and_then(|c| c.get_connection()).and_then(|mut c| c.set::<_, _, ()>(format!("ws:swe:{run_id}:ctl"), &what));
+                if let Err(e) = r {
+                    with(|g| g.msg = format!("发不出运行控制：{e}"));
                 }
             });
         }
@@ -1923,6 +2263,189 @@ pub fn handle(m: FlMsg) {
     }
 }
 
+/// 从模板新建：Python 把模板升到当前格式、换成草稿 id（`graph template <文件>`）。
+fn open_template(t: Template) {
+    if with(|g| std::mem::replace(&mut g.busy, true)).unwrap_or(true) {
+        return;
+    }
+    super::spawn_named("ws-flowtpl", move || {
+        let r: Result<Graph, String> = python(&["-m", "strategies.swe.graph", "template", &t.path], None).and_then(|b| serde_json::from_slice(&b).map_err(|e| format!("模板解析失败：{e}")));
+        with(|g| {
+            g.busy = false;
+            match r {
+                Ok(graph) => {
+                    g.graph = graph;
+                    g.path = None;
+                    g.dirty = true;
+                    fit(g);
+                    reset_editing(g);
+                    g.form.clear();
+                    g.issues.clear();
+                    g.whence.clear();
+                    g.checked = None;
+                    g.live.clear();
+                    g.live_n = 0;
+                    g.msg = format!("从模板「{}」新建（只是起点，与模板不保持关联；改个 id 再保存）", t.title);
+                    touch(g);
+                }
+                Err(e) => g.msg = e,
+            }
+        });
+    });
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct SubOut {
+    ok: bool,
+    error: String,
+    graph: Option<Graph>,
+    #[serde(rename = "ref")]
+    refer: String,
+    version: String,
+    affected: Vec<String>,
+}
+
+/// 把一个分组存成子图资产（`subgraph extract -`）。图里那组节点换成一个引用它的节点；
+/// 同 id 的资产已经有了：接口没变就升小版本（所有引用它的图一起变），接口变了要勾「升大版本」。
+fn save_asset(gid: String) {
+    let Some(req) = with(|g| {
+        if g.busy {
+            return None;
+        }
+        let grp = g.graph.group(&gid)?.clone();
+        let from_asset = grp.asset.as_deref().and_then(|a| a.strip_prefix("sub.")).and_then(|a| a.split_once('@')).map(|(id, _)| id.to_string());
+        let id = if g.asset_id.trim().is_empty() { from_asset.unwrap_or_default() } else { g.asset_id.trim().to_string() };
+        if id.is_empty() {
+            g.msg = "先给子图资产起个 id（英文字母、数字、下划线）".into();
+            return None;
+        }
+        g.busy = true;
+        Some(serde_json::json!({"graph": g.graph, "group": gid, "id": id, "name": grp.title, "major": g.asset_major, "path": g.path}))
+    })
+    .flatten() else {
+        return;
+    };
+    super::spawn_named("ws-flowasset", move || {
+        let body = serde_json::to_vec(&req).unwrap_or_default();
+        let r = python(&["-m", "strategies.swe.subgraph", "extract", "-"], Some(&body)).and_then(|b| serde_json::from_slice::<SubOut>(&b).map_err(|e| format!("结果解析失败：{e}")));
+        with(|g| {
+            g.busy = false;
+            match r {
+                Ok(o) if o.ok && o.graph.is_some() => {
+                    record(g, "");
+                    g.graph = o.graph.unwrap_or_default();
+                    g.selected.clear();
+                    g.focus = None;
+                    g.asset_id.clear();
+                    g.asset_major = false;
+                    let also = if o.affected.is_empty() { String::new() } else { format!("；同时生效于：{}", o.affected.join("、")) };
+                    g.msg = format!("已存成子图资产 {}（版本 {}）{also}", o.refer, o.version);
+                    touch(g);
+                }
+                Ok(o) => g.msg = format!("没存成：{}", o.error),
+                Err(e) => g.msg = format!("没存成：{e}"),
+            }
+        });
+        load_palette();
+    });
+}
+
+/// 解除关联（`subgraph unlink -`）：实例展开成一个普通分组，以后不再跟着资产变。
+fn unlink(id: String) {
+    let Some(req) = with(|g| {
+        if g.busy {
+            return None;
+        }
+        g.busy = true;
+        Some(serde_json::json!({"graph": g.graph, "node": id}))
+    })
+    .flatten() else {
+        return;
+    };
+    super::spawn_named("ws-flowunlink", move || {
+        let body = serde_json::to_vec(&req).unwrap_or_default();
+        let r = python(&["-m", "strategies.swe.subgraph", "unlink", "-"], Some(&body)).and_then(|b| serde_json::from_slice::<SubOut>(&b).map_err(|e| format!("结果解析失败：{e}")));
+        with(|g| {
+            g.busy = false;
+            match r {
+                Ok(o) if o.ok && o.graph.is_some() => {
+                    edit(g, "");
+                    g.graph = o.graph.unwrap_or_default();
+                    g.selected.clear();
+                    g.msg = "已解除关联：展开成了一个分组，以后各改各的；改完可以在分组上「存回资产」".into();
+                }
+                Ok(o) => g.msg = format!("解除关联失败：{}", o.error),
+                Err(e) => g.msg = format!("解除关联失败：{e}"),
+            }
+        });
+    });
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct CodeOut {
+    ok: bool,
+    error: String,
+    #[serde(rename = "ref")]
+    refer: String,
+    path: String,
+    abs: String,
+    problems: Vec<String>,
+}
+
+/// 代码节点：生成一个带标准接口的模块文件（`codegen new`），发给 Studio 打开。
+fn code_new() {
+    let Some((kind, name)) = with(|g| (g.code_kind.clone(), g.code_name.trim().to_string())) else { return };
+    super::spawn_named("ws-flowcode", move || {
+        let r = python(&["-m", "strategies.swe.codegen", "new", &kind, &name], None).and_then(|b| serde_json::from_slice::<CodeOut>(&b).map_err(|e| format!("结果解析失败：{e}")));
+        match r {
+            Ok(o) if o.ok => {
+                let sent = wealthspring_ui_tokens::bridge::send(
+                    wealthspring_ui_tokens::bridge::Peer::Studio,
+                    &wealthspring_ui_tokens::bridge::UiCommand::OpenFile { path: o.abs.clone(), line: None },
+                );
+                with(|g| {
+                    g.code_made = Some((o.refer.clone(), o.path.clone()));
+                    g.code_problems = None;
+                    g.code_name.clear();
+                    g.msg = match sent {
+                        Ok(_) => format!("已生成 {}，在 Studio 里打开了；改完点「契约测试」", o.path),
+                        Err(e) => format!("已生成 {}（Studio 没打开：{e}）；改完点「契约测试」", o.path),
+                    };
+                });
+            }
+            Ok(o) => {
+                with(|g| g.msg = format!("没生成：{}", o.error));
+            }
+            Err(e) => {
+                with(|g| g.msg = format!("没生成：{e}"));
+            }
+        }
+    });
+}
+
+/// 代码节点的契约测试（`codegen test`，与仓库测试里对全部模块跑的是同一份）；过了就刷新模块库。
+fn code_test() {
+    let Some(refer) = with(|g| g.code_made.as_ref().map(|c| c.0.clone())).flatten() else { return };
+    super::spawn_named("ws-flowcodetest", move || {
+        let r = python(&["-m", "strategies.swe.codegen", "test", &refer], None).and_then(|b| serde_json::from_slice::<CodeOut>(&b).map_err(|e| format!("结果解析失败：{e}")));
+        let ok = matches!(&r, Ok(o) if o.ok);
+        with(|g| {
+            match r {
+                Ok(o) => {
+                    g.code_problems = Some(o.problems);
+                    g.msg = if o.ok { format!("{refer} 过了契约测试，已进模块库") } else { format!("{refer} 没过契约测试（问题列在模块库下方）") };
+                }
+                Err(e) => g.msg = format!("契约测试没跑起来：{e}"),
+            }
+        });
+        if ok {
+            load_palette();
+        }
+    });
+}
+
 /// 在一个表里按「a.b」的路径写值（None = 删掉；删空了的子表一并删掉）。表单里 `session.start` 这类项用。
 pub fn set_path(root: &mut Value, path: &str, value: Option<Value>) {
     if !root.is_object() {
@@ -1967,6 +2490,34 @@ fn set_table(g: &mut St, id: &str, name: &str, rows: Vec<[String; 3]>, tag: &str
             }
         }
     }
+}
+
+/// 断点（节点）→ 调试器认的 `[{lane, module}]`，写到 `ws:swe:<运行号>:bp`。节点经轨迹定位表反查出线名与模块 id。
+fn breakpoint_specs(g: &St) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (key, nid) in &g.whence {
+        if !g.breakpoints.contains(nid) {
+            continue;
+        }
+        let (lane, module) = key.split_once('|').unwrap_or(("", key));
+        if module.is_empty() {
+            continue; // 「线|」这个兜底键指向入场节点；入场模块本身另有一条
+        }
+        out.push(serde_json::json!({"lane": lane, "module": module}));
+    }
+    out
+}
+
+fn write_breakpoints(run_id: &str) {
+    let Some(specs) = with(|g| breakpoint_specs(g)) else { return };
+    let key = format!("ws:swe:{run_id}:bp");
+    super::spawn_named("ws-flowbp", move || {
+        use redis::Commands;
+        if let Ok(mut c) = redis::Client::open(redis_url()).and_then(|c| c.get_connection()) {
+            let _: Result<(), _> = c.set(&key, serde_json::to_string(&specs).unwrap_or_default());
+            let _: Result<(), _> = c.expire(&key, 86_400);
+        }
+    });
 }
 
 /// 自动整理：位置由 Python 算（`graph layout`，排版只有一份），这里只是把结果放回去。
@@ -2072,6 +2623,30 @@ mod tests {
     }
 
     #[test]
+    fn parameter_references_are_typed_as_eq_node_dot_param() {
+        // docs/45 §4.3 第 5 条：`=节点.参数` 存成 {"$ref": …}，显示时还原；不像引用的「=」照常当文字
+        let r = parse_value("= n5.sl", "number").unwrap();
+        assert_eq!(r, serde_json::json!({"$ref": "n5.sl"}));
+        assert_eq!(param_ref(&r), Some("n5.sl"));
+        assert_eq!(value_text(&r), "=n5.sl");
+        assert_eq!(parse_value("=oops", "string"), Some(Value::String("=oops".into())));
+        assert_eq!(param_ref(&serde_json::json!({"$ref": "a.b", "x": 1})), None);
+    }
+
+    #[test]
+    fn format_4_fields_survive_a_save_and_stay_out_of_old_graphs() {
+        let mut g = Graph::blank();
+        assert_eq!(g.format, 4);
+        g.nodes.push(Node { id: "n2".into(), module: "sub.reaper_trail@1".into(), ..Default::default() });
+        let plain = serde_json::to_value(&g).unwrap();
+        assert!(plain["nodes"][1].get("expose").is_none()); // 空的不写
+        g.nodes[1].expose.insert("distance".into(), Value::String("trail_distance".into()));
+        g.groups.push(Group { id: "g1".into(), title: "t".into(), collapsed: false, asset: Some("sub.reaper_trail@1".into()) });
+        let back: Graph = serde_json::from_value(serde_json::to_value(&g).unwrap()).unwrap();
+        assert_eq!(back, g);
+    }
+
+    #[test]
     fn trace_events_find_their_node_with_fallbacks() {
         let w: HashMap<String, String> = [("S1|exit.breakeven", "n7"), ("|risk.exposure_cap", "n3"), ("S1|", "n5"), ("|regime.ema_trend", "n1")]
             .into_iter()
@@ -2140,6 +2715,34 @@ mod tests {
         assert_eq!((v.in_type("a"), v.in_type("b"), v.out_type("out")), ("flag", "series", "flag"));
         assert_eq!(v.first_in("series").map(String::as_str), Some("b"));
         assert_eq!((port_type("n_feature"), port_type("feature"), port_type("signal")), ("feature", "feature", "signal"));
+    }
+
+    #[test]
+    fn a_trade_traces_back_to_its_signal_through_the_same_lane_only() {
+        let w: HashMap<String, String> = [("S1|setup.rule", "n2"), ("S1|entry.market_single", "n3"), ("S1|", "n3"), ("S1|exit.rule", "n4"), ("S2|", "n9")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let ev: Vec<Value> = [
+            r#"{"ts": 1, "lane": "S1", "kind": "trade", "module": "", "reason": "old"}"#,
+            r#"{"ts": 2, "lane": "S1", "kind": "intent", "module": "entry.market_single", "reason": "买 市价", "trail": [["setup.rule", "1.0", {"rule": "z > 1", "values": {"z": 1.7}}], ["entry.market_single", "1.0", {}]]}"#,
+            r#"{"ts": 3, "lane": "S2", "kind": "fill", "module": "", "reason": "开仓"}"#,
+            r#"{"ts": 4, "lane": "S1", "kind": "fill", "module": "", "reason": "第 1 笔", "why": {"price": 100.5}}"#,
+            r#"{"ts": 5, "lane": "S1", "kind": "why_not", "module": "", "why": {"检查了": 9}}"#,
+            r#"{"ts": 6, "lane": "S1", "kind": "close", "module": "exit.rule", "reason": "rule", "why": {"held_secs": 31.0}}"#,
+            r#"{"ts": 7, "lane": "S1", "kind": "trade", "module": "", "reason": "rule", "why": {"gross": 12.5}}"#,
+        ]
+        .iter()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+        let (steps, nodes) = trade_path(&ev, 6, &w);
+        // 从信号（带着它的依据）到平仓；别的线、上一笔、计数事件都不在里面
+        assert_eq!(steps.iter().map(|s| s.kind.as_str()).collect::<Vec<_>>(), ["origin", "intent", "fill", "close", "trade"]);
+        assert_eq!(steps[0].module, "setup.rule");
+        assert!(steps[0].why.contains("z = 1.7") && steps[0].why.contains("rule = z > 1"));
+        assert_eq!(nodes, ["n2", "n3", "n4"]);
+        assert_eq!(ts_text(1_788_270_111_200_000_000), "09-01 13:41:51");
+        assert!(trade_path(&ev, 99, &w).0.is_empty());
     }
 
     #[test]

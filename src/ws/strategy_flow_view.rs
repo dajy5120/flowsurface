@@ -21,7 +21,7 @@ use iced::widget::{Space, button, checkbox, column, container, opaque, pick_list
 use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 use serde_json::Value;
 
-use super::strategy_flow::{self as sf, Control, EXEC, Edge, FlMsg, ModDef, Node, NodeLive, Palette, ParamDef, Quick, View, form_key, value_text};
+use super::strategy_flow::{self as sf, Control, DebugTab, EXEC, Edge, FlMsg, ModDef, Node, NodeLive, Palette, ParamDef, Quick, View, form_key, value_text};
 use crate::ui::metrics::space;
 use crate::ui::pal;
 use crate::ui::text as t;
@@ -391,6 +391,9 @@ struct FlowCanvas {
     scene: Scene,
     edges: Vec<Edge>,
     selected: Vec<String>,
+    /// 选中的那笔成交经过的节点（按先后）
+    path: Vec<String>,
+    breakpoints: Vec<String>,
     pan: (f32, f32),
     zoom: f32,
     now: Instant,
@@ -552,6 +555,17 @@ impl FlowCanvas {
         frame.stroke(&body, Stroke::default().with_width(width).with_color(color));
         if selected && glow.is_some() {
             frame.stroke(&body, Stroke::default().with_width(1.0).with_color(pal::accent()));
+        }
+        // 选中的那笔成交经过这里：粗框 + 第几步
+        if let Some(k) = self.path.iter().position(|n| g.members.contains(n)) {
+            frame.stroke(&body, Stroke::default().with_width(3.0).with_color(pal::warn()));
+            let c = Point::new(tl.x + NODE_W * z - 2.0 * z, tl.y - 2.0 * z);
+            frame.fill(&Path::circle(c, 9.0 * z), pal::warn());
+            frame.fill_text(Text { content: (k + 1).to_string(), position: Point::new(c.x - 4.0 * z, c.y - 7.0 * z), color: pal::card_bg(), size: iced::Pixels(t::s_meta() * z), ..Default::default() });
+        }
+        // 断点：左上角一个红点
+        if g.members.iter().any(|m| self.breakpoints.contains(m)) {
+            frame.fill(&Path::circle(Point::new(tl.x, tl.y), 5.0 * z), pal::bad());
         }
         if g.group.is_some() {
             // 叠一层边，看着像一摞
@@ -954,7 +968,40 @@ fn palette_col<'a>(v: &View) -> Element<'a, FlMsg> {
             );
         }
     }
+    col = col.push(code_node_section(v));
     crate::ui::scroll(col).height(Length::Fill).into()
+}
+
+/// 「新建代码节点」（docs/45 §3.4）：不在画布上写代码，而是生成一个带标准接口的模块文件，在 Studio 里改。
+fn code_node_section<'a>(v: &View) -> Element<'a, FlMsg> {
+    let kinds: Vec<String> = sf::CODE_KINDS.iter().map(|k| k.to_string()).collect();
+    let name_ok = !v.code_name.trim().is_empty();
+    let mut c = column![
+        w::section("新建代码节点"),
+        t::metadata("生成一个模块文件（strategies/modules/<环节>/<名字>.py）并在 Studio 里打开；改完点「契约测试」，过了就出现在上面的模块库里。").color(pal::dim()),
+        row![
+            pick_list(kinds, Some(v.code_kind.clone()), FlMsg::CodeKind).text_size(t::s_small()),
+            text_input("名字，如 my_signal", &v.code_name).on_input(FlMsg::CodeName).size(t::s_small()),
+        ]
+        .spacing(space(1))
+        .wrap(),
+        w::btn("生成并打开", Kind::Standard, name_ok.then_some(FlMsg::CodeNew)),
+    ]
+    .spacing(space(1));
+    if let Some((refer, path)) = &v.code_made {
+        c = c.push(t::caption(format!("{refer}  {path}")));
+        c = c.push(w::btn("契约测试", Kind::Standard, Some(FlMsg::CodeTest)));
+        match &v.code_problems {
+            Some(p) if p.is_empty() => c = c.push(t::caption("契约测试通过").color(pal::ok())),
+            Some(p) => {
+                for x in p {
+                    c = c.push(t::caption(x.clone()).color(pal::bad()));
+                }
+            }
+            None => {}
+        }
+    }
+    c.into()
 }
 
 // ── 属性（画进全局检查器，docs/42）──────────────────────────────────────
@@ -981,7 +1028,9 @@ fn param_field<'a>(v: &View, n: &Node, pd: &ParamDef) -> Element<'a, FlMsg> {
     let reset = |on: bool| -> Element<'a, FlMsg> {
         if on { w::btn("用缺省", Kind::Ghost, Some(FlMsg::ParamValue(n.id.clone(), pd.name.clone(), None))) } else { Space::new().into() }
     };
-    let control: Element<'a, FlMsg> = match pd.control() {
+    // 写成引用（=节点.参数）的参数一律按文字显示，免得开关 / 下拉把引用盖掉
+    let ctl = if set.is_some_and(|x| sf::param_ref(x).is_some()) { Control::Text } else { pd.control() };
+    let control: Element<'a, FlMsg> = match ctl {
         Control::Switch => {
             let cur = set.or(Some(&pd.default)).and_then(Value::as_bool).unwrap_or(false);
             row![checkbox(cur).on_toggle(move |b| FlMsg::ParamValue(id.clone(), name.clone(), Some(Value::Bool(b)))).size(t::s_body()), t::caption(if cur { "是" } else { "否" }), reset(set.is_some())]
@@ -1032,11 +1081,18 @@ fn param_field<'a>(v: &View, n: &Node, pd: &ParamDef) -> Element<'a, FlMsg> {
             text_input(&hint, &shown).on_input(move |s| FlMsg::Param(id.clone(), name.clone(), s)).size(t::s_small()).into()
         }
     };
-    let note = match pd.control() {
+    let note = match ctl {
         Control::List if !pd.description.is_empty() => format!("{}（逗号隔开）", pd.description),
         Control::Table if !pd.description.is_empty() => format!("{}（每行：谁 · 哪一项 = 值）", pd.description),
+        _ if set.and_then(sf::param_ref).is_some() => format!("引用：与 {} 相同（改那边这里跟着变）", set.and_then(sf::param_ref).unwrap_or_default()),
         _ => pd.description.clone(),
     };
+    // 在分组里的节点：参数可以勾「暴露」，存成子图资产时成为子图节点上的参数
+    if n.group.is_some() && ctl != Control::Table {
+        let (nid, pname, on) = (n.id.clone(), pd.name.clone(), n.expose.contains_key(&pd.name));
+        let control = column![control, row![checkbox(on).on_toggle(move |b| FlMsg::Expose(nid.clone(), pname.clone(), b)).size(t::s_small()), t::metadata("暴露成子图参数").color(pal::dim())].spacing(space(1)).align_y(Alignment::Center)].spacing(0);
+        return labelled(label, control.into(), note);
+    }
     labelled(label, control, note)
 }
 
@@ -1075,6 +1131,17 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
         );
         col = col.push(t::metadata("子图只影响怎么画：折叠、解散都不会改变策略。折叠后顶层只占一个节点，对外的线照常画；双击它进去看。解散只是不再分组，节点都留着。").color(pal::dim()));
         col = col.push(row![w::btn("复制", Kind::Ghost, Some(FlMsg::Copy)), w::btn("删除里面的节点", Kind::Ghost, Some(FlMsg::DeleteSelected))].spacing(space(2)).wrap());
+        // 存成子图资产（docs/45 C6）：别的图可以引用它，改一处处处生效
+        let from = gr.asset.clone();
+        col = col.push(w::section(if from.is_some() { "存回子图资产" } else { "存成子图资产" }));
+        let hint = from.as_deref().and_then(|a| a.strip_prefix("sub.")).and_then(|a| a.split_once('@')).map(|(id, _)| id.to_string()).unwrap_or_else(|| "trail_breakeven".into());
+        col = col.push(field("资产 id（英文、数字、下划线）".into(), &hint, v.asset_id.clone(), FlMsg::AssetId, if from.is_some() { format!("从 {} 展开来的；留空 = 存回它", from.clone().unwrap_or_default()) } else { String::new() }));
+        col = col.push(row![checkbox(v.asset_major).on_toggle(FlMsg::AssetMajor).size(t::s_body()), t::caption("升大版本（接口变了要勾）")].spacing(space(2)).align_y(Alignment::Center));
+        col = col.push(w::btn(if from.is_some() { "存回资产" } else { "存成资产" }, Kind::Primary, (!v.busy).then(|| FlMsg::SaveAsset(gr.id.clone()))));
+        col = col.push(
+            t::metadata("接口 = 从外面接进来、接出去的线，加上节点参数里勾了「暴露」的参数。存完这组节点变成一个引用资产的节点；同一个 id 再存：接口没变就升小版本，所有引用它的图一起变；接口变了要升大版本，老版本留着给已经在用的图。")
+                .color(pal::dim()),
+        );
         return col.into();
     }
     if v.selected.len() > 1 {
@@ -1156,6 +1223,14 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
     col = col.push(w::section(def.map(|d| format!("{} · {}", d.kind_label, d.title)).unwrap_or_else(|| n.module.clone())));
     if let Some(d) = def {
         col = col.push(t::caption(d.summary.clone()));
+        if d.kind == "sub" {
+            // 子图实例（docs/45 C6）：引用的是资产，不是拷贝
+            col = col.push(t::metadata(format!("子图资产 {} · 版本 {} · {}", d.refer, d.version, d.path)).color(pal::dim()));
+            col = col.push(t::metadata(format!("里面：{}", d.inner.join(" → "))).color(pal::dim()));
+            col = col.push(t::metadata(if d.validations.is_empty() { "验证记录：没有（「能复用」要靠这张表里有那一行）".to_string() } else { format!("验证记录 {} 条", d.validations.len()) }).color(pal::dim()));
+            col = col.push(w::btn("解除关联（展开成分组）", Kind::Standard, (!v.busy).then(|| FlMsg::Unlink(id.clone()))));
+            col = col.push(t::metadata("资产改了，所有引用它的图一起变；想各改各的就先解除关联。").color(pal::dim()));
+        }
     }
     for i in v.issues.iter().filter(|i| i.node == n.id) {
         col = col.push(t::caption(i.msg.clone()).color(pal::bad()));
@@ -1192,6 +1267,7 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
         && !d.params.is_empty()
     {
         col = col.push(w::section("参数（★ = 值得优化；留空 = 用缺省值）"));
+        col = col.push(t::metadata("填 =节点.参数（如 =n5.sl）= 与那个参数相同").color(pal::dim()));
         // 由连线给出的参数（过滤 / 路由的 regime）不在这里填：接一根线就是了
         for pd in d.params.iter().filter(|pd| !d.ins.contains(&pd.name)) {
             col = col.push(param_field(v, n, pd));
@@ -1204,6 +1280,14 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
             "无线输出".into(),
             row![checkbox(n.wireless).on_toggle(move |b| FlMsg::Wireless(nid.clone(), b)).size(t::s_body()), t::caption(if n.wireless { "不画线" } else { "画线" })].spacing(space(2)).align_y(Alignment::Center).into(),
             "给很多节点用的输出（市场状态、特征）开着它，图上少一把线。只影响怎么画".into(),
+        ));
+    }
+    if n.module != EXEC && def.is_some_and(|d| d.kind != "value") {
+        let (nid, on) = (id.clone(), v.breakpoints.contains(&n.id));
+        col = col.push(labelled(
+            "断点".into(),
+            row![checkbox(on).on_toggle(move |b| FlMsg::Breakpoint(nid.clone(), b)).size(t::s_body()), t::caption(if on { "它下一次做决策时停" } else { "不停" })].spacing(space(2)).align_y(Alignment::Center).into(),
+            "运行时在这里停下，可以一步一步往下走。只在画布上运行时有效".into(),
         ));
     }
     if let Some(l) = v.live.get(&n.id) {
@@ -1258,6 +1342,95 @@ fn quick_popup<'a>(v: &View, q: &Quick) -> Element<'a, FlMsg> {
 /// 「模块库」页签的视图名（工作区模板里锁定的 `Settings.view`）。
 pub const LIBRARY: &str = "模块库";
 
+/// 运行中：暂停 / 继续 / 走到下一个决策（docs/45 C5）。只在运行时出现。
+fn run_controls<'a>(v: &View) -> Element<'a, FlMsg> {
+    if !v.running {
+        return Space::new().into();
+    }
+    let mut r = row![].spacing(space(1)).align_y(Alignment::Center);
+    if v.paused.is_some() {
+        r = r.push(w::btn("▶ 继续", Kind::Primary, Some(FlMsg::Ctl("run".into()))));
+        r = r.push(w::btn("⏭ 下一个决策", Kind::Standard, Some(FlMsg::Ctl("step".into()))));
+    } else {
+        r = r.push(w::btn("⏸ 暂停", Kind::Standard, Some(FlMsg::Ctl("pause".into()))));
+    }
+    r.into()
+}
+
+/// 调试面板（画布下方，docs/45 C5）：成交（点一笔亮出来龙去脉）｜为什么没做｜断点。
+fn debug_panel<'a>(v: &View) -> Element<'a, FlMsg> {
+    let tabs = row![
+        w::tabs(&[("成交", DebugTab::Trades), ("为什么没做", DebugTab::WhyNot), ("断点", DebugTab::Breaks)], &v.debug_tab, FlMsg::DebugTab),
+        t::metadata(format!("成交 {} 笔 · 断点 {} 个", v.trades.len(), v.breakpoints.len())).color(pal::dim()),
+    ]
+    .spacing(space(3))
+    .align_y(Alignment::Center);
+    let body: Element<'a, FlMsg> = match v.debug_tab {
+        DebugTab::Trades => {
+            let mut list = column![].spacing(0);
+            if v.trades.is_empty() {
+                list = list.push(t::metadata(if v.running { "还没有平掉的仓位" } else { "运行一次之后，这里列出每一笔（平仓才算一笔）" }).color(pal::dim()));
+            }
+            for (i, e) in v.trades.iter().rev().take(300) {
+                let s = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+                let gross = e.get("why").and_then(|w| w.get("gross")).and_then(Value::as_f64);
+                let line = format!("{}  线 {}  {}  {}", sf::ts_text(e.get("ts").and_then(Value::as_i64).unwrap_or(0)), s("lane"), s("reason"), gross.map(|g| format!("{g:+.2}")).unwrap_or_default());
+                let picked = v.picked_trade == Some(*i);
+                list = list.push(
+                    button(t::caption(line).color(match gross {
+                        Some(g) if g > 0.0 => pal::ok(),
+                        Some(g) if g < 0.0 => pal::bad(),
+                        _ => pal::txt(),
+                    }))
+                    .width(Length::Fill)
+                    .on_press(FlMsg::PickTrade(*i))
+                    .style(move |th, st| w::button_style(if picked { Kind::Standard } else { Kind::Ghost }, th, st)),
+                );
+            }
+            let mut steps = column![t::metadata(if v.trace_path.is_empty() { "点左边一笔，这里列出它从信号到平仓的每一步，画布上亮出经过的节点（黄框上的数字是第几步）" } else { "这一笔的来龙去脉" }).color(pal::dim())].spacing(space(1));
+            for st in &v.trace_path {
+                let label = if st.kind == "origin" { "依据".to_string() } else { live_label(&st.kind).to_string() };
+                steps = steps.push(
+                    column![
+                        row![t::metadata(sf::ts_text(st.ts)).color(pal::dim()), t::caption(format!("{label} · {}", if st.module.is_empty() { "内核" } else { st.module.as_str() })), t::caption(st.reason.clone()).color(pal::dim())].spacing(space(2)).wrap(),
+                        t::caption(st.why.clone()).color(pal::dim()), // 依据要读得清：不用全大写的小字
+                    ]
+                    .spacing(0),
+                );
+            }
+            row![
+                container(crate::ui::scroll(list).height(Length::Fill)).width(Length::FillPortion(2)),
+                container(crate::ui::scroll(steps).height(Length::Fill)).width(Length::FillPortion(3)),
+            ]
+            .spacing(space(3))
+            .into()
+        }
+        DebugTab::WhyNot => {
+            let mut c = column![t::metadata("每条线的每一次进场检查停在了哪一关（每小时更新一次，计数从开跑算起）。「检查了」是过了所有过滤之后真正看信号的次数；看了信号但没下单 = 没有信号或已有持仓。").color(pal::dim())].spacing(space(1));
+            if v.why_not.is_empty() {
+                c = c.push(t::metadata(if v.running { "跑满一小时（回测时间）后出第一份" } else { "运行一次之后才有" }).color(pal::dim()));
+            }
+            for (lane, m) in &v.why_not {
+                let mut items: Vec<(String, i64)> = m.iter().map(|(k, x)| (k.clone(), x.as_i64().unwrap_or(0))).collect();
+                items.sort_by(|a, b| b.1.cmp(&a.1));
+                let total: i64 = items.iter().filter(|(k, _)| !k.starts_with("信号被否决") && k != "风控没放行" && k != "下了单").map(|x| x.1).sum();
+                let text = items.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" · ");
+                c = c.push(row![container(t::caption(format!("线 {lane}"))).width(Length::Fixed(80.0)), t::metadata(format!("进场检查 {total} 次：{text}"))].spacing(space(2)).wrap());
+            }
+            crate::ui::scroll(c).height(Length::Fill).into()
+        }
+        DebugTab::Breaks => {
+            let mut c = column![t::metadata("断点：那个模块下一次做出决策（提出意图、否决、缩量、平仓……）时回测停下，停在哪会显示在工具条下方；「⏭ 下一个决策」再走一步。在节点的检查器里加。").color(pal::dim())].spacing(space(1));
+            for id in &v.breakpoints {
+                let name = v.graph.node(id).map(|n| n.module.clone()).unwrap_or_else(|| id.clone());
+                c = c.push(row![t::caption(name), w::btn("取消", Kind::Ghost, Some(FlMsg::Breakpoint(id.clone(), false)))].spacing(space(2)).align_y(Alignment::Center));
+            }
+            crate::ui::scroll(c).height(Length::Fill).into()
+        }
+    };
+    container(column![tabs, body].spacing(space(1))).height(Length::Fixed(220.0)).width(Length::Fill).into()
+}
+
 fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
     let state: Element<'a, FlMsg> = if v.running {
         w::badge(format!("运行中 · {} 个决策", v.live_n), Tone::Accent)
@@ -1271,6 +1444,7 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
     let idle = !v.busy;
     row![
         w::btn("新建", Kind::Ghost, Some(FlMsg::New)),
+        pick_list(v.palette.as_ref().map(|p| p.templates.clone()).unwrap_or_default(), None::<sf::Template>, FlMsg::NewFrom).placeholder("从模板…").text_size(t::s_small()),
         pick_list(v.files.clone(), None::<sf::FileItem>, FlMsg::Open).placeholder("打开 / 导入…").text_size(t::s_small()),
         w::btn("保存", Kind::Standard, idle.then_some(FlMsg::Save)),
         w::btn("↶", Kind::Ghost, v.can_undo.then_some(FlMsg::Undo)),
@@ -1281,6 +1455,8 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
         t::caption("倍速"),
         text_input("3600", &v.pace).on_input(FlMsg::Pace).size(t::s_small()).width(Length::Fixed(64.0)),
         if v.running { w::btn("■ 停止", Kind::Standard, Some(FlMsg::Stop)) } else { w::btn("▶ 运行", Kind::Primary, idle.then_some(FlMsg::Run)) },
+        run_controls(v),
+        w::btn(if v.debug_open { "调试 ▾" } else { "调试 ▸" }, if v.debug_open { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::DebugToggle)),
         Space::new().width(Length::Fill),
         text_input("搜节点，回车跳过去", &v.find).on_input(FlMsg::FindQuery).on_submit(FlMsg::FindNext).size(t::s_small()).width(Length::Fixed(150.0)),
         t::metadata(if v.find.trim().is_empty() { String::new() } else { format!("{}/{}", v.find_hits.1, v.find_hits.0) }).color(pal::dim()),
@@ -1306,6 +1482,8 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
         scene: build_scene(&v, pal_),
         edges: v.graph.edges.clone(),
         selected: v.selected.clone(),
+        path: v.path_nodes.clone(),
+        breakpoints: v.breakpoints.clone(),
         pan: v.pan,
         zoom: v.zoom,
         now: Instant::now(),
@@ -1324,6 +1502,12 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
     .spacing(space(2))
     .height(Length::Fill);
     let mut col = column![w::panel_header(title, None, vec![]), toolbar(&v)].spacing(space(2));
+    if let Some(p) = &v.paused {
+        // 调试器停住了：停在哪条决策上
+        let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let what = if s("kind") == "pause" { "手动暂停".to_string() } else { format!("{} · {} · {}", live_label(&s("kind")), if s("module").is_empty() { "内核".to_string() } else { s("module") }, s("reason")) };
+        col = col.push(row![w::badge("已暂停", Tone::Warning), t::caption(format!("线 {} · {what}", s("lane"))), t::metadata(sf::ts_text(p.get("ts").and_then(Value::as_i64).unwrap_or(0))).color(pal::dim())].spacing(space(2)).align_y(Alignment::Center));
+    }
     if let Some(gr) = v.focus.as_ref().and_then(|f| v.graph.group(f)) {
         // 进了子图：面包屑，点「顶层」回去
         col = col.push(
@@ -1346,6 +1530,9 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
         col = col.push(row![w::badge(label, Tone::Danger), t::caption(format!("{reason}（这次运行共 {n} 次）")).color(pal::bad())].spacing(space(2)).align_y(Alignment::Center));
     }
     col = col.push(body);
+    if v.debug_open {
+        col = col.push(debug_panel(&v));
+    }
     if !v.msg.is_empty() {
         col = col.push(t::metadata(v.msg.clone()).color(if v.msg.contains("失败") || v.msg.contains("问题") || v.msg.contains("起不来") { pal::bad() } else { pal::dim() }));
     }
