@@ -82,7 +82,25 @@ pub struct ModDef {
     pub summary: String,
     pub ins: Vec<String>,
     pub outs: Vec<String>,
+    /// 端口类型，与 `ins` / `outs` 一一对应（连线只看类型）。数值层：series = 数，flag = 条件
+    pub in_types: Vec<String>,
+    pub out_types: Vec<String>,
     pub params: Vec<ParamDef>,
+}
+
+impl ModDef {
+    pub fn in_type<'a>(&'a self, port: &'a str) -> &'a str {
+        self.ins.iter().position(|p| p == port).and_then(|i| self.in_types.get(i)).map_or(port_type(port), String::as_str)
+    }
+
+    pub fn out_type<'a>(&'a self, port: &'a str) -> &'a str {
+        self.outs.iter().position(|p| p == port).and_then(|i| self.out_types.get(i)).map_or(port_type(port), String::as_str)
+    }
+
+    /// 第一个这种类型的输入端口。
+    pub fn first_in(&self, ty: &str) -> Option<&String> {
+        self.ins.iter().find(|p| self.in_type(p) == ty)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -259,6 +277,8 @@ fn unique_name(base: &str, taken: &[String]) -> String {
 pub struct Quick {
     pub from: String,
     pub port: String,
+    /// 拖出来的那个端口的类型
+    pub ty: String,
     /// 新节点放在哪（世界坐标）
     pub x: f32,
     pub y: f32,
@@ -271,7 +291,7 @@ impl Quick {
         let q = self.query.trim().to_lowercase();
         pal.modules
             .iter()
-            .filter(|m| m.ins.iter().any(|p| port_type(p) == port_type(&self.port)))
+            .filter(|m| m.first_in(&self.ty).is_some())
             .filter(|m| q.is_empty() || m.title.to_lowercase().contains(&q) || m.kind_label.contains(&q) || m.summary.to_lowercase().contains(&q))
             .collect()
     }
@@ -400,6 +420,7 @@ struct St {
     /// 参数输入框里的原文：键 = 节点 id + '\u{1}' + 参数名（允许暂时填着不合法的东西）
     form: BTreeMap<String, String>,
     issues: Vec<Issue>,
+    warnings: Vec<String>,
     /// 轨迹定位表：`线名|模块 id` → 节点 id
     whence: HashMap<String, String>,
     checked: Option<bool>,
@@ -441,6 +462,7 @@ impl Default for St {
             auto_on: false,
             form: BTreeMap::new(),
             issues: Vec::new(),
+            warnings: Vec::new(),
             whence: HashMap::new(),
             checked: None,
             busy: false,
@@ -488,6 +510,7 @@ pub struct View {
     pub tables: BTreeMap<String, Vec<[String; 3]>>,
     pub form: BTreeMap<String, String>,
     pub issues: Vec<Issue>,
+    pub warnings: Vec<String>,
     pub checked: Option<bool>,
     pub busy: bool,
     pub msg: String,
@@ -521,6 +544,7 @@ pub fn view() -> View {
         tables: g.tables.clone(),
         form: g.form.clone(),
         issues: g.issues.clone(),
+        warnings: g.warnings.clone(),
         checked: g.checked,
         busy: g.busy,
         msg: g.msg.clone(),
@@ -645,8 +669,8 @@ pub fn parse_value(text: &str, ty: &str) -> Option<Value> {
     }
 }
 
-/// 端口名 → 类型（与 graph.py 的 `ptype` 一致）。大多数端口名字就是类型；
-/// 特征输入端口以参数名为名（`feature`、`n_feature`），类型都是 feature。连线只看类型。
+/// 端口名 → 类型的兜底（模块库没给类型时用；与 graph.py 的 `ptype` 一致）。
+/// 正常情况下类型来自模块库的 `in_types` / `out_types`（见 [`ModDef::in_type`]）。
 pub fn port_type(port: &str) -> &str {
     if port == "feature" || port.ends_with("_feature") { "feature" } else { port }
 }
@@ -703,7 +727,8 @@ fn ensure_started() {
                         if std::env::var_os("WS_FLOW_QUICK").is_some()
                             && let Some(port) = g.palette.as_ref().and_then(|p| p.get(&n.module)).and_then(|d| d.outs.first().cloned())
                         {
-                            g.quick = Some(Quick { from: n.id.clone(), port, x: n.x + 260.0, y: n.y + 60.0, query: String::new() });
+                            let ty = g.palette.as_ref().and_then(|p| p.get(&n.module)).map(|d| d.out_type(&port).to_string()).unwrap_or_default();
+                            g.quick = Some(Quick { from: n.id.clone(), port, ty, x: n.x + 260.0, y: n.y + 60.0, query: String::new() });
                         }
                     });
                 });
@@ -786,6 +811,8 @@ fn graph_path_for(id: &str) -> String {
 struct CheckOut {
     ok: bool,
     errors: Vec<Issue>,
+    /// 不挡编译的提醒（表达式两边量纲不同之类）
+    warnings: Vec<String>,
     #[serde(rename = "where")]
     whence: HashMap<String, String>,
     toml: String,
@@ -797,6 +824,7 @@ fn apply_check(g: &mut St, r: Result<CheckOut, String>, what: &str) -> Option<St
         Ok(c) => {
             g.checked = Some(c.ok);
             g.issues = c.errors;
+            g.warnings = c.warnings;
             if c.ok {
                 g.whence = c.whence;
                 g.msg = format!("{what}通过");
@@ -1484,7 +1512,7 @@ pub fn handle(m: FlMsg) {
                 edit(g, "");
                 g.graph = after;
                 // 接到新节点上第一个同类型的输入端口（特征输入的名字是参数名，不等于类型）
-                let inp = g.palette.as_ref().and_then(|p| p.get(&refer)).and_then(|d| d.ins.iter().find(|p| port_type(p) == port_type(&q.port)).cloned()).unwrap_or_else(|| q.port.clone());
+                let inp = g.palette.as_ref().and_then(|p| p.get(&refer)).and_then(|d| d.first_in(&q.ty).cloned()).unwrap_or_else(|| q.port.clone());
                 let multi = multi_in(&kind_of(g, &id), &inp);
                 g.graph.connect(Edge { from: q.from, out: q.port, to: id.clone(), inp }, multi);
                 g.selected = vec![id];
@@ -1792,19 +1820,23 @@ mod tests {
 
     #[test]
     fn quick_search_lists_only_modules_that_accept_the_dragged_port() {
-        let m = |title: &str, kind: &str, ins: &[&str]| ModDef { refer: format!("{kind}.{title}@1"), title: title.into(), kind: kind.into(), kind_label: kind.into(), ins: ins.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let m = |title: &str, kind: &str, ins: &[&str]| ModDef { refer: format!("{kind}.{title}@1"), title: title.into(), kind: kind.into(), kind_label: kind.into(), ins: ins.iter().map(|s| s.to_string()).collect(), in_types: ins.iter().map(|s| port_type(s).to_string()).collect(), ..Default::default() };
         let pal = Palette { modules: vec![m("calendar", "confirm", &["signal"]), m("stop_ladder", "entry", &["signal", "stop"]), m("breakeven", "exit", &["position"])], ..Default::default() };
-        let mut q = Quick { port: "signal".into(), ..Default::default() };
+        let mut q = Quick { port: "signal".into(), ty: "signal".into(), ..Default::default() };
         assert_eq!(q.candidates(&pal).iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["calendar", "stop_ladder"]);
         q.query = "LADDER".into();
         assert_eq!(q.candidates(&pal).len(), 1);
-        q.port = "regime".into();
+        q.ty = "regime".into();
         q.query.clear();
         assert!(q.candidates(&pal).is_empty());
         // 特征输入端口以参数名为名，按类型匹配
         let pal = Palette { modules: vec![m("vol_unit", "sizing", &["n_feature"]), m("threshold", "setup", &["feature"])], ..Default::default() };
-        q.port = "feature".into();
+        q.ty = "feature".into();
         assert_eq!(q.candidates(&pal).len(), 2);
+        // 数值节点：端口叫 a / b，类型由模块库给
+        let v = ModDef { ins: vec!["a".into(), "b".into()], in_types: vec!["flag".into(), "series".into()], outs: vec!["out".into()], out_types: vec!["flag".into()], ..Default::default() };
+        assert_eq!((v.in_type("a"), v.in_type("b"), v.out_type("out")), ("flag", "series", "flag"));
+        assert_eq!(v.first_in("series").map(String::as_str), Some("b"));
         assert_eq!((port_type("n_feature"), port_type("feature"), port_type("signal")), ("feature", "feature", "signal"));
     }
 

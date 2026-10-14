@@ -39,7 +39,7 @@ const PORT_HIT: f32 = 10.0;
 /// 高亮从最亮到熄灭的秒数（墙上时间）
 const GLOW_SECS: f32 = 2.5;
 
-const PORT_TYPES: [&str; 8] = ["signal", "regime", "scale", "stop", "sizing", "intent", "position", "feature"];
+const PORT_TYPES: [&str; 10] = ["signal", "regime", "scale", "stop", "sizing", "intent", "position", "feature", "series", "flag"];
 
 fn port_label(p: &str) -> &str {
     // 特征输入端口：显示参数名里有区分度的那一段（n_feature → n）
@@ -55,12 +55,28 @@ fn port_label(p: &str) -> &str {
         "intent" => "意图",
         "position" => "持仓",
         "feature" => "特征",
-        _ => "?",
+        "out" => "",
+        "long" => "做多",
+        "short" => "做空",
+        "price" => "价位",
+        "allow" => "放行",
+        "when" => "平仓",
+        _ => p,
     }
 }
 
-fn port_color(p: &str) -> Color {
-    pal::series(PORT_TYPES.iter().position(|x| *x == sf::port_type(p)).unwrap_or(0))
+/// 按端口**类型**上色。
+/// 端口类型的说法（弹窗标题用）。
+fn type_label(ty: &str) -> &str {
+    match ty {
+        "series" => "数",
+        "flag" => "条件",
+        other => port_label(other),
+    }
+}
+
+fn port_color(ty: &str) -> Color {
+    pal::series(PORT_TYPES.iter().position(|x| *x == ty).unwrap_or(0))
 }
 
 /// 运行时一个事件用什么颜色点亮节点。
@@ -102,6 +118,8 @@ struct Geom {
     h: f32,
     ins: Vec<String>,
     outs: Vec<String>,
+    in_types: Vec<String>,
+    out_types: Vec<String>,
     kind_label: String,
     title: String,
     sub: String,
@@ -110,13 +128,17 @@ struct Geom {
 impl Geom {
     fn of(n: &Node, def: Option<&ModDef>) -> Geom {
         let (ins, outs) = def.map(|d| (d.ins.clone(), d.outs.clone())).unwrap_or_default();
+        let in_types = ins.iter().map(|p| def.map_or(sf::port_type(p), |d| d.in_type(p)).to_string()).collect();
+        let out_types = outs.iter().map(|p| def.map_or(sf::port_type(p), |d| d.out_type(p)).to_string()).collect();
+        // 数值节点把最要紧的参数直接写在底栏上（N、常数的值、特征名、表达式）
+        let brief = ["n", "value", "name", "tf", "expr"].iter().filter_map(|k| n.params.get(*k).map(|v| value_text(v))).collect::<Vec<_>>().join(" · ");
         let rows = ins.len().max(outs.len()).max(1) as f32;
         let sub = n
             .lane
             .as_ref()
             .and_then(|l| l.get("name").and_then(|v| v.as_str()).map(|s| format!("线 {s}")))
             .or_else(|| n.name.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|| if def.is_some_and(|d| d.kind == "value") { brief.chars().take(22).collect() } else { String::new() });
         Geom {
             id: n.id.clone(),
             x: n.x,
@@ -124,6 +146,8 @@ impl Geom {
             h: HEAD_H + rows * ROW_H + FOOT_H,
             ins,
             outs,
+            in_types,
+            out_types,
             kind_label: def.map(|d| d.kind_label.clone()).unwrap_or_else(|| "未知模块".into()),
             title: def.map(|d| d.title.clone()).unwrap_or_else(|| n.module.clone()),
             sub,
@@ -177,6 +201,8 @@ enum Drag {
     Wire {
         from: String,
         port: String,
+        /// 端口类型（决定能接到哪）
+        ty: String,
         at: Point,
     },
     Pan {
@@ -210,22 +236,22 @@ impl FlowCanvas {
         self.geoms.iter().find(|g| g.id == id)
     }
 
-    fn out_at(&self, p: Point) -> Option<(String, String, Point)> {
+    fn out_at(&self, p: Point) -> Option<(String, String, String, Point)> {
         for g in self.geoms.iter().rev() {
             for (k, port) in g.outs.iter().enumerate() {
                 if near(p, g.out_pos(k), PORT_HIT / self.zoom.max(0.5)) {
-                    return Some((g.id.clone(), port.clone(), g.out_pos(k)));
+                    return Some((g.id.clone(), port.clone(), g.out_types[k].clone(), g.out_pos(k)));
                 }
             }
         }
         None
     }
 
-    fn in_at(&self, p: Point) -> Option<(String, String)> {
+    fn in_at(&self, p: Point) -> Option<(String, String, String)> {
         for g in self.geoms.iter().rev() {
             for (k, port) in g.ins.iter().enumerate() {
                 if near(p, g.in_pos(k), PORT_HIT / self.zoom.max(0.5)) {
-                    return Some((g.id.clone(), port.clone()));
+                    return Some((g.id.clone(), port.clone(), g.in_types[k].clone()));
                 }
             }
         }
@@ -243,14 +269,42 @@ impl FlowCanvas {
         (age < GLOW_SECS).then(|| (1.0 - age / GLOW_SECS, live_color(&l.kind)))
     }
 
+    /// 一个端口的记号：条件（flag）画菱形，其余画圆——线型与端口形状区分语义（docs/45 §3.1）。
+    fn port_mark(&self, frame: &mut Frame, at: Point, ty: &str) {
+        let (c, r) = (self.to_screen(at), PORT_R * self.zoom);
+        if ty == "flag" {
+            let r = r * 1.25;
+            let d = Path::new(|p| {
+                p.move_to(Point::new(c.x, c.y - r));
+                p.line_to(Point::new(c.x + r, c.y));
+                p.line_to(Point::new(c.x, c.y + r));
+                p.line_to(Point::new(c.x - r, c.y));
+                p.close();
+            });
+            frame.fill(&d, port_color(ty));
+        } else {
+            frame.fill(&Path::circle(c, r), port_color(ty));
+        }
+    }
+
     fn wire(&self, frame: &mut Frame, a: Point, b: Point, color: Color, width: f32) {
+        self.wire_of(frame, a, b, color, width, "");
+    }
+
+    /// 数值线细、条件线虚、决策层的线照旧。
+    fn wire_of(&self, frame: &mut Frame, a: Point, b: Point, color: Color, width: f32, ty: &str) {
         let (a, b) = (self.to_screen(a), self.to_screen(b));
         let bend = ((b.x - a.x).abs() * 0.5).max(30.0 * self.zoom);
         let path = Path::new(|p| {
             p.move_to(a);
             p.bezier_curve_to(Point::new(a.x + bend, a.y), Point::new(b.x - bend, b.y), b);
         });
-        frame.stroke(&path, Stroke::default().with_width(width).with_color(color));
+        let stroke = Stroke::default().with_color(color);
+        match ty {
+            "flag" => frame.stroke(&path, Stroke { line_dash: canvas::LineDash { segments: &[6.0, 4.0], offset: 0 }, ..stroke.with_width(width) }),
+            "series" => frame.stroke(&path, stroke.with_width((width - 0.5).max(1.0))),
+            _ => frame.stroke(&path, stroke.with_width(width)),
+        }
     }
 
     fn label(&self, frame: &mut Frame, s: impl Into<String>, at: Point, color: Color, size: f32) {
@@ -291,12 +345,12 @@ impl FlowCanvas {
         // 端口
         for (k, port) in g.ins.iter().enumerate() {
             let p = g.in_pos(k);
-            frame.fill(&Path::circle(self.to_screen(p), PORT_R * z), port_color(port));
+            self.port_mark(frame, p, &g.in_types[k]);
             self.label(frame, port_label(port), Point::new(p.x + 8.0, p.y - 6.5), pal::txt(), small);
         }
         for (k, port) in g.outs.iter().enumerate() {
             let p = g.out_pos(k);
-            frame.fill(&Path::circle(self.to_screen(p), PORT_R * z), port_color(port));
+            self.port_mark(frame, p, &g.out_types[k]);
             self.label(frame, port_label(port), Point::new(p.x - 8.0 - 12.0 * port_label(port).chars().count() as f32, p.y - 6.5), pal::txt(), small);
         }
         // 底栏：线名 / 状态名；运行时换成最近一次决策与计数
@@ -374,11 +428,11 @@ impl canvas::Program<FlMsg> for FlowCanvas {
                     return Some(canvas::Action::capture());
                 }
                 let p = self.to_world(screen);
-                if let Some((from, port, at)) = self.out_at(p) {
-                    state.drag = Drag::Wire { from, port, at };
+                if let Some((from, port, ty, at)) = self.out_at(p) {
+                    state.drag = Drag::Wire { from, port, ty, at };
                     return Some(canvas::Action::request_redraw().and_capture());
                 }
-                if let Some((to, port)) = self.in_at(p) {
+                if let Some((to, port, _)) = self.in_at(p) {
                     // 点一个已经接了线的输入端口 = 拔线
                     if self.edges.iter().any(|e| e.to == to && e.inp == port) {
                         return Some(canvas::Action::publish(FlMsg::Disconnect(to, port)).and_capture());
@@ -427,16 +481,19 @@ impl canvas::Program<FlMsg> for FlowCanvas {
             }
             Mouse(mouse::Event::ButtonReleased(mouse::Button::Left | mouse::Button::Middle)) => {
                 match std::mem::take(&mut state.drag) {
-                    Drag::Wire { from, port, at } => {
+                    Drag::Wire { from, port, ty, at } => {
                         // 松手在同类型的输入端口上，或者直接松在一个有这种输入的节点身上
-                        let same = |p: &String| sf::port_type(p) == sf::port_type(&port);
-                        let target = self.in_at(at).filter(|(_, inp)| same(inp)).or_else(|| self.node_at(at).and_then(|g| g.ins.iter().find(|p| same(p)).map(|p| (g.id.clone(), p.clone()))));
+                        let target = self
+                            .in_at(at)
+                            .filter(|(_, _, t)| *t == ty)
+                            .map(|(id, inp, _)| (id, inp))
+                            .or_else(|| self.node_at(at).and_then(|g| g.in_types.iter().position(|t| *t == ty).map(|k| (g.id.clone(), g.ins[k].clone()))));
                         match target {
                             Some((to, inp)) if to != from => Some(canvas::Action::publish(FlMsg::Connect(Edge { from, out: port, to, inp })).and_capture()),
                             Some(_) => Some(canvas::Action::request_redraw()),
                             // 松在别的节点上（类型不对）：什么也不做；松在空白处：问「接什么」
                             None if self.node_at(at).is_some() => Some(canvas::Action::request_redraw()),
-                            None => Some(canvas::Action::publish(FlMsg::QuickOpen(Quick { from, port, x: at.x, y: at.y - HEAD_H, query: String::new() })).and_capture()),
+                            None => Some(canvas::Action::publish(FlMsg::QuickOpen(Quick { from, port, ty, x: at.x, y: at.y - HEAD_H, query: String::new() })).and_capture()),
                         }
                     }
                     Drag::Box { start, at } => {
@@ -465,26 +522,27 @@ impl canvas::Program<FlMsg> for FlowCanvas {
             let (Some(a), Some(b)) = (self.geom(&e.from), self.geom(&e.to)) else { continue };
             let (Some(ka), Some(kb)) = (a.outs.iter().position(|p| *p == e.out), b.ins.iter().position(|p| *p == e.inp)) else { continue };
             // 上游节点刚做出决策时，这根线跟着亮一下
+            let ty = a.out_types[ka].as_str();
             let (color, width) = match self.glow(&e.from) {
-                Some((k, c)) => (pal::mix(pal::alpha(port_color(&e.out), 0.75), c, k), 1.5 + 2.0 * k),
-                None => (pal::alpha(port_color(&e.out), 0.75), 1.5),
+                Some((k, c)) => (pal::mix(pal::alpha(port_color(ty), 0.75), c, k), 1.5 + 2.0 * k),
+                None => (pal::alpha(port_color(ty), 0.75), 1.5),
             };
-            self.wire(&mut frame, a.out_pos(ka), b.in_pos(kb), color, width);
+            self.wire_of(&mut frame, a.out_pos(ka), b.in_pos(kb), color, width, ty);
         }
         for g in &self.geoms {
             self.draw_node(&mut frame, g);
         }
         match &state.drag {
-            Drag::Wire { from, port, at } => {
+            Drag::Wire { from, port, ty, at } => {
                 if let Some(a) = self.geom(from)
                     && let Some(k) = a.outs.iter().position(|p| p == port)
                 {
-                    self.wire(&mut frame, a.out_pos(k), *at, port_color(port), 2.0);
+                    self.wire(&mut frame, a.out_pos(k), *at, port_color(ty), 2.0);
                 }
                 // 拖线时把能接的输入端口圈出来
                 for g in &self.geoms {
-                    for (k, _) in g.ins.iter().enumerate().filter(|(_, p)| sf::port_type(p) == sf::port_type(port)) {
-                        frame.stroke(&Path::circle(self.to_screen(g.in_pos(k)), (PORT_R + 3.0) * self.zoom), Stroke::default().with_width(1.5).with_color(port_color(port)));
+                    for (k, _) in g.in_types.iter().enumerate().filter(|(_, t)| *t == ty) {
+                        frame.stroke(&Path::circle(self.to_screen(g.in_pos(k)), (PORT_R + 3.0) * self.zoom), Stroke::default().with_width(1.5).with_color(port_color(ty)));
                     }
                 }
             }
@@ -694,6 +752,9 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
             })
             .color(pal::dim()));
         }
+        for wmsg in &v.warnings {
+            col = col.push(t::caption(format!("提醒：{wmsg}")).color(pal::warn()));
+        }
         for i in &v.issues {
             let line = t::caption(i.msg.clone()).color(pal::bad());
             col = col.push(if i.node.is_empty() {
@@ -785,7 +846,7 @@ fn quick_popup<'a>(v: &View, q: &Quick) -> Element<'a, FlMsg> {
         input = input.on_submit(FlMsg::QuickPick(r));
     }
     let mut col = column![
-        row![t::caption(format!("接在「{}」后面", port_label(&q.port))).color(port_color(&q.port)), Space::new().width(Length::Fill), w::btn("✕", Kind::Ghost, Some(FlMsg::QuickClose))].align_y(Alignment::Center),
+        row![t::caption(format!("接在「{}」后面", type_label(&q.ty))).color(port_color(&q.ty)), Space::new().width(Length::Fill), w::btn("✕", Kind::Ghost, Some(FlMsg::QuickClose))].align_y(Alignment::Center),
         input
     ]
     .spacing(space(1));
