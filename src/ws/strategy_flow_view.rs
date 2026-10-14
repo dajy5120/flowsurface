@@ -628,6 +628,19 @@ fn param_field<'a>(v: &View, n: &Node, pd: &ParamDef) -> Element<'a, FlMsg> {
     labelled(label, control, note)
 }
 
+/// 表单里的一项（运行配置 / 强制风控）：留空 = 用缺省值，缺省值显示成提示。
+fn config_field<'a>(v: &View, section: &'static str, root: &Value, pd: &ParamDef) -> Element<'a, FlMsg> {
+    let name = pd.name.clone();
+    let set = sf::get_path(root, &pd.name);
+    if pd.control() == Control::Choice {
+        let names: Vec<String> = pd.choices.clone().unwrap_or_default().iter().map(value_text).collect();
+        let cur = set.or(Some(&pd.default)).map(value_text).filter(|s| names.contains(s));
+        return labelled(pd.name.clone(), pick_list(names, cur, move |s: String| FlMsg::Config(section.to_string(), name.clone(), s)).text_size(t::s_small()).into(), pd.description.clone());
+    }
+    let shown = v.form.get(&form_key(section, &pd.name)).cloned().unwrap_or_else(|| set.map(value_text).unwrap_or_default());
+    field(pd.name.clone(), &value_text(&pd.default), shown, move |s| FlMsg::Config(section.to_string(), name.clone(), s), pd.description.clone())
+}
+
 /// 检查器「属性」页：选中一个节点 = 它的参数；选中多个 = 批量操作；没选 = 这张图与问题清单。
 pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
     let v = sf::view();
@@ -657,6 +670,21 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
             None => "还没保存".to_string(),
         })
         .color(pal::dim()));
+        if let Some(p) = &v.palette {
+            // 表单（docs/45 §3.5）：运行配置与账户底线不是节点
+            col = col.push(w::section("运行配置"));
+            for pd in p.backtest_params.iter() {
+                col = col.push(config_field(v, "backtest", &v.graph.backtest, pd));
+            }
+            for pd in p.settings_params.iter() {
+                col = col.push(config_field(v, "settings", &v.graph.settings, pd));
+            }
+            col = col.push(w::section("强制风控（账户底线）"));
+            col = col.push(t::metadata("不在图上，图怎么连都绕不过它；只能拒绝或缩量。留空 = 用缺省的底线，不能关掉。").color(pal::dim()));
+            for pd in p.envelope_params.iter() {
+                col = col.push(config_field(v, "envelope", &v.graph.envelope, pd));
+            }
+        }
         col = col.push(w::section(format!("问题（{}）", v.issues.len())));
         if v.issues.is_empty() {
             col = col.push(t::metadata(match v.checked {
@@ -852,7 +880,17 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
     ]
     .spacing(space(2))
     .height(Length::Fill);
-    let mut col = column![w::panel_header(title, None, vec![]), toolbar(&v), body].spacing(space(2));
+    let mut col = column![w::panel_header(title, None, vec![]), toolbar(&v)].spacing(space(2));
+    if let Some((what, reason, n)) = &v.envelope_hit {
+        // 强制风控层出手了：它不是节点，所以不是哪个节点亮，而是这里一条横幅
+        let label = match what.as_str() {
+            "halt" => "强制风控：已停手",
+            "reject" => "强制风控：拒绝了新单",
+            _ => "强制风控：缩了量",
+        };
+        col = col.push(row![w::badge(label, Tone::Danger), t::caption(format!("{reason}（这次运行共 {n} 次）")).color(pal::bad())].spacing(space(2)).align_y(Alignment::Center));
+    }
+    col = col.push(body);
     if !v.msg.is_empty() {
         col = col.push(t::metadata(v.msg.clone()).color(if v.msg.contains("失败") || v.msg.contains("问题") || v.msg.contains("起不来") { pal::bad() } else { pal::dim() }));
     }

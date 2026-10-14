@@ -90,6 +90,12 @@ pub struct ModDef {
 pub struct Palette {
     pub modules: Vec<ModDef>,
     pub lane_params: Vec<ParamDef>,
+    /// 强制风控层 `[envelope]` 的各项（docs/45 §3.6）：账户底线，不在图上
+    pub envelope_params: Vec<ParamDef>,
+    /// 运行配置 `[backtest]` 里画布上能改的项
+    pub backtest_params: Vec<ParamDef>,
+    /// `[workflow]` 里画布上能改的运行设置（采样栅格）
+    pub settings_params: Vec<ParamDef>,
 }
 
 impl Palette {
@@ -135,6 +141,8 @@ pub struct Graph {
     pub version: String,
     pub strategy: Value,
     pub backtest: Value,
+    /// 强制风控层：没写的项用缺省的底线
+    pub envelope: Value,
     pub settings: Value,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
@@ -353,6 +361,8 @@ pub enum FlMsg {
     TableEdit(String, String, usize, usize, String),
     TableAdd(String, String),
     TableDel(String, String, usize),
+    /// 表单（docs/45 §3.5）：(段 backtest / envelope / settings, 项, 文字)。不是节点——运行配置与账户底线
+    Config(String, String, String),
     /// 从一次运行的结果目录打开当时的图
     OpenSnapshot(String),
     /// 「模块库」页签里的操作，转给策略中心的模块注册表
@@ -405,6 +415,8 @@ struct St {
     running: bool,
     live: HashMap<String, NodeLive>,
     live_n: usize,
+    /// 这次运行里强制风控层最近一次出手：(拒绝 / 缩量 / 停手, 原因, 共几次)
+    envelope_hit: Option<(String, String, u32)>,
     /// 换一次运行加一：读轨迹的线程发现自己过时了就退出
     generation: u64,
 }
@@ -443,6 +455,7 @@ impl Default for St {
             running: false,
             live: HashMap::new(),
             live_n: 0,
+            envelope_hit: None,
             generation: 0,
         }
     }
@@ -487,6 +500,7 @@ pub struct View {
     pub running: bool,
     pub live: HashMap<String, NodeLive>,
     pub live_n: usize,
+    pub envelope_hit: Option<(String, String, u32)>,
 }
 
 pub fn view() -> View {
@@ -519,6 +533,7 @@ pub fn view() -> View {
         running: g.running,
         live: g.live.clone(),
         live_n: g.live_n,
+        envelope_hit: g.envelope_hit.clone(),
     })
     .expect("策略画布状态锁中毒")
 }
@@ -884,6 +899,7 @@ fn run_async() {
                     g.run_id = run_id.clone();
                     g.live.clear();
                     g.live_n = 0;
+                    g.envelope_hit = None;
                     g.generation += 1;
                     g.msg = format!("运行中：{run_id}（{start} → {end}）");
                     g.generation
@@ -988,6 +1004,14 @@ fn follow_trace(run_id: String, generation: u64) {
                     let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
                     let (lane, module, kind, reason) = (s("lane"), s("module"), s("kind"), s("reason"));
                     g.live_n += 1;
+                    // 强制风控层不是节点：它出手时记在横幅上
+                    if let Some(what) = kind.strip_prefix("envelope_") {
+                        if what != "resume" {
+                            let n = g.envelope_hit.as_ref().map_or(0, |h| h.2) + 1;
+                            g.envelope_hit = Some((what.to_string(), reason.clone(), n));
+                        }
+                        continue;
+                    }
                     let Some(node) = locate(&g.whence, &lane, &module) else { continue };
                     let blocked = matches!(kind.as_str(), "veto" | "risk_reject" | "risk_resize" | "risk_halt");
                     let e = g.live.entry(node).or_insert(NodeLive { at: Instant::now(), kind: String::new(), reason: String::new(), n: 0, n_blocked: 0 });
@@ -1152,6 +1176,7 @@ fn reset_editing(g: &mut St) {
     g.quick = None;
     g.tables.clear();
     g.touched = None;
+    g.envelope_hit = None;
 }
 
 /// 撤销 / 重做之后：输入框里的原文作废（照图上的值重显），选择里去掉已经不在的节点。
@@ -1250,6 +1275,31 @@ pub fn handle(m: FlMsg) {
             });
         }
         FlMsg::Open(item) => open(item),
+        FlMsg::Config(section, name, text) => {
+            with(|g| {
+                let ty = g
+                    .palette
+                    .as_ref()
+                    .and_then(|p| match section.as_str() {
+                        "backtest" => Some(&p.backtest_params),
+                        "envelope" => Some(&p.envelope_params),
+                        "settings" => Some(&p.settings_params),
+                        _ => None,
+                    })
+                    .and_then(|ps| ps.iter().find(|p| p.name == name))
+                    .map(|p| p.ty.clone())
+                    .unwrap_or_default();
+                let parsed = parse_value(&text, &ty);
+                edit(g, &format!("c.{section}.{name}"));
+                g.form.insert(form_key(&section, &name), text);
+                let slot = match section.as_str() {
+                    "backtest" => &mut g.graph.backtest,
+                    "envelope" => &mut g.graph.envelope,
+                    _ => &mut g.graph.settings,
+                };
+                set_path(slot, &name, parsed);
+            });
+        }
         FlMsg::OpenSnapshot(dir) => {
             let path = std::path::Path::new(&dir).join("graph.json");
             if path.exists() {
@@ -1584,6 +1634,36 @@ pub fn handle(m: FlMsg) {
     }
 }
 
+/// 在一个表里按「a.b」的路径写值（None = 删掉；删空了的子表一并删掉）。表单里 `session.start` 这类项用。
+pub fn set_path(root: &mut Value, path: &str, value: Option<Value>) {
+    if !root.is_object() {
+        *root = Value::Object(Map::new());
+    }
+    let Some(map) = root.as_object_mut() else { return };
+    match path.split_once('.') {
+        None => match value {
+            Some(v) => {
+                map.insert(path.to_string(), v);
+            }
+            None => {
+                map.remove(path);
+            }
+        },
+        Some((head, rest)) => {
+            let child = map.entry(head.to_string()).or_insert_with(|| Value::Object(Map::new()));
+            set_path(child, rest, value);
+            if child.as_object().is_some_and(Map::is_empty) {
+                map.remove(head);
+            }
+        }
+    }
+}
+
+/// 按「a.b」的路径读值。
+pub fn get_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.').try_fold(root, |v, k| v.get(k))
+}
+
 fn set_table(g: &mut St, id: &str, name: &str, rows: Vec<[String; 3]>, tag: &str) {
     edit(g, tag);
     let value = rows_table(&rows);
@@ -1726,6 +1806,20 @@ mod tests {
         q.port = "feature".into();
         assert_eq!(q.candidates(&pal).len(), 2);
         assert_eq!((port_type("n_feature"), port_type("feature"), port_type("signal")), ("feature", "feature", "signal"));
+    }
+
+    #[test]
+    fn config_form_writes_nested_paths_and_cleans_up_empty_tables() {
+        let mut v = Value::Null;
+        set_path(&mut v, "source", Some("databento".into()));
+        set_path(&mut v, "session.start", Some("13:30".into()));
+        set_path(&mut v, "session.minutes", Some(30.into()));
+        assert_eq!(v, serde_json::json!({"source": "databento", "session": {"start": "13:30", "minutes": 30}}));
+        assert_eq!(get_path(&v, "session.minutes"), Some(&Value::from(30)));
+        assert_eq!(get_path(&v, "session.nope"), None);
+        set_path(&mut v, "session.start", None);
+        set_path(&mut v, "session.minutes", None); // 子表删空了就整个去掉，不留一个空的 session = {}
+        assert_eq!(v, serde_json::json!({"source": "databento"}));
     }
 
     #[test]
