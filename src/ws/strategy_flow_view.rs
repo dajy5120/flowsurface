@@ -1,21 +1,27 @@
-//! 策略画布视图（docs/44 §21）：工具条 ∣ 模块库 ∣ 画布 ∣ 属性。
+//! 策略画布视图（docs/44 §21，docs/45 C0）：工具条 ∣ 模块库 ∣ 画布；属性在全局检查器里（docs/42）。
 //!
 //! 只读 [`super::strategy_flow::view`] 的快照，不做 IO。画布每帧重画（运行时的高亮要随时间淡出）。
 //!
 //! 画布上的操作：
-//! - 点左边模块库里的模块 = 加一个节点；拖节点 = 挪位置；点节点 = 选中（右边改参数、换模块、删除）；
-//! - 从节点**右侧**的输出端口拖到另一个节点**左侧**的同类型输入端口 = 连线；
-//!   点一个已经接了线的输入端口 = 拔掉那根线；
-//! - 拖空白处 = 平移；滚轮 = 缩放。
+//! - 点左边模块库里的模块 = 加一个节点；拖节点 = 挪位置（选中了几个就一起挪）；
+//! - 点节点 = 选中；Ctrl / Shift 点 = 加选 / 减选；Shift 拖空白 = 框选；
+//! - 从节点**右侧**的输出端口拖到另一个节点**左侧**的同类型输入端口（或直接拖到那个节点身上）= 连线；
+//!   拖到空白处松手 = 弹出「接什么」，只列能接的模块；点一个已经接了线的输入端口 = 拔线；
+//! - 拖空白处 / 按住中键拖 = 平移；滚轮 = 缩放；
+//! - 键盘（最后一次点的是画布时才生效，免得在输入框里打字误删节点）：
+//!   Delete 删除 · Ctrl Z / Ctrl Shift Z 撤销重做 · Ctrl C / X / V 复制剪切粘贴 · Ctrl D 原地再来一份 ·
+//!   Ctrl A 全选 · Esc 取消选择 · F 看全。
 
 use std::collections::HashMap;
 use std::time::Instant;
 
+use iced::keyboard::{self, Key, key::Named};
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, Text};
-use iced::widget::{Space, button, column, container, pick_list, row, text_input};
+use iced::widget::{Space, button, checkbox, column, container, opaque, pick_list, row, stack, text_input};
 use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
+use serde_json::Value;
 
-use super::strategy_flow::{self as sf, EXEC, Edge, FlMsg, ModDef, Node, NodeLive, Palette, View, form_key, value_text};
+use super::strategy_flow::{self as sf, Control, EXEC, Edge, FlMsg, ModDef, Node, NodeLive, Palette, ParamDef, Quick, View, form_key, value_text};
 use crate::ui::metrics::space;
 use crate::ui::pal;
 use crate::ui::text as t;
@@ -130,6 +136,12 @@ impl Geom {
     fn contains(&self, p: Point) -> bool {
         p.x >= self.x && p.x <= self.x + NODE_W && p.y >= self.y && p.y <= self.y + self.h
     }
+
+    /// 与框选矩形（任意两个对角点）有没有交叠。
+    fn touches(&self, a: Point, b: Point) -> bool {
+        let (x0, x1, y0, y1) = (a.x.min(b.x), a.x.max(b.x), a.y.min(b.y), a.y.max(b.y));
+        self.x <= x1 && self.x + NODE_W >= x0 && self.y <= y1 && self.y + self.h >= y0
+    }
 }
 
 fn near(a: Point, b: Point, r: f32) -> bool {
@@ -141,7 +153,7 @@ fn near(a: Point, b: Point, r: f32) -> bool {
 struct FlowCanvas {
     geoms: Vec<Geom>,
     edges: Vec<Edge>,
-    selected: Option<String>,
+    selected: Vec<String>,
     bad: HashMap<String, usize>,
     live: HashMap<String, NodeLive>,
     pan: (f32, f32),
@@ -153,10 +165,9 @@ struct FlowCanvas {
 enum Drag {
     #[default]
     None,
-    Node {
-        id: String,
-        dx: f32,
-        dy: f32,
+    /// 拖着选中的节点；`last` 是上一次的世界坐标
+    Nodes {
+        last: Point,
     },
     Wire {
         from: String,
@@ -166,6 +177,19 @@ enum Drag {
     Pan {
         last: Point,
     },
+    /// 框选（世界坐标）；`add` = 加到现有选择上
+    Box {
+        start: Point,
+        at: Point,
+    },
+}
+
+#[derive(Default)]
+struct CanvasState {
+    drag: Drag,
+    mods: keyboard::Modifiers,
+    /// 最后一次按下鼠标是在画布里：键盘快捷键只在这时生效
+    armed: bool,
 }
 
 impl FlowCanvas {
@@ -242,7 +266,7 @@ impl FlowCanvas {
         let head = Path::rounded_rectangle(tl, Size::new(NODE_W * z, HEAD_H * z), (5.0 * z).into());
         frame.fill(&head, pal::band());
         // 边框：出错 > 运行中的高亮 > 选中 > 平常
-        let selected = self.selected.as_deref() == Some(g.id.as_str());
+        let selected = self.selected.contains(&g.id);
         let (color, width) = if self.bad.contains_key(&g.id) {
             (pal::bad(), 2.0)
         } else if let Some((k, c)) = glow {
@@ -295,17 +319,58 @@ impl FlowCanvas {
     }
 }
 
-impl canvas::Program<FlMsg> for FlowCanvas {
-    type State = Drag;
+impl FlowCanvas {
+    fn key(&self, state: &CanvasState, key: &Key, mods: keyboard::Modifiers, cursor_world: Option<Point>) -> Option<FlMsg> {
+        let ctrl = mods.command() || mods.control();
+        match key.as_ref() {
+            Key::Named(Named::Delete) => Some(FlMsg::DeleteSelected),
+            Key::Named(Named::Escape) => Some(FlMsg::Select(None)),
+            Key::Character(c) => match (c.to_lowercase().as_str(), ctrl, mods.shift()) {
+                ("z", true, false) => Some(FlMsg::Undo),
+                ("z", true, true) | ("y", true, _) => Some(FlMsg::Redo),
+                ("c", true, _) => Some(FlMsg::Copy),
+                ("x", true, _) => Some(FlMsg::Cut),
+                ("v", true, _) => Some(FlMsg::Paste(cursor_world.map(|p| (p.x, p.y)))),
+                ("d", true, _) => Some(FlMsg::Duplicate),
+                ("a", true, _) => Some(FlMsg::SelectAll),
+                ("f", false, false) if matches!(state.drag, Drag::None) => Some(FlMsg::ResetView),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
 
-    fn update(&self, state: &mut Drag, event: &iced::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<FlMsg>> {
-        use iced::Event::Mouse;
+impl canvas::Program<FlMsg> for FlowCanvas {
+    type State = CanvasState;
+
+    fn update(&self, state: &mut CanvasState, event: &iced::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<FlMsg>> {
+        use iced::Event::{Keyboard, Mouse};
         match event {
-            Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let screen = cursor.position_in(bounds)?;
+            Keyboard(keyboard::Event::ModifiersChanged(m)) => {
+                state.mods = *m;
+                None
+            }
+            Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                if !state.armed {
+                    return None;
+                }
+                let at = cursor.position_in(bounds).map(|p| self.to_world(p));
+                self.key(state, key, *modifiers, at).map(|m| canvas::Action::publish(m).and_capture())
+            }
+            Mouse(mouse::Event::ButtonPressed(btn @ (mouse::Button::Left | mouse::Button::Middle))) => {
+                let Some(screen) = cursor.position_in(bounds) else {
+                    state.armed = false;
+                    return None;
+                };
+                state.armed = true;
+                if *btn == mouse::Button::Middle {
+                    state.drag = Drag::Pan { last: screen };
+                    return Some(canvas::Action::capture());
+                }
                 let p = self.to_world(screen);
                 if let Some((from, port, at)) = self.out_at(p) {
-                    *state = Drag::Wire { from, port, at };
+                    state.drag = Drag::Wire { from, port, at };
                     return Some(canvas::Action::request_redraw().and_capture());
                 }
                 if let Some((to, port)) = self.in_at(p) {
@@ -315,21 +380,35 @@ impl canvas::Program<FlMsg> for FlowCanvas {
                     }
                     return Some(canvas::Action::capture());
                 }
+                let multi = state.mods.shift() || state.mods.control() || state.mods.command();
                 if let Some(g) = self.node_at(p) {
-                    *state = Drag::Node { id: g.id.clone(), dx: p.x - g.x, dy: p.y - g.y };
+                    if multi {
+                        return Some(canvas::Action::publish(FlMsg::SelectToggle(g.id.clone())).and_capture());
+                    }
+                    state.drag = Drag::Nodes { last: p };
+                    // 点的是已选中的一群里的一个：保持选择，好一起拖
+                    if self.selected.contains(&g.id) {
+                        return Some(canvas::Action::capture());
+                    }
                     return Some(canvas::Action::publish(FlMsg::Select(Some(g.id.clone()))).and_capture());
                 }
-                *state = Drag::Pan { last: screen };
+                if state.mods.shift() {
+                    state.drag = Drag::Box { start: p, at: p };
+                    return Some(canvas::Action::request_redraw().and_capture());
+                }
+                state.drag = Drag::Pan { last: screen };
                 Some(canvas::Action::publish(FlMsg::Select(None)).and_capture())
             }
             Mouse(mouse::Event::CursorMoved { .. }) => {
                 let screen = cursor.position_in(bounds)?;
-                match state {
-                    Drag::Node { id, dx, dy } => {
+                match &mut state.drag {
+                    Drag::Nodes { last } => {
                         let p = self.to_world(screen);
-                        Some(canvas::Action::publish(FlMsg::MoveNode(id.clone(), p.x - *dx, p.y - *dy)).and_capture())
+                        let (dx, dy) = (p.x - last.x, p.y - last.y);
+                        *last = p;
+                        Some(canvas::Action::publish(FlMsg::MoveSelected(dx, dy)).and_capture())
                     }
-                    Drag::Wire { at, .. } => {
+                    Drag::Wire { at, .. } | Drag::Box { at, .. } => {
                         *at = self.to_world(screen);
                         Some(canvas::Action::request_redraw().and_capture())
                     }
@@ -341,19 +420,25 @@ impl canvas::Program<FlMsg> for FlowCanvas {
                     Drag::None => None,
                 }
             }
-            Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                let done = std::mem::take(state);
-                if let Drag::Wire { from, port, at } = done {
-                    // 松手在同类型的输入端口上才算连上
-                    if let Some((to, inp)) = self.in_at(at)
-                        && inp == port
-                        && to != from
-                    {
-                        return Some(canvas::Action::publish(FlMsg::Connect(Edge { from, out: port, to, inp })).and_capture());
+            Mouse(mouse::Event::ButtonReleased(mouse::Button::Left | mouse::Button::Middle)) => {
+                match std::mem::take(&mut state.drag) {
+                    Drag::Wire { from, port, at } => {
+                        // 松手在同类型的输入端口上，或者直接松在一个有这种输入的节点身上
+                        let target = self.in_at(at).filter(|(_, inp)| *inp == port).or_else(|| self.node_at(at).filter(|g| g.ins.contains(&port)).map(|g| (g.id.clone(), port.clone())));
+                        match target {
+                            Some((to, inp)) if to != from => Some(canvas::Action::publish(FlMsg::Connect(Edge { from, out: port, to, inp })).and_capture()),
+                            Some(_) => Some(canvas::Action::request_redraw()),
+                            // 松在别的节点上（类型不对）：什么也不做；松在空白处：问「接什么」
+                            None if self.node_at(at).is_some() => Some(canvas::Action::request_redraw()),
+                            None => Some(canvas::Action::publish(FlMsg::QuickOpen(Quick { from, port, x: at.x, y: at.y - HEAD_H, query: String::new() })).and_capture()),
+                        }
                     }
-                    return Some(canvas::Action::request_redraw());
+                    Drag::Box { start, at } => {
+                        let ids = self.geoms.iter().filter(|g| g.touches(start, at)).map(|g| g.id.clone()).collect();
+                        Some(canvas::Action::publish(FlMsg::SelectBox(ids, state.mods.control() || state.mods.command())).and_capture())
+                    }
+                    _ => None,
                 }
-                None
             }
             Mouse(mouse::Event::WheelScrolled { delta }) => {
                 cursor.position_in(bounds)?;
@@ -367,7 +452,7 @@ impl canvas::Program<FlMsg> for FlowCanvas {
         }
     }
 
-    fn draw(&self, state: &Drag, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(&self, state: &CanvasState, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         // 连线在节点下面
         for e in &self.edges {
@@ -383,15 +468,31 @@ impl canvas::Program<FlMsg> for FlowCanvas {
         for g in &self.geoms {
             self.draw_node(&mut frame, g);
         }
-        if let Drag::Wire { from, port, at } = state
-            && let Some(a) = self.geom(from)
-            && let Some(k) = a.outs.iter().position(|p| p == port)
-        {
-            self.wire(&mut frame, a.out_pos(k), *at, port_color(port), 2.0);
+        match &state.drag {
+            Drag::Wire { from, port, at } => {
+                if let Some(a) = self.geom(from)
+                    && let Some(k) = a.outs.iter().position(|p| p == port)
+                {
+                    self.wire(&mut frame, a.out_pos(k), *at, port_color(port), 2.0);
+                }
+                // 拖线时把能接的输入端口圈出来
+                for g in &self.geoms {
+                    for (k, _) in g.ins.iter().enumerate().filter(|(_, p)| *p == port) {
+                        frame.stroke(&Path::circle(self.to_screen(g.in_pos(k)), (PORT_R + 3.0) * self.zoom), Stroke::default().with_width(1.5).with_color(port_color(port)));
+                    }
+                }
+            }
+            Drag::Box { start, at } => {
+                let (a, b) = (self.to_screen(*start), self.to_screen(*at));
+                let rect = Path::rectangle(Point::new(a.x.min(b.x), a.y.min(b.y)), Size::new((a.x - b.x).abs(), (a.y - b.y).abs()));
+                frame.fill(&rect, pal::alpha(pal::accent(), 0.10));
+                frame.stroke(&rect, Stroke::default().with_width(1.0).with_color(pal::accent()));
+            }
+            _ => {}
         }
         if self.geoms.len() <= 1 {
             frame.fill_text(Text {
-                content: "从左边的模块库点模块加节点；从右侧端口拖到另一个节点左侧的同色端口连线".to_string(),
+                content: "从左边的模块库点模块加节点；从右侧端口拖到另一个节点左侧的同色端口连线，拖到空白处松手可以直接选要接的模块".to_string(),
                 position: Point::new(24.0, bounds.height / 2.0),
                 color: pal::dim(),
                 size: iced::Pixels(t::s_body()),
@@ -401,12 +502,12 @@ impl canvas::Program<FlMsg> for FlowCanvas {
         vec![frame.into_geometry()]
     }
 
-    fn mouse_interaction(&self, state: &Drag, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
+    fn mouse_interaction(&self, state: &CanvasState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
         let Some(screen) = cursor.position_in(bounds) else { return mouse::Interaction::default() };
         let p = self.to_world(screen);
-        match state {
-            Drag::Node { .. } | Drag::Pan { .. } => mouse::Interaction::Grabbing,
-            Drag::Wire { .. } => mouse::Interaction::Crosshair,
+        match &state.drag {
+            Drag::Nodes { .. } | Drag::Pan { .. } => mouse::Interaction::Grabbing,
+            Drag::Wire { .. } | Drag::Box { .. } => mouse::Interaction::Crosshair,
             Drag::None if self.out_at(p).is_some() || self.in_at(p).is_some() => mouse::Interaction::Crosshair,
             Drag::None if self.node_at(p).is_some() => mouse::Interaction::Grab,
             Drag::None => mouse::Interaction::default(),
@@ -417,12 +518,13 @@ impl canvas::Program<FlMsg> for FlowCanvas {
 // ── 左栏：模块库 ────────────────────────────────────────────────────────
 
 fn palette_col<'a>(v: &View) -> Element<'a, FlMsg> {
-    let mut col = column![w::section("模块库（点一下加到画布）")].spacing(space(1));
+    let mut col = column![w::section("模块库（点一下加到画布）"), text_input("搜模块…", &v.lib_query).on_input(FlMsg::LibQuery).size(t::s_small())].spacing(space(1));
     let Some(pal_) = &v.palette else {
         return col.push(if v.palette_loading { w::loading("模块库") } else { w::empty("没读到模块库", "点「刷新」") }).into();
     };
+    let q = v.lib_query.trim().to_lowercase();
     let mut last = String::new();
-    for m in &pal_.modules {
+    for m in pal_.modules.iter().filter(|m| q.is_empty() || m.title.to_lowercase().contains(&q) || m.kind_label.contains(&q) || m.summary.to_lowercase().contains(&q)) {
         if m.kind_label != last {
             last = m.kind_label.clone();
             col = col.push(t::metadata(last.clone()).color(pal::dim()));
@@ -437,20 +539,109 @@ fn palette_col<'a>(v: &View) -> Element<'a, FlMsg> {
     crate::ui::scroll(col).height(Length::Fill).into()
 }
 
-// ── 右栏：属性 ──────────────────────────────────────────────────────────
+// ── 属性（画进全局检查器，docs/42）──────────────────────────────────────
+//
+// 检查器很窄而且能拖宽：一律「标签在上、控件在下」，并排的东西都 wrap。
 
-fn field<'a>(label: String, hint: &str, value: String, on: impl Fn(String) -> FlMsg + 'a, note: String) -> Element<'a, FlMsg> {
-    let mut c = column![row![container(t::caption(label)).width(Length::Fixed(118.0)), text_input(hint, &value).on_input(on).size(t::s_small())].spacing(space(2)).align_y(Alignment::Center)].spacing(0);
+fn labelled<'a>(label: String, control: Element<'a, FlMsg>, note: String) -> Element<'a, FlMsg> {
+    let mut c = column![t::caption(label), control].spacing(0).width(Length::Fill);
     if !note.is_empty() {
         c = c.push(t::metadata(note).color(pal::dim()));
     }
     c.into()
 }
 
-fn inspector<'a>(v: &View) -> Element<'a, FlMsg> {
-    let mut col = column![].spacing(space(2));
-    let node = v.selected.as_ref().and_then(|id| v.graph.node(id));
-    let Some(n) = node else {
+fn field<'a>(label: String, hint: &str, value: String, on: impl Fn(String) -> FlMsg + 'a, note: String) -> Element<'a, FlMsg> {
+    labelled(label, text_input(hint, &value).on_input(on).size(t::s_small()).into(), note)
+}
+
+/// 一个参数：按它的类型给控件（docs/45 §4.3）。
+fn param_field<'a>(v: &View, n: &Node, pd: &ParamDef) -> Element<'a, FlMsg> {
+    let (id, name) = (n.id.clone(), pd.name.clone());
+    let set = n.params.get(&pd.name);
+    let label = format!("{}{}{}", if pd.optimize { "★ " } else { "" }, pd.name, if pd.required { " *" } else { "" });
+    let reset = |on: bool| -> Element<'a, FlMsg> {
+        if on { w::btn("用缺省", Kind::Ghost, Some(FlMsg::ParamValue(n.id.clone(), pd.name.clone(), None))) } else { Space::new().into() }
+    };
+    let control: Element<'a, FlMsg> = match pd.control() {
+        Control::Switch => {
+            let cur = set.or(Some(&pd.default)).and_then(Value::as_bool).unwrap_or(false);
+            row![checkbox(cur).on_toggle(move |b| FlMsg::ParamValue(id.clone(), name.clone(), Some(Value::Bool(b)))).size(t::s_body()), t::caption(if cur { "是" } else { "否" }), reset(set.is_some())]
+                .spacing(space(2))
+                .align_y(Alignment::Center)
+                .wrap()
+                .into()
+        }
+        Control::Choice => {
+            let choices = pd.choices.clone().unwrap_or_default();
+            let names: Vec<String> = choices.iter().map(value_text).collect();
+            let cur = set.or(Some(&pd.default)).map(value_text).filter(|s| names.contains(s));
+            row![
+                pick_list(names, cur, move |s: String| FlMsg::ParamValue(id.clone(), name.clone(), choices.iter().find(|c| value_text(c) == s).cloned())).text_size(t::s_small()),
+                reset(set.is_some())
+            ]
+            .spacing(space(2))
+            .align_y(Alignment::Center)
+            .wrap()
+            .into()
+        }
+        Control::Table => {
+            let rows = v.tables.get(&form_key(&n.id, &pd.name)).cloned().unwrap_or_else(|| sf::table_rows(set));
+            let mut c = column![].spacing(space(1));
+            for (i, r) in rows.iter().enumerate() {
+                let cell = |col: usize, hint: &'static str, width: f32| {
+                    let (id, name) = (n.id.clone(), pd.name.clone());
+                    text_input(hint, &r[col]).on_input(move |s| FlMsg::TableEdit(id.clone(), name.clone(), i, col, s)).size(t::s_small()).width(Length::Fixed(width))
+                };
+                c = c.push(
+                    row![cell(0, "谁", 76.0), cell(1, "哪一项", 64.0), cell(2, "值", 48.0), w::btn("✕", Kind::Ghost, Some(FlMsg::TableDel(n.id.clone(), pd.name.clone(), i)))]
+                        .spacing(space(1))
+                        .align_y(Alignment::Center)
+                        .wrap(),
+                );
+            }
+            c.push(w::btn("＋ 加一行", Kind::Ghost, Some(FlMsg::TableAdd(id, name)))).into()
+        }
+        Control::List | Control::Text => {
+            let shown = v.form.get(&form_key(&n.id, &pd.name)).cloned().unwrap_or_else(|| set.map(value_text).unwrap_or_default());
+            let hint = if pd.required {
+                "必填".to_string()
+            } else if pd.control() == Control::List && value_text(&pd.default).is_empty() {
+                "逗号隔开".to_string()
+            } else {
+                value_text(&pd.default)
+            };
+            text_input(&hint, &shown).on_input(move |s| FlMsg::Param(id.clone(), name.clone(), s)).size(t::s_small()).into()
+        }
+    };
+    let note = match pd.control() {
+        Control::List if !pd.description.is_empty() => format!("{}（逗号隔开）", pd.description),
+        Control::Table if !pd.description.is_empty() => format!("{}（每行：谁 · 哪一项 = 值）", pd.description),
+        _ => pd.description.clone(),
+    };
+    labelled(label, control, note)
+}
+
+/// 检查器「属性」页：选中一个节点 = 它的参数；选中多个 = 批量操作；没选 = 这张图与问题清单。
+pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
+    let v = sf::view();
+    let v = &v;
+    let mut col = column![].spacing(space(2)).width(Length::Fill);
+    if v.selected.len() > 1 {
+        col = col.push(w::section(format!("选中了 {} 个节点", v.selected.len())));
+        col = col.push(
+            row![
+                w::btn("复制", Kind::Standard, Some(FlMsg::Copy)),
+                w::btn("再来一份", Kind::Standard, Some(FlMsg::Duplicate)),
+                w::btn("删除", Kind::Ghost, Some(FlMsg::DeleteSelected)),
+            ]
+            .spacing(space(2))
+            .wrap(),
+        );
+        col = col.push(t::metadata("拖其中任何一个 = 一起挪。「执行」节点不会被复制或删除。").color(pal::dim()));
+        return col.into();
+    }
+    let Some(n) = v.primary() else {
         // 没选中节点：这张图本身 + 问题清单
         col = col.push(w::section("这份策略"));
         col = col.push(field("id（主题.名字）".into(), "ea.my_strategy", v.graph.id.clone(), FlMsg::MetaId, "决定文件放在哪：strategies/research/<主题>/<名字>".into()));
@@ -465,7 +656,7 @@ fn inspector<'a>(v: &View) -> Element<'a, FlMsg> {
             col = col.push(t::metadata(match v.checked {
                 Some(true) => "检查通过，可以运行",
                 Some(false) => "检查没过",
-                None => "改过之后还没检查",
+                None => "改完停手半秒会自动检查",
             })
             .color(pal::dim()));
         }
@@ -477,7 +668,17 @@ fn inspector<'a>(v: &View) -> Element<'a, FlMsg> {
                 button(line).on_press(FlMsg::Select(Some(i.node.clone()))).style(|th, st| w::button_style(Kind::Ghost, th, st)).width(Length::Fill).into()
             });
         }
-        return crate::ui::scroll(col).height(Length::Fill).into();
+        col = col.push(w::section("快捷键"));
+        for line in [
+            "Delete 删除 · Esc 取消选择 · F 看全",
+            "Ctrl Z 撤销 · Ctrl Shift Z 重做",
+            "Ctrl C / X / V 复制 / 剪切 / 粘贴 · Ctrl D 再来一份",
+            "Ctrl 点 = 加选 · Shift 拖空白 = 框选 · Ctrl A 全选",
+            "拖线到空白处松手 = 选要接的模块",
+        ] {
+            col = col.push(t::metadata(line).color(pal::dim()));
+        }
+        return col.into();
     };
     let def = v.palette.as_ref().and_then(|p| p.get(&n.module));
     let id = n.id.clone();
@@ -495,7 +696,7 @@ fn inspector<'a>(v: &View) -> Element<'a, FlMsg> {
         let same: Vec<String> = p.modules.iter().filter(|m| m.kind == d.kind).map(|m| m.refer.clone()).collect();
         if same.len() > 1 {
             let nid = id.clone();
-            col = col.push(row![container(t::caption("换模块")).width(Length::Fixed(118.0)), pick_list(same, Some(n.module.clone()), move |r| FlMsg::Swap(nid.clone(), r)).text_size(t::s_small())].spacing(space(2)).align_y(Alignment::Center));
+            col = col.push(labelled("换模块".into(), pick_list(same, Some(n.module.clone()), move |r| FlMsg::Swap(nid.clone(), r)).text_size(t::s_small()).into(), "名字相同的参数会留着".into()));
         }
     }
     if n.name.is_some() || def.is_some_and(|d| d.kind == "regime") {
@@ -503,23 +704,26 @@ fn inspector<'a>(v: &View) -> Element<'a, FlMsg> {
         col = col.push(field("状态名".into(), "trend", n.name.clone().unwrap_or_default(), move |s| FlMsg::RegimeName(nid.clone(), s), "过滤与路由靠它引用".into()));
     }
     if let (Some(lane), Some(p)) = (&n.lane, &v.palette) {
-        col = col.push(t::metadata("这条线").color(pal::dim()));
+        col = col.push(w::section("这条线"));
         for lp in &p.lane_params {
-            let shown = v.form.get(&form_key(&id, &format!("lane.{}", lp.name))).cloned().unwrap_or_else(|| lane.get(&lp.name).map(value_text).unwrap_or_default());
             let (nid, name) = (id.clone(), lp.name.clone());
+            if lp.control() == Control::Choice {
+                let names: Vec<String> = lp.choices.clone().unwrap_or_default().iter().map(value_text).collect();
+                let cur = lane.get(&lp.name).or(Some(&lp.default)).map(value_text).filter(|s| names.contains(s));
+                col = col.push(labelled(lp.name.clone(), pick_list(names, cur, move |s: String| FlMsg::LaneField(nid.clone(), name.clone(), s)).text_size(t::s_small()).into(), lp.description.clone()));
+                continue;
+            }
+            let shown = v.form.get(&form_key(&id, &format!("lane.{}", lp.name))).cloned().unwrap_or_else(|| lane.get(&lp.name).map(value_text).unwrap_or_default());
             col = col.push(field(lp.name.clone(), &value_text(&lp.default), shown, move |s| FlMsg::LaneField(nid.clone(), name.clone(), s), lp.description.clone()));
         }
     }
     if let Some(d) = def
         && !d.params.is_empty()
     {
-        col = col.push(t::metadata("参数（★ = 值得优化；留空 = 用缺省值）").color(pal::dim()));
-        for pd in &d.params {
-            let shown = v.form.get(&form_key(&id, &pd.name)).cloned().unwrap_or_else(|| n.params.get(&pd.name).map(value_text).unwrap_or_default());
-            let label = format!("{}{}{}", if pd.optimize { "★ " } else { "" }, pd.name, if pd.required { " *" } else { "" });
-            let hint = if pd.required { "必填".to_string() } else { value_text(&pd.default) };
-            let (nid, name) = (id.clone(), pd.name.clone());
-            col = col.push(field(label, &hint, shown, move |s| FlMsg::Param(nid.clone(), name.clone(), s), pd.description.clone()));
+        col = col.push(w::section("参数（★ = 值得优化；留空 = 用缺省值）"));
+        // 由连线给出的参数（过滤 / 路由的 regime）不在这里填：接一根线就是了
+        for pd in d.params.iter().filter(|pd| !d.ins.contains(&pd.name)) {
+            col = col.push(param_field(v, n, pd));
         }
     }
     if let Some(l) = v.live.get(&n.id) {
@@ -529,10 +733,50 @@ fn inspector<'a>(v: &View) -> Element<'a, FlMsg> {
     if n.module != EXEC {
         col = col.push(w::btn("删除这个节点", Kind::Ghost, Some(FlMsg::Delete(id))));
     }
-    crate::ui::scroll(col).height(Length::Fill).into()
+    col.into()
+}
+
+/// 检查器里有没有东西可看（画布始终有：没选中节点时是图的属性与问题清单）。
+pub fn in_canvas_view(view: Option<&str>) -> bool {
+    view != Some(LIBRARY)
+}
+
+/// 拖线拖到空白处弹出的「接什么」：只列有同类型输入端口的模块。
+fn quick_popup<'a>(v: &View, q: &Quick) -> Element<'a, FlMsg> {
+    let empty = Palette::default();
+    let cands = q.candidates(v.palette.as_ref().unwrap_or(&empty));
+    let first = cands.first().map(|m| m.refer.clone());
+    let mut input = text_input("搜能接的模块…", &q.query).on_input(FlMsg::QuickQuery).size(t::s_small());
+    if let Some(r) = first {
+        input = input.on_submit(FlMsg::QuickPick(r));
+    }
+    let mut col = column![
+        row![t::caption(format!("接在「{}」后面", port_label(&q.port))).color(port_color(&q.port)), Space::new().width(Length::Fill), w::btn("✕", Kind::Ghost, Some(FlMsg::QuickClose))].align_y(Alignment::Center),
+        input
+    ]
+    .spacing(space(1));
+    if cands.is_empty() {
+        col = col.push(t::metadata("没有能接的模块").color(pal::dim()));
+    }
+    for m in cands.into_iter().take(9) {
+        col = col.push(
+            button(row![t::metadata(m.kind_label.clone()).color(pal::dim()), t::label(m.title.clone())].spacing(space(2)))
+                .width(Length::Fill)
+                .on_press(FlMsg::QuickPick(m.refer.clone()))
+                .style(|th, st| w::button_style(Kind::Ghost, th, st)),
+        );
+    }
+    opaque(container(col).width(Length::Fixed(232.0)).padding(space(2)).style(|_| container::Style {
+        background: Some(pal::card_bg().into()),
+        border: iced::Border { color: pal::accent(), width: 1.0, radius: 4.0.into() },
+        ..Default::default()
+    }))
 }
 
 // ── 整个面板 ────────────────────────────────────────────────────────────
+
+/// 「模块库」页签的视图名（工作区模板里锁定的 `Settings.view`）。
+pub const LIBRARY: &str = "模块库";
 
 fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
     let state: Element<'a, FlMsg> = if v.running {
@@ -541,15 +785,16 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
         match v.checked {
             Some(true) => w::badge("检查通过", Tone::Success),
             Some(false) => w::badge(format!("{} 个问题", v.issues.len()), Tone::Danger),
-            None => w::badge(if v.dirty { "未保存" } else { "未检查" }, Tone::Neutral),
+            None => w::badge(if v.busy { "检查中" } else if v.dirty { "未保存" } else { "未检查" }, Tone::Neutral),
         }
     };
     let idle = !v.busy;
     row![
         w::btn("新建", Kind::Ghost, Some(FlMsg::New)),
         pick_list(v.files.clone(), None::<sf::FileItem>, FlMsg::Open).placeholder("打开 / 导入…").text_size(t::s_small()),
-        w::btn_busy("检查", Kind::Standard, idle.then_some(FlMsg::Check), v.busy),
         w::btn("保存", Kind::Standard, idle.then_some(FlMsg::Save)),
+        w::btn("↶", Kind::Ghost, v.can_undo.then_some(FlMsg::Undo)),
+        w::btn("↷", Kind::Ghost, v.can_redo.then_some(FlMsg::Redo)),
         Space::new().width(Length::Fixed(space(3))),
         text_input("开始", &v.start).on_input(FlMsg::Start).size(t::s_small()).width(Length::Fixed(96.0)),
         text_input("结束", &v.end).on_input(FlMsg::End).size(t::s_small()).width(Length::Fixed(96.0)),
@@ -566,7 +811,11 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
     .into()
 }
 
-pub fn pane_body<'a>() -> Element<'a, FlMsg> {
+/// `view` = 这个面板锁定的视图：「模块库」页签显示模块注册表，其余是画布。
+pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
+    if view == Some(LIBRARY) {
+        return super::strategy_center_view::modules_page().map(FlMsg::Center);
+    }
     let v = sf::view();
     let empty = Palette::default();
     let pal_ = v.palette.as_ref().unwrap_or(&empty);
@@ -585,10 +834,15 @@ pub fn pane_body<'a>() -> Element<'a, FlMsg> {
         now: Instant::now(),
     };
     let title = format!("策略画布 · {}{}", v.graph.name, if v.dirty { " *" } else { "" });
+    let mut layers = stack![canvas::Canvas::new(program).width(Length::Fill).height(Length::Fill)];
+    if let Some(q) = &v.quick {
+        // 弹在松手的地方（世界坐标 → 画布内的屏幕坐标）；用占位把它推过去
+        let (x, y) = ((q.x * v.zoom + v.pan.0).max(0.0), (q.y * v.zoom + v.pan.1).max(0.0));
+        layers = layers.push(column![Space::new().height(Length::Fixed(y)), row![Space::new().width(Length::Fixed(x)), quick_popup(&v, q)]]);
+    }
     let body = row![
         container(palette_col(&v)).width(Length::Fixed(196.0)).height(Length::Fill),
-        container(canvas::Canvas::new(program).width(Length::Fill).height(Length::Fill)).width(Length::Fill).height(Length::Fill).style(|_| container::Style { border: iced::Border { color: pal::line(), width: 1.0, radius: 0.0.into() }, ..Default::default() }),
-        container(inspector(&v)).width(Length::Fixed(312.0)).height(Length::Fill),
+        container(layers).width(Length::Fill).height(Length::Fill).clip(true).style(|_| container::Style { border: iced::Border { color: pal::line(), width: 1.0, radius: 0.0.into() }, ..Default::default() }),
     ]
     .spacing(space(2))
     .height(Length::Fill);

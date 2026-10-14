@@ -30,6 +30,8 @@ pub const WS_BACKTEST: &str = "回测";
 /// 策略中心（docs/37 P1）：策略库 · 参数表单 · 一键回测 · 运行记录与概况 ∣ 回测结果。
 /// 放在「回测」组首位：`Ctrl Shift 2` 直达。
 pub const WS_STRATEGY: &str = "策略中心";
+/// 策略画布（docs/45，2026-10-14 用户定：单独一个工作区）：「画布」设计与运行 ∣ 「模块库」模块注册表。
+pub const WS_CANVAS: &str = "策略画布";
 /// 订单流层析（docs/40）：OFMS-10 分层时间轴 · 事件因果链 · 价格响应 · 特征字典（按层）。
 pub const WS_OFMS: &str = "订单流层析";
 pub const WS_RECORDER: &str = "数据录制";
@@ -59,7 +61,7 @@ pub const WS_RESOURCES: &str = "资源";
 /// | 图表 | 官方原生 |
 /// | 资讯 | 金融日历 · 新闻资讯 · 全球市场 |（2026-10-09 用户：金融日历放资讯组第一个，docs/43）
 /// | 数据 | 数据录制 · Tardis 历史回放 · 接口观察终端 |
-/// | 研究 | 订单流特征 · 订单流层析 · 策略中心 · Alpha Factory · C4 影子 · 期权/0DTE · 预测市场 |
+/// | 研究 | 订单流特征 · 订单流层析 · 策略中心 · 策略画布 · Alpha Factory · C4 影子 · 期权/0DTE · 预测市场 |（2026-10-14 用户：画布单独一个工作区，docs/45）
 /// | 回测 | 回测 · 实时数据回测 |
 /// | 系统 | 资源 |
 ///
@@ -68,7 +70,7 @@ pub const GROUPS: [(&str, &[&str]); 6] = [
     ("图表", &[WS_OFFICIAL]),
     ("资讯", &[WS_CALENDAR, WS_NEWS, WS_GLOBAL]),
     ("数据", &[WS_RECORDER, WS_TARDIS, WS_OBSERVATORY]),
-    ("研究", &[WS_FEATURES, WS_OFMS, WS_STRATEGY, WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]),
+    ("研究", &[WS_FEATURES, WS_OFMS, WS_STRATEGY, WS_CANVAS, WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]),
     ("回测", &[WS_BACKTEST, WS_LIVE]),
     ("系统", &[WS_RESOURCES]),
 ];
@@ -77,7 +79,7 @@ pub const GROUPS: [(&str, &[&str]); 6] = [
 ///
 /// **加/删项要同时改 `GROUPS`、`icon()` 与 `pane_template()` 的 match 臂**，
 /// 漏了会落到 `_ => Starter` 兜底（有测试钉住）。
-pub const WORKSPACES: [&str; 17] = [
+pub const WORKSPACES: [&str; 18] = [
     WS_OFFICIAL,
     WS_CALENDAR,
     WS_NEWS,
@@ -88,6 +90,7 @@ pub const WORKSPACES: [&str; 17] = [
     WS_FEATURES,
     WS_OFMS,
     WS_STRATEGY,
+    WS_CANVAS,
     WS_FACTORY,
     WS_C4,
     WS_OPTIONS,
@@ -108,7 +111,7 @@ pub const PAGE_SEP: char = '｜';
 /// 2026-10-07 用户逐个指定（docs/41 §3.2）：面板内部原有的视图 / 分节拆成页面，去掉「总览」页。
 /// 同一面板出现在同一工作区的几页里时，靠 `Settings.view` 锁定各自显示哪个视图（§3.3）；
 /// 几页不会同时显示，共用面板的其余状态正好一致。
-pub const PAGES: [(&str, &[&str]); 12] = [
+pub const PAGES: [(&str, &[&str]); 13] = [
     (WS_CALENDAR, &["月历", "全年", "事件流", "提醒", "研究"]),
     (WS_NEWS, &["新闻", "订阅与检索", "源管理"]),
     (WS_GLOBAL, &["热图", "筛选器", "全球总览", "市场宽度", "加密全景", "预测市场", "股票全景", "宏观新闻"]),
@@ -116,7 +119,8 @@ pub const PAGES: [(&str, &[&str]); 12] = [
     (WS_TARDIS, &["历史面板", "预测市场回放", "自有数据图"]),
     (WS_FEATURES, &["特征矩阵", "图表参数", "引擎健康", "图表"]),
     (WS_OFMS, &["层析时间轴", "响应表", "入场形态矩阵", "特征字典"]),
-    (WS_STRATEGY, &["策略库", "七层", "画布"]),
+    (WS_STRATEGY, &["策略库", "七层"]),
+    (WS_CANVAS, &["画布", "模块库"]),
     (WS_FACTORY, &["Alpha Factory", "特征库"]),
     (WS_PREDICTION, &["币安钱包", "Polymarket"]),
     (WS_BACKTEST, &["运行", "结果报告", "订单明细"]),
@@ -141,7 +145,7 @@ fn page_template(layout: &str) -> Option<String> {
         WS_OFMS => locked("OfmsLab", t),
         WS_FEATURES if t != "图表" => locked("FeatureMatrix", t),
         WS_STRATEGY if t == "七层" => locked("StrategyLayers", t),
-        WS_STRATEGY if t == "画布" => locked("StrategyFlow", t),
+        WS_CANVAS => locked("StrategyFlow", t),
         // 策略库：左策略库 / 详情 / 运行记录 ∣ 右回测结果（七层是单独一页）
         WS_STRATEGY => r#"{"Split":{"axis":"Vertical","ratio":0.64,"a":{"StrategyCenter":{"settings":{},"link_group":null}},"b":{"BacktestResult":{"settings":{},"link_group":null}}}}"#.to_string(),
         WS_FACTORY if t == "特征库" => locked("FeatureLab", t),
@@ -230,6 +234,7 @@ pub fn icon(name: &str) -> crate::style::Icon {
         WS_FEATURES => Icon::WsLadder,      // 订单流特征：DOM 阶梯（docs/31）
         WS_OFMS => Icon::WsLayers,          // 订单流层析：分层切片（docs/40）
         WS_STRATEGY => Icon::WsNodes,       // 策略中心：策略流程节点（docs/37）
+        WS_CANVAS => Icon::WsFlow,          // 策略画布：节点连线（docs/45）
         WS_FACTORY => Icon::WsFlask,        // Alpha Factory：研究烧瓶
         WS_C4 => Icon::WsShield,            // C4 影子：合格判定
         WS_OPTIONS => Icon::WsPayoff,       // 期权/0DTE：损益曲线（docs/18）
@@ -507,7 +512,11 @@ mod tests {
     fn 侧栏按用户指定的六组排序() {
         let names: Vec<&str> = GROUPS.iter().map(|(g, _)| *g).collect();
         assert_eq!(names, ["图表", "资讯", "数据", "研究", "回测", "系统"]);
-        assert_eq!(GROUPS[3].1, [WS_FEATURES, WS_OFMS, WS_STRATEGY, WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]);
+        assert_eq!(GROUPS[3].1, [WS_FEATURES, WS_OFMS, WS_STRATEGY, WS_CANVAS, WS_FACTORY, WS_C4, WS_OPTIONS, WS_PREDICTION]);
+        // docs/45：画布是单独的工作区，模块库是它的第二个页签；策略中心不再有「画布」页
+        assert_eq!(page_layouts(WS_CANVAS), ["策略画布", "策略画布｜模块库"]);
+        assert!(pane_template("策略画布｜模块库").contains(r#""view":"模块库""#));
+        assert_eq!(page_layouts(WS_STRATEGY), ["策略中心", "策略中心｜七层"]);
         // docs/43：金融日历是资讯组第一个（组首快捷键 Ctrl Shift 2 直达它）
         assert_eq!(GROUPS[1].1, [WS_CALENDAR, WS_NEWS, WS_GLOBAL]);
         assert_eq!(page_layouts(WS_CALENDAR), ["金融日历", "金融日历｜全年", "金融日历｜事件流", "金融日历｜提醒", "金融日历｜研究"]);

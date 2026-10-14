@@ -297,6 +297,8 @@ pub enum ScMsg {
     GatesRefresh,
     // ── 模块（docs/44 W6）──
     ModsRefresh,
+    /// 在「策略画布」里打开一次运行当时的图（参数 = 结果目录）
+    OpenGraph(String),
     /// 选中一个模块看详情（再点一次收起）
     ModPick(String),
     // ── 对比与组合 ──
@@ -820,6 +822,13 @@ fn load_gates() {
 }
 
 /// 模块库：登记、引用、验证记录都只在 Python（strategies.swe.module）一处，这里只跑它、读 JSON。
+/// 「模块库」页签第一次显示时把注册表读进来（之后靠「刷新」）。
+pub fn ensure_mods() {
+    if with(|g| g.mods.is_none() && !g.mods_loading && g.mods_err.is_empty()).unwrap_or(false) {
+        load_mods();
+    }
+}
+
 fn load_mods() {
     let go = with(|g| {
         if g.mods_loading {
@@ -1366,6 +1375,10 @@ pub fn handle(m: ScMsg) {
             load_compare();
         }
         ScMsg::ModsRefresh => load_mods(),
+        ScMsg::OpenGraph(dir) => {
+            super::strategy_flow::handle(super::strategy_flow::FlMsg::OpenSnapshot(dir));
+            with(|g| g.msg = "已在「策略画布」工作区打开这次运行当时的图".to_string());
+        }
         ScMsg::ModPick(r) => {
             with(|g| g.mod_picked = if g.mod_picked.as_deref() == Some(r.as_str()) { None } else { Some(r) });
         }

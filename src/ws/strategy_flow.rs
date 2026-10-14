@@ -1,4 +1,4 @@
-//! 策略画布（docs/44 §21）——状态与逻辑。
+//! 策略画布（docs/44 §21，docs/45）——状态与逻辑。
 //!
 //! 画布上每个节点是一个模块，端口有类型，只有同类型的端口能连。图不是直接执行的：
 //! 它被 Python 端**编译**成一份工作流（`*.swe.toml`），由现有的宿主运行。
@@ -9,6 +9,7 @@
 //! |---|---|
 //! | 模块库（端口、参数表、说明） | `python -m strategies.swe.graph palette` |
 //! | 现有工作流 → 图 | `python -m strategies.swe.graph import <toml>` |
+//! | 打开图文件（旧格式由 Python 升级，迁移只有一份） | `python -m strategies.swe.graph upgrade <图>` |
 //! | 检查 / 编译（错误带节点 id、轨迹定位表） | `python -m strategies.swe.graph check -` / `compile <图>` |
 //! | 运行 | `python -m strategies.swe.run_dukascopy <toml> --live --pace …` |
 //! | 实时高亮 | Redis 流 `ws:swe:<运行号>:trace`（宿主推出来的决策轨迹） |
@@ -37,6 +38,35 @@ pub struct ParamDef {
     pub default: Value,
     pub description: String,
     pub optimize: bool,
+    /// 只能取这几个值（下拉）
+    #[serde(rename = "enum")]
+    pub choices: Option<Vec<Value>>,
+}
+
+impl ParamDef {
+    /// 用哪种控件（docs/45 §4.3）：开关 / 下拉 / 列表 / 表 / 文本。
+    pub fn control(&self) -> Control {
+        if self.choices.as_ref().is_some_and(|c| !c.is_empty()) {
+            return Control::Choice;
+        }
+        match self.ty.as_str() {
+            "boolean" => Control::Switch,
+            "array" => Control::List,
+            "object" => Control::Table,
+            _ => Control::Text,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    Text,
+    Switch,
+    Choice,
+    /// 一行里用逗号隔开
+    List,
+    /// 两层的表（按来源覆盖、路由权重）：外层键 · 内层键 = 值
+    Table,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -98,6 +128,8 @@ pub struct Edge {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Graph {
+    /// 图文件的格式版本（docs/45 §3.7）；迁移在 Python 端（`graph.upgrade`）
+    pub format: u32,
     pub id: String,
     pub name: String,
     pub version: String,
@@ -109,11 +141,18 @@ pub struct Graph {
 }
 
 pub const EXEC: &str = "kernel.exec";
+/// 这份代码写出的图格式版本，与 `strategies/swe/graph.py` 的 FORMAT 一致（Python 端拒绝比它新的）。
+pub const GRAPH_FORMAT: u32 = 2;
+/// 撤销栈的深度。
+const UNDO_DEPTH: usize = 100;
+/// 停手多久之后自动检查。
+const AUTO_CHECK_MS: u64 = 500;
 
 impl Graph {
     /// 空画布：只有一个「执行」节点。
     pub fn blank() -> Self {
         Graph {
+            format: GRAPH_FORMAT,
             id: "draft.untitled".into(),
             name: "未命名策略".into(),
             version: "0.1".into(),
@@ -150,6 +189,84 @@ impl Graph {
         self.nodes.retain(|n| n.id != id);
         self.edges.retain(|e| e.from != id && e.to != id);
     }
+
+    /// 取出一组节点和它们**之间**的线（复制用）。「执行」节点不复制——每张图只能有一个。
+    pub fn excerpt(&self, ids: &[String]) -> Clip {
+        let nodes: Vec<Node> = self.nodes.iter().filter(|n| ids.contains(&n.id) && n.module != EXEC).cloned().collect();
+        let has = |id: &str| nodes.iter().any(|n| n.id == id);
+        let edges = self.edges.iter().filter(|e| has(&e.from) && has(&e.to)).cloned().collect();
+        Clip { nodes, edges }
+    }
+
+    /// 贴进一组节点：换新 id、线名与状态名改成不重复的、整体挪到 `at`（左上角对齐）。返回新节点的 id。
+    pub fn paste(&mut self, clip: &Clip, at: (f32, f32)) -> Vec<String> {
+        let (x0, y0) = clip.nodes.iter().fold((f32::MAX, f32::MAX), |a, n| (a.0.min(n.x), a.1.min(n.y)));
+        let mut map: HashMap<String, String> = HashMap::new();
+        for n in &clip.nodes {
+            let id = self.fresh_id();
+            let mut n2 = n.clone();
+            n2.id = id.clone();
+            n2.x = n.x - x0 + at.0;
+            n2.y = n.y - y0 + at.1;
+            if let Some(name) = n2.lane.as_ref().and_then(|l| l.get("name")).and_then(Value::as_str).map(str::to_string) {
+                let taken: Vec<String> = self.nodes.iter().filter_map(|x| x.lane.as_ref().and_then(|l| l.get("name")).and_then(Value::as_str).map(str::to_string)).collect();
+                if let Some(l) = n2.lane.as_mut() {
+                    l.insert("name".into(), Value::String(unique_name(&name, &taken)));
+                }
+            }
+            if let Some(name) = n2.name.clone() {
+                let taken: Vec<String> = self.nodes.iter().filter_map(|x| x.name.clone()).collect();
+                n2.name = Some(unique_name(&name, &taken));
+            }
+            self.nodes.push(n2);
+            map.insert(n.id.clone(), id);
+        }
+        for e in &clip.edges {
+            if let (Some(a), Some(b)) = (map.get(&e.from), map.get(&e.to)) {
+                self.edges.push(Edge { from: a.clone(), out: e.out.clone(), to: b.clone(), inp: e.inp.clone() });
+            }
+        }
+        clip.nodes.iter().filter_map(|n| map.get(&n.id).cloned()).collect()
+    }
+}
+
+/// 剪贴板里的一段图（整个进程共用一份，所以能跨图粘贴）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Clip {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+}
+
+/// `S1` 被占了就给 `S1_2`、`S1_3`……
+fn unique_name(base: &str, taken: &[String]) -> String {
+    if !taken.iter().any(|t| t == base) {
+        return base.to_string();
+    }
+    let stem = base.rsplit_once('_').filter(|(_, n)| n.parse::<u32>().is_ok()).map_or(base, |(s, _)| s);
+    (2..).map(|i| format!("{stem}_{i}")).find(|c| !taken.contains(c)).unwrap_or_else(|| base.to_string())
+}
+
+/// 拖线拖到空白处弹出的「接什么」搜索框（docs/45 §2：只列能接的节点）。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Quick {
+    pub from: String,
+    pub port: String,
+    /// 新节点放在哪（世界坐标）
+    pub x: f32,
+    pub y: f32,
+    pub query: String,
+}
+
+impl Quick {
+    /// 能接在这根线后面的模块：有一个同类型的输入端口，且名字 / 环节里含搜索词。
+    pub fn candidates<'a>(&self, pal: &'a Palette) -> Vec<&'a ModDef> {
+        let q = self.query.trim().to_lowercase();
+        pal.modules
+            .iter()
+            .filter(|m| m.ins.contains(&self.port))
+            .filter(|m| q.is_empty() || m.title.to_lowercase().contains(&q) || m.kind_label.contains(&q) || m.summary.to_lowercase().contains(&q))
+            .collect()
+    }
 }
 
 /// 一个节点的运行态：最近一次决策是什么、什么时候（墙上时间）。
@@ -175,6 +292,8 @@ pub struct Issue {
 pub struct FileItem {
     pub path: String,
     pub is_graph: bool,
+    /// 运行结果目录里的留底图（绝对路径）
+    pub snapshot: bool,
 }
 
 impl std::fmt::Display for FileItem {
@@ -199,14 +318,45 @@ pub enum FlMsg {
     MetaId(String),
     MetaName(String),
     AddNode(String),
+    /// 只选这一个（None = 全不选）
     Select(Option<String>),
-    MoveNode(String, f32, f32),
+    /// Ctrl / Shift 点：加进选择或从选择里去掉
+    SelectToggle(String),
+    /// 框选；true = 加到现有选择上
+    SelectBox(Vec<String>, bool),
+    SelectAll,
+    /// 把选中的节点一起挪 (dx, dy)
+    MoveSelected(f32, f32),
     Delete(String),
+    DeleteSelected,
+    Copy,
+    Cut,
+    /// 贴到这个世界坐标（None = 视野左上）
+    Paste(Option<(f32, f32)>),
+    Duplicate,
+    Undo,
+    Redo,
+    /// 拖线拖到空白处：弹出「接什么」
+    QuickOpen(Quick),
+    QuickQuery(String),
+    QuickPick(String),
+    QuickClose,
+    LibQuery(String),
     Connect(Edge),
     /// 拔掉接在某个输入端口上的线
     Disconnect(String, String),
     Swap(String, String),
     Param(String, String, String),
+    /// 开关 / 下拉直接给值；None = 回到缺省
+    ParamValue(String, String, Option<Value>),
+    /// 表格参数：(节点, 参数, 行, 列 0..3, 文字)
+    TableEdit(String, String, usize, usize, String),
+    TableAdd(String, String),
+    TableDel(String, String, usize),
+    /// 从一次运行的结果目录打开当时的图
+    OpenSnapshot(String),
+    /// 「模块库」页签里的操作，转给策略中心的模块注册表
+    Center(super::strategy_center::ScMsg),
     LaneField(String, String, String),
     RegimeName(String, String),
     Pan(f32, f32),
@@ -224,7 +374,19 @@ struct St {
     /// 图文件（仓库相对路径）；还没存过是 None
     path: Option<String>,
     dirty: bool,
-    selected: Option<String>,
+    /// 选中的节点（最后一个是「主」选中：检查器显示它）
+    selected: Vec<String>,
+    undo: Vec<Graph>,
+    redo: Vec<Graph>,
+    /// 上一次改动的标签与时刻：同一个标签连着来（打字、拖动）只记一步撤销
+    undo_tag: Option<(String, Instant)>,
+    quick: Option<Quick>,
+    lib_query: String,
+    /// 表格参数正在编辑的行：键同 `form`。每行 [外层键, 内层键, 值]
+    tables: BTreeMap<String, Vec<[String; 3]>>,
+    /// 最近一次改动的时刻（自动检查用）；检查过了清掉
+    touched: Option<Instant>,
+    auto_on: bool,
     /// 参数输入框里的原文：键 = 节点 id + '\u{1}' + 参数名（允许暂时填着不合法的东西）
     form: BTreeMap<String, String>,
     issues: Vec<Issue>,
@@ -256,7 +418,15 @@ impl Default for St {
             graph: Graph::blank(),
             path: None,
             dirty: false,
-            selected: None,
+            selected: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            undo_tag: None,
+            quick: None,
+            lib_query: String::new(),
+            tables: BTreeMap::new(),
+            touched: None,
+            auto_on: false,
             form: BTreeMap::new(),
             issues: Vec::new(),
             whence: HashMap::new(),
@@ -296,7 +466,13 @@ pub struct View {
     pub graph: Graph,
     pub path: Option<String>,
     pub dirty: bool,
-    pub selected: Option<String>,
+    pub selected: Vec<String>,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub can_paste: bool,
+    pub quick: Option<Quick>,
+    pub lib_query: String,
+    pub tables: BTreeMap<String, Vec<[String; 3]>>,
     pub form: BTreeMap<String, String>,
     pub issues: Vec<Issue>,
     pub checked: Option<bool>,
@@ -323,6 +499,12 @@ pub fn view() -> View {
         path: g.path.clone(),
         dirty: g.dirty,
         selected: g.selected.clone(),
+        can_undo: !g.undo.is_empty(),
+        can_redo: !g.redo.is_empty(),
+        can_paste: clip().lock().map(|c| !c.nodes.is_empty()).unwrap_or(false),
+        quick: g.quick.clone(),
+        lib_query: g.lib_query.clone(),
+        tables: g.tables.clone(),
         form: g.form.clone(),
         issues: g.issues.clone(),
         checked: g.checked,
@@ -341,6 +523,66 @@ pub fn view() -> View {
     .expect("策略画布状态锁中毒")
 }
 
+impl View {
+    /// 检查器显示的那个节点：只选了一个时才有。
+    pub fn primary(&self) -> Option<&Node> {
+        match self.selected.as_slice() {
+            [one] => self.graph.node(one),
+            _ => None,
+        }
+    }
+}
+
+fn clip() -> &'static Mutex<Clip> {
+    static C: OnceLock<Mutex<Clip>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(Clip::default()))
+}
+
+/// 两层的表 → 编辑用的行（[外层键, 内层键, 值]）。一层的表内层键留空。
+pub fn table_rows(v: Option<&Value>) -> Vec<[String; 3]> {
+    let mut rows = Vec::new();
+    if let Some(Value::Object(outer)) = v {
+        for (k, inner) in outer {
+            match inner {
+                Value::Object(m) => rows.extend(m.iter().map(|(k2, x)| [k.clone(), k2.clone(), value_text(x)])),
+                x => rows.push([k.clone(), String::new(), value_text(x)]),
+            }
+        }
+    }
+    rows
+}
+
+/// 编辑用的行 → 表。键没填的行不算；值按「数 / 真假 / 文字」认。全空 = None（用缺省值）。
+pub fn rows_table(rows: &[[String; 3]]) -> Option<Value> {
+    let scalar = |s: &str| -> Value {
+        let s = s.trim();
+        if let Ok(i) = s.parse::<i64>() {
+            return Value::from(i);
+        }
+        if let Some(n) = s.parse::<f64>().ok().and_then(serde_json::Number::from_f64) {
+            return Value::Number(n);
+        }
+        match s {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            _ => Value::String(s.to_string()),
+        }
+    };
+    let mut out = Map::new();
+    for [a, b, v] in rows {
+        let (a, b) = (a.trim(), b.trim());
+        if a.is_empty() || v.trim().is_empty() {
+            continue;
+        }
+        if b.is_empty() {
+            out.insert(a.to_string(), scalar(v));
+        } else if let Value::Object(m) = out.entry(a.to_string()).or_insert_with(|| Value::Object(Map::new())) {
+            m.insert(b.to_string(), scalar(v));
+        }
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
+}
+
 pub fn form_key(node: &str, param: &str) -> String {
     format!("{node}\u{1}{param}")
 }
@@ -350,6 +592,8 @@ pub fn value_text(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
+        // 列表：一行里用逗号隔开（不是 JSON）
+        Value::Array(a) if a.iter().all(|x| !x.is_array() && !x.is_object()) => a.iter().map(value_text).collect::<Vec<_>>().join(", "),
         other => other.to_string(),
     }
 }
@@ -369,7 +613,19 @@ pub fn parse_value(text: &str, ty: &str) -> Option<Value> {
             _ => Some(Value::String(t.to_string())),
         },
         "string" => Some(Value::String(t.to_string())),
-        // 数组 / 表：按 JSON 写
+        // 列表：逗号隔开，每一项是数就按数、否则按文字（也认方括号写法）
+        "array" => {
+            if t.starts_with('[')
+                && let Ok(v) = serde_json::from_str::<Value>(t)
+            {
+                return Some(v);
+            }
+            let item = |s: &str| -> Value {
+                let s = s.trim().trim_matches('"');
+                s.parse::<i64>().map(Value::from).ok().or_else(|| s.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(Value::Number)).unwrap_or_else(|| Value::String(s.to_string()))
+            };
+            Some(Value::Array(t.split([',', '，']).filter(|s| !s.trim().is_empty()).map(item).collect()))
+        }
         _ => serde_json::from_str(t).ok().or_else(|| Some(Value::String(t.to_string()))),
     }
 }
@@ -403,7 +659,7 @@ fn ensure_started() {
         // 样张截图用：启动时直接打开一个文件；`WS_FLOW_DEMO=1` 再给几个节点摆上运行中的样子
         if let Ok(path) = std::env::var("WS_FLOW_OPEN") {
             let is_graph = path.ends_with(".json");
-            open(FileItem { path, is_graph });
+            open(FileItem { path, is_graph, snapshot: false });
             // 端到端自测用：打开之后自动「保存 → 编译 → 运行」（全速、两天），截图时应能看到节点上的计数
             if std::env::var_os("WS_FLOW_RUN").is_some() {
                 super::spawn_named("ws-flowauto", || {
@@ -413,6 +669,22 @@ fn ensure_started() {
                         g.end = "2026-06-02".into();
                     });
                     handle(FlMsg::Run);
+                });
+            }
+            // 样张截图用：`WS_FLOW_SELECT=<模块 id 的一段>` 选中第一个匹配的节点（看检查器里的参数控件）；
+            // `WS_FLOW_QUICK=1` 再从它的第一个输出端口弹出「接什么」
+            if let Ok(pat) = std::env::var("WS_FLOW_SELECT") {
+                super::spawn_named("ws-flowsel", move || {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    with(|g| {
+                        let Some(n) = g.graph.nodes.iter().find(|n| n.module.contains(&pat)).cloned() else { return };
+                        g.selected = vec![n.id.clone()];
+                        if std::env::var_os("WS_FLOW_QUICK").is_some()
+                            && let Some(port) = g.palette.as_ref().and_then(|p| p.get(&n.module)).and_then(|d| d.outs.first().cloned())
+                        {
+                            g.quick = Some(Quick { from: n.id.clone(), port, x: n.x + 260.0, y: n.y + 60.0, query: String::new() });
+                        }
+                    });
                 });
             }
             if std::env::var_os("WS_FLOW_DEMO").is_some() {
@@ -468,7 +740,7 @@ fn scan_files() {
                     }
                 } else if name.ends_with(".swe.graph.json") || name.ends_with(".swe.toml") {
                     if let Ok(rel) = p.strip_prefix(&root) {
-                        out.push(FileItem { path: rel.to_string_lossy().to_string(), is_graph: name.ends_with(".json") });
+                        out.push(FileItem { path: rel.to_string_lossy().to_string(), is_graph: name.ends_with(".json"), snapshot: false });
                     }
                 }
             }
@@ -743,8 +1015,9 @@ fn open(item: FileItem) {
     }
     super::spawn_named("ws-flowopen", move || {
         let r: Result<Graph, String> = if item.is_graph {
-            std::fs::read(super::paths::repo_root().join(&item.path))
-                .map_err(|e| format!("读不了 {}：{e}", item.path))
+            // 旧格式的图由 Python 升到当前版（迁移只有一份）；比代码新的版本它会拒绝并说明
+            let abs = super::paths::repo_root().join(&item.path);
+            python(&["-m", "strategies.swe.graph", "upgrade", &abs.to_string_lossy()], None)
                 .and_then(|b| serde_json::from_slice(&b).map_err(|e| format!("图文件解析失败：{e}")))
         } else {
             python(&["-m", "strategies.swe.graph", "import", &item.path], None)
@@ -754,7 +1027,13 @@ fn open(item: FileItem) {
             g.busy = false;
             match r {
                 Ok(mut graph) => {
-                    if item.is_graph {
+                    if item.snapshot {
+                        // 运行记录里存的图：是那次运行的留底，打开成副本，不指向任何文件
+                        graph.id = format!("{}.rerun", graph.id);
+                        g.path = None;
+                        g.dirty = true;
+                        g.msg = "已打开那次运行用的图（副本；改个 id 再保存）".to_string();
+                    } else if item.is_graph {
                         g.path = Some(item.path.clone());
                         g.dirty = false;
                         g.msg = format!("已打开 {}", item.path);
@@ -768,7 +1047,7 @@ fn open(item: FileItem) {
                     }
                     g.graph = graph;
                     fit(g);
-                    g.selected = None;
+                    reset_editing(g);
                     g.form.clear();
                     g.issues.clear();
                     g.whence.clear();
@@ -804,6 +1083,142 @@ fn fit(g: &mut St) {
 fn touch(g: &mut St) {
     g.dirty = true;
     g.checked = None;
+    g.touched = Some(Instant::now());
+    if !std::mem::replace(&mut g.auto_on, true) {
+        auto_check();
+    }
+}
+
+/// 边改边检查（docs/45 §4.4）：停手 0.5 秒自动检查一次。按需起线程，检查完就退出。
+fn auto_check() {
+    super::spawn_named("ws-flowidle", || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            let go = with(|g| match g.touched {
+                None => Some(false),
+                Some(at) if at.elapsed().as_millis() as u64 >= AUTO_CHECK_MS && !g.busy && g.palette.is_some() => {
+                    g.touched = None;
+                    Some(true)
+                }
+                Some(_) => None,
+            })
+            .unwrap_or(Some(false));
+            match go {
+                None => continue,
+                Some(run) => {
+                    with(|g| g.auto_on = false);
+                    if run {
+                        check_async();
+                    }
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// 改图之前调用：记一步撤销。`tag` 非空时，一秒内连着来的同标签改动（打字、拖动）并成一步。
+fn edit(g: &mut St, tag: &str) {
+    record(g, tag);
+    touch(g);
+}
+
+/// 只记撤销，不触发检查（挪位置用：不改变策略）。
+fn record(g: &mut St, tag: &str) {
+    let now = Instant::now();
+    let merge = !tag.is_empty() && g.undo_tag.as_ref().is_some_and(|(t, at)| t == tag && now.duration_since(*at).as_millis() < 1000);
+    if !merge {
+        g.undo.push(g.graph.clone());
+        if g.undo.len() > UNDO_DEPTH {
+            g.undo.remove(0);
+        }
+    }
+    g.redo.clear();
+    g.undo_tag = (!tag.is_empty()).then(|| (tag.to_string(), now));
+}
+
+/// 换了一张图：选择、撤销栈、弹窗都清掉。
+fn reset_editing(g: &mut St) {
+    g.selected.clear();
+    g.undo.clear();
+    g.redo.clear();
+    g.undo_tag = None;
+    g.quick = None;
+    g.tables.clear();
+    g.touched = None;
+}
+
+/// 撤销 / 重做之后：输入框里的原文作废（照图上的值重显），选择里去掉已经不在的节点。
+fn after_swap(g: &mut St) {
+    g.form.clear();
+    g.tables.clear();
+    g.undo_tag = None;
+    let ids: Vec<String> = g.graph.nodes.iter().map(|n| n.id.clone()).collect();
+    g.selected.retain(|s| ids.contains(s));
+    g.quick = None;
+    touch(g);
+}
+
+fn kind_of(g: &St, node: &str) -> String {
+    g.graph.node(node).and_then(|n| g.palette.as_ref().and_then(|p| p.get(&n.module))).map(|d| d.kind.clone()).unwrap_or_default()
+}
+
+/// 加一个节点（入场带一条线的缺省属性，市场状态带名字）。返回新节点的 id。
+fn add_node(g: &mut St, refer: &str, x: f32, y: f32) -> Option<String> {
+    let def = g.palette.as_ref().and_then(|p| p.get(refer)).cloned()?;
+    if def.kind == "exec" && g.graph.nodes.iter().any(|n| n.module == EXEC) {
+        g.msg = "「执行」节点已经有一个了".to_string();
+        return None;
+    }
+    let id = g.graph.fresh_id();
+    let mut node = Node { id: id.clone(), module: refer.to_string(), x, y, ..Default::default() };
+    if def.kind == "entry" {
+        let taken: Vec<String> = g.graph.nodes.iter().filter_map(|n| n.lane.as_ref().and_then(|l| l.get("name")).and_then(Value::as_str).map(str::to_string)).collect();
+        let mut lane = Map::new();
+        lane.insert("name".into(), Value::String(unique_name(&format!("L{}", taken.len() + 1), &taken)));
+        lane.insert("entry_tf".into(), Value::from(15));
+        lane.insert("exit_tf".into(), Value::from(1));
+        lane.insert("entry_on".into(), Value::String(if def.book == "basket" { "tick" } else { "bar" }.into()));
+        node.lane = Some(lane);
+    }
+    if def.kind == "regime" {
+        let taken: Vec<String> = g.graph.nodes.iter().filter_map(|n| n.name.clone()).collect();
+        node.name = Some(unique_name(&def.title, &taken));
+    }
+    g.graph.nodes.push(node);
+    Some(id)
+}
+
+fn delete_nodes(g: &mut St, ids: &[String]) {
+    // 「执行」节点删不掉：每张图必须有一个
+    let ids: Vec<&String> = ids.iter().filter(|id| g.graph.node(id).is_some_and(|n| n.module != EXEC)).collect();
+    if ids.is_empty() {
+        return;
+    }
+    edit(g, "");
+    for id in ids {
+        g.graph.remove_node(id);
+        g.live.remove(id);
+    }
+    g.selected.clear();
+}
+
+fn copy_selected(g: &mut St) -> usize {
+    let c = g.graph.excerpt(&g.selected);
+    let n = c.nodes.len();
+    if n > 0
+        && let Ok(mut slot) = clip().lock()
+    {
+        *slot = c;
+    }
+    n
+}
+
+fn paste_at(g: &mut St, at: (f32, f32)) {
+    let Some(c) = clip().lock().ok().map(|c| c.clone()).filter(|c| !c.nodes.is_empty()) else { return };
+    edit(g, "");
+    g.selected = g.graph.paste(&c, at);
+    g.msg = format!("贴了 {} 个节点", g.selected.len());
 }
 
 pub fn handle(m: FlMsg) {
@@ -818,7 +1233,7 @@ pub fn handle(m: FlMsg) {
                 g.graph = Graph::blank();
                 g.path = None;
                 g.dirty = false;
-                g.selected = None;
+                reset_editing(g);
                 g.form.clear();
                 g.issues.clear();
                 g.whence.clear();
@@ -829,6 +1244,15 @@ pub fn handle(m: FlMsg) {
             });
         }
         FlMsg::Open(item) => open(item),
+        FlMsg::OpenSnapshot(dir) => {
+            let path = std::path::Path::new(&dir).join("graph.json");
+            if path.exists() {
+                open(FileItem { path: path.to_string_lossy().to_string(), is_graph: true, snapshot: true });
+            } else {
+                with(|g| g.msg = "那次运行没有存图（这个功能之前跑的，或者不是工作流）".to_string());
+            }
+        }
+        FlMsg::Center(m) => super::strategy_center::handle(m),
         FlMsg::Check => check_async(),
         FlMsg::Save => {
             if with(|g| std::mem::replace(&mut g.busy, true)).unwrap_or(true) {
@@ -854,90 +1278,187 @@ pub fn handle(m: FlMsg) {
         }
         FlMsg::MetaId(v) => {
             with(|g| {
+                edit(g, "meta.id");
                 g.graph.id = v;
                 g.path = None; // id 变了 = 另存为
-                touch(g);
             });
         }
         FlMsg::MetaName(v) => {
             with(|g| {
+                edit(g, "meta.name");
                 g.graph.name = v;
-                touch(g);
             });
         }
         FlMsg::AddNode(refer) => {
             with(|g| {
-                let Some(def) = g.palette.as_ref().and_then(|p| p.get(&refer)).cloned() else { return };
-                if def.kind == "exec" && g.graph.nodes.iter().any(|n| n.module == EXEC) {
-                    g.msg = "「执行」节点已经有一个了".to_string();
-                    return;
-                }
-                let id = g.graph.fresh_id();
                 // 放在当前视野的左上附近，逐个错开
                 let k = g.graph.nodes.len() as f32;
                 let (x, y) = ((40.0 - g.pan.0) / g.zoom + (k % 5.0) * 24.0, (40.0 - g.pan.1) / g.zoom + (k % 5.0) * 24.0);
-                let mut node = Node { id: id.clone(), module: refer, x, y, ..Default::default() };
-                if def.kind == "entry" {
-                    let n_lanes = g.graph.nodes.iter().filter(|n| n.lane.is_some()).count();
-                    let mut lane = Map::new();
-                    lane.insert("name".into(), Value::String(format!("L{}", n_lanes + 1)));
-                    lane.insert("entry_tf".into(), Value::from(15));
-                    lane.insert("exit_tf".into(), Value::from(1));
-                    lane.insert("entry_on".into(), Value::String(if def.book == "basket" { "tick" } else { "bar" }.into()));
-                    node.lane = Some(lane);
+                let before = g.graph.clone();
+                if let Some(id) = add_node(g, &refer, x, y) {
+                    let after = std::mem::replace(&mut g.graph, before);
+                    edit(g, "");
+                    g.graph = after;
+                    g.selected = vec![id];
                 }
-                if def.kind == "regime" {
-                    node.name = Some(def.title.clone());
-                }
-                g.graph.nodes.push(node);
-                g.selected = Some(id);
-                touch(g);
             });
         }
         FlMsg::Select(id) => {
-            with(|g| g.selected = id);
-        }
-        FlMsg::MoveNode(id, x, y) => {
             with(|g| {
-                if let Some(n) = g.graph.node_mut(&id) {
-                    n.x = x;
-                    n.y = y;
-                    g.dirty = true;
+                g.selected = id.into_iter().collect();
+                g.quick = None;
+            });
+        }
+        FlMsg::SelectToggle(id) => {
+            with(|g| {
+                if let Some(i) = g.selected.iter().position(|s| *s == id) {
+                    g.selected.remove(i);
+                } else {
+                    g.selected.push(id);
+                }
+            });
+        }
+        FlMsg::SelectBox(ids, add) => {
+            with(|g| {
+                if !add {
+                    g.selected.clear();
+                }
+                for id in ids {
+                    if !g.selected.contains(&id) {
+                        g.selected.push(id);
+                    }
+                }
+            });
+        }
+        FlMsg::SelectAll => {
+            with(|g| g.selected = g.graph.nodes.iter().map(|n| n.id.clone()).collect());
+        }
+        FlMsg::MoveSelected(dx, dy) => {
+            with(|g| {
+                if g.selected.is_empty() {
+                    return;
+                }
+                // 挪位置不改变策略：记撤销，但不触发检查、不把「检查通过」打回未检查
+                record(g, "move");
+                g.dirty = true;
+                let sel = g.selected.clone();
+                for n in g.graph.nodes.iter_mut().filter(|n| sel.contains(&n.id)) {
+                    n.x += dx;
+                    n.y += dy;
                 }
             });
         }
         FlMsg::Delete(id) => {
+            with(|g| delete_nodes(g, &[id]));
+        }
+        FlMsg::DeleteSelected => {
             with(|g| {
-                g.graph.remove_node(&id);
-                g.selected = None;
-                g.live.remove(&id);
-                touch(g);
+                let ids = g.selected.clone();
+                delete_nodes(g, &ids);
             });
+        }
+        FlMsg::Copy => {
+            with(|g| {
+                let n = copy_selected(g);
+                if n > 0 {
+                    g.msg = format!("复制了 {n} 个节点");
+                }
+            });
+        }
+        FlMsg::Cut => {
+            with(|g| {
+                if copy_selected(g) > 0 {
+                    let ids = g.selected.clone();
+                    delete_nodes(g, &ids);
+                }
+            });
+        }
+        FlMsg::Paste(at) => {
+            with(|g| {
+                let at = at.unwrap_or(((60.0 - g.pan.0) / g.zoom, (60.0 - g.pan.1) / g.zoom));
+                paste_at(g, at);
+            });
+        }
+        FlMsg::Duplicate => {
+            with(|g| {
+                let c = g.graph.excerpt(&g.selected);
+                if c.nodes.is_empty() {
+                    return;
+                }
+                let (x0, y0) = c.nodes.iter().fold((f32::MAX, f32::MAX), |a, n| (a.0.min(n.x), a.1.min(n.y)));
+                edit(g, "");
+                g.selected = g.graph.paste(&c, (x0 + 32.0, y0 + 32.0));
+            });
+        }
+        FlMsg::Undo => {
+            with(|g| {
+                if let Some(prev) = g.undo.pop() {
+                    g.redo.push(std::mem::replace(&mut g.graph, prev));
+                    after_swap(g);
+                }
+            });
+        }
+        FlMsg::Redo => {
+            with(|g| {
+                if let Some(next) = g.redo.pop() {
+                    g.undo.push(std::mem::replace(&mut g.graph, next));
+                    after_swap(g);
+                }
+            });
+        }
+        FlMsg::QuickOpen(q) => {
+            with(|g| g.quick = Some(q));
+        }
+        FlMsg::QuickQuery(s) => {
+            with(|g| {
+                if let Some(q) = g.quick.as_mut() {
+                    q.query = s;
+                }
+            });
+        }
+        FlMsg::QuickClose => {
+            with(|g| g.quick = None);
+        }
+        FlMsg::QuickPick(refer) => {
+            with(|g| {
+                let Some(q) = g.quick.take() else { return };
+                let before = g.graph.clone();
+                let Some(id) = add_node(g, &refer, q.x, q.y) else { return };
+                let after = std::mem::replace(&mut g.graph, before);
+                edit(g, "");
+                g.graph = after;
+                let multi = multi_in(&kind_of(g, &id), &q.port);
+                g.graph.connect(Edge { from: q.from, out: q.port.clone(), to: id.clone(), inp: q.port }, multi);
+                g.selected = vec![id];
+            });
+        }
+        FlMsg::LibQuery(s) => {
+            with(|g| g.lib_query = s);
         }
         FlMsg::Connect(e) => {
             with(|g| {
-                let kind = g.graph.node(&e.to).and_then(|n| g.palette.as_ref().and_then(|p| p.get(&n.module))).map(|d| d.kind.clone()).unwrap_or_default();
-                let multi = multi_in(&kind, &e.inp);
+                let multi = multi_in(&kind_of(g, &e.to), &e.inp);
+                edit(g, "");
                 g.graph.connect(e, multi);
-                touch(g);
             });
         }
         FlMsg::Disconnect(to, inp) => {
             with(|g| {
+                edit(g, "");
                 g.graph.edges.retain(|e| !(e.to == to && e.inp == inp));
-                touch(g);
             });
         }
         FlMsg::Swap(id, refer) => {
             with(|g| {
                 // 换成同环节的另一个模块：名字相同的参数留着，其余丢掉
                 let keep: Vec<String> = g.palette.as_ref().and_then(|p| p.get(&refer)).map(|d| d.params.iter().map(|p| p.name.clone()).collect()).unwrap_or_default();
+                edit(g, "");
                 if let Some(n) = g.graph.node_mut(&id) {
                     n.module = refer;
                     n.params.retain(|k, _| keep.contains(k));
                 }
                 g.form.retain(|k, _| !k.starts_with(&format!("{id}\u{1}")));
-                touch(g);
+                g.tables.retain(|k, _| !k.starts_with(&format!("{id}\u{1}")));
             });
         }
         FlMsg::Param(id, name, text) => {
@@ -950,6 +1471,7 @@ pub fn handle(m: FlMsg) {
                     .map(|p| p.ty.clone())
                     .unwrap_or_default();
                 let parsed = parse_value(&text, &ty);
+                edit(g, &format!("p.{id}.{name}"));
                 g.form.insert(form_key(&id, &name), text);
                 if let Some(n) = g.graph.node_mut(&id) {
                     match parsed {
@@ -961,13 +1483,58 @@ pub fn handle(m: FlMsg) {
                         }
                     }
                 }
-                touch(g);
+            });
+        }
+        FlMsg::ParamValue(id, name, value) => {
+            with(|g| {
+                edit(g, "");
+                g.form.remove(&form_key(&id, &name));
+                if let Some(n) = g.graph.node_mut(&id) {
+                    match value {
+                        Some(v) => {
+                            n.params.insert(name, v);
+                        }
+                        None => {
+                            n.params.remove(&name);
+                        }
+                    }
+                }
+            });
+        }
+        FlMsg::TableEdit(id, name, row, col, text) => {
+            with(|g| {
+                let key = form_key(&id, &name);
+                let mut rows = g.tables.get(&key).cloned().unwrap_or_else(|| table_rows(g.graph.node(&id).and_then(|n| n.params.get(&name))));
+                let Some(cell) = rows.get_mut(row).and_then(|r| r.get_mut(col)) else { return };
+                *cell = text;
+                set_table(g, &id, &name, rows, &format!("t.{id}.{name}.{row}.{col}"));
+            });
+        }
+        FlMsg::TableAdd(id, name) => {
+            with(|g| {
+                let key = form_key(&id, &name);
+                let mut rows = g.tables.get(&key).cloned().unwrap_or_else(|| table_rows(g.graph.node(&id).and_then(|n| n.params.get(&name))));
+                // 新行沿用上一行的外层键：多半是给同一个来源再加一项
+                let outer = rows.last().map(|r| r[0].clone()).unwrap_or_default();
+                rows.push([outer, String::new(), String::new()]);
+                g.tables.insert(key, rows); // 空行还不算改动
+            });
+        }
+        FlMsg::TableDel(id, name, row) => {
+            with(|g| {
+                let key = form_key(&id, &name);
+                let mut rows = g.tables.get(&key).cloned().unwrap_or_else(|| table_rows(g.graph.node(&id).and_then(|n| n.params.get(&name))));
+                if row < rows.len() {
+                    rows.remove(row);
+                    set_table(g, &id, &name, rows, "");
+                }
             });
         }
         FlMsg::LaneField(id, name, text) => {
             with(|g| {
                 let ty = if name == "entry_tf" || name == "exit_tf" { "integer" } else { "string" };
                 let parsed = parse_value(&text, ty);
+                edit(g, &format!("l.{id}.{name}"));
                 g.form.insert(form_key(&id, &format!("lane.{name}")), text);
                 if let Some(lane) = g.graph.node_mut(&id).and_then(|n| n.lane.as_mut()) {
                     match parsed {
@@ -979,15 +1546,14 @@ pub fn handle(m: FlMsg) {
                         }
                     }
                 }
-                touch(g);
             });
         }
         FlMsg::RegimeName(id, text) => {
             with(|g| {
+                edit(g, &format!("r.{id}"));
                 if let Some(n) = g.graph.node_mut(&id) {
                     n.name = if text.trim().is_empty() { None } else { Some(text) };
                 }
-                touch(g);
             });
         }
         FlMsg::Pan(dx, dy) => {
@@ -1006,6 +1572,22 @@ pub fn handle(m: FlMsg) {
                     g.pan = (24.0, 16.0);
                 }
             });
+        }
+    }
+}
+
+fn set_table(g: &mut St, id: &str, name: &str, rows: Vec<[String; 3]>, tag: &str) {
+    edit(g, tag);
+    let value = rows_table(&rows);
+    g.tables.insert(form_key(id, name), rows);
+    if let Some(n) = g.graph.node_mut(id) {
+        match value {
+            Some(v) => {
+                n.params.insert(name.to_string(), v);
+            }
+            None => {
+                n.params.remove(name);
+            }
         }
     }
 }
@@ -1060,6 +1642,11 @@ mod tests {
         assert_eq!(parse_value("2.5", "number").unwrap().as_f64(), Some(2.5));
         assert_eq!(parse_value("true", "boolean"), Some(Value::Bool(true)));
         assert_eq!(parse_value("[1, 15]", "array"), Some(serde_json::json!([1, 15])));
+        // 列表不用写成 JSON：逗号隔开，数按数、文字按文字；显示时也是逗号隔开
+        assert_eq!(parse_value("1, 15，60", "array"), Some(serde_json::json!([1, 15, 60])));
+        assert_eq!(parse_value("trend_up, range", "array"), Some(serde_json::json!(["trend_up", "range"])));
+        assert_eq!(value_text(&serde_json::json!(["trend_up", "range"])), "trend_up, range");
+        assert_eq!(value_text(&serde_json::json!([1, 15])), "1, 15");
         assert_eq!(parse_value("", "number"), None); // 留空 = 用缺省值
         assert_eq!(parse_value("abc", "integer"), Some(Value::String("abc".into()))); // 填错了也留着，检查时报
         assert_eq!(value_text(&Value::String("both".into())), "both");
@@ -1078,5 +1665,63 @@ mod tests {
         assert_eq!(locate(&w, "S1", "").as_deref(), Some("n5")); // 成交 / 平仓 → 这条线的入场节点
         assert_eq!(locate(&w, "S9", "exit.breakeven"), None);
         assert_eq!(graph_path_for("ea.my_breakout"), "strategies/research/ea/my_breakout.swe.graph.json");
+    }
+
+    #[test]
+    fn two_level_tables_edit_as_rows_and_back() {
+        let v = serde_json::json!({"trend_up": {"S1": 1.0, "S2": 0}, "range": {"S1": 0.5}});
+        let rows = table_rows(Some(&v));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows_table(&rows), Some(v));
+        // 键没填、值没填的行不算；全空 = 用缺省值
+        assert_eq!(rows_table(&[["a".into(), "".into(), "2".into()], ["".into(), "x".into(), "1".into()], ["b".into(), "k".into(), "".into()]]), Some(serde_json::json!({"a": 2})));
+        assert_eq!(rows_table(&[["".into(), "".into(), "".into()]]), None);
+        assert_eq!(table_rows(None), Vec::<[String; 3]>::new());
+    }
+
+    #[test]
+    fn paste_gives_fresh_ids_unique_names_and_keeps_inner_wires() {
+        let mut g = Graph::blank();
+        let lane = |name: &str| Some([("name".to_string(), Value::String(name.into()))].into_iter().collect::<Map<String, Value>>());
+        g.nodes.push(Node { id: "n2".into(), module: "setup.x@1".into(), x: 10.0, y: 20.0, ..Default::default() });
+        g.nodes.push(Node { id: "n3".into(), module: "entry.y@1".into(), x: 210.0, y: 20.0, lane: lane("S1"), ..Default::default() });
+        g.nodes.push(Node { id: "n4".into(), module: "regime.z@1".into(), name: Some("trend".into()), ..Default::default() });
+        g.edges.push(Edge { from: "n2".into(), out: "signal".into(), to: "n3".into(), inp: "signal".into() });
+        g.edges.push(Edge { from: "n3".into(), out: "intent".into(), to: "n1".into(), inp: "intent".into() });
+        // 「执行」不复制；只带走选中节点之间的线
+        let clip = g.excerpt(&["n1".into(), "n2".into(), "n3".into(), "n4".into()]);
+        assert_eq!((clip.nodes.len(), clip.edges.len()), (3, 1));
+        let new = g.paste(&clip, (100.0, 100.0));
+        assert_eq!(new, ["n5", "n6", "n7"]);
+        assert_eq!(g.edges.len(), 3);
+        assert!(g.edges.contains(&Edge { from: "n5".into(), out: "signal".into(), to: "n6".into(), inp: "signal".into() }));
+        assert_eq!(g.node("n6").unwrap().lane.as_ref().unwrap()["name"], "S1_2"); // 线名不能重复
+        assert_eq!(g.node("n7").unwrap().name.as_deref(), Some("trend_2"));
+        // 左上角对齐到粘贴点，相对位置不变（n4 在 (0,0) 是这一组的左上角）
+        assert_eq!((g.node("n5").unwrap().x, g.node("n6").unwrap().x), (110.0, 310.0));
+        assert_eq!(unique_name("S1_2", &["S1".into(), "S1_2".into()]), "S1_3");
+    }
+
+    #[test]
+    fn quick_search_lists_only_modules_that_accept_the_dragged_port() {
+        let m = |title: &str, kind: &str, ins: &[&str]| ModDef { refer: format!("{kind}.{title}@1"), title: title.into(), kind: kind.into(), kind_label: kind.into(), ins: ins.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let pal = Palette { modules: vec![m("calendar", "confirm", &["signal"]), m("stop_ladder", "entry", &["signal", "stop"]), m("breakeven", "exit", &["position"])], ..Default::default() };
+        let mut q = Quick { port: "signal".into(), ..Default::default() };
+        assert_eq!(q.candidates(&pal).iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["calendar", "stop_ladder"]);
+        q.query = "LADDER".into();
+        assert_eq!(q.candidates(&pal).len(), 1);
+        q.port = "regime".into();
+        q.query.clear();
+        assert!(q.candidates(&pal).is_empty());
+    }
+
+    #[test]
+    fn param_controls_follow_declared_type() {
+        let p = |ty: &str, choices: Option<Vec<Value>>| ParamDef { ty: ty.into(), choices, ..Default::default() };
+        assert_eq!(p("boolean", None).control(), Control::Switch);
+        assert_eq!(p("string", Some(vec!["a".into(), "b".into()])).control(), Control::Choice);
+        assert_eq!(p("array", None).control(), Control::List);
+        assert_eq!(p("object", None).control(), Control::Table);
+        assert_eq!(p("number", None).control(), Control::Text);
     }
 }

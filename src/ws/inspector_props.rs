@@ -143,6 +143,10 @@ pub fn view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
         }
         Content::OfmsLab => Some(super::ofms_lab_view::inspector_settings(st.unique_id()).map(Event::OfmsLabInteraction)),
         Content::BacktestResult => Some(super::backtest_launch_view::inspector_form().map(Event::BacktestLaunchInteraction)),
+        // 策略画布（docs/45 C0）：选中节点的参数；没选中是这张图的属性与问题清单。「模块库」页签没有属性
+        Content::StrategyFlow if super::strategy_flow_view::in_canvas_view(st.settings.view.as_deref()) => {
+            Some(super::strategy_flow_view::inspector_panel().map(Event::StrategyFlowInteraction))
+        }
         Content::TardisBoard(tb) => {
             Some(with_part(Part::Props, || super::tardis_board_view::pane_body(tb, true)).map(Event::TardisBoardInteraction))
         }
@@ -316,6 +320,7 @@ pub fn has_props(content: &Content) -> bool {
         | Content::TardisReplay(_)
         | Content::OfmsLab
         | Content::MarketMap
+        | Content::StrategyFlow
         | Content::Calendar => true,
         Content::Orders => super::orders_view::selected_detail().is_some(),
         _ => false,
@@ -332,7 +337,7 @@ pub fn about(content: &Content) -> Option<String> {
         Content::BacktestResult => "回测结果（docs/37）：最近一次（或钉住的那次）回测的 tearsheet——收益、回撤、成交、数据来源与体检等级。\n\n选策略在「属性」页、选数据在「数据」页，运行 / 停止在顶部工具栏。回测 PnL 不可直接外推实盘：队列位置已建模，但逆向选择、他人撤单、自身冲击不在内（docs/27 §9）。",
         Content::StrategyCenter => "策略中心（docs/37）：策略库、参数表单、完整 / 快速回测、运行记录、优化与验证、闸门（G1–G8）、对比。\n\n只跑观察模式与回测；真金下单必须逐次确认。",
         Content::StrategyLayers => "七层（docs/39）：交易大师策略的七层流水线，跟随策略中心选中的策略与运行。",
-        Content::StrategyFlow => "策略画布（docs/44）：用节点和连线设计策略；运行时按决策轨迹把跑到的节点点亮。",
+        Content::StrategyFlow => "策略画布（docs/44、docs/45）：用节点和连线设计策略；运行时按决策轨迹把跑到的节点点亮。\n\n节点的参数在检查器「属性」页里改；改完停手半秒自动检查，问题标在节点上。图不直接执行——保存时编译成一份工作流，由同一个宿主运行，所以和手写的工作流是同一个东西。\n\n只跑回测与观察模式；实盘下单不在画布上发起。",
         Content::Calendar => "金融日历（docs/43）：全球金融事件的月历、未来 12 个月概览与事件流——宏观数据发布（BLS / BEA）、FOMC 与欧洲央行决议、国债拍卖、币安季度交割，以及按规则推算的美股休市、期权到期、四巫日。\n\n抓取在资讯守护 ws-news 里（与新闻共用源表），面板只读快照。筛选、显示时区、选中事件的详情与修订历史在「属性」页；刷新与各源覆盖期在「数据」页。\n\n确定性分得开：≈ = 时刻按惯例（来源只给日期）；预计 = 规则推算；⊘ = 来源已撤下。重要性不等于实际波动。",
         Content::News => "新闻资讯（docs/25）：交易所 / 监管 / 媒体的统一时间线；连接全在 ws-news 守护里，面板只读快照。\n\n守护启停、条数与源新鲜度在「数据」页；`~` = 源没给发布时间，显示的是我们抓到的时刻。",
         Content::MarketMap => "全球市场雷达（docs/22）：全市场热图、筛选器、宽度等视图。发现工具，不是交易信号；加密是实时价，股票是延迟报价，徽章分档标出。\n\n资产 / 来源 / 筛选 / 大小 / 颜色 / 色板在「属性」页；守护启停、刷新、标的数、z 可信度与回填在「数据」页。",

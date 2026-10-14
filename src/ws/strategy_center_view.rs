@@ -444,7 +444,7 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
 
 // ── 右栏：运行记录 + 概况 ──────────────────────────────────────────────
 
-fn run_item<'a>(r: &RunRow, picked: bool, in_basket: bool) -> Element<'a, ScMsg> {
+fn run_item<'a>(r: &RunRow, picked: bool, in_basket: bool, is_workflow: bool) -> Element<'a, ScMsg> {
     let mut head = row![t::metadata(when(r.created_ts)), status_badge(&r.status)].spacing(space(2)).align_y(Alignment::Center);
     if let Some(s) = &r.summary {
         if s.is_bp() {
@@ -464,6 +464,13 @@ fn run_item<'a>(r: &RunRow, picked: bool, in_basket: bool) -> Element<'a, ScMsg>
     head = head.push(Space::new().width(Length::Fill));
     if r.active() {
         head = head.push(w::btn("■ 停止", Kind::Destructive, Some(ScMsg::Stop(r.run_id.clone()))));
+    }
+    if r.status == "done"
+        && let Some(dir) = &r.result_dir
+        && is_workflow
+    {
+        // 图随结果存（docs/45 §4.4）：在「策略画布」里打开这次运行当时的图
+        head = head.push(w::btn("当时的图", Kind::Ghost, Some(ScMsg::OpenGraph(dir.clone()))));
     }
     if r.status == "done" && r.result_dir.is_some() {
         head = head.push(w::btn(if in_basket { "✓ 对比" } else { "＋对比" }, if in_basket { Kind::Standard } else { Kind::Ghost },
@@ -557,7 +564,7 @@ fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
     let mut col = column![
         w::panel_header(
             "",
-            Some(w::tabs(&[("运行记录", Tab::Runs), (study_tab, Tab::Studies), (check_tab, Tab::Checks), (cmp_tab, Tab::Compare), ("模块", Tab::Modules)], &v.tab, ScMsg::Tab)),
+            Some(w::tabs(&[("运行记录", Tab::Runs), (study_tab, Tab::Studies), (check_tab, Tab::Checks), (cmp_tab, Tab::Compare)], &v.tab, ScMsg::Tab)),
             vec![w::btn("跟随最新结果", if pinned { Kind::Standard } else { Kind::Ghost }, pinned.then_some(ScMsg::FollowLatest))],
         )
     ]
@@ -583,10 +590,12 @@ fn runs<'a>(v: &View) -> Element<'a, ScMsg> {
     if v.runs.is_empty() && v.db_err.is_empty() {
         col = col.push(w::empty("这个策略还没跑过", "改好参数点「▶ 完整回测」"));
     }
+    // 工作流条目的运行带着当时的图（docs/45 §4.4）
+    let is_workflow = v.selected.as_ref().is_some_and(|e| e.path.ends_with(".swe.toml"));
     let mut list = column![].spacing(space(1));
     for r in &v.runs {
         let in_basket = v.basket.iter().any(|b| b.run_id == r.run_id);
-        list = list.push(run_item(r, v.picked_run.as_deref() == Some(r.run_id.as_str()), in_basket));
+        list = list.push(run_item(r, v.picked_run.as_deref() == Some(r.run_id.as_str()), in_basket, is_workflow));
     }
     col = col.push(crate::ui::scroll(list).height(Length::FillPortion(3)));
 
@@ -1257,6 +1266,13 @@ fn module_item<'a>(m: &Module, picked: bool) -> Element<'a, ScMsg> {
     if picked { column![item, module_detail(m)].spacing(0).into() } else { item.into() }
 }
 
+/// 「策略画布」工作区的「模块库」页签（docs/45）：整页就是模块注册表。
+pub fn modules_page<'a>() -> Element<'a, ScMsg> {
+    super::strategy_center::ensure_mods();
+    let v = super::strategy_center::view();
+    container(crate::ui::scroll(modules(&v)).height(Length::Fill)).width(Length::Fill).height(Length::Fill).into()
+}
+
 fn modules<'a>(v: &View) -> Element<'a, ScMsg> {
     let mut col = column![
         row![
@@ -1265,7 +1281,7 @@ fn modules<'a>(v: &View) -> Element<'a, ScMsg> {
             w::btn_busy("刷新", Kind::Ghost, Some(ScMsg::ModsRefresh), v.mods_loading)
         ]
         .align_y(Alignment::Center),
-        t::metadata("按环节列出全部模块：一个模块一个文件，工作流用「id@版本」引用。这一页与左栏选中的策略无关。").color(pal::dim()),
+        t::metadata("按环节列出全部模块：一个模块一个文件，工作流用「id@版本」引用；画布左栏的模块就是这些。").color(pal::dim()),
     ]
     .spacing(space(2));
     if !v.mods_err.is_empty() {

@@ -1133,7 +1133,7 @@ impl State {
             }
             Content::StrategyFlow => {
                 // 策略画布（docs/44 §21）：节点 + 连线设计策略，运行时按决策轨迹高亮
-                let base = crate::ws::strategy_flow_view::pane_body()
+                let base = crate::ws::strategy_flow_view::pane_body(self.settings.view.as_deref())
                     .map(move |m| Message::PaneEvent(id, Event::StrategyFlowInteraction(m)));
                 self.compose_stack_view(
                     base,

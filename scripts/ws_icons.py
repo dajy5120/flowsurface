@@ -251,6 +251,16 @@ def chip():  # 资源：处理器
     return i
 
 
+def flow():  # 策略画布：两个节点、端口上的圆点、一根折过去的连线
+    i = Icon()
+    i.rect(2.5, 3.5, 10.5, 10.5, 1.5)
+    i.rect(13.5, 13.5, 21.5, 20.5, 1.5)
+    i.line((10.5, 7), (15, 7), (9, 17), (13.5, 17))
+    i.dot(10.5, 7, 1.7)
+    i.dot(13.5, 17, 1.7)
+    return i
+
+
 def calendar():  # 金融日历：日历页 + 两个挂环 + 标记日
     i = Icon()
     i.rect(3, 5, 21, 21, 2)
@@ -284,6 +294,7 @@ ICONS = [
     ("ws-pulse", pulse),
     ("ws-chip", chip),
     ("ws-calendar", calendar),
+    ("ws-flow", flow),
 ]
 
 
