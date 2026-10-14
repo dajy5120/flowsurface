@@ -168,6 +168,18 @@ pub struct Node {
     /// 存成子图资产时要暴露的参数：{参数名: 暴露名}（docs/45 §4.3 第 4 条）
     #[serde(skip_serializing_if = "Map::is_empty")]
     pub expose: Map<String, Value>,
+    /// 旁路（docs/45 §4.4）：当它不存在。过滤 → 全部放行；出场 / 止损 / 缩放 → 不调整；风控 → 不审
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bypass: bool,
+    /// 待比较（docs/45 C7）：`{"use": [模块…]}` 或 `{参数: [取值…]}`；「跑变体」取它们的笛卡尔积
+    #[serde(skip_serializing_if = "Map::is_empty")]
+    pub vary: Map<String, Value>,
+    /// 由连线驱动的参数（docs/45 C8）：每个变成一个「数」输入端口，接上的数值链在运行时给它取值
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub driven: Vec<String>,
+    /// 这份代码不认识的字段：原样留着、原样写回（新版画布加的东西不会被旧版存丢）
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// 子图 / 分组框（docs/45 §4.2）：一组节点。展开时画一个框，折叠时顶层只占一个节点，可以进去看。
@@ -209,11 +221,16 @@ pub struct Graph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub groups: Vec<Group>,
+    /// 不认识的字段（运行快照里冻结的子图 `assets`、新版加的东西）：原样留着、原样写回
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 pub const EXEC: &str = "kernel.exec";
 /// 这份代码写出的图格式版本，与 `strategies/swe/graph.py` 的 FORMAT 一致（Python 端拒绝比它新的）。
-pub const GRAPH_FORMAT: u32 = 4;
+pub const GRAPH_FORMAT: u32 = 6;
+/// 最小缩放：上千个节点的图要能整张看全（低于 0.3 只画色块，见视图的细节层级）。
+pub const MIN_ZOOM: f32 = 0.1;
 /// 撤销栈的深度。
 const UNDO_DEPTH: usize = 100;
 /// 停手多久之后自动检查。
@@ -388,6 +405,34 @@ pub enum DebugTab {
     Trades,
     WhyNot,
     Breaks,
+    /// 运行队列与变体对比（docs/45 C7）
+    Queue,
+}
+
+/// 运行队列里的一项：一组变体（没标待比较 = 一组只有一次）。经策略中心跑，每次都计入全局试验数。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Job {
+    pub title: String,
+    pub path: String,
+    pub start: String,
+    pub end: String,
+    /// waiting / running / done / failed / cancelled
+    pub status: String,
+    pub study_id: String,
+    pub labels: Vec<String>,
+    /// 旁路 / 静音了什么（跑的时候图上的状态）
+    pub marks: Vec<String>,
+    /// 每组一条：done / failed 事件（带 metrics / error）
+    pub rows: Vec<Value>,
+    pub curves: Option<Value>,
+    pub global_trials: Option<i64>,
+    pub error: String,
+}
+
+impl Job {
+    pub fn n_finished(&self) -> usize {
+        self.rows.len()
+    }
 }
 
 /// 一笔成交的来龙去脉里的一步。
@@ -551,6 +596,21 @@ pub enum FlMsg {
     CodeName(String),
     CodeNew,
     CodeTest,
+    /// 旁路这个节点 / 静音这条线（入场节点）
+    Bypass(String, bool),
+    LaneMute(String, bool),
+    /// 待比较：换模块的候选（节点, 模块, 加 / 去）
+    VaryUse(String, String, bool),
+    /// 待比较：参数的候选取值（节点, 参数, 逗号隔开的文字；空 = 不比较）
+    VaryParam(String, String, String),
+    /// 把当前的图（先保存）按当前日期排进运行队列
+    Enqueue,
+    QueueCancel(usize),
+    QueuePick(usize),
+    /// 这个参数改为由连线驱动 / 取消（取消时拔掉接在上面的线）
+    Drive(String, String, bool),
+    /// 节点上叠显示上次运行各模块的耗时
+    ProfileToggle,
     Open(FileItem),
     Save,
     Check,
@@ -691,6 +751,8 @@ struct St {
     envelope_hit: Option<(String, String, u32)>,
     /// 这次运行收到的决策轨迹（调试面板用；最多留 5 万条）
     events: Vec<Value>,
+    /// 其中「一笔结束」的那些的序号（视图每帧要，别每帧去五万条里筛）
+    trade_idx: Vec<usize>,
     /// 各条线最新的「为什么没做」计数
     why_not: BTreeMap<String, Map<String, Value>>,
     debug_open: bool,
@@ -711,6 +773,12 @@ struct St {
     code_made: Option<(String, String)>,
     /// 它的契约测试结果（None = 还没测）
     code_problems: Option<Vec<String>>,
+    queue: Vec<Job>,
+    queue_pick: Option<usize>,
+    queue_child: Option<Child>,
+    /// 上次运行各节点的耗时：节点 → (毫秒, 调用次数)
+    profile: HashMap<String, (f64, u64)>,
+    profile_on: bool,
 }
 
 impl Default for St {
@@ -755,6 +823,7 @@ impl Default for St {
             live_n: 0,
             envelope_hit: None,
             events: Vec::new(),
+            trade_idx: Vec::new(),
             why_not: BTreeMap::new(),
             debug_open: false,
             debug_tab: DebugTab::Trades,
@@ -770,6 +839,11 @@ impl Default for St {
             code_name: String::new(),
             code_made: None,
             code_problems: None,
+            queue: Vec::new(),
+            queue_pick: None,
+            queue_child: None,
+            profile: HashMap::new(),
+            profile_on: false,
         }
     }
 }
@@ -836,6 +910,10 @@ pub struct View {
     pub code_name: String,
     pub code_made: Option<(String, String)>,
     pub code_problems: Option<Vec<String>>,
+    pub queue: Vec<Job>,
+    pub queue_pick: Option<usize>,
+    pub profile: HashMap<String, (f64, u64)>,
+    pub profile_on: bool,
 }
 
 /// 「新建代码节点」能生成哪些环节（与 `strategies/swe/codegen.py` 的模板一致）。
@@ -877,7 +955,7 @@ pub fn view() -> View {
         live: g.live.clone(),
         live_n: g.live_n,
         envelope_hit: g.envelope_hit.clone(),
-        trades: g.events.iter().enumerate().filter(|(_, e)| e.get("kind").and_then(Value::as_str) == Some("trade")).map(|(i, e)| (i, e.clone())).collect(),
+        trades: if g.debug_open { g.trade_idx.iter().filter_map(|&i| g.events.get(i).map(|e| (i, e.clone()))).collect() } else { Vec::new() },
         why_not: g.why_not.clone(),
         debug_open: g.debug_open,
         debug_tab: g.debug_tab,
@@ -892,6 +970,10 @@ pub fn view() -> View {
         code_name: g.code_name.clone(),
         code_made: g.code_made.clone(),
         code_problems: g.code_problems.clone(),
+        queue: g.queue.clone(),
+        queue_pick: g.queue_pick,
+        profile: if g.profile_on { g.profile.clone() } else { HashMap::new() },
+        profile_on: g.profile_on,
     })
     .expect("策略画布状态锁中毒")
 }
@@ -1113,6 +1195,47 @@ fn ensure_started() {
                     });
                 });
             }
+            // 性能自测（docs/45 C8）：`WS_FLOW_BENCH=1` 打开后连着平移 / 缩放 240 帧，把视图构建与绘制的耗时打到标准错误
+            if std::env::var_os("WS_FLOW_BENCH").is_some() {
+                super::spawn_named("ws-flowbench", || {
+                    std::thread::sleep(std::time::Duration::from_secs(6));
+                    // 最坏的情况：缩到最小、视野里塞满节点（WS_FLOW_BENCH=near 则保持打开时的视野）
+                    if std::env::var("WS_FLOW_BENCH").ok().as_deref() != Some("near") {
+                        with(fit);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    bench_reset();
+                    for i in 0..240 {
+                        if i % 60 == 30 {
+                            handle(FlMsg::Zoom(if i < 120 { 1.25 } else { 0.8 }));
+                        } else {
+                            handle(FlMsg::Pan(if (i / 60) % 2 == 0 { 6.0 } else { -6.0 }, 3.0));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(16));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    eprintln!("[flow-bench] {}", bench_report());
+                });
+            }
+            // 样张截图用：`WS_FLOW_QUEUE_LOG=<变体运行的事件日志>` 把一次跑过的变体放进队列（不重跑、不再计试验数）
+            if let Ok(log) = std::env::var("WS_FLOW_QUEUE_LOG") {
+                let mut job = Job { title: "（回放）".into(), status: "running".into(), ..Default::default() };
+                for line in std::fs::read_to_string(&log).unwrap_or_default().lines() {
+                    if let Ok(ev) = serde_json::from_str::<Value>(line) {
+                        apply_queue_event(&mut job, &ev);
+                    }
+                }
+                with(|g| {
+                    g.queue.push(job);
+                    g.queue_pick = Some(0);
+                    g.debug_open = true;
+                    g.debug_tab = DebugTab::Queue;
+                });
+            }
+            // 样张截图用：`WS_FLOW_PROFILE=1` 一开始就叠显示耗时（配 WS_FLOW_RUN，跑完才有数）
+            if std::env::var_os("WS_FLOW_PROFILE").is_some() {
+                with(|g| g.profile_on = true);
+            }
             if std::env::var_os("WS_FLOW_DEMO").is_some() {
                 super::spawn_named("ws-flowdemo", || {
                     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1310,12 +1433,14 @@ fn run_async() {
                     g.live_n = 0;
                     g.envelope_hit = None;
                     g.events.clear();
+                    g.trade_idx.clear();
                     g.why_not.clear();
                     g.picked_trade = None;
                     g.trace_path.clear();
                     g.path_nodes.clear();
                     g.paused = None;
                     g.generation += 1;
+                    g.profile.clear();
                     g.msg = format!("运行中：{run_id}（{start} → {end}）");
                     g.generation
                 })
@@ -1426,6 +1551,15 @@ fn follow_trace(run_id: String, generation: u64) {
                 for v in got {
                     let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
                     let (lane, module, kind, reason) = (s("lane"), s("module"), s("kind"), s("reason"));
+                    if kind == "profile" {
+                        // 运行结束时宿主报的各模块耗时（docs/45 C8）：按「线|模块」落到节点上，同一个节点的相加
+                        g.profile = profile_by_node(&v, &g.whence);
+                        let worst = g.profile.iter().max_by(|a, b| a.1.0.total_cmp(&b.1.0)).map(|(n, (ms, _))| (n.clone(), *ms));
+                        if let Some((n, ms)) = worst {
+                            g.msg = format!("耗时最多：{n}（{ms:.0} ms）；工具条「耗时」叠在节点上");
+                        }
+                        continue;
+                    }
                     if kind == "why_not" {
                         if let Some(m) = v.get("why").and_then(Value::as_object) {
                             g.why_not.insert(lane.clone(), m.clone());
@@ -1433,6 +1567,9 @@ fn follow_trace(run_id: String, generation: u64) {
                         continue;
                     }
                     if g.events.len() < 50_000 {
+                        if kind == "trade" {
+                            g.trade_idx.push(g.events.len());
+                        }
                         g.events.push(v.clone());
                     }
                     g.live_n += 1;
@@ -1486,6 +1623,8 @@ fn open(item: FileItem) {
             python(&["-m", "strategies.swe.graph", "import", &item.path], None)
                 .and_then(|b| serde_json::from_slice(&b).map_err(|e| format!("导入失败：{e}")))
         };
+        // 比这份代码新的图：打开了也认不全，存回去会丢东西——不开（docs/45 §3.7）
+        let r = r.and_then(|gr| if gr.format > GRAPH_FORMAT { Err(format!("这张图是第 {} 版格式，这个 Cockpit 只认到第 {GRAPH_FORMAT} 版：先更新 Cockpit 再打开", gr.format)) } else { Ok(gr) });
         with(|g| {
             g.busy = false;
             match r {
@@ -1542,7 +1681,7 @@ fn fit(g: &mut St) {
         x1 = x1.max(n.x + NODE.0);
         y1 = y1.max(n.y + NODE.1);
     }
-    let zoom = (VIEW.0 / (x1 - x0).max(1.0)).min(VIEW.1 / (y1 - y0).max(1.0)).clamp(0.35, 1.0);
+    let zoom = (VIEW.0 / (x1 - x0).max(1.0)).min(VIEW.1 / (y1 - y0).max(1.0)).clamp(MIN_ZOOM, 1.0);
     g.zoom = zoom;
     g.pan = (20.0 - x0 * zoom, 16.0 - y0 * zoom);
 }
@@ -1746,6 +1885,106 @@ pub fn handle(m: FlMsg) {
             with(|g| g.code_name = s);
         }
         FlMsg::CodeNew => code_new(),
+        FlMsg::Bypass(id, on) => {
+            with(|g| {
+                edit(g, "");
+                if let Some(n) = g.graph.node_mut(&id) {
+                    n.bypass = on;
+                }
+            });
+        }
+        FlMsg::LaneMute(id, on) => {
+            with(|g| {
+                edit(g, "");
+                if let Some(l) = g.graph.node_mut(&id).and_then(|n| n.lane.as_mut()) {
+                    if on {
+                        l.insert("mute".into(), Value::Bool(true));
+                    } else {
+                        l.remove("mute");
+                    }
+                }
+            });
+        }
+        FlMsg::VaryUse(id, refer, on) => {
+            with(|g| {
+                edit(g, "");
+                let Some(n) = g.graph.node_mut(&id) else { return };
+                let cur = n.module.clone();
+                let mut list: Vec<Value> = n.vary.get("use").and_then(Value::as_array).cloned().unwrap_or_default();
+                if list.is_empty() {
+                    list.push(Value::String(cur)); // 现在用的那个总是候选之一
+                }
+                list.retain(|v| v.as_str() != Some(refer.as_str()));
+                if on {
+                    list.push(Value::String(refer));
+                }
+                n.vary.retain(|k, _| k == "use"); // 换模块与改参数不能标在同一个节点上
+                if list.len() >= 2 {
+                    n.vary.insert("use".into(), Value::Array(list));
+                } else {
+                    n.vary.remove("use");
+                }
+            });
+        }
+        FlMsg::VaryParam(id, param, text) => {
+            with(|g| {
+                let ty = g.graph.node(&id).and_then(|n| g.palette.as_ref().and_then(|p| p.get(&n.module))).and_then(|d| d.params.iter().find(|p| p.name == param)).map(|p| p.ty.clone()).unwrap_or_default();
+                edit(g, &format!("v.{id}.{param}"));
+                g.form.insert(form_key(&id, &format!("vary.{param}")), text.clone());
+                let values: Vec<Value> = text.split([',', '，']).filter(|s| !s.trim().is_empty()).filter_map(|s| parse_value(s, &ty)).collect();
+                if let Some(n) = g.graph.node_mut(&id) {
+                    n.vary.remove("use");
+                    if values.is_empty() {
+                        n.vary.remove(&param);
+                    } else {
+                        n.vary.insert(param, Value::Array(values));
+                    }
+                }
+            });
+        }
+        FlMsg::Enqueue => enqueue(),
+        FlMsg::Drive(id, param, on) => {
+            with(|g| {
+                edit(g, "");
+                if !on {
+                    g.graph.edges.retain(|e| !(e.to == id && e.inp == param));
+                }
+                if let Some(n) = g.graph.node_mut(&id) {
+                    n.driven.retain(|p| *p != param);
+                    if on {
+                        n.driven.push(param);
+                    }
+                }
+            });
+        }
+        FlMsg::ProfileToggle => {
+            with(|g| {
+                g.profile_on = !g.profile_on;
+                if g.profile_on && g.profile.is_empty() {
+                    g.msg = "还没有耗时：在画布上运行一次（跑完时宿主报各模块的耗时）".into();
+                }
+            });
+        }
+        FlMsg::QueueCancel(i) => {
+            with(|g| {
+                let Some(j) = g.queue.get_mut(i) else { return };
+                match j.status.as_str() {
+                    "waiting" => j.status = "cancelled".into(),
+                    "running" => {
+                        if let Some(mut c) = g.queue_child.take() {
+                            let _ = c.kill();
+                            let _ = c.wait();
+                        }
+                        j.status = "cancelled".into();
+                    }
+                    _ => {}
+                }
+            });
+            queue_kick();
+        }
+        FlMsg::QueuePick(i) => {
+            with(|g| g.queue_pick = Some(i));
+        }
         FlMsg::CodeTest => code_test(),
         FlMsg::SelectToggleMany(ids) => {
             with(|g| {
@@ -2247,7 +2486,7 @@ pub fn handle(m: FlMsg) {
             with(|g| g.pan = (g.pan.0 + dx, g.pan.1 + dy));
         }
         FlMsg::Zoom(f) => {
-            with(|g| g.zoom = (g.zoom * f).clamp(0.35, 2.0));
+            with(|g| g.zoom = (g.zoom * f).clamp(MIN_ZOOM, 2.0));
         }
         FlMsg::ResetView => {
             // 第一下：看全；已经是看全的样子再点：回到 100%
@@ -2446,6 +2685,171 @@ fn code_test() {
     });
 }
 
+/// 排进运行队列：先存图（变体按存下的工作流跑），再记一项；队列空着就马上开始。
+fn enqueue() {
+    super::spawn_named("ws-flowenq", || {
+        if with(|g| g.busy).unwrap_or(true) {
+            return;
+        }
+        if let Err(e) = save_blocking() {
+            with(|g| g.msg = format!("没排进队列：{e}"));
+            return;
+        }
+        with(|g| {
+            let n_vary: usize = g.graph.nodes.iter().filter(|n| !n.vary.is_empty()).count();
+            let job = Job {
+                title: format!("{}（{} → {}）", g.graph.name, g.start, g.end),
+                path: g.path.clone().unwrap_or_default(),
+                start: g.start.clone(),
+                end: g.end.clone(),
+                status: "waiting".into(),
+                ..Default::default()
+            };
+            g.queue.push(job);
+            g.queue_pick = Some(g.queue.len() - 1);
+            g.debug_open = true;
+            g.debug_tab = DebugTab::Queue;
+            g.msg = if n_vary == 0 { "排进队列：没标待比较，就跑一次（也计入全局试验数）".into() } else { format!("排进队列：{n_vary} 个节点标了待比较") };
+        });
+        queue_kick();
+    });
+}
+
+/// 队列空闲时开始下一项（`python -m strategies.swe.variants run`，一行一个 JSON 事件）。
+fn queue_kick() {
+    let next = with(|g| {
+        if g.queue.iter().any(|j| j.status == "running") {
+            return None;
+        }
+        let i = g.queue.iter().position(|j| j.status == "waiting")?;
+        g.queue[i].status = "running".into();
+        Some((i, g.queue[i].clone()))
+    })
+    .flatten();
+    let Some((i, job)) = next else { return };
+    super::spawn_named("ws-flowqueue", move || {
+        use std::io::BufRead;
+        let mut cmd = Command::new(super::paths::python());
+        cmd.args(["-m", "strategies.swe.variants", "run", &job.path, "--start", &job.start, "--end", &job.end, "--workers", "2"]);
+        cmd.current_dir(super::paths::repo_root()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                with(|g| {
+                    if let Some(j) = g.queue.get_mut(i) {
+                        j.status = "failed".into();
+                        j.error = format!("起不来：{e}");
+                    }
+                });
+                return queue_kick();
+            }
+        };
+        let out = child.stdout.take();
+        with(|g| g.queue_child = Some(child));
+        if let Some(out) = out {
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
+                with(|g| {
+                    if let Some(j) = g.queue.get_mut(i) {
+                        apply_queue_event(j, &ev);
+                    }
+                });
+            }
+        }
+        with(|g| {
+            if let Some(mut c) = g.queue_child.take() {
+                let _ = c.wait();
+            }
+            if let Some(j) = g.queue.get_mut(i)
+                && j.status == "running"
+            {
+                j.status = "failed".into();
+                if j.error.is_empty() {
+                    j.error = "进程没跑完就退出了".into();
+                }
+            }
+        });
+        queue_kick();
+    });
+}
+
+/// 宿主报的耗时（{"线|模块": {"ms", "calls"}}）→ 每个节点的（毫秒, 次数）。
+pub fn profile_by_node(ev: &Value, whence: &HashMap<String, String>) -> HashMap<String, (f64, u64)> {
+    let mut out: HashMap<String, (f64, u64)> = HashMap::new();
+    if let Some(m) = ev.get("why").and_then(Value::as_object) {
+        for (key, x) in m {
+            let (lane, module) = key.split_once('|').unwrap_or(("", key));
+            if let Some(node) = locate(whence, lane, module) {
+                let e = out.entry(node).or_default();
+                e.0 += x.get("ms").and_then(Value::as_f64).unwrap_or(0.0);
+                e.1 += x.get("calls").and_then(Value::as_u64).unwrap_or(0);
+            }
+        }
+    }
+    out
+}
+
+/// 一行事件 → 队列项。
+pub fn apply_queue_event(j: &mut Job, ev: &Value) {
+    let s = |k: &str| ev.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    match s("event").as_str() {
+        "start" => {
+            j.study_id = s("study_id");
+            j.labels = ev.get("labels").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+            j.marks = ev.get("marks").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+        }
+        "done" | "failed" => j.rows.push(ev.clone()),
+        "end" => {
+            if let Some(rows) = ev.get("rows").and_then(Value::as_array) {
+                j.rows = rows.clone(); // 按组的顺序（跑的时候是谁先完谁先到）
+            }
+            j.curves = ev.get("curves").cloned().filter(|c| !c.is_null());
+            j.global_trials = ev.get("global_trials").and_then(Value::as_i64);
+            j.status = "done".into();
+        }
+        "error" => {
+            j.status = "failed".into();
+            j.error = s("error");
+        }
+        _ => {}
+    }
+}
+
+/// 性能自测的计时（视图构建 / 绘制，毫秒）。只在 `WS_FLOW_BENCH` 时有人看。
+fn bench_cell() -> &'static Mutex<(Vec<f32>, Vec<f32>)> {
+    static C: OnceLock<Mutex<(Vec<f32>, Vec<f32>)>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new((Vec::new(), Vec::new())))
+}
+
+pub fn bench_note(view_ms: Option<f32>, draw_ms: Option<f32>) {
+    if let Ok(mut c) = bench_cell().lock() {
+        if c.0.len() < 100_000 {
+            c.0.extend(view_ms);
+            c.1.extend(draw_ms);
+        }
+    }
+}
+
+fn bench_reset() {
+    if let Ok(mut c) = bench_cell().lock() {
+        c.0.clear();
+        c.1.clear();
+    }
+}
+
+fn bench_report() -> String {
+    let q = |v: &mut Vec<f32>| -> String {
+        if v.is_empty() {
+            return "无".into();
+        }
+        v.sort_by(f32::total_cmp);
+        let at = |p: f32| v[((v.len() - 1) as f32 * p) as usize];
+        format!("{} 次 中位 {:.2} / p95 {:.2} / 最大 {:.2} ms", v.len(), at(0.5), at(0.95), v[v.len() - 1])
+    };
+    let n = with(|g| g.graph.nodes.len()).unwrap_or(0);
+    bench_cell().lock().map(|mut c| format!("{n} 个节点；视图构建 {}；绘制 {}", q(&mut c.0), q(&mut c.1))).unwrap_or_default()
+}
+
 /// 在一个表里按「a.b」的路径写值（None = 删掉；删空了的子表一并删掉）。表单里 `session.start` 这类项用。
 pub fn set_path(root: &mut Value, path: &str, value: Option<Value>) {
     if !root.is_object() {
@@ -2636,7 +3040,7 @@ mod tests {
     #[test]
     fn format_4_fields_survive_a_save_and_stay_out_of_old_graphs() {
         let mut g = Graph::blank();
-        assert_eq!(g.format, 4);
+        assert_eq!(g.format, GRAPH_FORMAT);
         g.nodes.push(Node { id: "n2".into(), module: "sub.reaper_trail@1".into(), ..Default::default() });
         let plain = serde_json::to_value(&g).unwrap();
         assert!(plain["nodes"][1].get("expose").is_none()); // 空的不写
@@ -2644,6 +3048,64 @@ mod tests {
         g.groups.push(Group { id: "g1".into(), title: "t".into(), collapsed: false, asset: Some("sub.reaper_trail@1".into()) });
         let back: Graph = serde_json::from_value(serde_json::to_value(&g).unwrap()).unwrap();
         assert_eq!(back, g);
+    }
+
+    #[test]
+    fn bypass_and_vary_are_saved_only_when_set() {
+        let mut n = Node { id: "n1".into(), module: "stop.fixed@1.0".into(), ..Default::default() };
+        let v = serde_json::to_value(&n).unwrap();
+        assert!(v.get("bypass").is_none() && v.get("vary").is_none());
+        n.bypass = true;
+        n.vary.insert("sl".into(), serde_json::json!([20, 30]));
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["bypass"], Value::Bool(true));
+        assert_eq!(v["vary"]["sl"], serde_json::json!([20, 30]));
+    }
+
+    #[test]
+    fn profile_lands_on_nodes_and_sums_modules_sharing_one() {
+        let mut whence = HashMap::new();
+        whence.insert("S1|stop.fixed".to_string(), "n5".to_string());
+        whence.insert("S1|exit.trailing_stop".to_string(), "n9".to_string());
+        whence.insert("S1|exit.breakeven".to_string(), "n9".to_string()); // 子图实例：里面几个模块都落在它上
+        let ev = serde_json::json!({"kind": "profile", "why": {"S1|stop.fixed": {"ms": 1.5, "calls": 3}, "S1|exit.trailing_stop": {"ms": 2.0, "calls": 10}, "S1|exit.breakeven": {"ms": 1.0, "calls": 10}}});
+        let p = profile_by_node(&ev, &whence);
+        assert_eq!(p.get("n5"), Some(&(1.5, 3)));
+        assert_eq!(p.get("n9"), Some(&(3.0, 20)));
+    }
+
+    #[test]
+    fn unknown_fields_survive_a_round_trip() {
+        let src = serde_json::json!({"format": 6, "id": "a.b", "assets": {"sub.x@1": {"id": "x"}}, "future": 1,
+            "nodes": [{"id": "n1", "use": "kernel.exec", "x": 0.0, "y": 0.0, "params": {}, "later_field": [1, 2]}]});
+        let g: Graph = serde_json::from_value(src).unwrap();
+        let back = serde_json::to_value(&g).unwrap();
+        assert_eq!(back["assets"]["sub.x@1"]["id"], "x");
+        assert_eq!(back["future"], 1);
+        assert_eq!(back["nodes"][0]["later_field"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn driven_params_are_saved_only_when_set() {
+        let mut n = Node { id: "n1".into(), module: "stop.fixed@1.0".into(), ..Default::default() };
+        assert!(serde_json::to_value(&n).unwrap().get("driven").is_none());
+        n.driven.push("sl".into());
+        assert_eq!(serde_json::to_value(&n).unwrap()["driven"], serde_json::json!(["sl"]));
+    }
+
+    #[test]
+    fn queue_events_fill_a_job_and_end_in_order() {
+        let mut j = Job { status: "running".into(), ..Default::default() };
+        apply_queue_event(&mut j, &serde_json::json!({"event": "start", "study_id": "S-1", "n": 2, "labels": ["a", "b"], "marks": ["旁路 x"]}));
+        assert_eq!((j.study_id.as_str(), j.labels.len(), j.marks.len()), ("S-1", 2, 1));
+        apply_queue_event(&mut j, &serde_json::json!({"event": "done", "i": 1, "label": "b", "metrics": {"pnl": 2.0}}));
+        assert_eq!((j.n_finished(), j.status.as_str()), (1, "running"));
+        let rows = serde_json::json!([{"event": "done", "i": 0, "label": "a", "metrics": {"pnl": 1.0}}, {"event": "done", "i": 1, "label": "b", "metrics": {"pnl": 2.0}}]);
+        apply_queue_event(&mut j, &serde_json::json!({"event": "end", "rows": rows, "curves": null, "global_trials": 7}));
+        assert_eq!((j.rows.len(), j.status.as_str(), j.global_trials, j.curves.is_none()), (2, "done", Some(7), true));
+        let mut k = Job::default();
+        apply_queue_event(&mut k, &serde_json::json!({"event": "error", "error": "先保存"}));
+        assert_eq!((k.status.as_str(), k.error.as_str()), ("failed", "先保存"));
     }
 
     #[test]

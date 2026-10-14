@@ -134,14 +134,20 @@ struct Geom {
     sub: String,
     /// 无线引用的发布者
     wireless: bool,
+    /// 旁路了（画成淡的）；标记：「旁路」「比较 ×3」「静音」（docs/45 C7，不能忘了取消就拿去比较）
+    bypass: bool,
+    tag: String,
     bad: usize,
     live: Option<NodeLive>,
 }
 
 impl Geom {
     fn of(n: &Node, def: Option<&ModDef>) -> Geom {
-        let (ins, outs) = def.map(|d| (d.ins.clone(), d.outs.clone())).unwrap_or_default();
-        let in_types = ins.iter().map(|p| def.map_or(sf::port_type(p), |d| d.in_type(p)).to_string()).collect();
+        let (mut ins, outs) = def.map(|d| (d.ins.clone(), d.outs.clone())).unwrap_or_default();
+        // 由连线驱动的参数：各是一个「数」输入端口（docs/45 C8）
+        let extra: Vec<String> = n.driven.iter().filter(|p| !ins.contains(p)).cloned().collect();
+        ins.extend(extra);
+        let in_types = ins.iter().map(|p| if n.driven.contains(p) { "series" } else { def.map_or(sf::port_type(p), |d| d.in_type(p)) }.to_string()).collect();
         let out_types = outs.iter().map(|p| def.map_or(sf::port_type(p), |d| d.out_type(p)).to_string()).collect();
         // 数值节点把最要紧的参数直接写在底栏上（N、常数的值、特征名、表达式）
         let brief = ["n", "value", "name", "tf", "expr"].iter().filter_map(|k| n.params.get(*k).map(value_text)).collect::<Vec<_>>().join(" · ");
@@ -169,6 +175,8 @@ impl Geom {
             title: def.map(|d| d.title.clone()).unwrap_or_else(|| n.module.clone()),
             sub,
             wireless: n.wireless,
+            bypass: n.bypass,
+            tag: node_tag(n),
             bad: 0,
             live: None,
         }
@@ -191,6 +199,22 @@ impl Geom {
         let (x0, x1, y0, y1) = (a.x.min(b.x), a.x.max(b.x), a.y.min(b.y), a.y.max(b.y));
         self.x <= x1 && self.x + NODE_W >= x0 && self.y <= y1 && self.y + self.h >= y0
     }
+}
+
+/// 节点标题条右侧的标记：旁路 / 静音 / 待比较几个候选。
+fn node_tag(n: &Node) -> String {
+    let mut out = Vec::new();
+    if n.bypass {
+        out.push("旁路".to_string());
+    }
+    if n.lane.as_ref().and_then(|l| l.get("mute")).and_then(Value::as_bool) == Some(true) {
+        out.push("静音".to_string());
+    }
+    let k: usize = n.vary.values().filter_map(Value::as_array).map(Vec::len).product();
+    if !n.vary.is_empty() {
+        out.push(format!("比较×{k}"));
+    }
+    out.join(" ")
 }
 
 fn near(a: Point, b: Point, r: f32) -> bool {
@@ -256,38 +280,49 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
     for i in v.issues.iter().filter(|i| !i.node.is_empty()) {
         *bad.entry(i.node.as_str()).or_default() += 1;
     }
-    let title_of = |n: &Node| n.name.clone().or_else(|| pal_.get(&n.module).map(|d| d.title.clone())).unwrap_or_else(|| n.module.clone());
-    let collapsed = |n: &Node| v.focus.is_none() && n.group.as_ref().is_some_and(|gid| g.group(gid).is_some_and(|x| x.collapsed));
+    // 按 id 查节点 / 子图 / 模块：大图（上千节点）里逐个线性找是平方级的（docs/45 C8）
+    let node_of: HashMap<&str, &Node> = g.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let folded: std::collections::HashSet<&str> = g.groups.iter().filter(|x| x.collapsed).map(|x| x.id.as_str()).collect();
+    let defs: HashMap<&str, &ModDef> = pal_.modules.iter().map(|m| (m.refer.as_str(), m)).collect();
+    let title_of = |n: &Node| n.name.clone().or_else(|| defs.get(n.module.as_str()).map(|d| d.title.clone())).unwrap_or_else(|| n.module.clone());
+    let collapsed = |n: &Node| v.focus.is_none() && n.group.as_deref().is_some_and(|gid| folded.contains(gid));
     let visible = |n: &Node| v.focus.is_none() || n.group == v.focus;
     let mut sc = Scene::default();
     // 1. 方块：看得见的节点各一个；折叠的子图合成一个
     let mut where_: HashMap<&str, usize> = HashMap::new(); // 节点 → 它在哪个方块里
     for n in g.nodes.iter().filter(|n| visible(n) && !collapsed(n)) {
-        let mut ge = Geom::of(n, pal_.get(&n.module));
+        let mut ge = Geom::of(n, defs.get(n.module.as_str()).copied());
         ge.bad = bad.get(n.id.as_str()).copied().unwrap_or(0);
         ge.live = v.live.get(&n.id).cloned();
         where_.insert(n.id.as_str(), sc.geoms.len());
         sc.geoms.push(ge);
     }
+    let mut by_group: HashMap<&str, Vec<&Node>> = HashMap::new();
+    for n in &g.nodes {
+        if let Some(gid) = n.group.as_deref() {
+            by_group.entry(gid).or_default().push(n);
+        }
+    }
     if v.focus.is_none() {
         for gr in g.groups.iter().filter(|x| x.collapsed) {
-            let members: Vec<&Node> = g.nodes.iter().filter(|n| n.group.as_deref() == Some(gr.id.as_str())).collect();
+            let members: Vec<&Node> = by_group.get(gr.id.as_str()).cloned().unwrap_or_default();
             if members.is_empty() {
                 continue;
             }
-            let inside = |id: &str| members.iter().any(|m| m.id == id);
+            let member_ids: std::collections::HashSet<&str> = members.iter().map(|m| m.id.as_str()).collect();
+            let inside = |id: &str| member_ids.contains(id);
             // 对外的端口：有线通到子图外面的那些，按成员的上下位置排
             let mut ins: Vec<(f32, String, String, String)> = Vec::new();
             let mut outs: Vec<(f32, String, String, String)> = Vec::new();
             for e in &g.edges {
                 if inside(&e.to) && !inside(&e.from) && !ins.iter().any(|x| x.1 == e.to && x.2 == e.inp) {
                     let m = members.iter().find(|m| m.id == e.to).expect("成员");
-                    let ty = pal_.get(&m.module).map_or(sf::port_type(&e.inp), |d| d.in_type(&e.inp)).to_string();
+                    let ty = if m.driven.contains(&e.inp) { "series" } else { defs.get(m.module.as_str()).map_or(sf::port_type(&e.inp), |d| d.in_type(&e.inp)) }.to_string();
                     ins.push((m.y, e.to.clone(), e.inp.clone(), ty));
                 }
                 if inside(&e.from) && !inside(&e.to) && !outs.iter().any(|x| x.1 == e.from && x.2 == e.out) {
                     let m = members.iter().find(|m| m.id == e.from).expect("成员");
-                    let ty = pal_.get(&m.module).map_or(sf::port_type(&e.out), |d| d.out_type(&e.out)).to_string();
+                    let ty = defs.get(m.module.as_str()).map_or(sf::port_type(&e.out), |d| d.out_type(&e.out)).to_string();
                     outs.push((m.y, e.from.clone(), e.out.clone(), ty));
                 }
             }
@@ -327,13 +362,21 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
                 title: gr.title.clone(),
                 sub: format!("{} 个节点 · 双击进去看", members.len()),
                 wireless: false,
+                bypass: false,
+                tag: String::new(),
                 bad: members.iter().map(|m| bad.get(m.id.as_str()).copied().unwrap_or(0)).sum(),
                 live,
             });
         }
         // 2. 展开着的子图：一个框
+        let mut geoms_of: HashMap<&str, Vec<&Geom>> = HashMap::new();
+        for ge in sc.geoms.iter().filter(|ge| ge.group.is_none()) {
+            if let Some(gid) = node_of.get(ge.id.as_str()).and_then(|n| n.group.as_deref()) {
+                geoms_of.entry(gid).or_default().push(ge);
+            }
+        }
         for gr in g.groups.iter().filter(|x| !x.collapsed) {
-            let ms: Vec<&Geom> = sc.geoms.iter().filter(|ge| ge.group.is_none() && g.node(&ge.id).is_some_and(|n| n.group.as_deref() == Some(gr.id.as_str()))).collect();
+            let ms: Vec<&Geom> = geoms_of.get(gr.id.as_str()).cloned().unwrap_or_default();
             if ms.is_empty() {
                 continue;
             }
@@ -353,7 +396,7 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
     // 3. 线：两头都看得见就画线（无线引用画标签）；有一头在外面（进了子图时）画标签
     for e in &g.edges {
         let (a, b) = (where_.get(e.from.as_str()).copied(), where_.get(e.to.as_str()).copied());
-        let (from_n, to_n) = (g.node(&e.from), g.node(&e.to));
+        let (from_n, to_n) = (node_of.get(e.from.as_str()).copied(), node_of.get(e.to.as_str()).copied());
         match (a, b) {
             (Some(a), Some(b)) if a == b => {} // 折叠的子图内部的线
             (Some(a), Some(b)) => {
@@ -389,6 +432,8 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
 
 struct FlowCanvas {
     scene: Scene,
+    /// 叠显示的耗时（开着「耗时」时才有）：节点 → (毫秒, 次数)
+    profile: HashMap<String, (f64, u64)>,
     edges: Vec<Edge>,
     selected: Vec<String>,
     /// 选中的那笔成交经过的节点（按先后）
@@ -534,7 +579,7 @@ impl FlowCanvas {
         let size = Size::new(NODE_W * z, g.h * z);
         let glow = self.glow(g);
         let body = Path::rounded_rectangle(tl, size, (5.0 * z).into());
-        frame.fill(&body, pal::card_bg());
+        frame.fill(&body, if g.bypass { pal::alpha(pal::card_bg(), 0.35) } else { pal::card_bg() });
         if let Some((k, c)) = glow {
             frame.fill(&body, pal::alpha(c, 0.28 * k));
         }
@@ -592,6 +637,10 @@ impl FlowCanvas {
         if g.wireless {
             self.label(frame, "↯", Point::new(g.x + NODE_W - 16.0, g.y + 5.0), pal::accent(), small);
         }
+        if !g.tag.is_empty() {
+            // 旁路 / 静音 / 待比较：标在节点上方，缩小了也看得见
+            self.label(frame, g.tag.clone(), Point::new(g.x + 4.0, g.y - 14.0), pal::warn(), small);
+        }
         // 端口
         for (k, port) in g.ins.iter().enumerate() {
             let p = g.in_pos(k);
@@ -603,8 +652,16 @@ impl FlowCanvas {
             self.port_mark(frame, p, &g.out_types[k]);
             self.label(frame, port_label(port), Point::new(p.x - 8.0 - 12.0 * port_label(port).chars().count() as f32, p.y - 6.5), pal::txt(), small);
         }
-        // 底栏：线名 / 状态名；运行时换成最近一次决策与计数
+        // 底栏：线名 / 状态名；运行时换成最近一次决策与计数；开着「耗时」时换成耗时
         let foot_y = g.y + g.h - FOOT_H + 3.0;
+        let spent = g.members.iter().filter_map(|m| self.profile.get(m)).fold(None::<(f64, u64)>, |a, x| Some(a.map_or(*x, |a| (a.0 + x.0, a.1 + x.1))));
+        if let Some((ms, calls)) = spent {
+            let worst = self.profile.values().map(|x| x.0).fold(0.0, f64::max).max(1e-9);
+            let k = (ms / worst) as f32;
+            frame.fill(&Path::rectangle(self.to_screen(Point::new(g.x, g.y + g.h - 3.0)), Size::new(NODE_W * k * self.zoom, 3.0 * self.zoom)), pal::warn());
+            self.label(frame, format!("{ms:.1} ms · {calls} 次"), Point::new(g.x + 8.0, foot_y), if k > 0.5 { pal::warn() } else { pal::dim() }, small);
+            return;
+        }
         match &g.live {
             Some(l) => {
                 let c = glow.map(|(_, c)| c).unwrap_or_else(pal::dim);
@@ -836,12 +893,30 @@ impl canvas::Program<FlMsg> for FlowCanvas {
         }
     }
 
-    fn draw(&self, state: &CanvasState, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(&self, state: &CanvasState, renderer: &Renderer, theme: &Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
+        let t0 = Instant::now();
+        let out = self.draw_all(state, renderer, theme, bounds, cursor);
+        sf::bench_note(None, Some(t0.elapsed().as_secs_f32() * 1000.0));
+        out
+    }
+
+    fn mouse_interaction(&self, state: &CanvasState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
+        self.interaction(state, bounds, cursor)
+    }
+}
+
+impl FlowCanvas {
+    fn draw_all(&self, state: &CanvasState, renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let sc = &self.scene;
         let small = t::s_meta();
+        // 视野裁剪（docs/45 C8）：世界坐标里看得见的那块，外扩一点（标签、端口圈会伸出方块）
+        let m = 40.0 / self.zoom;
+        let (v0, v1) = (self.to_world(Point::ORIGIN), self.to_world(Point::new(bounds.width, bounds.height)));
+        let (vx0, vy0, vx1, vy1) = (v0.x - m, v0.y - m, v1.x + m, v1.y + m);
+        let seen = |x0: f32, y0: f32, x1: f32, y1: f32| x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1;
         // 展开着的子图的框在最下面
-        for f in &sc.frames {
+        for f in sc.frames.iter().filter(|f| seen(f.x, f.y, f.x + f.w, f.y + f.h)) {
             let tl = self.to_screen(Point::new(f.x, f.y));
             let rect = Path::rounded_rectangle(tl, Size::new(f.w * self.zoom, f.h * self.zoom), (6.0 * self.zoom).into());
             let picked = f.members.iter().all(|m| self.selected.contains(m));
@@ -854,6 +929,12 @@ impl canvas::Program<FlMsg> for FlowCanvas {
         // 连线在方块下面
         for l in &sc.links {
             let (a, b) = (&sc.geoms[l.a], &sc.geoms[l.b]);
+            let (pa, pb) = (a.out_pos(l.ka), b.in_pos(l.kb));
+            // 曲线不会越出两端的包围盒（控制点在两端之间的水平方向上），外扩一点就够
+            let bend = (pb.x - pa.x).abs().max(60.0) * 0.5;
+            if !seen(pa.x.min(pb.x) - bend, pa.y.min(pb.y), pa.x.max(pb.x) + bend, pa.y.max(pb.y)) {
+                continue;
+            }
             // 上游刚做出决策时，这根线跟着亮一下
             let (color, width) = match self.glow(a) {
                 Some((k, c)) => (pal::mix(pal::alpha(port_color(&l.ty), 0.75), c, k), 1.5 + 2.0 * k),
@@ -861,13 +942,16 @@ impl canvas::Program<FlMsg> for FlowCanvas {
             };
             self.wire_of(&mut frame, a.out_pos(l.ka), b.in_pos(l.kb), color, width, &l.ty);
         }
-        for g in &sc.geoms {
+        for g in sc.geoms.iter().filter(|g| seen(g.x, g.y - 16.0, g.x + NODE_W, g.y + g.h)) {
             self.draw_node(&mut frame, g);
         }
         // 端口旁的标签：无线引用、通到子图外面的线。选中另一头时高亮
         if self.zoom >= LOD_PLAIN {
             for s in &sc.stubs {
                 let g = &sc.geoms[s.geom];
+                if !seen(g.x - 140.0, g.y, g.x + NODE_W + 140.0, g.y + g.h) {
+                    continue;
+                }
                 let lit = self.selected.contains(&s.other);
                 let color = if lit { pal::accent() } else { pal::alpha(port_color(&s.ty), 0.9) };
                 let text: String = s.label.chars().take(14).collect();
@@ -910,7 +994,7 @@ impl canvas::Program<FlMsg> for FlowCanvas {
         vec![frame.into_geometry()]
     }
 
-    fn mouse_interaction(&self, state: &CanvasState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
+    fn interaction(&self, state: &CanvasState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
         let Some(screen) = cursor.position_in(bounds) else { return mouse::Interaction::default() };
         let p = self.to_world(screen);
         match &state.drag {
@@ -1087,6 +1171,18 @@ fn param_field<'a>(v: &View, n: &Node, pd: &ParamDef) -> Element<'a, FlMsg> {
         _ if set.and_then(sf::param_ref).is_some() => format!("引用：与 {} 相同（改那边这里跟着变）", set.and_then(sf::param_ref).unwrap_or_default()),
         _ => pd.description.clone(),
     };
+    // 数值参数可以改为由连线驱动（docs/45 C8）：节点上多一个「数」输入端口，接上表达式 / 指标
+    let drivable = matches!(pd.ty.as_str(), "number" | "integer") && pd.choices.is_none() && v.palette.as_ref().and_then(|p| p.get(&n.module)).is_some_and(|d| DRIVABLE.contains(&d.kind.as_str()));
+    let driven = n.driven.contains(&pd.name);
+    let control: Element<'a, FlMsg> = if drivable {
+        let (nid, pname) = (n.id.clone(), pd.name.clone());
+        let flag = row![checkbox(driven).on_toggle(move |b| FlMsg::Drive(nid.clone(), pname.clone(), b)).size(t::s_small()), t::metadata(if driven { "由连线驱动：接一根「数」线到节点上的这个端口；这里的值只是开头用的" } else { "由连线驱动" }).color(pal::dim())]
+            .spacing(space(1))
+            .align_y(Alignment::Center);
+        column![control, flag].spacing(0).into()
+    } else {
+        control
+    };
     // 在分组里的节点：参数可以勾「暴露」，存成子图资产时成为子图节点上的参数
     if n.group.is_some() && ctl != Control::Table {
         let (nid, pname, on) = (n.id.clone(), pd.name.clone(), n.expose.contains_key(&pd.name));
@@ -1262,6 +1358,12 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
             let shown = v.form.get(&form_key(&id, &format!("lane.{}", lp.name))).cloned().unwrap_or_else(|| lane.get(&lp.name).map(value_text).unwrap_or_default());
             col = col.push(field(lp.name.clone(), &value_text(&lp.default), shown, move |s| FlMsg::LaneField(nid.clone(), name.clone(), s), lp.description.clone()));
         }
+        let (nid, muted) = (id.clone(), lane.get("mute").and_then(Value::as_bool) == Some(true));
+        col = col.push(labelled(
+            "静音".into(),
+            row![checkbox(muted).on_toggle(move |b| FlMsg::LaneMute(nid.clone(), b)).size(t::s_body()), t::caption(if muted { "不开新仓，持仓照常管理" } else { "照常" })].spacing(space(2)).align_y(Alignment::Center).into(),
+            "静音与旁路会标在节点上、写进运行记录：别忘了取消就拿去比较".into(),
+        ));
     }
     if let Some(d) = def
         && !d.params.is_empty()
@@ -1272,6 +1374,21 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
         for pd in d.params.iter().filter(|pd| !d.ins.contains(&pd.name)) {
             col = col.push(param_field(v, n, pd));
         }
+    }
+    if let Some(d) = def
+        && BYPASSABLE.contains(&d.kind.as_str())
+    {
+        let (nid, on) = (id.clone(), n.bypass);
+        col = col.push(labelled(
+            "旁路".into(),
+            row![checkbox(on).on_toggle(move |b| FlMsg::Bypass(nid.clone(), b)).size(t::s_body()), t::caption(if on { "当它不存在" } else { "生效" })].spacing(space(2)).align_y(Alignment::Center).into(),
+            "过滤 → 全部放行；出场 / 止损 / 缩放 → 不调整；风控 → 不审".into(),
+        ));
+    }
+    if let (Some(d), Some(p)) = (def, &v.palette)
+        && !matches!(d.kind.as_str(), "exec" | "value" | "sub")
+    {
+        col = col.push(vary_section(v, n, d, p));
     }
     if def.is_some_and(|d| !d.outs.is_empty() && d.kind != "value") {
         // 无线引用（docs/45 §4.2）：一个输出给很多个用时不画线，用它的节点在端口旁标名字
@@ -1298,6 +1415,38 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
         col = col.push(w::btn("删除这个节点", Kind::Ghost, Some(FlMsg::Delete(id))));
     }
     col.into()
+}
+
+/// 参数能由连线驱动的环节（与 graph.py 的 DRIVABLE 一致）。
+const DRIVABLE: [&str; 7] = ["setup", "confirm", "entry", "stop", "sizing", "scale", "exit"];
+
+/// 能旁路的环节（与 graph.py 的 BYPASSABLE 一致）。
+const BYPASSABLE: [&str; 5] = ["confirm", "exit", "stop", "scale", "risk"];
+
+/// 「待比较」（docs/45 C7）：换模块的候选，或几个参数取值。「排进队列」时取所有标记的笛卡尔积，每组一次运行。
+fn vary_section<'a>(v: &View, n: &Node, d: &ModDef, p: &Palette) -> Element<'a, FlMsg> {
+    let mut c = column![w::section("待比较（排进队列时每个候选跑一次）")].spacing(space(1));
+    let picked: Vec<String> = n.vary.get("use").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+    let others: Vec<&ModDef> = p.modules.iter().filter(|m| m.kind == d.kind && m.refer != n.module).collect();
+    if !others.is_empty() {
+        c = c.push(t::metadata("换模块：勾上的与现在这个各跑一次").color(pal::dim()));
+        for m in others {
+            let (nid, r, on) = (n.id.clone(), m.refer.clone(), picked.contains(&m.refer));
+            c = c.push(row![checkbox(on).on_toggle(move |b| FlMsg::VaryUse(nid.clone(), r.clone(), b)).size(t::s_small()), t::caption(m.title.clone())].spacing(space(1)).align_y(Alignment::Center));
+        }
+    }
+    let scalar = |pd: &&ParamDef| matches!(pd.ty.as_str(), "integer" | "number" | "boolean" | "string") && pd.choices.is_none();
+    let shown: Vec<&ParamDef> = d.params.iter().filter(scalar).filter(|pd| pd.optimize || n.vary.contains_key(&pd.name)).collect();
+    if !shown.is_empty() {
+        c = c.push(t::metadata("参数：填几个候选值，逗号隔开（只列 ★ 参数）").color(pal::dim()));
+    }
+    for pd in shown {
+        let key = form_key(&n.id, &format!("vary.{}", pd.name));
+        let text = v.form.get(&key).cloned().unwrap_or_else(|| n.vary.get(&pd.name).map(value_text).unwrap_or_default());
+        let (nid, name) = (n.id.clone(), pd.name.clone());
+        c = c.push(field(pd.name.clone(), "如 20, 30, 40", text, move |s| FlMsg::VaryParam(nid.clone(), name.clone(), s), String::new()));
+    }
+    c.push(t::metadata("换模块与改参数不能标在同一个节点上。每次运行都经策略中心、计入全局试验数。").color(pal::dim())).into()
 }
 
 /// 检查器里有没有东西可看（画布始终有：没选中节点时是图的属性与问题清单）。
@@ -1360,7 +1509,7 @@ fn run_controls<'a>(v: &View) -> Element<'a, FlMsg> {
 /// 调试面板（画布下方，docs/45 C5）：成交（点一笔亮出来龙去脉）｜为什么没做｜断点。
 fn debug_panel<'a>(v: &View) -> Element<'a, FlMsg> {
     let tabs = row![
-        w::tabs(&[("成交", DebugTab::Trades), ("为什么没做", DebugTab::WhyNot), ("断点", DebugTab::Breaks)], &v.debug_tab, FlMsg::DebugTab),
+        w::tabs(&[("成交", DebugTab::Trades), ("为什么没做", DebugTab::WhyNot), ("断点", DebugTab::Breaks), ("队列与对比", DebugTab::Queue)], &v.debug_tab, FlMsg::DebugTab),
         t::metadata(format!("成交 {} 笔 · 断点 {} 个", v.trades.len(), v.breakpoints.len())).color(pal::dim()),
     ]
     .spacing(space(3))
@@ -1419,6 +1568,7 @@ fn debug_panel<'a>(v: &View) -> Element<'a, FlMsg> {
             }
             crate::ui::scroll(c).height(Length::Fill).into()
         }
+        DebugTab::Queue => queue_view(v),
         DebugTab::Breaks => {
             let mut c = column![t::metadata("断点：那个模块下一次做出决策（提出意图、否决、缩量、平仓……）时回测停下，停在哪会显示在工具条下方；「⏭ 下一个决策」再走一步。在节点的检查器里加。").color(pal::dim())].spacing(space(1));
             for id in &v.breakpoints {
@@ -1429,6 +1579,107 @@ fn debug_panel<'a>(v: &View) -> Element<'a, FlMsg> {
         }
     };
     container(column![tabs, body].spacing(space(1))).height(Length::Fixed(220.0)).width(Length::Fill).into()
+}
+
+/// 运行队列（左）与选中那一项的对比表 + 收益曲线叠加（右）。
+fn queue_view<'a>(v: &View) -> Element<'a, FlMsg> {
+    let mut list = column![t::metadata("「排进队列」= 存图后按工具条上的日期跑一组变体（标了待比较的取全部组合，没标就一次）。依次执行，每次都经策略中心、计入全局试验数。").color(pal::dim())].spacing(0);
+    for (i, j) in v.queue.iter().enumerate() {
+        let state = match j.status.as_str() {
+            "waiting" => "排队".to_string(),
+            "running" => format!("跑着 {}/{}", j.n_finished(), j.labels.len().max(1)),
+            "done" => format!("完成 {} 组", j.rows.len()),
+            "cancelled" => "取消了".to_string(),
+            _ => "失败".to_string(),
+        };
+        let picked = v.queue_pick == Some(i);
+        let mut r = row![button(column![t::caption(j.title.clone()), t::metadata(state).color(pal::dim())].spacing(0)).width(Length::Fill).on_press(FlMsg::QueuePick(i)).style(move |th, st| w::button_style(if picked { Kind::Standard } else { Kind::Ghost }, th, st))]
+            .spacing(space(1))
+            .align_y(Alignment::Center);
+        if matches!(j.status.as_str(), "waiting" | "running") {
+            r = r.push(w::btn("取消", Kind::Ghost, Some(FlMsg::QueueCancel(i))));
+        }
+        list = list.push(r);
+    }
+    let right: Element<'a, FlMsg> = match v.queue_pick.and_then(|i| v.queue.get(i)) {
+        None => t::metadata("选左边一项看对比").color(pal::dim()).into(),
+        Some(j) => compare_view(j),
+    };
+    row![
+        container(crate::ui::scroll(list).height(Length::Fill)).width(Length::FillPortion(2)),
+        container(crate::ui::scroll(right).height(Length::Fill)).width(Length::FillPortion(5)),
+    ]
+    .spacing(space(3))
+    .into()
+}
+
+/// 一组变体的对比表（相对第一组的差）与收益曲线叠加。
+fn compare_view<'a>(j: &sf::Job) -> Element<'a, FlMsg> {
+    let mut c = column![].spacing(space(1));
+    if !j.error.is_empty() {
+        c = c.push(t::caption(j.error.clone()).color(pal::bad()));
+    }
+    if !j.marks.is_empty() {
+        c = c.push(t::caption(format!("这次跑的时候：{}", j.marks.join("；"))).color(pal::warn()));
+    }
+    let mut info = format!("批次 {}", if j.study_id.is_empty() { "—" } else { j.study_id.as_str() });
+    if let Some(n) = j.global_trials {
+        info.push_str(&format!(" · 全局试验数 {n}（每组都计入；DSR 按它打折）"));
+    }
+    c = c.push(t::metadata(info).color(pal::dim()));
+    let cols: [(&str, &str); 7] = [("trades", "笔数"), ("pnl", "盈亏"), ("pnl_pct", "收益 %"), ("sharpe", "夏普"), ("max_dd_pct", "最大回撤 %"), ("profit_factor", "盈亏比"), ("win_rate", "胜率")];
+    let cell = |s: String, wd: f32| container(t::caption(s)).width(Length::Fixed(wd));
+    let mut head = row![cell("变体".into(), 180.0)].spacing(space(1));
+    for (_, label) in cols {
+        head = head.push(cell(label.into(), 84.0));
+    }
+    c = c.push(head);
+    let mut rows: Vec<&Value> = j.rows.iter().collect();
+    rows.sort_by_key(|r| r.get("i").and_then(Value::as_i64).unwrap_or(0));
+    let base = rows.iter().find(|r| r.get("metrics").is_some()).and_then(|r| r.get("metrics")).cloned();
+    let best = rows.iter().filter_map(|r| r.get("metrics").and_then(|m| m.get("pnl")).and_then(Value::as_f64)).fold(f64::NEG_INFINITY, f64::max);
+    for (k, r) in rows.iter().enumerate() {
+        let label = format!("[{k}] {}", r.get("label").and_then(Value::as_str).unwrap_or(""));
+        let Some(m) = r.get("metrics") else {
+            c = c.push(row![cell(label, 180.0), t::caption(r.get("error").and_then(Value::as_str).unwrap_or("失败").chars().take(80).collect::<String>()).color(pal::bad())].spacing(space(1)));
+            continue;
+        };
+        let top = m.get("pnl").and_then(Value::as_f64) == Some(best) && rows.len() > 1;
+        let mut line = row![container(t::caption(label).color(if top { pal::ok() } else { pal::txt() })).width(Length::Fixed(180.0))].spacing(space(1));
+        for (key, _) in cols {
+            let x = m.get(key).and_then(Value::as_f64);
+            let b = base.as_ref().and_then(|b| b.get(key)).and_then(Value::as_f64);
+            let s = match (x, b) {
+                (Some(x), Some(b)) if k > 0 && (x - b).abs() > 1e-9 => format!("{} ({:+.2})", fmt_num(x), x - b),
+                (Some(x), _) => fmt_num(x),
+                _ => "—".into(),
+            };
+            line = line.push(cell(s, 84.0));
+        }
+        c = c.push(line);
+    }
+    if rows.len() > 1 {
+        c = c.push(t::metadata("括号里是与 [0] 的差；绿色 = 盈亏最高。几组之中挑最好的那组是多重比较：结论要看策略中心按全局试验数打折后的 DSR，或者拿留出段再验。").color(pal::dim()));
+    }
+    if let Some(cv) = &j.curves {
+        if let Some(e) = cv.get("error").and_then(Value::as_str) {
+            c = c.push(t::metadata(format!("收益曲线没画：{e}")).color(pal::dim()));
+        } else {
+            let ts: Vec<i64> = cv.get("t").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default();
+            let series = cv
+                .get("series")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().enumerate().map(|(i, s)| (s.as_array().map(|x| x.iter().map(Value::as_f64).collect()).unwrap_or_default(), pal::series(i), format!("[{i}]"))).collect())
+                .unwrap_or_default();
+            c = c.push(t::metadata(format!("收益曲线叠加（{}，各自从 0 起算）", cv.get("freq").and_then(Value::as_str).unwrap_or(""))).color(pal::dim()));
+            c = c.push(iced::widget::Canvas::new(super::strategy_center_cmp::MultiLine { t: ts, series, unit: "累计 %".into(), cache: Default::default() }).width(Length::Fill).height(Length::Fixed(150.0)));
+        }
+    }
+    c.into()
+}
+
+fn fmt_num(x: f64) -> String {
+    if x.abs() >= 1000.0 { format!("{x:.0}") } else if x.abs() >= 10.0 { format!("{x:.1}") } else { format!("{x:.2}") }
 }
 
 fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
@@ -1455,12 +1706,14 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
         t::caption("倍速"),
         text_input("3600", &v.pace).on_input(FlMsg::Pace).size(t::s_small()).width(Length::Fixed(64.0)),
         if v.running { w::btn("■ 停止", Kind::Standard, Some(FlMsg::Stop)) } else { w::btn("▶ 运行", Kind::Primary, idle.then_some(FlMsg::Run)) },
+        w::btn("排进队列", Kind::Standard, idle.then_some(FlMsg::Enqueue)),
         run_controls(v),
         w::btn(if v.debug_open { "调试 ▾" } else { "调试 ▸" }, if v.debug_open { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::DebugToggle)),
         Space::new().width(Length::Fill),
         text_input("搜节点，回车跳过去", &v.find).on_input(FlMsg::FindQuery).on_submit(FlMsg::FindNext).size(t::s_small()).width(Length::Fixed(150.0)),
         t::metadata(if v.find.trim().is_empty() { String::new() } else { format!("{}/{}", v.find_hits.1, v.find_hits.0) }).color(pal::dim()),
         w::btn("整理", Kind::Ghost, idle.then_some(FlMsg::Tidy)),
+        w::btn("耗时", if v.profile_on { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::ProfileToggle)),
         state,
         w::btn(format!("{:.0}%", v.zoom * 100.0), Kind::Ghost, Some(FlMsg::ResetView)),
         w::btn("刷新", Kind::Ghost, Some(FlMsg::Refresh)),
@@ -1475,10 +1728,12 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
     if view == Some(LIBRARY) {
         return super::strategy_center_view::modules_page().map(FlMsg::Center);
     }
+    let t0 = Instant::now();
     let v = sf::view();
     let empty = Palette::default();
     let pal_ = v.palette.as_ref().unwrap_or(&empty);
     let program = FlowCanvas {
+        profile: v.profile.clone(),
         scene: build_scene(&v, pal_),
         edges: v.graph.edges.clone(),
         selected: v.selected.clone(),
@@ -1488,6 +1743,7 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
         zoom: v.zoom,
         now: Instant::now(),
     };
+    sf::bench_note(Some(t0.elapsed().as_secs_f32() * 1000.0), None);
     let title = format!("策略画布 · {}{}", v.graph.name, if v.dirty { " *" } else { "" });
     let mut layers = stack![canvas::Canvas::new(program).width(Length::Fill).height(Length::Fill)];
     if let Some(q) = &v.quick {
