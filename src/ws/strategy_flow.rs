@@ -11,7 +11,7 @@
 //! | 现有工作流 → 图 | `python -m strategies.swe.graph import <toml>` |
 //! | 打开图文件（旧格式由 Python 升级，迁移只有一份） | `python -m strategies.swe.graph upgrade <图>` |
 //! | 检查 / 编译（错误带节点 id、轨迹定位表） | `python -m strategies.swe.graph check -` / `compile <图>` |
-//! | 运行 | `python -m strategies.swe.run_dukascopy <toml> --live --pace …` |
+//! | 运行（按工作流的数据源挑回测脚本：黄金报价 / 已购逐笔数据） | `python -m strategies.swe.run <toml> --run-id …` |
 //! | 实时高亮 | Redis 流 `ws:swe:<运行号>:trace`（宿主推出来的决策轨迹） |
 //!
 //! 视图每帧都会调用，所以**视图里不做任何 IO**——只读这里的快照。
@@ -263,7 +263,7 @@ impl Quick {
         let q = self.query.trim().to_lowercase();
         pal.modules
             .iter()
-            .filter(|m| m.ins.contains(&self.port))
+            .filter(|m| m.ins.iter().any(|p| port_type(p) == port_type(&self.port)))
             .filter(|m| q.is_empty() || m.title.to_lowercase().contains(&q) || m.kind_label.contains(&q) || m.summary.to_lowercase().contains(&q))
             .collect()
     }
@@ -630,6 +630,12 @@ pub fn parse_value(text: &str, ty: &str) -> Option<Value> {
     }
 }
 
+/// 端口名 → 类型（与 graph.py 的 `ptype` 一致）。大多数端口名字就是类型；
+/// 特征输入端口以参数名为名（`feature`、`n_feature`），类型都是 feature。连线只看类型。
+pub fn port_type(port: &str) -> &str {
+    if port == "feature" || port.ends_with("_feature") { "feature" } else { port }
+}
+
 /// 这个输入端口能不能接多根线（与 graph.py 的 MULTI_IN 一致）。
 pub fn multi_in(kind: &str, port: &str) -> bool {
     port == "intent" && (kind == "risk" || kind == "exec")
@@ -857,7 +863,7 @@ fn run_async() {
         let log = std::env::temp_dir().join(format!("ws-{run_id}.log"));
         let out = std::fs::File::create(&log).ok();
         let mut cmd = Command::new(super::paths::python());
-        cmd.args(["-m", "strategies.swe.run_dukascopy", &toml, "--live", "--run-id", &run_id, "--start", &start, "--end", &end]);
+        cmd.args(["-m", "strategies.swe.run", &toml, "--run-id", &run_id, "--start", &start, "--end", &end]);
         if pace.trim().parse::<f64>().map(|p| p > 0.0).unwrap_or(false) {
             cmd.args(["--pace", pace.trim()]);
         }
@@ -1427,8 +1433,10 @@ pub fn handle(m: FlMsg) {
                 let after = std::mem::replace(&mut g.graph, before);
                 edit(g, "");
                 g.graph = after;
-                let multi = multi_in(&kind_of(g, &id), &q.port);
-                g.graph.connect(Edge { from: q.from, out: q.port.clone(), to: id.clone(), inp: q.port }, multi);
+                // 接到新节点上第一个同类型的输入端口（特征输入的名字是参数名，不等于类型）
+                let inp = g.palette.as_ref().and_then(|p| p.get(&refer)).and_then(|d| d.ins.iter().find(|p| port_type(p) == port_type(&q.port)).cloned()).unwrap_or_else(|| q.port.clone());
+                let multi = multi_in(&kind_of(g, &id), &inp);
+                g.graph.connect(Edge { from: q.from, out: q.port, to: id.clone(), inp }, multi);
                 g.selected = vec![id];
             });
         }
@@ -1713,6 +1721,11 @@ mod tests {
         q.port = "regime".into();
         q.query.clear();
         assert!(q.candidates(&pal).is_empty());
+        // 特征输入端口以参数名为名，按类型匹配
+        let pal = Palette { modules: vec![m("vol_unit", "sizing", &["n_feature"]), m("threshold", "setup", &["feature"])], ..Default::default() };
+        q.port = "feature".into();
+        assert_eq!(q.candidates(&pal).len(), 2);
+        assert_eq!((port_type("n_feature"), port_type("feature"), port_type("signal")), ("feature", "feature", "signal"));
     }
 
     #[test]

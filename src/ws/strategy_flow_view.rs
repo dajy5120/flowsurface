@@ -39,9 +39,13 @@ const PORT_HIT: f32 = 10.0;
 /// 高亮从最亮到熄灭的秒数（墙上时间）
 const GLOW_SECS: f32 = 2.5;
 
-const PORT_TYPES: [&str; 7] = ["signal", "regime", "scale", "stop", "sizing", "intent", "position"];
+const PORT_TYPES: [&str; 8] = ["signal", "regime", "scale", "stop", "sizing", "intent", "position", "feature"];
 
-fn port_label(p: &str) -> &'static str {
+fn port_label(p: &str) -> &str {
+    // 特征输入端口：显示参数名里有区分度的那一段（n_feature → n）
+    if let Some(stem) = p.strip_suffix("_feature") {
+        return stem;
+    }
     match p {
         "signal" => "信号",
         "regime" => "状态",
@@ -50,12 +54,13 @@ fn port_label(p: &str) -> &'static str {
         "sizing" => "仓位",
         "intent" => "意图",
         "position" => "持仓",
+        "feature" => "特征",
         _ => "?",
     }
 }
 
 fn port_color(p: &str) -> Color {
-    pal::series(PORT_TYPES.iter().position(|x| *x == p).unwrap_or(0))
+    pal::series(PORT_TYPES.iter().position(|x| *x == sf::port_type(p)).unwrap_or(0))
 }
 
 /// 运行时一个事件用什么颜色点亮节点。
@@ -424,7 +429,8 @@ impl canvas::Program<FlMsg> for FlowCanvas {
                 match std::mem::take(&mut state.drag) {
                     Drag::Wire { from, port, at } => {
                         // 松手在同类型的输入端口上，或者直接松在一个有这种输入的节点身上
-                        let target = self.in_at(at).filter(|(_, inp)| *inp == port).or_else(|| self.node_at(at).filter(|g| g.ins.contains(&port)).map(|g| (g.id.clone(), port.clone())));
+                        let same = |p: &String| sf::port_type(p) == sf::port_type(&port);
+                        let target = self.in_at(at).filter(|(_, inp)| same(inp)).or_else(|| self.node_at(at).and_then(|g| g.ins.iter().find(|p| same(p)).map(|p| (g.id.clone(), p.clone()))));
                         match target {
                             Some((to, inp)) if to != from => Some(canvas::Action::publish(FlMsg::Connect(Edge { from, out: port, to, inp })).and_capture()),
                             Some(_) => Some(canvas::Action::request_redraw()),
@@ -477,7 +483,7 @@ impl canvas::Program<FlMsg> for FlowCanvas {
                 }
                 // 拖线时把能接的输入端口圈出来
                 for g in &self.geoms {
-                    for (k, _) in g.ins.iter().enumerate().filter(|(_, p)| *p == port) {
+                    for (k, _) in g.ins.iter().enumerate().filter(|(_, p)| sf::port_type(p) == sf::port_type(port)) {
                         frame.stroke(&Path::circle(self.to_screen(g.in_pos(k)), (PORT_R + 3.0) * self.zoom), Stroke::default().with_width(1.5).with_color(port_color(port)));
                     }
                 }
