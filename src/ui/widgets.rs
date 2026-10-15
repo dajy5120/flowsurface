@@ -595,3 +595,110 @@ mod time_range_tests {
         assert_eq!(resolve_window("2026-09-01", "25:00", 60), None, "非法起始不硬猜");
     }
 }
+
+// ── 图标工具按钮（docs/46 §13：浮动绘图条）────────────────────────────
+
+/// 图标工具按钮的边长（方形）。
+pub const TOOL_CELL: f32 = 30.0;
+const TOOL_GLYPH: f32 = 17.0;
+
+/// 方形图标按钮：图标字体里的一个字形 + 悬停提示（名字、快捷键）。
+/// `active` = 当前选中：强调色 24% 洗底、图标用强调色。
+pub fn icon_tool<'a, M: Clone + 'a>(
+    glyph: char,
+    tip: impl Into<String>,
+    active: bool,
+    msg: Option<M>,
+    tip_at: iced::widget::tooltip::Position,
+) -> Element<'a, M> {
+    icon_tool_sized(TOOL_CELL, TOOL_GLYPH, glyph, tip, active, msg, tip_at)
+}
+
+/// 同 [`icon_tool`]，小一号：放在顶部工具栏里（不撑高工具栏，docs/42 非内容高度闸门）。
+pub fn icon_tool_inline<'a, M: Clone + 'a>(
+    glyph: char,
+    tip: impl Into<String>,
+    active: bool,
+    msg: Option<M>,
+    tip_at: iced::widget::tooltip::Position,
+) -> Element<'a, M> {
+    icon_tool_sized(22.0, 14.0, glyph, tip, active, msg, tip_at)
+}
+
+fn icon_tool_sized<'a, M: Clone + 'a>(
+    cell: f32,
+    size: f32,
+    glyph: char,
+    tip: impl Into<String>,
+    active: bool,
+    msg: Option<M>,
+    tip_at: iced::widget::tooltip::Position,
+) -> Element<'a, M> {
+    let face = text(glyph.to_string())
+        .font(crate::style::ICONS_FONT)
+        .size(size)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center);
+    let mut b = button(face)
+        .width(Length::Fixed(cell))
+        .height(Length::Fixed(cell))
+        .padding(Padding::ZERO)
+        .style(move |th, s| {
+            let c = core();
+            let mut st = button_style(Kind::Subtle, th, s);
+            if active {
+                st.background = Some(Background::Color(Color { a: 0.24, ..color(c.accent_primary) }));
+                st.text_color = color(c.accent_primary);
+            } else if !matches!(s, button::Status::Hovered | button::Status::Pressed) {
+                st.text_color = color(c.text_secondary);
+            }
+            st
+        });
+    if let Some(m) = msg {
+        b = b.on_press(m);
+    }
+    iced::widget::tooltip(b, container(t::caption(tip.into())).padding(metrics::space(2)).style(crate::style::tooltip), tip_at)
+        .delay(std::time::Duration::from_millis(300))
+        .into()
+}
+
+/// 浮动工具条里分组之间的细线（竖排时横线、横排时竖线）。
+pub fn tool_sep<'a, M: 'a>(vertical_bar: bool) -> Element<'a, M> {
+    let c = core();
+    let (w, h) = if vertical_bar { (Length::Fixed(TOOL_CELL - 8.0), Length::Fixed(1.0)) } else { (Length::Fixed(1.0), Length::Fixed(TOOL_CELL - 8.0)) };
+    container(Space::new().width(w).height(h))
+        .style(move |_| container::Style { background: Some(Background::Color(color(c.border_default))), ..Default::default() })
+        .into()
+}
+
+/// 浮动工具条的拖动柄：按住拖整条。`vertical_bar` = 条是竖排的（柄横着躺在顶上）。
+pub fn tool_grip<'a, M: Clone + 'a>(vertical_bar: bool, on_press: M) -> Element<'a, M> {
+    let c = core();
+    let (w, h) = if vertical_bar { (Length::Fixed(TOOL_CELL), Length::Fixed(12.0)) } else { (Length::Fixed(12.0), Length::Fixed(TOOL_CELL)) };
+    let dots = text(char::from(crate::style::Icon::DragHandle).to_string())
+        .font(crate::style::ICONS_FONT)
+        .size(11.0)
+        .color(color(c.text_tertiary))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center);
+    iced::widget::mouse_area(container(dots).width(w).height(h))
+        .on_press(on_press)
+        .interaction(iced::mouse::Interaction::Grab)
+        .into()
+}
+
+/// 浮在内容上方的卡片外观（e2：底色、细边、圆角、阴影）：浮动工具条与它旁边的面板。
+pub fn float_card(_theme: &Theme) -> container::Style {
+    let c = core();
+    container::Style {
+        background: Some(Background::Color(color(c.surface_primary))),
+        border: metrics::hairline(radius::MD),
+        shadow: metrics::shadow(metrics::Elevation::E2),
+        text_color: Some(color(c.text_primary)),
+        ..Default::default()
+    }
+}

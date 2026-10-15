@@ -28,6 +28,10 @@ impl ToolDef for Arrow {
         "Alt+A"
     }
 
+    fn icon(&self) -> char {
+        char::from(crate::style::Icon::DrArrow)
+    }
+
     fn prims(&self, _v: &DrawView, _d: &Drawing, pts: &[Point]) -> Vec<Prim> {
         let (Some(&a), Some(&b)) = (pts.first(), pts.get(1)) else { return Vec::new() };
         let (dx, dy) = (b.x - a.x, b.y - a.y);

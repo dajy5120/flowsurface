@@ -1,4 +1,4 @@
-//! 绘图的界面（docs/46 G1）：顶部工具栏的「绘图」组与下拉菜单、检查器里选中对象的属性与对象树、
+//! 绘图的界面（docs/46 G1、§13）：顶部工具栏的「绘图」组与浮动绘图条、检查器里选中对象的属性与对象树、
 //! 图上选中对象旁的浮动小条。状态全在 [`super::drawing`]，这里只渲染、发 [`DrawMsg`]。
 //!
 //! 入口不在图里常驻（docs/46 §2 第 4 条、docs/42「主区始终减负」）：选工具在工具栏，改属性在检查器，
@@ -119,7 +119,7 @@ pub fn object_label(d: &Drawing, decimals: usize) -> String {
 
 // ── 工具栏 ───────────────────────────────────────────────────────────────────
 
-/// 工具栏「绘图」组：当前工具（点开 / 收起菜单）+ 收藏的工具（再点一下回到光标）。
+/// 工具栏「绘图」组：当前工具（点一下显示 / 收起浮动绘图条）+ 收藏的工具图标（再点一下回到光标）。
 pub fn toolbar<'a>() -> Element<'a, DrawMsg> {
     let tool = dw::tool();
     let p = dw::prefs();
@@ -135,7 +135,7 @@ pub fn toolbar<'a>() -> Element<'a, DrawMsg> {
         .align_y(Alignment::Center);
     for k in p.favorites {
         let on = tool == Some(k);
-        r = r.push(w::btn(k.label(), if on { Btn::Standard } else { Btn::Ghost }, Some(DrawMsg::Tool((!on).then_some(k)))));
+        r = r.push(w::icon_tool_inline(glyph(k), tip_of(k), on, Some(DrawMsg::Tool((!on).then_some(k))), iced::widget::tooltip::Position::Bottom));
     }
     if p.hide_all {
         r = r.push(w::btn("画线已隐藏", Btn::Subtle, Some(DrawMsg::HideAll(false))));
@@ -143,54 +143,194 @@ pub fn toolbar<'a>() -> Element<'a, DrawMsg> {
     r.into()
 }
 
-/// 绘图菜单：盖在内容上方的卡片（与「⋯ 页面」同一种做法）。
-pub fn menu<'a>() -> Element<'a, DrawMsg> {
+/// 工具的图标（§13）：内置的在这里配，登记的工具用它自己声明的（缺省铅笔）。
+#[must_use]
+pub fn glyph(k: Kind) -> char {
+    use crate::style::Icon as I;
+    char::from(match k {
+        Kind::HLine => I::DrHLine,
+        Kind::VLine => I::DrVLine,
+        Kind::Trend => I::DrTrend,
+        Kind::Ray => I::DrRay,
+        Kind::Polyline => I::DrPolyline,
+        Kind::Channel => I::DrChannel,
+        Kind::FibRetrace => I::DrFibRetrace,
+        Kind::FibExt => I::DrFibExt,
+        Kind::Rect => I::DrRect,
+        Kind::Text => I::DrText,
+        Kind::Callout => I::DrCallout,
+        Kind::PriceRange => I::DrPriceRange,
+        Kind::DateRange => I::DrDateRange,
+        Kind::LongPos => I::DrLong,
+        Kind::ShortPos => I::DrShort,
+        Kind::VolProfile => I::DrVolProfile,
+        Kind::Marker => I::DrMarker,
+        k => return super::drawing::tools::find(k).map_or(char::from(I::DrPencil), |t| t.icon()),
+    })
+}
+
+fn tip_of(k: Kind) -> String {
+    if shortcut(k).is_empty() { k.label().to_string() } else { format!("{}  {}", k.label(), shortcut(k)) }
+}
+
+/// 浮动条上的一格：按钮（主轴长 = 一格）、分隔线、拖动柄。
+enum Cell<'a> {
+    Item(Element<'a, DrawMsg>),
+    Sep,
+    Grip,
+}
+
+impl Cell<'_> {
+    fn len(&self, spacing: f32) -> f32 {
+        match self {
+            Cell::Item(_) => w::TOOL_CELL + spacing,
+            Cell::Sep => 1.0 + spacing,
+            Cell::Grip => 12.0 + spacing,
+        }
+    }
+}
+
+/// 浮动绘图条（docs/46 §13）：点顶部「绘图」后浮在内容上方，每个工具一个图标，悬停看名字与快捷键。
+/// 按住顶上的拖动柄拖到哪儿就停在哪儿（位置存偏好），双击拖动柄回到左上角。
+/// 内容区放不下一排时自动折成两排（三排…）。返回铺满内容区的一层，只有条和「⋯」面板本身接鼠标。
+pub fn overlay<'a>(area: iced::Size) -> Element<'a, DrawMsg> {
+    use iced::widget::tooltip::Position;
     let tool = dw::tool();
+    let p = dw::prefs();
+    let vertical = !p.bar_horizontal;
+    let at = if vertical { Position::Right } else { Position::Bottom };
+    let item = |g: char, tip: String, on: bool, m: DrawMsg| Cell::Item(w::icon_tool(g, tip, on, Some(m), at));
+    let mut cells = vec![Cell::Grip, item(char::from(crate::style::Icon::DrCursor), "光标  Esc".into(), tool.is_none(), DrawMsg::Tool(None)), Cell::Sep];
+    for (_, kinds) in menu_groups() {
+        for k in kinds {
+            let on = tool == Some(k);
+            cells.push(item(glyph(k), tip_of(k), on, DrawMsg::Tool((!on).then_some(k))));
+        }
+        cells.push(Cell::Sep);
+    }
+    use crate::style::Icon as I;
+    cells.push(item(char::from(I::DrMagnet), format!("磁吸：吸到开 / 高 / 低 / 收（{}）", if p.magnet { "开" } else { "关" }), p.magnet, DrawMsg::Magnet(!p.magnet)));
+    cells.push(item(
+        char::from(I::DrContinuous),
+        format!("连续绘制：画完一个不回到光标（{}）", if p.continuous { "开" } else { "关" }),
+        p.continuous,
+        DrawMsg::Continuous(!p.continuous),
+    ));
+    cells.push(item(
+        char::from(if p.lock_all { I::Locked } else { I::Unlocked }),
+        if p.lock_all { "全部锁定中：点一下解锁".into() } else { "全部锁定（只能选中看属性，不能拖、不能删）".into() },
+        p.lock_all,
+        DrawMsg::LockAll(!p.lock_all),
+    ));
+    cells.push(item(
+        char::from(if p.hide_all { I::DrEyeOff } else { I::DrEye }),
+        if p.hide_all { "画线已全部隐藏：点一下显示".into() } else { "全部隐藏（只是不画，对象不动）".into() },
+        p.hide_all,
+        DrawMsg::HideAll(!p.hide_all),
+    ));
+    cells.push(Cell::Sep);
+    let more = dw::more_open();
+    cells.push(item(char::from(I::DrMore), "更多：收藏、系统对象、横排 / 竖排、说明".into(), more, DrawMsg::ToggleMore));
+    cells.push(item(char::from(I::Close), "收起绘图条（顶部「绘图」再打开）".into(), false, DrawMsg::CloseMenu));
+
+    // 折行：主轴放不下就另起一排
+    let gap = space(1);
+    let pad = space(1);
+    let main_room = (if vertical { area.height } else { area.width } - 2.0 * pad - 8.0).max(w::TOOL_CELL * 4.0);
+    let mut lines: Vec<Vec<Cell<'a>>> = vec![Vec::new()];
+    let mut used = 0.0;
+    for c in cells {
+        let l = c.len(gap);
+        if used + l > main_room && !lines.last().is_none_or(Vec::is_empty) {
+            lines.push(Vec::new());
+            used = 0.0;
+        }
+        used += l;
+        lines.last_mut().expect("至少一排").push(c);
+    }
+    let main_len = lines.iter().map(|ln| ln.iter().map(|c| c.len(gap)).sum::<f32>()).fold(0.0, f32::max);
+    let n = lines.len() as f32;
+    let cross_len = n * w::TOOL_CELL + (n - 1.0) * gap;
+    let (bw, bh) = if vertical { (cross_len + 2.0 * pad + 2.0, main_len + 2.0 * pad + 2.0) } else { (main_len + 2.0 * pad + 2.0, cross_len + 2.0 * pad + 2.0) };
+    let line_el = |ln: Vec<Cell<'a>>| -> Element<'a, DrawMsg> {
+        let els = ln.into_iter().map(|c| match c {
+            Cell::Item(e) => e,
+            Cell::Sep => w::tool_sep(vertical),
+            Cell::Grip => w::tool_grip(vertical, DrawMsg::BarDragStart),
+        });
+        if vertical {
+            iced::widget::Column::with_children(els).spacing(gap).align_x(Alignment::Center).into()
+        } else {
+            iced::widget::Row::with_children(els).spacing(gap).align_y(Alignment::Center).into()
+        }
+    };
+    let lines: Vec<Element<'a, DrawMsg>> = lines.into_iter().map(line_el).collect();
+    let body: Element<'a, DrawMsg> = if vertical {
+        iced::widget::Row::with_children(lines).spacing(gap).into()
+    } else {
+        iced::widget::Column::with_children(lines).spacing(gap).into()
+    };
+    let bar = iced::widget::opaque(container(body).padding(pad).style(w::float_card));
+
+    // 位置：放不下就往回收，始终整条可见
+    let [x0, y0] = dw::bar_at();
+    let x = x0.min(area.width - bw).max(0.0);
+    let y = y0.min(area.height - bh).max(0.0);
+    let place = |e: Element<'a, DrawMsg>, x: f32, y: f32| -> Element<'a, DrawMsg> {
+        container(e).padding(iced::Padding { top: y, left: x, right: 0.0, bottom: 0.0 }).width(Length::Fill).height(Length::Fill).into()
+    };
+    let mut layer = iced::widget::Stack::new().width(Length::Fill).height(Length::Fill).push(place(bar.into(), x, y));
+    if more {
+        // 「⋯」面板：竖排时贴在条右边（右边放不下就放左边），横排时贴在条下面
+        let pw = MORE_WIDTH.min(area.width);
+        let (mx, my) = if vertical {
+            let right = x + bw + gap;
+            (if right + pw <= area.width { right } else { (x - gap - pw).max(0.0) }, y)
+        } else {
+            (x.min(area.width - pw).max(0.0), y + bh + gap)
+        };
+        let room = (area.height - my - pad).max(w::TOOL_CELL * 4.0);
+        let card = container(crate::ui::scroll(more_panel()))
+            .padding(space(3))
+            .width(Length::Fixed(pw))
+            .max_height(room)
+            .style(w::float_card);
+        layer = layer.push(place(iced::widget::opaque(card).into(), mx, my));
+    }
+    layer.into()
+}
+
+const MORE_WIDTH: f32 = 380.0;
+
+/// 浮动条「⋯」面板：收藏（顶部工具栏上直接点的那几个）、横排 / 竖排、系统对象来源、操作说明。
+fn more_panel<'a>() -> Element<'a, DrawMsg> {
     let p = dw::prefs();
     let mut col = column![
         row![
-            t::section("绘图工具"),
+            t::section("绘图"),
             Space::new().width(Length::Fill),
-            w::btn("↖ 光标", if tool.is_none() { Btn::Standard } else { Btn::Ghost }, Some(DrawMsg::Tool(None))),
-            w::btn("收起", Btn::Ghost, Some(DrawMsg::CloseMenu)),
+            w::btn(if p.bar_horizontal { "改竖排" } else { "改横排" }, Btn::Ghost, Some(DrawMsg::BarHorizontal(!p.bar_horizontal))),
+            w::btn("关闭", Btn::Ghost, Some(DrawMsg::ToggleMore)),
         ]
         .spacing(space(2))
-        .align_y(Alignment::Center)
+        .align_y(Alignment::Center),
+        t::caption("点图标收藏到顶部工具栏（高亮 = 已收藏）").color(pal::dim()),
     ]
     .spacing(space(2));
     for (group, kinds) in menu_groups() {
-        let mut r = row![t::metadata(group).color(pal::dim()).width(Length::Fixed(40.0))].spacing(space(2)).align_y(Alignment::Center);
+        let mut r = row![t::metadata(group).color(pal::dim()).width(Length::Fixed(40.0))].spacing(space(1)).align_y(Alignment::Center);
         for k in kinds {
             let fav = p.favorites.contains(&k);
-            r = r.push(
-                row![
-                    w::btn(
-                        if shortcut(k).is_empty() { k.label().to_string() } else { format!("{}  {}", k.label(), shortcut(k)) },
-                        if tool == Some(k) { Btn::Standard } else { Btn::Ghost },
-                        Some(DrawMsg::Tool(Some(k))),
-                    ),
-                    w::btn(if fav { "★" } else { "☆" }, Btn::Ghost, Some(DrawMsg::Favorite(k))),
-                ]
-                .spacing(0)
-                .align_y(Alignment::Center),
-            );
+            r = r.push(w::icon_tool(
+                glyph(k),
+                format!("{}：{}", k.label(), if fav { "已收藏，点一下取消" } else { "点一下收藏到顶部工具栏" }),
+                fav,
+                Some(DrawMsg::Favorite(k)),
+                iced::widget::tooltip::Position::Top,
+            ));
         }
         col = col.push(r.wrap());
     }
-    let tick = |on: bool, label: &'static str, f: fn(bool) -> DrawMsg| row![checkbox(on).on_toggle(f).size(t::s_small()), t::caption(label)].spacing(space(1)).align_y(Alignment::Center);
-    col = col.push(
-        row![
-            tick(p.continuous, "连续绘制", DrawMsg::Continuous),
-            tick(p.magnet, "磁吸（吸到开 / 高 / 低 / 收）", DrawMsg::Magnet),
-            tick(p.hide_all, "全部隐藏", DrawMsg::HideAll),
-            tick(p.lock_all, "全部锁定", DrawMsg::LockAll),
-        ]
-        .spacing(space(4))
-        .wrap(),
-    );
-    col = col.push(
-        t::metadata("光标在图上时：点线选中、拖动；Delete 删除；Ctrl+Z 撤销、Ctrl+Shift+Z 重做；Esc 退出工具；折线回车结束。改颜色、精确价格与时间、文字、斐波那契比例、仓位数量在检查器「属性」页。仓位工具的盈亏只是估算，不会下单").color(pal::dim()),
-    );
     // 系统对象（G4）：按来源显示 / 隐藏
     let mut srcs = row![t::caption("显示系统对象：")].spacing(space(3)).align_y(Alignment::Center);
     for src in Source::SYSTEM {
@@ -206,6 +346,9 @@ pub fn menu<'a>() -> Element<'a, DrawMsg> {
             super::drawing::feeds::external_dir().display()
         ))
         .color(pal::dim()),
+    );
+    col = col.push(
+        t::metadata("光标在图上时：点线选中、拖动；Delete 删除；Ctrl+Z 撤销、Ctrl+Shift+Z 重做；Esc 退出工具；折线回车结束。改颜色、精确价格与时间、文字、斐波那契比例、仓位数量在检查器「属性」页。仓位工具的盈亏只是估算，不会下单。拖动柄按住拖动绘图条，双击回到左上角").color(pal::dim()),
     );
     let note = dw::note();
     if !note.is_empty() {

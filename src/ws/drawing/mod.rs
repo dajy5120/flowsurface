@@ -46,6 +46,10 @@ pub struct Prefs {
     pub defaults: Vec<(Kind, model::Style)>,
     /// 隐藏了哪些系统来源（G4）
     pub hide_sources: Vec<model::Source>,
+    /// 浮动绘图条（§13）左上角在内容区里的位置；`None` = 缺省（左上角往里一点）
+    pub bar_at: Option<[f32; 2]>,
+    /// 浮动绘图条横排（缺省竖排）
+    pub bar_horizontal: bool,
 }
 
 /// 一个样式模板。
@@ -67,6 +71,8 @@ impl Default for Prefs {
             templates: Vec::new(),
             defaults: Vec::new(),
             hide_sources: Vec::new(),
+            bar_at: None,
+            bar_horizontal: false,
         }
     }
 }
@@ -99,8 +105,18 @@ pub enum Param {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DrawMsg {
     Tool(Option<Kind>),
+    /// 顶部「绘图」：显示 / 收起浮动绘图条（§13）
     ToggleMenu,
     CloseMenu,
+    /// 浮动条上的「⋯」：收藏、系统对象来源、说明
+    ToggleMore,
+    /// 浮动条横排 / 竖排
+    BarHorizontal(bool),
+    /// 按下浮动条的拖动柄（两次按下 0.4 秒内 = 复位到缺省位置）
+    BarDragStart,
+    /// 拖动中光标在窗口里的位置（整窗接住鼠标的那层发）
+    BarDragMove(f32, f32),
+    BarDragEnd,
     Favorite(Kind),
     Continuous(bool),
     Magnet(bool),
@@ -186,6 +202,13 @@ struct State {
     note: String,
     prefs: Option<Prefs>,
     menu_open: bool,
+    /// 浮动条的「⋯」面板开着
+    more_open: bool,
+    /// 拖浮动条：(按下后第一次移动时的光标, 那时条的位置)；`Some(None)` = 按下了、还没动
+    bar_drag: Option<Option<([f32; 2], [f32; 2])>>,
+    /// 拖动中的位置（松开才存进偏好，免得每一帧写库）
+    bar_live: Option<[f32; 2]>,
+    bar_last_press: Option<std::time::Instant>,
     /// 检查器输入框里还没回车的文字：键 → 文字
     edits: HashMap<String, String>,
     /// 对象树里展开了的系统分组（系统分组缺省折叠：日历一组就有两百多个）
@@ -389,6 +412,27 @@ pub fn note() -> String {
 #[must_use]
 pub fn menu_open() -> bool {
     with(|st| st.menu_open)
+}
+
+/// 浮动条的「⋯」面板开着没有。
+#[must_use]
+pub fn more_open() -> bool {
+    with(|st| st.more_open)
+}
+
+/// 正在拖浮动条（main 据此整窗接住鼠标）。
+#[must_use]
+pub fn bar_dragging() -> bool {
+    with(|st| st.bar_drag.is_some())
+}
+
+/// 浮动条缺省位置：内容区左上角往里一点。
+pub const BAR_HOME: [f32; 2] = [8.0, 8.0];
+
+/// 浮动条现在的位置（拖动中用拖动中的，否则偏好里存的，否则缺省）。
+#[must_use]
+pub fn bar_at() -> [f32; 2] {
+    with(|st| st.bar_live.or_else(|| prefs_of(st).bar_at).unwrap_or(BAR_HOME))
 }
 
 /// 这个对象现在能不能拖、能不能删（还要看「全部锁定」）。
@@ -763,15 +807,51 @@ fn modify(symbol: &str, id: &str, anchors: bool, f: impl FnOnce(&mut Drawing)) {
 /// 处理一条绘图消息。
 pub fn handle(m: DrawMsg) {
     match m {
-        DrawMsg::Tool(k) => {
-            set_tool(k);
-            with(|st| st.menu_open = false);
-        }
+        // 浮动条（§13）选了工具不收起：TradingView 那样一直在手边，点顶部「绘图」或条上的 ✕ 才收
+        DrawMsg::Tool(k) => set_tool(k),
         DrawMsg::ToggleMenu => {
-            with(|st| st.menu_open = !st.menu_open);
+            with(|st| {
+                st.menu_open = !st.menu_open;
+                st.more_open = false;
+            });
             bump();
         }
-        DrawMsg::CloseMenu => with(|st| st.menu_open = false),
+        DrawMsg::CloseMenu => with(|st| {
+            st.menu_open = false;
+            st.more_open = false;
+        }),
+        DrawMsg::ToggleMore => with(|st| st.more_open = !st.more_open),
+        DrawMsg::BarHorizontal(v) => set_prefs(|p| p.bar_horizontal = v),
+        DrawMsg::BarDragStart => {
+            let reset = with(|st| {
+                let now = std::time::Instant::now();
+                let double = st.bar_last_press.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(400));
+                st.bar_last_press = (!double).then_some(now);
+                st.bar_drag = (!double).then_some(None);
+                st.bar_live = None;
+                double
+            });
+            if reset {
+                set_prefs(|p| p.bar_at = None);
+            }
+        }
+        DrawMsg::BarDragMove(x, y) => with(|st| {
+            let cur = st.bar_live.or_else(|| prefs_of(st).bar_at).unwrap_or(BAR_HOME);
+            match st.bar_drag {
+                Some(None) => st.bar_drag = Some(Some(([x, y], cur))),
+                Some(Some((c0, p0))) => st.bar_live = Some([(p0[0] + x - c0[0]).max(0.0), (p0[1] + y - c0[1]).max(0.0)]),
+                None => {}
+            }
+        }),
+        DrawMsg::BarDragEnd => {
+            let live = with(|st| {
+                st.bar_drag = None;
+                st.bar_live.take()
+            });
+            if let Some(at) = live {
+                set_prefs(|p| p.bar_at = Some(at));
+            }
+        }
         DrawMsg::Favorite(k) => set_prefs(|p| {
             if let Some(i) = p.favorites.iter().position(|x| *x == k) {
                 p.favorites.remove(i);

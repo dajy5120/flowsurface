@@ -1348,17 +1348,10 @@ impl Flowsurface {
                     |uid| Message::Layouts(modal::layout_manager::Message::SelectActive(uid)),
                     vec![],
                 );
-                // 绘图菜单（docs/46 G1）：与页面菜单同一种做法——盖在内容上方的卡片
+                // 浮动绘图条（docs/46 §13）：点顶部「绘图」后浮在内容上方；只有条本身接鼠标，图照常可拖可画
                 let dashboard_view: Element<'_, Message> = if ws::drawing::menu_open() {
-                    let card = container(ws::drawing_view::menu().map(Message::Draw))
-                        .padding(ui::metrics::space(3))
-                        .width(iced::Length::Fill)
-                        .style(|t: &iced::Theme| container::Style {
-                            background: Some(iced::Background::Color(t.extended_palette().background.weak.color)),
-                            border: iced::Border { color: ui::pal::accent(), width: 1.0, radius: 4.0.into() },
-                            ..Default::default()
-                        });
-                    iced::widget::stack![dashboard_view, column![card]].into()
+                    let bar = iced::widget::responsive(|size| ws::drawing_view::overlay(size).map(Message::Draw));
+                    iced::widget::stack![dashboard_view, bar].into()
                 } else {
                     dashboard_view
                 };
@@ -1480,6 +1473,21 @@ impl Flowsurface {
                 self.view_with_modal(base.into(), dashboard, menu)
             } else {
                 base.into()
+            };
+            // 拖浮动绘图条时：整窗接住鼠标（docs/46 §13），光标离开拖动柄也照样跟，松开结束
+            let base: Element<'_, Message> = if ws::drawing::bar_dragging() {
+                iced::widget::stack![
+                    base,
+                    iced::widget::mouse_area(iced::widget::Space::new().width(iced::Length::Fill).height(iced::Length::Fill))
+                        // 双击的第二下落在这层上：也当作按下拖动柄（复位）
+                        .on_press(Message::Draw(ws::drawing::DrawMsg::BarDragStart))
+                        .on_move(|p| Message::Draw(ws::drawing::DrawMsg::BarDragMove(p.x, p.y)))
+                        .on_release(Message::Draw(ws::drawing::DrawMsg::BarDragEnd))
+                        .interaction(iced::mouse::Interaction::Grabbing)
+                ]
+                .into()
+            } else {
+                base
             };
             // 拖检查器宽度时：整窗接住鼠标（光标离开拖动条也照样跟），松开结束（docs/42 第 2 期）
             let base: Element<'_, Message> = if self.shell.insp_drag {

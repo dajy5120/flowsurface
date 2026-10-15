@@ -44,6 +44,11 @@ pub trait ToolDef: Sync {
     fn shortcut(&self) -> &'static str {
         ""
     }
+    /// 浮动绘图条上的图标：图标字体（`assets/fonts/icons.ttf`）里的一个字形（缺省铅笔）。
+    /// 新画一个图标：在 `scripts/ws_icons.py` 末尾加一个函数、跑一遍脚本，`style::Icon` 里补上码位。
+    fn icon(&self) -> char {
+        char::from(crate::style::Icon::DrPencil)
+    }
     /// 锚点 → 图元。`pts` 是锚点的屏幕坐标（与 `d.anchors` 一一对应）。
     fn prims(&self, v: &DrawView, d: &Drawing, pts: &[Point]) -> Vec<Prim>;
     /// 对象树里名字后面的那一段（缺省空）。
