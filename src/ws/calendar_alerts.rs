@@ -1059,6 +1059,50 @@ fn desktop_notify(title: &str, body: &str, importance: u8) -> Result<(), String>
     }
 }
 
+/// 画线到价提醒（docs/46 G5）：现在就发一条——与日历提醒同一套通知中心、桌面通知、Telegram 与免打扰。
+/// **只提醒，不下单**。`want_tg`：这条线勾了「也发 Telegram」（还要配好、开着）。`dry`：测试用，不弹桌面通知、不起发送进程。
+pub fn queue_drawing_alert(c: &Connection, now: i64, title: &str, body: &str, want_tg: bool, dry: bool) -> rusqlite::Result<i64> {
+    let q = quiet(c);
+    let local_now = Local.timestamp_millis_opt(now).single().map(|t| t.time()).unwrap_or_default();
+    let suppressed = q.on() && q.covers(local_now);
+    c.execute(
+        "INSERT INTO alert_jobs (idem_key, event_id, rule_id, offset_min, what, version, fire_at, state, title, body, importance, created_at, fired_at, note)
+         VALUES (?1, '', 0, 0, 'drawing', 0, ?2, ?3, ?4, ?5, 1, ?2, ?2, ?6)",
+        params![format!("drawing|{now}|{title}|{body}"), now, if suppressed { "suppressed" } else { "fired" }, title, body, suppressed.then_some("免打扰时段")],
+    )?;
+    let id = c.last_insert_rowid();
+    if suppressed {
+        return Ok(id);
+    }
+    let tg = telegram();
+    let mut chans = vec![Channel::InApp, Channel::Desktop];
+    if want_tg {
+        chans.push(Channel::Telegram);
+    }
+    for ch in chans {
+        let (state, err): (&str, Option<String>) = match ch {
+            Channel::InApp => ("sent", None),
+            Channel::Desktop if dry => ("sent", None),
+            Channel::Desktop => match desktop_notify(title, body, 1) {
+                Ok(()) => ("sent", None),
+                Err(e) => ("failed", Some(e)),
+            },
+            Channel::Telegram if !tg.configured() => ("disabled", Some("未配置".into())),
+            Channel::Telegram if !tg.enabled => ("disabled", Some("已关（出口总闸 / 配置）".into())),
+            Channel::Telegram => ("pending", None),
+        };
+        c.execute(
+            "INSERT OR REPLACE INTO alert_deliveries (job_id, channel, state, attempts, last_error, sent_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, ch.key(), state, (state != "pending" && state != "disabled") as i64, err, (state == "sent").then_some(now), now + 600_000],
+        )?;
+    }
+    if !dry && want_tg && tg.enabled && tg.configured() {
+        ensure_sender_running();
+    }
+    Ok(id)
+}
+
 /// 到点的任务发出去。`dry`：测试用，不真的弹桌面通知。返回发了几条。
 pub fn fire_due(c: &Connection, now: i64, dry: bool) -> rusqlite::Result<usize> {
     #[allow(clippy::let_and_return)] // 同上：迭代器借着 stmt
@@ -1431,6 +1475,28 @@ pub fn start() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drawing_alert_goes_through_the_same_channels() {
+        let dir = std::env::temp_dir().join(format!("ws-drawing-alert-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = open(&dir.join("calendar.sqlite")).unwrap();
+        let id = queue_drawing_alert(&c, 1_000, "画线提醒 · BTCUSDT", "81000 上穿", true, true).unwrap();
+        let (what, state): (String, String) = c.query_row("SELECT what, state FROM alert_jobs WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((what.as_str(), state.as_str()), ("drawing", "fired"));
+        let chans: Vec<(String, String)> = c
+            .prepare("SELECT channel, state FROM alert_deliveries WHERE job_id=?1 ORDER BY channel")
+            .unwrap()
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        let names: Vec<&str> = chans.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(names, ["desktop", "inapp", "telegram"], "勾了 Telegram 就多一路（发不发看配置）");
+        assert!(chans.iter().all(|(c, s)| c == "telegram" || s == "sent"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 一个带事件表的内存库（事件表的形状与守护的一致；这里只建提醒要读的列）。
     fn db() -> Connection {

@@ -822,6 +822,14 @@ impl KlineChart {
             }
             super::goto_time::ack(v);
         }
+        // 画线到价提醒（docs/46 G5）：每次有新数据，拿最新一根的收盘价查一遍（时间用那根 K 线的，回放时也对）
+        let last = match &self.data_source {
+            PlotData::TimeBased(ts) => ts.datapoints.values().next_back().map(|d| d.kline),
+            PlotData::TickBased(ta) => ta.datapoints.last().map(|d| d.kline),
+        };
+        if let Some(k) = last {
+            crate::ws::drawing::on_price(&self.chart.drawing_symbol(), k.close.units, k.time.as_u64(), self.chart.decimals);
+        }
         let chart = &mut self.chart;
 
         if let Some(autoscale) = chart.layout.autoscale {

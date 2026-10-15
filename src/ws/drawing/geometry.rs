@@ -466,7 +466,30 @@ pub fn prims(v: &DrawView, d: &Drawing) -> Vec<Prim> {
             }
             out
         }
-        _ => Vec::new(),
+        // 内置以外的：登记的工具自己画（G5）
+        (k, ..) => super::tools::find(k).map(|t| t.prims(v, d, &pts)).unwrap_or_default(),
+    }
+}
+
+/// 测试用的视图（登记工具的测试也用）：800×400、1 分钟、最新一根 600 000 毫秒、一格 10 价位 4 像素。
+#[cfg(test)]
+#[must_use]
+pub fn tests_view() -> DrawView {
+    DrawView {
+        size: Size::new(800.0, 400.0),
+        scaling: 1.0,
+        translation: Vector::new(0.0, 0.0),
+        x: XMode::Time { latest: 600_000, interval_ms: 60_000, cell_w: 10.0 },
+        base: 10_000,
+        tick: 10,
+        cell_h: 4.0,
+        snap: 10,
+        cat: "min",
+        tf: "1m".into(),
+        bars: Vec::new(),
+        decimals: 1,
+        multiplier: 1.0,
+        vol: Vec::new(),
     }
 }
 

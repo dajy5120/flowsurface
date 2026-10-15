@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// 对象格式版本（存在库的 `meta` 表里）。
-pub const FORMAT: u32 = 1;
+/// 对象格式版本（存在库的 `meta` 表里）。2：加了到价提醒 `alert`（G5）。升级时在 `store::MIGRATIONS` 加一步。
+pub const FORMAT: u32 = 2;
 
 /// 一个锚点：时间（毫秒，UTC）+ 价格（定点 `Price::units`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,47 +16,65 @@ pub struct Anchor {
     pub p: i64,
 }
 
-/// 工具 / 对象种类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Kind {
+/// 工具 / 对象种类（G5 起是名字：内置的是下面的常量，**新工具放进 `tools/` 目录就自动登记**，不用改这里）。
+/// 存盘、外部文件里写的就是这个名字（`h_line`、`trend`…）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Kind(pub &'static str);
+
+#[allow(non_upper_case_globals)]
+impl Kind {
+
     /// 水平线：一个锚点，只看价格，横贯整张图
-    HLine,
+    pub const HLine: Kind = Kind("h_line");
     /// 垂直线：一个锚点，只看时间
-    VLine,
+    pub const VLine: Kind = Kind("v_line");
     /// 趋势线：两个锚点之间的线段
-    Trend,
+    pub const Trend: Kind = Kind("trend");
     /// 射线：从第一个锚点出发、穿过第二个锚点、一直延到图边
-    Ray,
+    pub const Ray: Kind = Kind("ray");
     /// 矩形：两个对角
-    Rect,
+    pub const Rect: Kind = Kind("rect");
     /// 折线：任意多个顶点（至少两个；回车或在最后一个点上再点一下结束）
-    Polyline,
+    pub const Polyline: Kind = Kind("polyline");
     /// 平行通道：前两个锚点是一条边，第三个锚点定另一条边（平行）；中线虚线
-    Channel,
+    pub const Channel: Kind = Kind("channel");
     /// 斐波那契回撤：两个锚点；只存锚点与比例，各条线由引擎算
-    FibRetrace,
+    pub const FibRetrace: Kind = Kind("fib_retrace");
     /// 斐波那契延伸（按趋势）：A → B 是趋势，C 是回调点，比例从 C 起量
-    FibExt,
+    pub const FibExt: Kind = Kind("fib_ext");
     /// 文字：一个锚点 + 文字
-    Text,
+    pub const Text: Kind = Kind("text");
     /// 标注：指向的点 + 文字框的位置
-    Callout,
+    pub const Callout: Kind = Kind("callout");
     /// 价格区间：两个锚点之间的价差、百分比、tick 数、基点
-    PriceRange,
+    pub const PriceRange: Kind = Kind("price_range");
     /// 日期区间：两个锚点之间的 K 线根数与实际时长
-    DateRange,
+    pub const DateRange: Kind = Kind("date_range");
     /// 多头仓位：入场、目标、止损三个价位（点一下放下，再拖改）；盈亏只是**估算**，不是委托
-    LongPos,
+    pub const LongPos: Kind = Kind("long_pos");
     /// 空头仓位
-    ShortPos,
+    pub const ShortPos: Kind = Kind("short_pos");
     /// 标记：一个点上的 ▲ / ▼ / ● 加文字（成交、订单流事件、策略决策；G4）
-    Marker,
+    pub const Marker: Kind = Kind("marker");
     /// 成交量分布：时间区间里各价位的成交量，算出 POC / VAH / VAL（存参数，画的时候按数据重算；G4）
-    VolProfile,
+    pub const VolProfile: Kind = Kind("vol_profile");
+}
+
+impl Serialize for Kind {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Kind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(d)?;
+        Kind::from_name(&name).ok_or_else(|| serde::de::Error::custom(format!("不认识的绘图种类 {name:?}（新版本的工具？）")))
+    }
 }
 
 impl Kind {
+    /// 内置的种类（登记的工具见 [`Kind::all`]）。
     pub const ALL: [Self; 17] = [
         Self::HLine,
         Self::VLine,
@@ -79,26 +97,39 @@ impl Kind {
 
     /// 存几个锚点（折线不定，返回 0）。
     #[must_use]
-    pub const fn anchors(self) -> usize {
+    pub fn anchors(self) -> usize {
         match self {
             Self::HLine | Self::VLine | Self::Text | Self::Marker => 1,
             Self::Trend | Self::Ray | Self::Rect | Self::FibRetrace | Self::Callout | Self::PriceRange | Self::DateRange | Self::VolProfile => 2,
             Self::Channel | Self::FibExt | Self::LongPos | Self::ShortPos => 3,
             Self::Polyline => 0,
+            k => super::tools::find(k).map_or(1, |t| t.anchors()),
         }
+    }
+
+    /// 内置的 + 登记的全部种类。
+    #[must_use]
+    pub fn all() -> Vec<Self> {
+        Self::ALL.iter().copied().chain(super::tools::all().iter().map(|t| t.kind())).collect()
+    }
+
+    /// 名字 → 种类（内置的或登记的）。
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all().into_iter().find(|k| k.0 == name)
     }
 
     /// 放下它要在图上点几下（折线不定，返回 0；仓位点一下，另两个价位按缺省比例摆好）。
     #[must_use]
-    pub const fn clicks(self) -> usize {
+    pub fn clicks(self) -> usize {
         match self {
             Self::LongPos | Self::ShortPos => 1,
-            k => k.anchors(),
+            k => super::tools::find(k).map_or_else(|| k.anchors(), |t| t.clicks()),
         }
     }
 
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::HLine => "水平线",
             Self::VLine => "垂直线",
@@ -117,6 +148,7 @@ impl Kind {
             Self::ShortPos => "空头仓位",
             Self::Marker => "标记",
             Self::VolProfile => "成交量分布",
+            k => super::tools::find(k).map_or("?", |t| t.label()),
         }
     }
 
@@ -179,7 +211,7 @@ impl Source {
     pub const SYSTEM: [Self; 6] = [Self::Order, Self::Calendar, Self::Strategy, Self::Backtest, Self::OrderFlow, Self::Research];
 
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Manual => "手工",
             Self::Backtest => "回测",
@@ -252,6 +284,9 @@ pub struct Drawing {
     pub rows: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub va: Option<f64>,
+    /// 到价提醒（G5）：价格穿过这条线时提醒——**只提醒，不下单**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert: Option<Alert>,
     /// 认不得的字段（新版本加的）原样保留
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -287,6 +322,7 @@ impl Drawing {
             dir: None,
             rows: None,
             va: None,
+            alert: None,
             extra: Map::new(),
         }
     }
@@ -392,6 +428,95 @@ pub fn parse_time(s: &str) -> Option<u64> {
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M"))
         .ok()?;
     u64::try_from(t.and_utc().timestamp_millis()).ok()
+}
+
+/// 到价提醒的条件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertWhen {
+    /// 穿过（上下都算）
+    Cross,
+    /// 从下往上穿
+    Up,
+    /// 从上往下穿
+    Down,
+}
+
+impl AlertWhen {
+    pub const ALL: [Self; 3] = [Self::Cross, Self::Up, Self::Down];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Cross => "穿越",
+            Self::Up => "上穿",
+            Self::Down => "下穿",
+        }
+    }
+
+    /// 价格从 `prev` 走到 `cur`，算不算碰到了 `level`。
+    #[must_use]
+    pub fn hit(self, prev: i64, cur: i64, level: i64) -> bool {
+        let up = prev < level && cur >= level;
+        let down = prev > level && cur <= level;
+        match self {
+            Self::Cross => up || down,
+            Self::Up => up,
+            Self::Down => down,
+        }
+    }
+}
+
+/// 一个对象上的到价提醒（G5）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Alert {
+    pub when: AlertWhen,
+    /// 响一次就停
+    #[serde(default)]
+    pub once: bool,
+    /// 也发 Telegram（还要看 Telegram 配好、开着；与日历提醒同一个通道）
+    #[serde(default)]
+    pub telegram: bool,
+    /// 还在等（「只提醒一次」响过之后是 false）
+    #[serde(default = "yes")]
+    pub armed: bool,
+    /// 上次响的时刻（毫秒）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_fired: Option<u64>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Kind {
+    /// 能不能设到价提醒：水平线、趋势线、射线。
+    #[must_use]
+    pub fn alertable(self) -> bool {
+        matches!(self, Kind::HLine | Kind::Trend | Kind::Ray)
+    }
+}
+
+impl Drawing {
+    /// 这条线在 `t`（毫秒）时的价位：水平线就是它的价；趋势线在两个锚点之间按时间插值（之外没有）；
+    /// 射线从第一个锚点起往后延伸。
+    #[must_use]
+    pub fn level_at(&self, t: u64) -> Option<i64> {
+        let a = *self.anchors.first()?;
+        match self.kind {
+            Kind::HLine => Some(a.p),
+            Kind::Trend | Kind::Ray => {
+                let b = *self.anchors.get(1)?;
+                let (lo, hi) = (a.t.min(b.t), a.t.max(b.t));
+                if a.t == b.t || t < lo || (self.kind == Kind::Trend && t > hi) || (self.kind == Kind::Ray && t < a.t.min(b.t)) {
+                    return None;
+                }
+                let f = (t as f64 - a.t as f64) / (b.t as f64 - a.t as f64);
+                Some(a.p + ((b.p - a.p) as f64 * f).round() as i64)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// 成交量分布的结果（G4）：各档 (价位下沿, 上沿, 成交量)、POC 那档、价值区的上下沿。
@@ -591,6 +716,24 @@ mod tests {
         assert!(volume_profile(&[(1, 5, 5, 0.0)], 4, 0.7).is_none(), "没有量");
         // 单价位的 K 线（高 = 低）落进它所在的那一档
         assert!(volume_profile(&[(1, 100, 100, 3.0), (2, 100, 104, 1.0)], 4, 0.7).is_some());
+    }
+
+    #[test]
+    fn alert_levels_and_crossing() {
+        let h = Drawing::new(Kind::HLine, vec![Anchor { t: 0, p: 100 }]);
+        assert_eq!(h.level_at(123), Some(100));
+        let t = Drawing::new(Kind::Trend, vec![Anchor { t: 1_000, p: 100 }, Anchor { t: 3_000, p: 300 }]);
+        assert_eq!((t.level_at(2_000), t.level_at(500), t.level_at(4_000)), (Some(200), None, None), "趋势线只在两点之间");
+        let r = Drawing { kind: Kind::Ray, ..t.clone() };
+        assert_eq!((r.level_at(4_000), r.level_at(500)), (Some(400), None), "射线往后延伸");
+        assert_eq!(Drawing::new(Kind::Rect, vec![Anchor { t: 0, p: 1 }]).level_at(0), None);
+        assert!(AlertWhen::Up.hit(99, 100, 100) && !AlertWhen::Up.hit(101, 99, 100));
+        assert!(AlertWhen::Down.hit(101, 100, 100) && !AlertWhen::Down.hit(99, 101, 100));
+        assert!(AlertWhen::Cross.hit(99, 101, 100) && AlertWhen::Cross.hit(101, 99, 100) && !AlertWhen::Cross.hit(100, 100, 100));
+        let j: Alert = serde_json::from_str(r#"{"when":"up"}"#).unwrap();
+        assert!(j.armed && !j.once, "缺省：开着、不止一次");
+        assert!(serde_json::from_str::<Drawing>(r#"{"id":"x","kind":"tool_from_the_future","anchors":[]}"#).is_err(), "不认识的种类读不进来（整条跳过，库里不动）");
+        assert_eq!(serde_json::from_str::<Drawing>(r#"{"id":"x","kind":"arrow","anchors":[]}"#).unwrap().kind, Kind("arrow"));
     }
 
     #[test]

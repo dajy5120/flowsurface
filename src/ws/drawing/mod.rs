@@ -11,6 +11,7 @@ pub mod feeds;
 pub mod geometry;
 pub mod model;
 pub mod store;
+pub mod tools;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -138,6 +139,11 @@ pub enum DrawMsg {
     CopyToManual(String, String),
     /// 对象树里展开 / 折叠一个系统分组
     ToggleGroup(String),
+    /// 到价提醒（G5）：设条件（`None` = 关）、只提醒一次、也发 Telegram、重新开启
+    SetAlert(String, String, Option<model::AlertWhen>),
+    AlertOnce(String, String, bool),
+    AlertTelegram(String, String, bool),
+    AlertRearm(String, String),
     Delete(String, String),
     /// (品种, 分组, 值)
     GroupHide(String, String, bool),
@@ -180,6 +186,10 @@ struct State {
     edits: HashMap<String, String>,
     /// 对象树里展开了的系统分组（系统分组缺省折叠：日历一组就有两百多个）
     expanded: std::collections::HashSet<String>,
+    /// 各品种上一次看到的价（到价提醒判穿越用；G5）
+    last_px: HashMap<String, i64>,
+    /// 最近响过的提醒（标题, 内容）——检查器里看得到；隔离实例与测试里只记这里、不真的发
+    fired: Vec<(String, String)>,
 }
 
 static VERSION: AtomicU64 = AtomicU64::new(1);
@@ -271,6 +281,85 @@ fn set_prefs(f: impl FnOnce(&mut Prefs)) {
             }
         });
     }
+}
+
+// ── 到价提醒（G5）──────────────────────────────────────────────────────────
+
+/// 同一条线两次提醒至少隔这么久（来回抖动时不刷屏）。
+const ALERT_COOLDOWN_MS: u64 = 60_000;
+
+/// 图表收到新数据时调：价格从上一次的价走到 `price`（定点），碰到了哪条线的提醒就发。返回响了几个。
+/// **只提醒，不下单**。`now`：那根 K 线的时间（毫秒；趋势线、射线按它取价位）。
+pub fn on_price(symbol: &str, price: i64, now: u64, decimals: usize) -> usize {
+    let fired: Vec<(Drawing, i64, i64)> = with(|st| {
+        let Some(prev) = st.last_px.insert(symbol.to_string(), price) else { return Vec::new() };
+        if prev == price {
+            return Vec::new();
+        }
+        book(st, symbol)
+            .items
+            .iter()
+            .filter_map(|d| {
+                let a = d.alert.as_ref().filter(|a| a.armed)?;
+                let level = d.level_at(now)?;
+                let cool = a.last_fired.is_none_or(|t| now.saturating_sub(t) >= ALERT_COOLDOWN_MS);
+                (cool && a.when.hit(prev, price, level)).then(|| (d.clone(), level, prev))
+            })
+            .collect()
+    });
+    for (d, level, prev) in &fired {
+        let mut after = d.clone();
+        if let Some(a) = after.alert.as_mut() {
+            a.last_fired = Some(now);
+            if a.once {
+                a.armed = false;
+            }
+        }
+        let fx = with(|st| book(st, symbol).replace_silently(after));
+        persist(symbol, fx);
+        let code = symbol.rsplit(':').next().unwrap_or(symbol);
+        let when = d.alert.as_ref().map_or("穿越", |a| a.when.label());
+        let title = format!("画线提醒 · {code}");
+        let mut body = format!(
+            "{} → {} {when} {} {}",
+            model::price_text(*prev, decimals),
+            model::price_text(price, decimals),
+            d.kind.label(),
+            model::price_text(*level, decimals)
+        );
+        if let Some(t) = d.text.as_ref().filter(|t| !t.is_empty()) {
+            body.push_str(&format!("（{t}）"));
+        }
+        body.push_str(" · 只是提醒，不会下单");
+        deliver(title, body, d.alert.as_ref().is_some_and(|a| a.telegram));
+    }
+    fired.len()
+}
+
+/// 发出去：通知中心 + 桌面通知（+ Telegram），与金融日历同一个通道。样张、隔离实例（`WS_ISOLATED`）与测试只记下来。
+fn deliver(title: String, body: String, telegram: bool) {
+    with(|st| {
+        st.fired.push((title.clone(), body.clone()));
+        if st.fired.len() > 20 {
+            st.fired.remove(0);
+        }
+    });
+    if cfg!(test) || super::specimen::enabled() || std::env::var_os("WS_ISOLATED").is_some() {
+        return;
+    }
+    super::spawn_named("ws-drawing-alert", move || {
+        let r = super::calendar_alerts::open(&super::calendar_alerts::db_path())
+            .and_then(|c| super::calendar_alerts::queue_drawing_alert(&c, chrono::Utc::now().timestamp_millis(), &title, &body, telegram, false));
+        if let Err(e) = r {
+            with(|st| st.note = format!("画线提醒没发出去：{e}"));
+        }
+    });
+}
+
+/// 最近响过的提醒（新的在后）。
+#[must_use]
+pub fn fired_log() -> Vec<(String, String)> {
+    with(|st| st.fired.clone())
 }
 
 /// 对象树里这个系统分组展开了没有。
@@ -383,7 +472,7 @@ pub fn selected_drawing(symbol: &str) -> Option<Drawing> {
     items(symbol).into_iter().find(|d| d.id == id)
 }
 
-/// 价格轴上要标的价位（G1）：看得见的水平线，以及选中对象的各个锚点（垂直线除外）。(价格, 颜色)
+/// 价格轴上要标的价位（G1）：看得见的手工水平线，以及选中对象的各个锚点（垂直线除外）。(价格, 颜色)
 #[must_use]
 pub fn axis_marks(symbol: &str, cat: &str, tf: &str) -> Vec<(i64, iced::Color)> {
     let sel = selected(symbol);
@@ -393,7 +482,9 @@ pub fn axis_marks(symbol: &str, cat: &str, tf: &str) -> Vec<(i64, iced::Color)> 
             let is_sel = sel.as_deref() == Some(d.id.as_str());
             let c = base_color(&d);
             let ps: Vec<(i64, iced::Color)> = match d.kind {
-                Kind::HLine => d.anchors.first().map(|a| (a.p, c)).into_iter().collect(),
+                // 系统对象的水平线不标（研究脚本一写几百条，价格轴就被盖满了——G5 实测），选中了才标
+                Kind::HLine if d.source == model::Source::Manual || is_sel => d.anchors.first().map(|a| (a.p, c)).into_iter().collect(),
+                Kind::HLine => Vec::new(),
                 Kind::VLine => Vec::new(),
                 _ if is_sel => d.anchors.iter().map(|a| (a.p, c)).collect(),
                 _ => Vec::new(),
@@ -603,7 +694,7 @@ pub fn tool_for_key(c: &str, shift: bool) -> Option<Kind> {
         ("r", false) => Some(Kind::Ray),
         ("r", true) => Some(Kind::Rect),
         ("f", false) => Some(Kind::FibRetrace),
-        _ => None,
+        (c, shift) => tools::for_shortcut(c, shift),
     }
 }
 
@@ -795,6 +886,27 @@ pub fn handle(m: DrawMsg) {
             }
         }
         DrawMsg::ClearDefault(k) => set_prefs(|p| p.defaults.retain(|(x, _)| *x != k)),
+        DrawMsg::SetAlert(sym, id, when) => modify(&sym, &id, false, |d| {
+            d.alert = when.map(|w| match d.alert.take() {
+                Some(a) => model::Alert { when: w, armed: true, ..a },
+                None => model::Alert { when: w, once: false, telegram: false, armed: true, last_fired: None },
+            });
+        }),
+        DrawMsg::AlertOnce(sym, id, v) => modify(&sym, &id, false, |d| {
+            if let Some(a) = d.alert.as_mut() {
+                a.once = v;
+            }
+        }),
+        DrawMsg::AlertTelegram(sym, id, v) => modify(&sym, &id, false, |d| {
+            if let Some(a) = d.alert.as_mut() {
+                a.telegram = v;
+            }
+        }),
+        DrawMsg::AlertRearm(sym, id) => modify(&sym, &id, false, |d| {
+            if let Some(a) = d.alert.as_mut() {
+                a.armed = true;
+            }
+        }),
         DrawMsg::ToggleGroup(g) => with(|st| {
             if !st.expanded.remove(&g) {
                 st.expanded.insert(g);
@@ -925,6 +1037,19 @@ fn draw_one(frame: &mut Frame, v: &DrawView, d: &Drawing, selected: bool) {
             }
         }
     }
+    // 到价提醒开着（G5）：第一个锚点旁标「提醒 · 上穿」
+    if let (Some(al), Some(a)) = (d.alert.as_ref().filter(|a| a.armed), d.anchors.first()) {
+        let at = v.to_screen(*a);
+        let x = if d.kind == Kind::HLine { 4.0 } else { at.x + 6.0 };
+        frame.fill_text(canvas::Text {
+            content: format!("提醒 · {}", al.when.label()),
+            position: Point::new(x, at.y + 4.0),
+            size: iced::Pixels(crate::ui::text::s_meta()),
+            color: crate::ui::widgets::Tone::Warning.color(),
+            align_y: iced::alignment::Vertical::Top,
+            ..canvas::Text::default()
+        });
+    }
     // 来源周期（G3）：在别的周期上看时，线头标一个小字（如「15m」）
     // 标在第一个看得见的锚点旁；都在视野外时，水平线标在左边缘（它横贯整张图）
     let inside = |p: &Point| p.x >= 0.0 && p.x <= v.size.width - 30.0 && p.y >= 12.0 && p.y <= v.size.height;
@@ -954,6 +1079,7 @@ fn draw_one(frame: &mut Frame, v: &DrawView, d: &Drawing, selected: bool) {
 
 /// 绘图层：这个品种的全部对象（屏幕坐标，不套图表的平移缩放变换）。
 pub fn draw_layer(frame: &mut Frame, v: &DrawView, symbol: &str) {
+    let t0 = std::time::Instant::now();
     let sel = selected(symbol);
     let items = visible_items(symbol, v.cat, &v.tf);
     // 裁到画布里：画布不会自己裁，锚点在视野外的文字会越界画到旁边的面板上（G2 实测）
@@ -962,6 +1088,24 @@ pub fn draw_layer(frame: &mut Frame, v: &DrawView, symbol: &str) {
             draw_one(f, v, d, sel.as_deref() == Some(d.id.as_str()));
         }
     });
+    bench_note(items.len(), t0.elapsed());
+}
+
+/// 性能自测（G5）：设了 `WS_DRAWING_BENCH` 时，每 60 次重画在日志里记一行「对象数 · 中位 / p95 / 最大毫秒」。
+fn bench_note(n: usize, dt: std::time::Duration) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("WS_DRAWING_BENCH").is_some()) {
+        return;
+    }
+    static SAMPLES: Mutex<Vec<f64>> = Mutex::new(Vec::new());
+    let Ok(mut g) = SAMPLES.lock() else { return };
+    g.push(dt.as_secs_f64() * 1000.0);
+    if g.len() >= 60 {
+        g.sort_by(f64::total_cmp);
+        let q = |f: f64| g[((g.len() - 1) as f64 * f) as usize];
+        log::info!("[drawing-bench] 对象 {n} · 绘图层 中位 {:.2} / p95 {:.2} / 最大 {:.2} ms", q(0.5), q(0.95), q(1.0));
+        g.clear();
+    }
 }
 
 /// 十字线层：两个锚点的工具放下第一个点之后，跟着光标画预览；选着工具时左下角写一行提示。
@@ -1249,5 +1393,68 @@ mod tests {
         handle(DrawMsg::ShowSource(model::Source::Research, true));
         assert_eq!(items(sym).len(), 2);
         assert!(!needs_volume(sym));
+
+        // ── G5：到价提醒（只记下来，测试里不真的发）──
+        let sym = "TEST:G5";
+        handle(DrawMsg::Tool(Some(Kind::HLine)));
+        let id = place(sym, Anchor { t: 0, p: 10_000 }).unwrap();
+        handle(DrawMsg::SetAlert(sym.into(), id.clone(), Some(model::AlertWhen::Up)));
+        handle(DrawMsg::AlertOnce(sym.into(), id.clone(), true));
+        let before = fired_log().len();
+        assert_eq!(on_price(sym, 9_990, 1_000, 1), 0, "第一次只记价");
+        assert_eq!(on_price(sym, 9_995, 2_000, 1), 0, "没穿过");
+        assert_eq!(on_price(sym, 10_010, 3_000, 1), 1, "上穿");
+        let log = fired_log();
+        assert_eq!(log.len(), before + 1);
+        assert!(log.last().unwrap().1.contains("上穿 水平线") && log.last().unwrap().1.contains("不会下单"));
+        let a = items(sym)[0].alert.clone().unwrap();
+        assert_eq!((a.armed, a.last_fired), (false, Some(3_000)), "只提醒一次：响过就停");
+        assert_eq!(on_price(sym, 9_990, 4_000, 1) + on_price(sym, 10_020, 5_000, 1), 0, "停了就不再响");
+        // 重新开启；一分钟内同一条线不重复
+        handle(DrawMsg::AlertRearm(sym.into(), id.clone()));
+        handle(DrawMsg::AlertOnce(sym.into(), id.clone(), false));
+        on_price(sym, 9_990, 6_000, 1);
+        assert_eq!(on_price(sym, 10_010, 7_000, 1), 0, "离上次不到一分钟");
+        on_price(sym, 9_990, 70_000, 1);
+        assert_eq!(on_price(sym, 10_010, 70_500, 1), 1);
+        // 提醒响了改的状态不进撤销栈：撤销一步撤的是用户最后那次「只提醒一次」的改动
+        undo(sym);
+        assert!(items(sym)[0].alert.as_ref().is_some_and(|a| a.once), "撤回到勾着「只提醒一次」");
+        handle(DrawMsg::SetAlert(sym.into(), id.clone(), None));
+        assert!(items(sym)[0].alert.is_none());
+    }
+
+    /// 性能（G5）：2000 个对象的取对象、图元、命中测试。`cargo test --release perf_ -- --ignored --nocapture`
+    #[test]
+    #[ignore = "性能自测，手动跑"]
+    fn perf_two_thousand_objects() {
+        let sym = "TEST:PERF";
+        let v = view();
+        let kinds = [Kind::HLine, Kind::Trend, Kind::Rect, Kind::FibRetrace, Kind::Channel, Kind::Text, Kind::PriceRange, Kind::Ray];
+        with(|st| {
+            let b = book(st, sym);
+            for i in 0..2000_i64 {
+                let k = kinds[i as usize % kinds.len()];
+                let a = Anchor { t: 540_000 - (i as u64 % 50) * 60_000, p: 9_000 + (i * 7) % 2_000 };
+                let c = Anchor { t: a.t + 120_000, p: a.p + 50 };
+                b.exec(Cmd::Create(Drawing::new(k, vec![a, c, Anchor { t: c.t, p: a.p - 30 }])));
+            }
+        });
+        let t = std::time::Instant::now();
+        let n = 200;
+        let mut prims = 0;
+        for _ in 0..n {
+            let items = visible_items(sym, v.cat, &v.tf);
+            prims += items.iter().map(|d| geometry::prims(&v, d).len()).sum::<usize>();
+        }
+        let per = t.elapsed().as_secs_f64() * 1000.0 / f64::from(n);
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let items = visible_items(sym, v.cat, &v.tf);
+            let _ = geometry::pick(&v, &items, Point::new(100.0 + i as f32, 200.0), None);
+        }
+        let pick = t.elapsed().as_secs_f64() * 1000.0 / f64::from(n);
+        println!("2000 个对象：取对象 + 图元 {per:.2} ms / 次（{} 个图元）；取对象 + 命中测试 {pick:.2} ms / 次", prims / n as usize);
+        assert!(per < 16.0 && pick < 16.0, "一帧之内");
     }
 }

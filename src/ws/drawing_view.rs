@@ -37,7 +37,7 @@ pub const GROUPS: [(&str, &[Kind]); 4] = [
 
 /// 工具的快捷键（菜单里写在名字后面）。
 #[must_use]
-pub const fn shortcut(k: Kind) -> &'static str {
+pub fn shortcut(k: Kind) -> &'static str {
     match k {
         Kind::HLine => "Alt+H",
         Kind::VLine => "Alt+V",
@@ -45,8 +45,21 @@ pub const fn shortcut(k: Kind) -> &'static str {
         Kind::Ray => "Alt+R",
         Kind::Rect => "Alt+Shift+R",
         Kind::FibRetrace => "Alt+F",
-        _ => "",
+        k => super::drawing::tools::find(k).map_or("", |t| t.shortcut()),
     }
+}
+
+/// 菜单分组：内置的四组，登记的工具（G5）按它声明的组并进去（新组排在后面）。
+#[must_use]
+pub fn menu_groups() -> Vec<(&'static str, Vec<Kind>)> {
+    let mut out: Vec<(&'static str, Vec<Kind>)> = GROUPS.iter().map(|(g, k)| (*g, k.to_vec())).collect();
+    for t in super::drawing::tools::all() {
+        match out.iter_mut().find(|(g, _)| *g == t.group()) {
+            Some((_, ks)) => ks.push(t.kind()),
+            None => out.push((t.group(), vec![t.kind()])),
+        }
+    }
+    out
 }
 
 fn dash_label(d: Dash) -> &'static str {
@@ -95,6 +108,7 @@ pub fn object_label(d: &Drawing, decimals: usize) -> String {
         Kind::LongPos | Kind::ShortPos => format!("入 {} · 目标 {} · 止损 {}", p(0), p(1), p(2)),
         Kind::Marker => format!("{} {}", tm(0), d.text.clone().unwrap_or_else(|| p(0))),
         Kind::VolProfile => format!("{} – {}", tm(0), tm(1)),
+        k => super::drawing::tools::find(k).map(|t| t.summary(d, decimals)).unwrap_or_default(),
     };
     let mut s = format!("{} · {what}", d.kind.label());
     if d.source != Source::Manual {
@@ -144,9 +158,9 @@ pub fn menu<'a>() -> Element<'a, DrawMsg> {
         .align_y(Alignment::Center)
     ]
     .spacing(space(2));
-    for (group, kinds) in GROUPS {
+    for (group, kinds) in menu_groups() {
         let mut r = row![t::metadata(group).color(pal::dim()).width(Length::Fixed(40.0))].spacing(space(2)).align_y(Alignment::Center);
-        for &k in kinds {
+        for k in kinds {
             let fav = p.favorites.contains(&k);
             r = r.push(
                 row![
@@ -217,6 +231,11 @@ pub fn inspector<'a>(symbol: &str, decimals: usize, multiplier: f64) -> Element<
     let note = dw::note();
     if !note.is_empty() {
         col = col.push(t::caption(note).color(pal::warn()));
+    }
+    // 最近响过的到价提醒（只列这个品种的）
+    let code = symbol.rsplit(':').next().unwrap_or(symbol).to_string();
+    for (title, body) in dw::fired_log().into_iter().rev().filter(|(t, _)| t.ends_with(&code)).take(3) {
+        col = col.push(t::caption(format!("◆ {title}：{body}")).color(pal::warn()));
     }
     match dw::selected_drawing(symbol) {
         Some(d) => col = col.push(selected_props(&sym, &d, decimals, multiplier)),
@@ -366,6 +385,43 @@ fn selected_props<'a>(sym: &str, d: &Drawing, decimals: usize, multiplier: f64) 
         cats = cats.push(row![cb, t::caption(label)].spacing(space(1)).align_y(Alignment::Center));
     }
     col = col.push(kv("显示在", cats.wrap().into()));
+    // 到价提醒（G5）：水平线、趋势线、射线；只提醒，不下单
+    if !ro && d.kind.alertable() {
+        use super::drawing::model::AlertWhen;
+        let cur = d.alert.as_ref().map(|a| a.when);
+        let mut r = row![w::btn("关", if cur.is_none() { Btn::Standard } else { Btn::Ghost }, Some(DrawMsg::SetAlert(s.clone(), id.clone(), None)))].spacing(space(1));
+        for wh in AlertWhen::ALL {
+            r = r.push(w::btn(wh.label(), if cur == Some(wh) { Btn::Standard } else { Btn::Ghost }, Some(DrawMsg::SetAlert(s.clone(), id.clone(), Some(wh)))));
+        }
+        col = col.push(kv("到价提醒", r.wrap().into()));
+        if let Some(a) = &d.alert {
+            let (s2, id2, s3, id3) = (s.clone(), id.clone(), s.clone(), id.clone());
+            col = col.push(kv(
+                "",
+                row![
+                    checkbox(a.once).on_toggle(move |v| DrawMsg::AlertOnce(s2.clone(), id2.clone(), v)).size(t::s_small()),
+                    t::caption("只提醒一次"),
+                    checkbox(a.telegram).on_toggle(move |v| DrawMsg::AlertTelegram(s3.clone(), id3.clone(), v)).size(t::s_small()),
+                    t::caption("也发 Telegram"),
+                ]
+                .spacing(space(1))
+                .align_y(Alignment::Center)
+                .wrap()
+                .into(),
+            ));
+            let fired = a.last_fired.map(|t| time_text(t).get(5..16).unwrap_or_default().to_string());
+            let status = match (a.armed, fired) {
+                (true, None) => "等价格穿过这条线（图表开着、有新数据时检查）".to_string(),
+                (true, Some(f)) => format!("上次响在 {f}（UTC）；同一条线一分钟内不重复"),
+                (false, f) => format!("响过了（{}），只提醒一次所以停了", f.unwrap_or_default()),
+            };
+            col = col.push(row![t::metadata(status).color(pal::dim())].spacing(space(2)).align_y(Alignment::Center));
+            if !a.armed {
+                col = col.push(row![w::btn("重新开启", Btn::Ghost, Some(DrawMsg::AlertRearm(s.clone(), id.clone())))]);
+            }
+            col = col.push(t::metadata("与金融日历同一个通道：通知中心、桌面通知、（勾了且配好的）Telegram；免打扰时段照样生效。只提醒，不会下单").color(pal::dim()));
+        }
+    }
     // 来源周期（G3）：画在哪个周期；可以只在那个周期显示
     if let Some(o) = d.origin_tf.clone() {
         let (s2, id2) = (s.clone(), id.clone());
@@ -588,7 +644,8 @@ mod tests {
         sys.source = Source::Order;
         assert_eq!(object_label(&sys, 2), "水平线 · 0.36（订单）");
         // 菜单里每种工具都有，「标记」除外（它是系统生成的：成交、订单流事件、策略决策）
-        let in_menu: Vec<Kind> = GROUPS.iter().flat_map(|(_, k)| k.iter().copied()).collect();
-        assert!(Kind::ALL.iter().all(|k| in_menu.contains(k) || *k == Kind::Marker) && !in_menu.contains(&Kind::Marker));
+        let in_menu: Vec<Kind> = menu_groups().into_iter().flat_map(|(_, k)| k).collect();
+        assert!(Kind::all().iter().all(|k| in_menu.contains(k) || *k == Kind::Marker) && !in_menu.contains(&Kind::Marker));
+        assert!(menu_groups().iter().any(|(g, k)| *g == "线条" && k.contains(&Kind("arrow"))), "登记的工具并进它声明的组");
     }
 }

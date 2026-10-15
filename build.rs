@@ -3,6 +3,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    register_drawing_tools();
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs");
     println!("cargo:rerun-if-changed=.git/packed-refs");
@@ -74,4 +75,27 @@ fn git_head_has_release_tag(pkg_version: &str) -> bool {
         let value = tag.trim();
         value == pkg_version || value == prefixed
     })
+}
+
+/// 图表绘图的工具注册（docs/46 G5）：`src/ws/drawing/tools/` 里每个文件（`mod.rs` 除外）是一种工具，
+/// 生成「每个文件一个模块 + 登记表」——加工具只要新增一个文件。
+fn register_drawing_tools() {
+    let dir = std::path::Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap_or_default()).join("src/ws/drawing/tools");
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map(|rd| rd.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    files.retain(|p| p.extension().is_some_and(|x| x == "rs") && p.file_name().is_some_and(|n| n != "mod.rs"));
+    files.sort();
+    let mut out = String::from("// 由 build.rs 生成（docs/46 G5）：不要手改\n");
+    let mut names = Vec::new();
+    for p in &files {
+        println!("cargo:rerun-if-changed={}", p.display());
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default().replace(['-', ' '], "_");
+        out.push_str(&format!("#[path = {:?}]\npub mod {stem};\n", p.display().to_string()));
+        names.push(format!("&{stem}::TOOL"));
+    }
+    out.push_str(&format!("/// 登记了的工具。\npub static REGISTERED: &[&dyn ToolDef] = &[{}];\n", names.join(", ")));
+    let dst = std::path::Path::new(&env::var("OUT_DIR").unwrap_or_default()).join("drawing_tools.rs");
+    let _ = std::fs::write(dst, out);
 }

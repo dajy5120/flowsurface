@@ -70,6 +70,17 @@ impl Book {
         }
     }
 
+    /// 不记撤销地换掉一个对象（到价提醒响了之后改它的状态：这不是用户的编辑，不该被 Ctrl+Z 撤掉）。
+    pub fn replace_silently(&mut self, d: Drawing) -> Vec<Effect> {
+        match self.items.iter_mut().find(|x| x.id == d.id) {
+            Some(slot) if *slot != d => {
+                *slot = d.clone();
+                vec![Effect::Upsert(d)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// 执行一条新命令（清掉重做栈）。
     pub fn exec(&mut self, cmd: Cmd) -> Vec<Effect> {
         let fx = self.apply(&cmd);
@@ -127,6 +138,13 @@ impl Book {
     }
 }
 
+/// 格式迁移（G5）：第 i 步把格式 i+1 的对象 JSON 改成格式 i+2。打开库时按 `meta.format` 从旧往新逐步跑，
+/// 跑完写回新格式。加字段（可选、有缺省）不用改旧对象，那一步是空的；改名、拆字段才要写。
+pub const MIGRATIONS: &[fn(&mut serde_json::Value)] = &[v1_to_v2];
+
+/// 1 → 2：加了到价提醒 `alert`（可选），旧对象原样。
+fn v1_to_v2(_d: &mut serde_json::Value) {}
+
 /// 存盘：Cockpit 数据目录下的 `drawings.sqlite`（与 `saved-state.json` 同处）。
 pub struct Db {
     path: PathBuf,
@@ -154,7 +172,41 @@ impl Db {
              CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )?;
         c.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('format', ?1)", [FORMAT.to_string()])?;
+        let stored: u32 = c
+            .query_row("SELECT value FROM meta WHERE key='format'", [], |r| r.get::<_, String>(0))?
+            .parse()
+            .unwrap_or(FORMAT);
+        if stored < FORMAT {
+            Self::migrate(&c, stored)?;
+        }
         Ok(c)
+    }
+
+    /// 把库里每个对象从 `from` 迁到当前格式（一个事务）。
+    fn migrate(c: &rusqlite::Connection, from: u32) -> rusqlite::Result<()> {
+        let rows: Vec<(String, String, String)> = c
+            .prepare("SELECT symbol, id, body FROM drawings")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        c.execute_batch("BEGIN")?;
+        for (sym, id, body) in rows {
+            let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&body) else { continue };
+            for step in MIGRATIONS.iter().skip(from.saturating_sub(1) as usize).take(FORMAT.saturating_sub(from) as usize) {
+                step(&mut v);
+            }
+            c.execute("UPDATE drawings SET body = ?3 WHERE symbol = ?1 AND id = ?2", rusqlite::params![sym, id, v.to_string()])?;
+        }
+        c.execute("UPDATE meta SET value = ?1 WHERE key = 'format'", [FORMAT.to_string()])?;
+        c.execute_batch("COMMIT")
+    }
+
+    /// 库的格式比这个程序新（更新版本的程序写的）：只读——读得进来，但不写回，免得把不认识的东西写坏
+    /// （docs/45 C8 的教训）。
+    #[must_use]
+    pub fn newer_than_me(&self) -> Option<u32> {
+        let c = rusqlite::Connection::open(&self.path).ok()?;
+        let v: u32 = c.query_row("SELECT value FROM meta WHERE key='format'", [], |r| r.get::<_, String>(0)).ok()?.parse().ok()?;
+        (v > FORMAT).then_some(v)
     }
 
     /// 一个品种的全部对象（按写入先后）。读不了 / 某条坏了：跳过并返回说明。
@@ -198,6 +250,9 @@ impl Db {
 
     /// 写一批变化（一个事务）。
     pub fn write(&self, symbol: &str, fx: &[Effect]) -> Result<(), String> {
+        if let Some(v) = self.newer_than_me() {
+            return Err(format!("画线库是更新版本的程序写的（格式 {v}，这个程序认到 {FORMAT}）：只读，不写盘；请更新 Cockpit"));
+        }
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
         let mut c = self.open().map_err(|e| e.to_string())?;
         let tx = c.transaction().map_err(|e| e.to_string())?;
@@ -251,6 +306,39 @@ mod tests {
     }
 
     #[test]
+    fn old_databases_migrate_and_newer_ones_are_read_only() {
+        let dir = std::env::temp_dir().join(format!("ws-drawings-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 格式 1 的库（G0–G4 写的）
+        let p = dir.join("old.sqlite");
+        let c = rusqlite::Connection::open(&p).unwrap();
+        c.execute_batch(
+            "CREATE TABLE drawings (symbol TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, updated_ms INTEGER NOT NULL, PRIMARY KEY (symbol, id));
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO meta VALUES ('format', '1');",
+        )
+        .unwrap();
+        c.execute("INSERT INTO drawings VALUES ('S', 'a', ?1, 0)", [serde_json::to_string(&line(7)).unwrap()]).unwrap();
+        drop(c);
+        let db = Db::at(&p);
+        let (got, errs) = db.load("S");
+        assert!(errs.is_empty() && got.len() == 1 && got[0].alert.is_none());
+        assert_eq!(db.get_meta("format").as_deref(), Some(FORMAT.to_string().as_str()), "迁完写回新格式");
+        assert!(db.write("S", &[Effect::Upsert(line(8))]).is_ok());
+        // 更新版本写的库：读得进来，写不了
+        let q = dir.join("new.sqlite");
+        let db2 = Db::at(&q);
+        db2.write("S", &[Effect::Upsert(line(1))]).unwrap();
+        db2.set_meta("format", "99").unwrap();
+        assert_eq!(db2.load("S").0.len(), 1);
+        let e = db2.write("S", &[Effect::Upsert(line(2))]).unwrap_err();
+        assert!(e.contains("格式 99") && e.contains("只读"), "{e}");
+        assert_eq!(db2.load("S").0.len(), 1, "没写进去");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn database_round_trip_keeps_order_and_skips_broken_rows() {
         let dir = std::env::temp_dir().join(format!("ws-drawings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -266,7 +354,7 @@ mod tests {
         assert_eq!(got, vec![a2.clone(), b.clone()], "改过的对象留在原来的位置（先后不变）");
         db.set_meta("prefs", "{\"magnet\":true}").unwrap();
         db.set_meta("prefs", "{\"magnet\":false}").unwrap();
-        assert_eq!((db.get_meta("prefs").as_deref(), db.get_meta("format").as_deref(), db.get_meta("nope")), (Some("{\"magnet\":false}"), Some("1"), None));
+        assert_eq!((db.get_meta("prefs").as_deref(), db.get_meta("format").as_deref(), db.get_meta("nope")), (Some("{\"magnet\":false}"), Some(FORMAT.to_string().as_str()), None));
         db.write("BINANCE:BTCUSDT", &[Effect::Remove(b.id.clone())]).unwrap();
         let c = rusqlite::Connection::open(dir.join("drawings.sqlite")).unwrap();
         c.execute("INSERT INTO drawings VALUES ('BINANCE:BTCUSDT', 'bad', '{not json', 0)", []).unwrap();
