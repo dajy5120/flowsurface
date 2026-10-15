@@ -1192,21 +1192,9 @@ fn param_field<'a>(v: &View, n: &Node, pd: &ParamDef) -> Element<'a, FlMsg> {
     labelled(label, control, note)
 }
 
-/// 「数据」一节（docs/45 §21）：共用数据选择组件，选完写回 `[backtest]`。Dukascopy 黄金报价在 D3 并入
-/// 「B5 本地自有数据」之前走表单里的起止日。
-fn data_section<'a>(v: &View, p: &Palette) -> Element<'a, FlMsg> {
-    let bt = &v.graph.backtest;
-    let src = bt.get("source").and_then(Value::as_str).unwrap_or("dukascopy");
-    let mut col = column![w::section("数据"), t::caption(sf::data_label(bt))].spacing(space(1));
-    if src == "dukascopy" {
-        col = col.push(t::metadata("Dukascopy 黄金报价（整日）。D3 把它并入来源「B5 本地自有数据」之前，起止日在这里填：").color(pal::dim()));
-        for pd in p.backtest_params.iter().filter(|pd| pd.name == "start" || pd.name == "end") {
-            col = col.push(config_field(v, "backtest", bt, pd));
-        }
-        col = col.push(t::metadata("或者在下面选已购数据（Databento / Tardis）：").color(pal::dim()));
-    } else {
-        col = col.push(row![w::btn("↩ 用 Dukascopy 报价", Kind::Ghost, Some(FlMsg::UseDukascopy))]);
-    }
+/// 「数据」一节（docs/45 §21）：共用数据选择组件（B2 已购数据 / B5 本地自有数据），选完写回 `[backtest]`。
+fn data_section<'a>(v: &View) -> Element<'a, FlMsg> {
+    let mut col = column![w::section("数据"), t::caption(sf::data_label(&v.graph.backtest))].spacing(space(1));
     col = col.push(super::data_picker_view::view(&v.pick, &sf::pick_opts(&v.needs, v.palette.as_ref())).map(FlMsg::Data));
     col.into()
 }
@@ -1294,7 +1282,7 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
         .color(pal::dim()));
         if let Some(p) = &v.palette {
             // 表单（docs/45 §3.5）：运行配置与账户底线不是节点
-            col = col.push(data_section(v, p));
+            col = col.push(data_section(v));
             col = col.push(w::section("运行配置"));
             for pd in p.settings_params.iter() {
                 col = col.push(config_field(v, "settings", &v.graph.settings, pd));

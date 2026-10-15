@@ -7,6 +7,7 @@
 //!   B2 购买的高质量数据（本地目录）  Tardis / Databento 各走自己的接口，不互相转换格式
 //!   B3 本地录制数据
 //!   B4 第三方 API
+//!   B5 本地自有数据（本地目录）       从其他各个渠道拿到、自己转成统一格式的按日文件（docs/45 §21）
 //! ```
 //!
 //! 本地数据（B2 / B3）：选根目录（有缺省，可手填或弹目录选择框）→ **自动扫描**出其中的市场、标的、日期，
@@ -56,10 +57,13 @@ pub enum BSource {
     Recorded,
     /// B4 第三方 API。
     ThirdParty,
+    /// B5 本地自有数据：各渠道落成同一种格式（`<根>/<目录>/<标的>/<日>.parquet` + `_own.toml`），
+    /// 扫描只有一份（`ws-data-source scan own`）。**按整日**——自有数据的回测脚本不切时段。
+    Own,
 }
 
 impl BSource {
-    pub const ALL: [Self; 4] = [Self::Live, Self::Purchased, Self::Recorded, Self::ThirdParty];
+    pub const ALL: [Self; 5] = [Self::Live, Self::Purchased, Self::Recorded, Self::ThirdParty, Self::Own];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -68,13 +72,14 @@ impl BSource {
             Self::Purchased => "B2 购买数据（本地）",
             Self::Recorded => "B3 本地录制",
             Self::ThirdParty => "B4 第三方 API",
+            Self::Own => "B5 本地自有数据",
         }
     }
 
     /// 本地目录类来源。
     #[must_use]
     pub const fn is_local(self) -> bool {
-        matches!(self, Self::Purchased | Self::Recorded)
+        matches!(self, Self::Purchased | Self::Recorded | Self::Own)
     }
 }
 
@@ -106,6 +111,7 @@ pub fn market_label(m: &str) -> String {
         "future" => "期货".into(),
         "option" => "期权".into(),
         "prediction" => "预测市场".into(),
+        "cfd" => "差价合约（CFD）".into(),
         "spot" => "现货".into(),
         "linear" => "U 本位永续".into(),
         "inverse" => "币本位永续".into(),
@@ -162,6 +168,8 @@ pub struct ScanItem {
     pub symbol: String,
     pub date: String,
     pub types: Vec<String>,
+    /// B5 本地自有数据：渠道（数据从哪来，如 `dukascopy`）；其余来源为空。
+    pub channel: String,
 }
 
 /// 一个根目录的扫描结果。
@@ -183,11 +191,12 @@ impl Scan {
                     s.root = (*root).into();
                     s.exists = *ex == "1";
                 }
-                ["item", market, symbol, date, types] => s.items.push(ScanItem {
+                ["item", market, symbol, date, types, rest @ ..] if rest.len() <= 1 => s.items.push(ScanItem {
                     market: (*market).into(),
                     symbol: (*symbol).into(),
                     date: (*date).into(),
                     types: types.split(',').filter(|t| !t.is_empty()).map(str::to_string).collect(),
+                    channel: rest.first().map(|c| (*c).to_string()).unwrap_or_default(),
                 }),
                 _ => {}
             }
@@ -237,6 +246,12 @@ impl Scan {
             .find(|i| i.symbol == symbol && i.date == date)
             .map(|i| i.types.clone())
             .unwrap_or_default()
+    }
+
+    /// 某标的的渠道（B5 本地自有数据；其余来源为空）。
+    #[must_use]
+    pub fn channel_of(&self, symbol: &str) -> String {
+        self.items.iter().find(|i| i.symbol == symbol).map(|i| i.channel.clone()).unwrap_or_default()
     }
 
     /// 某标的所在的市场（扫描里第一次出现的那个）。宿主按已存的选择预置时还不知道市场，靠它补上。
@@ -323,6 +338,8 @@ pub fn default_root(src: &str) -> String {
     match src {
         "tardis" => env("WS_TARDIS_ROOT", "/data/ubuntu/HistoricalData/data/bronze/tardis/binance-futures"),
         "databento" => env("WS_DATABENTO_ROOT", "/data/ubuntu/HistoricalData/data/bronze/Databento"),
+        // 与 `wealthspring_vendors::own::DEFAULT_ROOT` 同一处：bronze 本身，只认带 `_own.toml` 的标的目录
+        "own" => env("WS_OWN_ROOT", "/data/ubuntu/HistoricalData/data/bronze"),
         _ => std::env::var("WS_DATA_DIR").unwrap_or_else(|_| super::paths::data_dir().to_string_lossy().into_owned()),
     }
 }
@@ -561,6 +578,8 @@ pub enum Selection {
         types: Vec<String>,
         /// 结束日（含）；不选一段时 = `date`。
         end: String,
+        /// B5 本地自有数据的渠道（如 `dukascopy`）；其余来源为空。
+        channel: String,
     },
     /// B4：第三方 API（实时）。
     ThirdParty { provider: String, market: String, symbol: String },
@@ -575,7 +594,11 @@ impl Selection {
             Self::Live { venue, market, symbol } => format!("B1 · {venue} {} · {symbol} · 实时", market_label(market)),
             Self::Local { source, market, symbol, date, window, types, end, .. } => format!(
                 "{} · {} · {} · {symbol} · {date}{}{} · {} 类数据",
-                if source == "recorder" { "B3" } else { "B2" },
+                match source.as_str() {
+                    "recorder" => "B3",
+                    "own" => "B5",
+                    _ => "B2",
+                },
                 source_label(source),
                 market_label(market),
                 if end == date { String::new() } else { format!(" → {end}") },
@@ -594,6 +617,7 @@ pub fn source_label(s: &str) -> String {
         "tardis" => "Tardis".into(),
         "databento" => "Databento".into(),
         "recorder" => "本地录制".into(),
+        "own" => "本地自有数据".into(),
         other => other.into(),
     }
 }
@@ -605,6 +629,7 @@ impl DataPick {
         match (self.pipeline, self.source) {
             (Some(Pipeline::B), Some(BSource::Purchased)) => self.vendor.as_deref(),
             (Some(Pipeline::B), Some(BSource::Recorded)) => Some("recorder"),
+            (Some(Pipeline::B), Some(BSource::Own)) => Some("own"),
             _ => None,
         }
     }
@@ -669,6 +694,8 @@ impl DataPick {
                     self.clear_below_source();
                     if s == BSource::Recorded {
                         self.root = default_root("recorder");
+                    } else if s == BSource::Own {
+                        self.root = default_root("own");
                     }
                 }
             }
@@ -825,6 +852,8 @@ impl DataPick {
                     _ => None,
                 };
                 let market = self.market.clone().or_else(|| scanned.as_ref().and_then(|sc| sc.market_of(&symbol)))?;
+                let channel = scanned.as_ref().map(|sc| sc.channel_of(&symbol)).unwrap_or_default();
+                let whole_day = s == BSource::Own; // 自有数据按整日
                 let req = opts.require.as_ref();
                 let types = scanned.map(|sc| sc.types_in(&symbol, &date, &end)).unwrap_or_default()
                 .into_iter()
@@ -839,9 +868,10 @@ impl DataPick {
                     market,
                     symbol,
                     date,
-                    window: (opts.time == TimeMode::Window).then(|| (self.start.clone(), self.minutes)),
+                    window: (opts.time == TimeMode::Window && !whole_day).then(|| (self.start.clone(), self.minutes)),
                     types,
                     end,
+                    channel,
                 })
             }
             _ => None,
@@ -924,6 +954,25 @@ junk\n";
         let Some(Selection::Local { types, .. }) = p.selection(&opts) else { panic!() };
         assert_eq!(types, ["mbo"]);
         assert_eq!(p.coverage(&opts).map(|c| (c.days, c.missing.len())), Some((1, 0)));
+    }
+
+    #[test]
+    fn 自有数据_扫描带渠道_按整日() {
+        let s = Scan::parse("root\t/b\t1\nitem\tcfd\tXAUUSD\t2026-06-01\tquotes\tdukascopy\nitem\tfuture\tESU6\t2026-09-01\tmbo\n");
+        assert_eq!((s.channel_of("XAUUSD").as_str(), s.channel_of("ESU6").as_str()), ("dukascopy", ""));
+        assert_eq!(market_label("cfd"), "差价合约（CFD）");
+        let mut p = DataPick::default();
+        p.update(DataPickMsg::Pipeline(Pipeline::B));
+        p.update(DataPickMsg::Source(BSource::Own));
+        assert_eq!((p.local_key(), p.root.clone()), (Some("own"), default_root("own")));
+        inject_scan("own", "/自有数据组件测试", "root\t/b\t1\nitem\tcfd\tXAUUSD\t2026-06-01\tquotes\tdukascopy\n");
+        p.root = "/自有数据组件测试".into();
+        p.update(DataPickMsg::Symbol("XAUUSD".into()));
+        p.update(DataPickMsg::Date("2026-06-01".into()));
+        let Some(sel @ Selection::Local { .. }) = p.selection(&PickOpts { range: true, ..PickOpts::default() }) else { panic!() };
+        assert!(sel.describe().starts_with("B5 · 本地自有数据 · 差价合约（CFD） · XAUUSD"));
+        let Selection::Local { window, channel, .. } = sel else { unreachable!() };
+        assert_eq!((window, channel.as_str()), (None, "dukascopy"), "自有数据按整日，带渠道");
     }
 
     #[test]

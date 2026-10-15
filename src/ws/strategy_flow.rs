@@ -648,8 +648,6 @@ pub enum FlMsg {
     Stop,
     /// 共用数据选择组件（docs/45 §21）：选完写回 `[backtest]`
     Data(DataPickMsg),
-    /// 回到 Dukascopy 黄金报价（D3 并入「B5 本地自有数据」之前的临时入口）
-    UseDukascopy,
     Pace(String),
     MetaId(String),
     MetaName(String),
@@ -1792,7 +1790,7 @@ fn record(g: &mut St, tag: &str) {
 /// 换了一张图：选择、撤销栈、弹窗都清掉。
 // ── 数据（docs/45 §21）：共用数据选择组件 ⇄ 图的 `[backtest]` ──────────────────────
 
-/// 画布对数据选择组件的要求：计算用途、本地已购数据（B5 本地自有数据在 D3）、一段日期 + 每日时段、列出数据类型；
+/// 画布对数据选择组件的要求：计算用途、B2 已购数据 + B5 本地自有数据、一段日期 + 每日时段（自有数据按整日）、列出数据类型；
 /// 检查过的图带上它要的数据（D2）——给不了的数据商置灰、缺数据的日子标出、必需的类型锁住。
 #[must_use]
 pub fn pick_opts(needs: &Needs, pal: Option<&Palette>) -> PickOpts {
@@ -1802,7 +1800,7 @@ pub fn pick_opts(needs: &Needs, pal: Option<&Palette>) -> PickOpts {
     });
     PickOpts {
         purpose: Purpose::Compute,
-        sources: Some(vec![BSource::Purchased]),
+        sources: Some(vec![BSource::Purchased, BSource::Own]),
         vendors: None,
         time: TimeMode::Window,
         local_only: true,
@@ -1812,13 +1810,26 @@ pub fn pick_opts(needs: &Needs, pal: Option<&Palette>) -> PickOpts {
     }
 }
 
-/// `[backtest]` 的标的（字符串或列表取第一个）。
-fn bt_symbol(bt: &Value) -> Option<String> {
+/// 已购数据的数据源名（B2）；`[backtest] source` 是别的名字 = B5 本地自有数据的渠道（如 `dukascopy`）。
+const PURCHASED: [&str; 3] = ["databento", "tardis", "auto"];
+
+/// `[backtest]` 的数据源（没写 = `dukascopy`，与 `strategies/swe/run.py` 一致）。
+fn bt_source(bt: &Value) -> &str {
+    bt.get("source").and_then(Value::as_str).unwrap_or("dukascopy")
+}
+
+/// `[backtest]` 里写了的标的（字符串或列表取第一个）。
+fn bt_symbol_written(bt: &Value) -> Option<String> {
     match bt.get("symbols") {
         Some(Value::String(s)) => Some(s.clone()),
         Some(Value::Array(a)) => a.first().and_then(Value::as_str).map(str::to_string),
         _ => None,
     }
+}
+
+/// `[backtest]` 的标的；Dukascopy 没写标的 = XAUUSD（它只有这一个）。
+fn bt_symbol(bt: &Value) -> Option<String> {
+    bt_symbol_written(bt).or_else(|| (bt_source(bt) == "dukascopy").then(|| "XAUUSD".to_string()))
 }
 
 /// `[backtest]` 的起止日（没写结束日 = 起始那一天）。
@@ -1833,9 +1844,10 @@ pub fn data_range(bt: &Value) -> (String, String) {
 /// 画布左上角数据牌上的一行：数据商 · 标的 · 日期（· 时段）（· 类型）。
 #[must_use]
 pub fn data_label(bt: &Value) -> String {
-    let src = bt.get("source").and_then(Value::as_str).unwrap_or("dukascopy");
+    let src = bt_source(bt);
     let (start, end) = data_range(bt);
-    let mut out = vec![dp::source_label(src).replace("dukascopy", "Dukascopy"), bt_symbol(bt).unwrap_or_else(|| "?".into())];
+    let vendor = if PURCHASED.contains(&src) || src == "recorder" { dp::source_label(src) } else { format!("自有数据 {src}") };
+    let mut out = vec![vendor, bt_symbol(bt).unwrap_or_else(|| "?".into())];
     out.push(match (start.is_empty(), start == end) {
         (true, _) => "最新一天".into(),
         (false, true) => start,
@@ -1860,7 +1872,7 @@ pub fn run_overrides(bt: &Value) -> Vec<String> {
     let mut out = Vec::new();
     for (flag, v) in [
         ("--source", s("source")),
-        ("--symbol", bt_symbol(bt)),
+        ("--symbol", bt_symbol_written(bt)),
         ("--start", s("start")),
         ("--end", s("end")),
         ("--session-start", sess.and_then(|x| x.get("start")).and_then(Value::as_str).map(str::to_string)),
@@ -1881,25 +1893,31 @@ fn root_env(p: &DataPick) -> Vec<(String, String)> {
     let var = match k {
         "databento" => "WS_DATABENTO_ROOT",
         "tardis" => "WS_TARDIS_ROOT",
+        "own" => "WS_OWN_ROOT", // 运行入口据此找到渠道目录（`datareq.own_channel_dir`）
         _ => return Vec::new(),
     };
     if root == dp::default_root(k) { Vec::new() } else { vec![(var.to_string(), root)] }
 }
 
-/// 图的 `[backtest]` → 选择器（打开图、撤销重做之后）。Dukascopy / 没写数据源的图：选择器从头选。
-/// 同一家数据商时保留手填的根目录。
+/// 图的 `[backtest]` → 选择器（打开图、撤销重做之后）。Tardis / Databento → B2；其余数据源名（没写 = dukascopy）
+/// 是 B5 本地自有数据的渠道。`auto`：选择器从头选。同一个来源 / 数据商时保留手填的根目录。
 fn sync_pick(g: &mut St) {
     let bt = &g.graph.backtest;
     let s = |k: &str| bt.get(k).and_then(Value::as_str);
     let mut p = DataPick::default();
-    if let Some(src @ ("databento" | "tardis")) = s("source")
+    let src = bt_source(bt);
+    if src != "auto"
         && let Some(sym) = bt_symbol(bt)
     {
         let sess = bt.get("session");
         let window = sess
             .and_then(|x| Some((x.get("start")?.as_str()?, u32::try_from(x.get("minutes")?.as_u64()?).ok()?)));
-        p.preset_local(BSource::Purchased, Some(src), &sym, s("start"), s("end"), window);
-        if g.pick.vendor == p.vendor && !g.pick.root.trim().is_empty() {
+        if PURCHASED.contains(&src) {
+            p.preset_local(BSource::Purchased, Some(src), &sym, s("start"), s("end"), window);
+        } else {
+            p.preset_local(BSource::Own, None, &sym, s("start"), s("end"), None);
+        }
+        if g.pick.source == p.source && g.pick.vendor == p.vendor && !g.pick.root.trim().is_empty() {
             p.root = g.pick.root.clone();
         }
     }
@@ -1908,10 +1926,12 @@ fn sync_pick(g: &mut St) {
 
 /// 选择器选完了 → 写回 `[backtest]`（其余项如手续费照留）。没变就不记撤销、不算改动。
 fn write_pick(g: &mut St) {
-    let Some(Selection::Local { source, symbol, date, end, window, types, .. }) = g.pick.selection(&pick_opts(&g.needs, g.palette.as_ref())) else {
+    let Some(Selection::Local { source, symbol, date, end, window, types, channel, .. }) = g.pick.selection(&pick_opts(&g.needs, g.palette.as_ref())) else {
         return;
     };
     let mut bt = g.graph.backtest.as_object().cloned().unwrap_or_default();
+    // B5 本地自有数据：数据源写渠道名（`dukascopy` …），运行入口按它挑回测脚本
+    let source = if source == "own" { if channel.is_empty() { source } else { channel } } else { source };
     bt.insert("source".into(), source.into());
     bt.insert("symbols".into(), symbol.into());
     bt.insert("start".into(), date.into());
@@ -2388,23 +2408,6 @@ pub fn handle(m: FlMsg) {
             with(|g| {
                 g.pick.update(m);
                 write_pick(g);
-            });
-        }
-        FlMsg::UseDukascopy => {
-            with(|g| {
-                let mut bt = g.graph.backtest.as_object().cloned().unwrap_or_default();
-                for k in ["session", "types"] {
-                    bt.remove(k);
-                }
-                bt.insert("source".into(), "dukascopy".into());
-                bt.insert("symbols".into(), "XAUUSD".into());
-                let bt = Value::Object(bt);
-                if bt != g.graph.backtest {
-                    edit(g, "c.backtest.data");
-                    g.graph.backtest = bt;
-                    g.form.retain(|k, _| !k.starts_with(&form_key("backtest", "")));
-                }
-                sync_pick(g);
             });
         }
         FlMsg::Pace(v) => {
@@ -3468,7 +3471,8 @@ mod tests {
         );
         assert_eq!(data_label(&bt), "Databento · ESU6 · 2026-09-01 · 13:30 起 30 分钟 · mbo+trades");
         let gold = serde_json::json!({"source": "dukascopy", "symbols": ["XAUUSD"], "start": "2026-06-01", "end": "2026-06-30"});
-        assert_eq!(data_label(&gold), "Dukascopy · XAUUSD · 2026-06-01 → 2026-06-30");
+        assert_eq!(data_label(&gold), "自有数据 dukascopy · XAUUSD · 2026-06-01 → 2026-06-30");
+        assert_eq!(data_label(&serde_json::json!({})), "自有数据 dukascopy · XAUUSD · 最新一天", "没写数据源 = Dukascopy 黄金");
         assert_eq!(data_range(&serde_json::json!({"start": "2026-06-01"})), ("2026-06-01".into(), "2026-06-01".into()));
         assert!(run_overrides(&serde_json::json!({})).is_empty(), "没写的项不传，按工作流里的");
     }
@@ -3492,8 +3496,21 @@ mod tests {
         assert_eq!(root_env(&g.pick), [("WS_DATABENTO_ROOT".to_string(), "/画布往返测试".to_string())]);
         write_pick(&mut g);
         assert_eq!(g.undo.len(), 1, "没变就不记撤销");
-        // Dukascopy 的图：选择器从头选
-        g.graph.backtest = serde_json::json!({"source": "dukascopy", "symbols": "XAUUSD"});
+        // Dukascopy 的图（没写数据源也算）：预置成 B5 本地自有数据；选完写回渠道名、整日（不写时段）
+        g.graph.backtest = serde_json::json!({"start": "2026-06-01", "end": "2026-06-05"});
+        sync_pick(&mut g);
+        assert_eq!((g.pick.source, g.pick.symbol.as_deref(), g.pick.end.as_deref()), (Some(BSource::Own), Some("XAUUSD"), Some("2026-06-05")));
+        g.pick.root = "/自有数据测试".into();
+        dp::inject_scan("own", "/自有数据测试", "root\t/x\t1\nitem\tcfd\tXAUUSD\t2026-06-01\tquotes\tdukascopy\nitem\tcfd\tXAUUSD\t2026-06-02\tquotes\tdukascopy\n");
+        g.pick.update(DataPickMsg::End("2026-06-02".into()));
+        write_pick(&mut g);
+        let bt = &g.graph.backtest;
+        assert_eq!((bt["source"].as_str(), bt["symbols"].as_str(), bt["end"].as_str()), (Some("dukascopy"), Some("XAUUSD"), Some("2026-06-02")));
+        assert!(bt.get("session").is_none(), "自有数据按整日");
+        assert_eq!(bt["types"], serde_json::json!(["quotes"]));
+        assert_eq!(root_env(&g.pick), [("WS_OWN_ROOT".to_string(), "/自有数据测试".to_string())]);
+        // auto：选择器从头选
+        g.graph.backtest = serde_json::json!({"source": "auto", "symbols": "ESU6"});
         sync_pick(&mut g);
         assert_eq!(g.pick.pipeline, None);
     }

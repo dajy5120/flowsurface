@@ -338,7 +338,12 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
     let items: Vec<Choice> = sc
         .symbols(mk, &p.search)
         .into_iter()
-        .map(|(s, n)| Choice { label: if n > 1 { format!("{s} · {n} 天") } else { s.clone() }, key: s })
+        .map(|(s, n)| {
+            // B5 本地自有数据：标出渠道（同名标的可能来自不同渠道）
+            let ch = sc.channel_of(&s);
+            let ch = if ch.is_empty() { String::new() } else { format!(" · {ch}") };
+            Choice { label: if n > 1 { format!("{s}{ch} · {n} 天") } else { format!("{s}{ch}") }, key: s }
+        })
         .collect();
     b = b.push(symbol_row(p, all, items));
     let Some(sym) = p.symbol.as_deref() else {
@@ -378,7 +383,12 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
     {
         v.push(chip("最新".into(), false, Some(DataPickMsg::Date(d))));
     }
-    if opts.time == TimeMode::Window {
+    // B5 本地自有数据按整日跑（回测脚本不切时段）
+    let window = opts.time == TimeMode::Window && p.source != Some(BSource::Own);
+    if opts.time == TimeMode::Window && !window {
+        v.push(dim("按整日（UTC）".into()));
+    }
+    if window {
         v.push(dim("起始（UTC）".into()));
         // 步进 ±15 分钟或手填；填错显示错误态（docs/35 §6.1 时间输入）
         v.push(crate::ui::widgets::time_input(&p.start, 15, DataPickMsg::Start));
@@ -410,7 +420,7 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
         }
     }
     // 常用时段 + 换算后的绝对范围（UTC 与北京时间）
-    if opts.time == TimeMode::Window {
+    if window {
         b = b.push(crate::ui::widgets::time_range(p.date.as_deref(), &p.start, p.minutes, DataPickMsg::Window));
     }
 
