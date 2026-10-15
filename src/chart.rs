@@ -321,6 +321,7 @@ fn canvas_interaction<T: Chart>(
                             keyboard::Key::Named(keyboard::key::Named::Delete | keyboard::key::Named::Backspace) if !ctrl && !alt => {
                                 crate::ws::drawing::delete_selected(symbol)
                             }
+                            keyboard::Key::Named(keyboard::key::Named::Enter) => crate::ws::drawing::finish(symbol).is_some(),
                             _ => false,
                         };
                         if handled {
@@ -642,7 +643,7 @@ pub fn view<'a, T: Chart>(
             marks: drawing
                 .as_ref()
                 .map(|(symbol, v)| {
-                    crate::ws::drawing::axis_marks(symbol, v.cat)
+                    crate::ws::drawing::axis_marks(symbol, v.cat, &v.tf)
                         .into_iter()
                         .map(|(p, c)| (Price::from_units(p).to_f32_lossy(), c))
                         .collect()
@@ -707,7 +708,7 @@ pub fn drawing_overlay<'a, T: Chart>(chart: &T, focused: bool) -> Option<Element
         return None;
     }
     let (symbol, v) = chart.drawing()?;
-    let d = crate::ws::drawing::selected_drawing(&symbol).filter(|d| !d.hidden && d.shown_on(v.cat))?;
+    let d = crate::ws::drawing::selected_drawing(&symbol).filter(|d| !d.hidden && d.visible_in(v.cat, &v.tf))?;
     let at = d.anchors.first().map(|a| v.to_screen(*a)).unwrap_or_default();
     let x = at.x.clamp(4.0, (v.size.width - 340.0).max(4.0));
     let y = if at.y > 44.0 { at.y - 40.0 } else { (at.y + 16.0).min((v.size.height - 34.0).max(0.0)) };
@@ -996,7 +997,11 @@ impl ViewState {
             cell_h: self.cell_height,
             snap: min_step.units.max(1),
             cat,
+            tf: self.basis.to_string(),
             bars,
+            decimals: self.decimals,
+            multiplier: self.contract_multiplier(),
+            vol: Vec::new(),
         })
     }
 
@@ -1008,6 +1013,11 @@ impl ViewState {
     /// 画线的品种键（docs/46）：同一品种的所有图共用一套画线。
     pub fn drawing_symbol(&self) -> String {
         crate::ws::drawing::symbol_key(&self.ticker_info.ticker)
+    }
+
+    /// 合约乘数（画线的仓位估算；没有就按 1）。
+    pub fn contract_multiplier(&self) -> f64 {
+        self.ticker_info.contract_size.map_or(1.0, |c| f64::from(c.as_f32()))
     }
 
     /// 价格的显示小数位。

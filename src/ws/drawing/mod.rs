@@ -7,6 +7,7 @@
 //! - **画线跟着品种走**：键是「交易所 市场:代码」，同一品种的所有面板、所有周期共用一套；
 //!   每次改动版本号 +1，各图在下一帧看到版本变了就重画自己那一层。
 
+pub mod feeds;
 pub mod geometry;
 pub mod model;
 pub mod store;
@@ -20,7 +21,7 @@ use iced::{Point, Size};
 
 use serde::{Deserialize, Serialize};
 
-use geometry::{DrawView, Part, Shape};
+use geometry::{DrawView, Part, Prim, Role};
 use model::{Anchor, Dash, Drawing, Kind};
 use store::{Book, Cmd, Db, Effect};
 
@@ -38,11 +39,34 @@ pub struct Prefs {
     pub hide_all: bool,
     /// 全部锁定（只能选中看属性，不能拖、不能删）
     pub lock_all: bool,
+    /// 样式模板（G3）：名字、哪种工具、样式
+    pub templates: Vec<Template>,
+    /// 各种工具的缺省样式（G3）：新画的直接用它
+    pub defaults: Vec<(Kind, model::Style)>,
+    /// 隐藏了哪些系统来源（G4）
+    pub hide_sources: Vec<model::Source>,
+}
+
+/// 一个样式模板。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Template {
+    pub name: String,
+    pub kind: Kind,
+    pub style: model::Style,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { continuous: false, magnet: false, favorites: vec![Kind::Trend, Kind::HLine], hide_all: false, lock_all: false }
+        Self {
+            continuous: false,
+            magnet: false,
+            favorites: vec![Kind::Trend, Kind::HLine],
+            hide_all: false,
+            lock_all: false,
+            templates: Vec::new(),
+            defaults: Vec::new(),
+            hide_sources: Vec::new(),
+        }
     }
 }
 
@@ -51,6 +75,23 @@ impl Default for Prefs {
 pub enum Field {
     Price,
     Time,
+}
+
+/// 对象上可以在检查器里填的参数（G2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Param {
+    /// 文字 / 标注的内容
+    Text,
+    /// 斐波那契的比例（逗号分隔）
+    Levels,
+    /// 仓位工具的数量
+    Qty,
+    /// 仓位工具的单边手续费（基点）
+    Fee,
+    /// 成交量分布的档数（G4）
+    Rows,
+    /// 成交量分布的价值区占比（G4）
+    Va,
 }
 
 /// 工具栏、检查器、图上浮动小条发来的操作（docs/46 G1）。都是全局状态上的操作，与哪个面板无关。
@@ -79,6 +120,24 @@ pub enum DrawMsg {
     ApplyAnchor(String, String, usize, Field),
     /// 回车：把输入框里的分组名写进对象
     ApplyGroup(String, String),
+    /// 回车：把输入框里的参数写进对象（G2）
+    ApplyParam(String, String, Param),
+    /// 只在来源周期显示（G3）
+    OnlyOrigin(String, String, bool),
+    /// 把这个对象的样式存成模板（名字取输入框 `template_key`；G3）
+    SaveTemplate(String, String),
+    /// 第 i 个模板套到这个对象上
+    ApplyTemplate(String, String, usize),
+    DeleteTemplate(usize),
+    /// 这个对象的样式设为这种工具的缺省 / 清掉这种工具的缺省
+    SetDefault(String, String),
+    ClearDefault(Kind),
+    /// 显示 / 隐藏一类系统对象（G4）
+    ShowSource(model::Source, bool),
+    /// 系统对象复制成手工对象（之后能拖、能改；G4）
+    CopyToManual(String, String),
+    /// 对象树里展开 / 折叠一个系统分组
+    ToggleGroup(String),
     Delete(String, String),
     /// (品种, 分组, 值)
     GroupHide(String, String, bool),
@@ -107,8 +166,10 @@ struct Drag {
 struct State {
     books: HashMap<String, Book>,
     tool: Option<Kind>,
-    /// 两个锚点的工具：已经放下的第一个（品种, 锚点）
-    placing: Option<(String, Anchor)>,
+    /// 要点几下的工具：已经放下的那几个（品种, 锚点）
+    placing: Option<(String, Vec<Anchor>)>,
+    /// 放的那张图的周期（折线回车结束时记成来源周期）
+    placing_tf: Option<String>,
     selected: Option<(String, String)>,
     drag: Option<Drag>,
     /// 最近一条说明（存盘失败、读不了的对象、输入不认得…），显示在工具栏的绘图菜单与检查器
@@ -117,6 +178,8 @@ struct State {
     menu_open: bool,
     /// 检查器输入框里还没回车的文字：键 → 文字
     edits: HashMap<String, String>,
+    /// 对象树里展开了的系统分组（系统分组缺省折叠：日历一组就有两百多个）
+    expanded: std::collections::HashSet<String>,
 }
 
 static VERSION: AtomicU64 = AtomicU64::new(1);
@@ -210,6 +273,12 @@ fn set_prefs(f: impl FnOnce(&mut Prefs)) {
     }
 }
 
+/// 对象树里这个系统分组展开了没有。
+#[must_use]
+pub fn group_expanded(name: &str) -> bool {
+    with(|st| st.expanded.contains(name))
+}
+
 /// 最近一条说明（空 = 没有）。
 #[must_use]
 pub fn note() -> String {
@@ -227,8 +296,8 @@ fn can_edit(st: &mut State, d: &Drawing) -> bool {
 }
 
 /// 在这张图上画不画它：没隐藏、没「全部隐藏」、这一类周期上显示。
-fn visible(st: &mut State, d: &Drawing, cat: &str) -> bool {
-    !d.hidden && !prefs_of(st).hide_all && d.shown_on(cat)
+fn visible(st: &mut State, d: &Drawing, cat: &str, tf: &str) -> bool {
+    !d.hidden && !prefs_of(st).hide_all && d.visible_in(cat, tf)
 }
 
 // ── 工具与选中 ───────────────────────────────────────────────────────────────
@@ -277,10 +346,10 @@ pub fn escape() {
     bump();
 }
 
-/// 这个品种的对象（拖动中的那个换成预览）。
+/// 这个品种的对象（拖动中的那个换成预览）：手工画的在前，系统生成的（订单、日历、策略、外部；G4）在后。
 #[must_use]
 pub fn items(symbol: &str) -> Vec<Drawing> {
-    with(|st| {
+    let (mut v, hidden) = with(|st| {
         let drag = st.drag.clone().filter(|d| d.symbol == symbol);
         let mut v = book(st, symbol).items.clone();
         if let Some(d) = drag
@@ -288,15 +357,23 @@ pub fn items(symbol: &str) -> Vec<Drawing> {
         {
             *slot = d.current;
         }
-        v
-    })
+        (v, prefs_of(st).hide_sources.clone())
+    });
+    v.extend(feeds::items(symbol, &hidden));
+    v
+}
+
+/// 这个品种有没有成交量分布对象（有才让图表把成交量带进 `DrawView`）。
+#[must_use]
+pub fn needs_volume(symbol: &str) -> bool {
+    items(symbol).iter().any(|d| d.kind == Kind::VolProfile)
 }
 
 /// 在这一类周期的图上看得见的对象（画与命中测试用）。
 #[must_use]
-pub fn visible_items(symbol: &str, cat: &str) -> Vec<Drawing> {
+pub fn visible_items(symbol: &str, cat: &str, tf: &str) -> Vec<Drawing> {
     let all = items(symbol);
-    with(|st| all.into_iter().filter(|d| visible(st, d, cat)).collect())
+    with(|st| all.into_iter().filter(|d| visible(st, d, cat, tf)).collect())
 }
 
 /// 选中的对象（拖动中是预览）。
@@ -308,14 +385,14 @@ pub fn selected_drawing(symbol: &str) -> Option<Drawing> {
 
 /// 价格轴上要标的价位（G1）：看得见的水平线，以及选中对象的各个锚点（垂直线除外）。(价格, 颜色)
 #[must_use]
-pub fn axis_marks(symbol: &str, cat: &str) -> Vec<(i64, [u8; 4])> {
+pub fn axis_marks(symbol: &str, cat: &str, tf: &str) -> Vec<(i64, iced::Color)> {
     let sel = selected(symbol);
-    visible_items(symbol, cat)
+    visible_items(symbol, cat, tf)
         .into_iter()
         .flat_map(|d| {
             let is_sel = sel.as_deref() == Some(d.id.as_str());
-            let c = d.style.color;
-            let ps: Vec<(i64, [u8; 4])> = match d.kind {
+            let c = base_color(&d);
+            let ps: Vec<(i64, iced::Color)> = match d.kind {
                 Kind::HLine => d.anchors.first().map(|a| (a.p, c)).into_iter().collect(),
                 Kind::VLine => Vec::new(),
                 _ if is_sel => d.anchors.iter().map(|a| (a.p, c)).collect(),
@@ -329,7 +406,7 @@ pub fn axis_marks(symbol: &str, cat: &str) -> Vec<(i64, [u8; 4])> {
 /// 光标下有没有对象（悬停时换光标）。
 #[must_use]
 pub fn hovering(symbol: &str, v: &DrawView, p: Point) -> bool {
-    let items = visible_items(symbol, v.cat);
+    let items = visible_items(symbol, v.cat, &v.tf);
     geometry::pick(v, &items, p, selected(symbol).as_deref()).is_some()
 }
 
@@ -343,23 +420,58 @@ fn anchor_for(v: &DrawView, p: Point) -> Anchor {
 
 /// 选了工具时在图上点了一下（屏幕位置）。
 pub fn place_at(symbol: &str, v: &DrawView, p: Point) -> Option<String> {
-    place(symbol, anchor_for(v, p))
+    place_in(symbol, anchor_for(v, p), Some(v))
 }
 
 /// 选了工具时按下左键：一个锚点的工具直接建好；两个锚点的，第一下记起点、第二下建好。返回建好的对象 id。
 pub fn place(symbol: &str, at: Anchor) -> Option<String> {
-    let (kind, first) = with(|st| (st.tool, st.placing.clone().filter(|(s, _)| s == symbol).map(|(_, a)| a)));
+    place_in(symbol, at, None)
+}
+
+/// 放一个锚点：点够了就建好（多锚点工具共用这一套）。折线点多少下都行，在最后一个点上再点一下（或回车）结束；
+/// 仓位工具点一下，目标与止损按缺省比例摆好、右边界 20 根 K 线（`v` 给了才知道一根多宽）。
+fn place_in(symbol: &str, at: Anchor, v: Option<&DrawView>) -> Option<String> {
+    let (kind, mut pts) = with(|st| (st.tool, st.placing.clone().filter(|(s, _)| s == symbol).map(|(_, a)| a).unwrap_or_default()));
     let kind = kind?;
-    if kind.anchors() == 2 && first.is_none() {
-        with(|st| st.placing = Some((symbol.to_string(), at)));
+    let need = kind.clicks();
+    if need == 0 && pts.len() >= 2 && pts.last() == Some(&at) {
+        return finish(symbol);
+    }
+    if need == 0 || pts.len() + 1 < need {
+        pts.push(at);
+        with(|st| {
+            st.placing = Some((symbol.to_string(), pts));
+            st.placing_tf = v.map(|v| v.tf.clone());
+        });
         bump();
         return None;
     }
-    let anchors = match first {
-        Some(a) => vec![a, at],
-        None => vec![at],
+    pts.push(at);
+    let anchors = match kind {
+        Kind::LongPos | Kind::ShortPos => {
+            let right = v.map_or(at.t + 20 * 60_000, |v| v.bars_later(at.t, 20.0));
+            model::position_anchors(kind, at, right, v.map_or(1, |v| v.snap))
+        }
+        _ => pts,
     };
-    let d = Drawing::new(kind, anchors);
+    create(symbol, kind, anchors, v.map(|v| v.tf.clone()))
+}
+
+/// 折线：回车结束（至少两个点）。
+pub fn finish(symbol: &str) -> Option<String> {
+    let (kind, pts) = with(|st| (st.tool, st.placing.clone().filter(|(s, _)| s == symbol).map(|(_, a)| a).unwrap_or_default()));
+    (kind == Some(Kind::Polyline) && pts.len() >= 2).then_some(())?;
+    let tf = with(|st| st.placing_tf.clone());
+    create(symbol, Kind::Polyline, pts, tf)
+}
+
+/// 建好一个对象：用这种工具的缺省样式（有的话），记下画它的周期。
+fn create(symbol: &str, kind: Kind, anchors: Vec<Anchor>, origin_tf: Option<String>) -> Option<String> {
+    let mut d = Drawing::new(kind, anchors);
+    d.origin_tf = origin_tf;
+    if let Some((_, st)) = prefs().defaults.into_iter().find(|(k, _)| *k == kind) {
+        d.style = st;
+    }
     let id = d.id.clone();
     let fx = with(|st| {
         st.placing = None;
@@ -373,18 +485,18 @@ pub fn place(symbol: &str, at: Anchor) -> Option<String> {
     Some(id)
 }
 
-/// 两个锚点的工具放下了第一个点（画预览用）。
+/// 要点几下的工具已经放下的锚点（画预览用）。
 #[must_use]
-pub fn placing(symbol: &str) -> Option<(Kind, Anchor)> {
+pub fn placing(symbol: &str) -> Option<(Kind, Vec<Anchor>)> {
     with(|st| match (&st.placing, st.tool) {
-        (Some((s, a)), Some(k)) if s == symbol => Some((k, *a)),
+        (Some((s, a)), Some(k)) if s == symbol => Some((k, a.clone())),
         _ => None,
     })
 }
 
 /// 没选工具时按下左键：点中对象就选中（能拖的开始拖），返回 true；没点中返回 false（图表照常平移），并取消选中。
 pub fn press(symbol: &str, v: &DrawView, p: Point) -> bool {
-    let all = visible_items(symbol, v.cat);
+    let all = visible_items(symbol, v.cat, &v.tf);
     let sel = selected(symbol);
     match geometry::pick(v, &all, p, sel.as_deref()) {
         Some((d, part)) => {
@@ -429,6 +541,7 @@ pub fn drag_to(v: &DrawView, p: Point) {
                 if let Some(a) = cur.anchors.get_mut(i) {
                     *a = if magnet { v.magnet(v.anchor_at(p), p) } else { v.anchor_at(p) };
                 }
+                cur.constrain(i);
             }
         }
         (cur != d.current).then(|| d.current = cur)
@@ -489,11 +602,24 @@ pub fn tool_for_key(c: &str, shift: bool) -> Option<Kind> {
         ("t", false) => Some(Kind::Trend),
         ("r", false) => Some(Kind::Ray),
         ("r", true) => Some(Kind::Rect),
+        ("f", false) => Some(Kind::FibRetrace),
         _ => None,
     }
 }
 
 // ── 工具栏 / 检查器 / 浮动小条的操作 ───────────────────────────────────────────
+
+/// 模板名输入框的键。
+#[must_use]
+pub fn template_key(id: &str) -> String {
+    format!("tpl:{id}")
+}
+
+/// 参数输入框的键。
+#[must_use]
+pub fn param_key(id: &str, p: Param) -> String {
+    format!("x:{id}:{p:?}")
+}
 
 /// 检查器输入框的键：`a:{id}:{锚点}:p|t`（价格 / 时间）、`g:{id}`（分组）。
 #[must_use]
@@ -603,6 +729,97 @@ pub fn handle(m: DrawMsg) {
             let g = text.trim().to_string();
             modify(&sym, &id, false, |d| d.group = (!g.is_empty()).then_some(g));
         }
+        DrawMsg::ApplyParam(sym, id, param) => {
+            let key = param_key(&id, param);
+            let Some(text) = with(|st| st.edits.get(&key).cloned()) else { return };
+            let num = |s: &str| s.trim().parse::<f64>().ok().filter(|x| x.is_finite() && *x >= 0.0);
+            let ok = match param {
+                Param::Text => {
+                    modify(&sym, &id, false, |d| d.text = Some(text.clone()));
+                    true
+                }
+                Param::Levels => {
+                    let lv: Option<Vec<f64>> = text.split([',', '，', ' ']).filter(|x| !x.trim().is_empty()).map(|x| x.trim().parse::<f64>().ok()).collect();
+                    match lv {
+                        Some(lv) if !lv.is_empty() => {
+                            modify(&sym, &id, false, |d| d.levels = lv);
+                            true
+                        }
+                        _ => false,
+                    }
+                }
+                Param::Qty => num(&text).filter(|q| *q > 0.0).map(|q| modify(&sym, &id, false, |d| d.qty = Some(q))).is_some(),
+                Param::Fee => num(&text).map(|f| modify(&sym, &id, false, |d| d.fee_bp = Some(f))).is_some(),
+                Param::Rows => num(&text)
+                    .filter(|r| (4.0..=200.0).contains(r))
+                    .map(|r| modify(&sym, &id, false, |d| d.rows = Some(r.round() as u32)))
+                    .is_some(),
+                Param::Va => num(&text).filter(|v| *v > 0.0 && *v < 1.0).map(|v| modify(&sym, &id, false, |d| d.va = Some(v))).is_some(),
+            };
+            with(|st| {
+                if ok {
+                    st.edits.remove(&key);
+                    st.note.clear();
+                } else {
+                    st.note = format!("认不得：{text}");
+                }
+            });
+        }
+        DrawMsg::OnlyOrigin(sym, id, v) => modify(&sym, &id, false, |d| d.only_origin = v),
+        DrawMsg::SaveTemplate(sym, id) => {
+            let key = template_key(&id);
+            let name = with(|st| st.edits.remove(&key)).unwrap_or_default().trim().to_string();
+            let Some(d) = items(&sym).into_iter().find(|d| d.id == id) else { return };
+            let name = if name.is_empty() { format!("{} {}", d.kind.label(), prefs().templates.iter().filter(|t| t.kind == d.kind).count() + 1) } else { name };
+            set_prefs(|p| {
+                p.templates.retain(|t| !(t.kind == d.kind && t.name == name)); // 同名覆盖
+                p.templates.push(Template { name, kind: d.kind, style: d.style.clone() });
+            });
+        }
+        DrawMsg::ApplyTemplate(sym, id, i) => {
+            if let Some(t) = prefs().templates.get(i).cloned() {
+                modify(&sym, &id, false, |d| d.style = t.style);
+            }
+        }
+        DrawMsg::DeleteTemplate(i) => set_prefs(|p| {
+            if i < p.templates.len() {
+                p.templates.remove(i);
+            }
+        }),
+        DrawMsg::SetDefault(sym, id) => {
+            if let Some(d) = items(&sym).into_iter().find(|d| d.id == id) {
+                set_prefs(|p| {
+                    p.defaults.retain(|(k, _)| *k != d.kind);
+                    p.defaults.push((d.kind, d.style.clone()));
+                });
+            }
+        }
+        DrawMsg::ClearDefault(k) => set_prefs(|p| p.defaults.retain(|(x, _)| *x != k)),
+        DrawMsg::ToggleGroup(g) => with(|st| {
+            if !st.expanded.remove(&g) {
+                st.expanded.insert(g);
+            }
+        }),
+        DrawMsg::ShowSource(src, show) => set_prefs(|p| {
+            p.hide_sources.retain(|s| *s != src);
+            if !show {
+                p.hide_sources.push(src);
+            }
+        }),
+        DrawMsg::CopyToManual(sym, id) => {
+            let Some(orig) = items(&sym).into_iter().find(|d| d.id == id) else { return };
+            let mut d = Drawing::new(orig.kind, orig.anchors.clone());
+            let new_id = d.id.clone();
+            d.style = orig.style.clone();
+            d.style.color = color_bytes(base_color(&orig)); // 主题色落成具体颜色：复制出来的就是自己的了
+            (d.text, d.levels, d.dir, d.rows, d.va, d.qty, d.fee_bp) = (orig.text, orig.levels, orig.dir, orig.rows, orig.va, orig.qty, orig.fee_bp);
+            d.group = Some(format!("复制自{}", orig.source.label()));
+            let fx = with(|st| {
+                st.selected = Some((sym.clone(), new_id));
+                book(st, &sym).exec(Cmd::Create(d))
+            });
+            persist(&sym, fx);
+        }
         DrawMsg::Delete(sym, id) => {
             select(&sym, Some(id));
             delete_selected(&sym);
@@ -612,6 +829,11 @@ pub fn handle(m: DrawMsg) {
         DrawMsg::Undo(sym) => undo(&sym),
         DrawMsg::Redo(sym) => redo(&sym),
     }
+}
+
+fn color_bytes(c: iced::Color) -> [u8; 4] {
+    let b = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [b(c.r), b(c.g), b(c.b), b(c.a)]
 }
 
 /// 整组改（每个对象一条「改」）。
@@ -624,8 +846,23 @@ fn group_set(symbol: &str, group: &str, f: impl Fn(&mut Drawing)) {
 
 // ── 画 ──────────────────────────────────────────────────────────────────────
 
+/// 对象的颜色：设了主题色（系统对象）就用主题色——跟着主题与「红涨绿跌」走；否则用样式里的颜色。
+#[must_use]
+pub fn base_color(d: &Drawing) -> iced::Color {
+    use model::Tone;
+    match d.tone {
+        Some(Tone::Up) => crate::ui::chart::up_strong(),
+        Some(Tone::Down) => crate::ui::chart::down_strong(),
+        Some(Tone::Warn) => crate::ui::widgets::Tone::Warning.color(),
+        Some(Tone::Danger) => crate::ui::widgets::Tone::Danger.color(),
+        Some(Tone::Accent) => crate::ui::pal::accent(),
+        Some(Tone::Dim) => crate::ui::pal::dim(),
+        None => crate::ui::chart::drawing_color(d.style.color),
+    }
+}
+
 fn stroke(d: &Drawing, emphasis: bool) -> Stroke<'static> {
-    let color = crate::ui::chart::drawing_color(d.style.color);
+    let color = base_color(d);
     let width = d.style.width + if emphasis { 0.5 } else { 0.0 };
     let segments: &'static [f32] = match d.style.dash {
         Dash::Solid => &[],
@@ -635,24 +872,77 @@ fn stroke(d: &Drawing, emphasis: bool) -> Stroke<'static> {
     Stroke { width, line_dash: LineDash { segments, offset: 0 }, ..Stroke::default() }.with_color(color)
 }
 
+fn fill(d: &Drawing, role: Role) -> iced::Color {
+    use crate::ui::pal::alpha;
+    match role {
+        Role::Up => alpha(crate::ui::chart::up(), 0.18),
+        Role::Down => alpha(crate::ui::chart::down(), 0.18),
+        Role::Solid => base_color(d),
+        Role::Faint => alpha(base_color(d), 0.07),
+        _ if d.tone.is_some() => alpha(base_color(d), 0.15),
+        _ => d.style.fill.map_or_else(|| alpha(base_color(d), 0.15), crate::ui::chart::drawing_color),
+    }
+}
+
 fn draw_one(frame: &mut Frame, v: &DrawView, d: &Drawing, selected: bool) {
     if d.hidden {
         return;
     }
-    let Some(shape) = geometry::shape(v, d) else { return };
-    match shape {
-        Shape::Segment(a, b) => frame.stroke(&Path::line(a, b), stroke(d, selected)),
-        Shape::Rect(r) => {
-            let fill = d.style.fill.map_or_else(
-                || crate::ui::pal::alpha(crate::ui::chart::drawing_color(d.style.color), 0.15),
-                crate::ui::chart::drawing_color,
-            );
-            frame.fill_rectangle(r.position(), r.size(), fill);
-            frame.stroke(&Path::rectangle(r.position(), r.size()), stroke(d, selected));
+    let color = base_color(d);
+    let aux = Stroke { width: 1.0, line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 }, ..Stroke::default() }.with_color(crate::ui::pal::alpha(color, 0.8));
+    for pr in geometry::prims(v, d) {
+        match pr {
+            Prim::Line(a, b, Role::Aux) => frame.stroke(&Path::line(a, b), aux),
+            Prim::Line(a, b, _) => frame.stroke(&Path::line(a, b), stroke(d, selected)),
+            Prim::Area(r, role) => frame.fill_rectangle(r.position(), r.size(), fill(d, role)),
+            Prim::Frame(r) => frame.stroke(&Path::rectangle(r.position(), r.size()), stroke(d, selected)),
+            Prim::Poly(pts, role) => {
+                if let Some((first, rest)) = pts.split_first() {
+                    let path = Path::new(|b| {
+                        b.move_to(*first);
+                        for p in rest {
+                            b.line_to(*p);
+                        }
+                        b.close();
+                    });
+                    frame.fill(&path, fill(d, role));
+                }
+            }
+            Prim::Label { at, text, align, boxed } => {
+                let r = geometry::label_rect(at, &text, align);
+                if boxed {
+                    frame.fill_rectangle(r.position(), r.size(), crate::ui::chart::drawing_handle_fill());
+                    frame.stroke(&Path::rectangle(r.position(), r.size()), Stroke::default().with_width(1.0).with_color(color));
+                }
+                frame.fill_text(canvas::Text {
+                    content: text,
+                    position: Point::new(r.x + 4.0, at.y),
+                    size: iced::Pixels(crate::ui::text::s_small()),
+                    color: if boxed { crate::ui::pal::txt() } else { color },
+                    align_y: iced::alignment::Vertical::Center,
+                    ..canvas::Text::default()
+                });
+            }
         }
     }
+    // 来源周期（G3）：在别的周期上看时，线头标一个小字（如「15m」）
+    // 标在第一个看得见的锚点旁；都在视野外时，水平线标在左边缘（它横贯整张图）
+    let inside = |p: &Point| p.x >= 0.0 && p.x <= v.size.width - 30.0 && p.y >= 12.0 && p.y <= v.size.height;
+    let spot = d.anchors.iter().map(|a| v.to_screen(*a)).find(inside).or_else(|| {
+        (d.kind == Kind::HLine).then(|| d.anchors.first().map(|a| Point::new(2.0, v.to_screen(*a).y))).flatten()
+    });
+    if let (Some(tag), Some(at)) = (d.origin_tag(&v.tf), spot) {
+        frame.fill_text(canvas::Text {
+            content: tag.to_string(),
+            position: Point::new(at.x + 6.0, at.y - 6.0),
+            size: iced::Pixels(crate::ui::text::s_meta()),
+            color: crate::ui::pal::alpha(color, 0.75),
+            align_y: iced::alignment::Vertical::Bottom,
+            ..canvas::Text::default()
+        });
+    }
     if selected {
-        let edge = crate::ui::chart::drawing_color(d.style.color);
+        let edge = base_color(d);
         for a in &d.anchors {
             let c = v.to_screen(*a);
             let dot = Path::circle(c, geometry::HANDLE_PX);
@@ -665,25 +955,32 @@ fn draw_one(frame: &mut Frame, v: &DrawView, d: &Drawing, selected: bool) {
 /// 绘图层：这个品种的全部对象（屏幕坐标，不套图表的平移缩放变换）。
 pub fn draw_layer(frame: &mut Frame, v: &DrawView, symbol: &str) {
     let sel = selected(symbol);
-    for d in visible_items(symbol, v.cat) {
-        draw_one(frame, v, &d, sel.as_deref() == Some(d.id.as_str()));
-    }
+    let items = visible_items(symbol, v.cat, &v.tf);
+    // 裁到画布里：画布不会自己裁，锚点在视野外的文字会越界画到旁边的面板上（G2 实测）
+    frame.with_clip(iced::Rectangle::with_size(v.size), |f| {
+        for d in &items {
+            draw_one(f, v, d, sel.as_deref() == Some(d.id.as_str()));
+        }
+    });
 }
 
 /// 十字线层：两个锚点的工具放下第一个点之后，跟着光标画预览；选着工具时左下角写一行提示。
 pub fn draw_hint(frame: &mut Frame, v: &DrawView, symbol: &str, cursor: Option<Point>) {
-    if let (Some((kind, first)), Some(c)) = (placing(symbol), cursor) {
-        let mut d = Drawing::new(kind, vec![first, v.anchor_at(c)]);
+    let placed = placing(symbol);
+    if let (Some((kind, pts)), Some(c)) = (&placed, cursor) {
+        let mut all = pts.clone();
+        all.push(v.anchor_at(c));
+        let mut d = Drawing::new(*kind, all);
         d.style.dash = Dash::Dashed;
-        draw_one(frame, v, &d, false);
+        frame.with_clip(iced::Rectangle::with_size(v.size), |f| draw_one(f, v, &d, false));
     }
     if let Some(kind) = tool() {
-        let step = if kind.anchors() == 2 && placing(symbol).is_none() {
-            "点一下放起点"
-        } else if kind.anchors() == 2 {
-            "再点一下放终点"
-        } else {
-            "点一下放下"
+        let n = placed.as_ref().map_or(0, |(_, p)| p.len());
+        let step = match kind.clicks() {
+            0 if n < 2 => "点下第一个、第二个顶点".to_string(),
+            0 => "接着点顶点 · 回车或在最后一点上再点一下结束".to_string(),
+            1 => "点一下放下".to_string(),
+            k => format!("点第 {} 下（共 {k} 下）", n + 1),
         };
         frame.fill_text(canvas::Text {
             content: format!("画{} · {step} · Esc 退出", kind.label()),
@@ -700,7 +997,8 @@ pub fn draw_hint(frame: &mut Frame, v: &DrawView, symbol: &str, cursor: Option<P
 /// 绘图层要不要重画：版本号变了。`seen` 是这张图上次画的版本。
 #[must_use]
 pub fn changed_since(seen: &AtomicU64) -> bool {
-    let v = version();
+    // 系统对象（订单、日历、策略、外部文件）变了也要重画：指纹并进来
+    let v = version() ^ feeds::fingerprint().rotate_left(17);
     seen.swap(v, Ordering::Relaxed) != v
 }
 
@@ -727,7 +1025,11 @@ mod tests {
             cell_h: 4.0,
             snap: 10,
             cat: "min",
+            tf: "1m".into(),
             bars: Vec::new(),
+            decimals: 1,
+            multiplier: 1.0,
+            vol: Vec::new(),
         }
     }
 
@@ -807,13 +1109,13 @@ mod tests {
         handle(DrawMsg::ApplyGroup(sym.into(), id.clone()));
         assert_eq!((items(sym)[0].style.color, items(sym)[0].group.as_deref()), ([1, 2, 3, 255], Some("支撑")));
         handle(DrawMsg::GroupHide(sym.into(), "支撑".into(), true));
-        assert!(items(sym)[0].hidden && visible_items(sym, "min").len() == 1);
+        assert!(items(sym)[0].hidden && visible_items(sym, "min", "1m").len() == 1);
         handle(DrawMsg::Undo(sym.into()));
         assert!(!items(sym)[0].hidden);
         // 只在小时级显示：分钟图上看不见、点不中
         handle(DrawMsg::ShowOn(sym.into(), id.clone(), "min".into(), false));
-        assert_eq!(visible_items(sym, "min").len(), 1);
-        assert_eq!(visible_items(sym, "hour").len(), 2);
+        assert_eq!(visible_items(sym, "min", "1m").len(), 1);
+        assert_eq!(visible_items(sym, "hour", "1h").len(), 2);
         // 全部锁定：能选中，不能拖、不能删、不能改位置；颜色照改
         handle(DrawMsg::LockAll(true));
         let other = items(sym)[1].id.clone();
@@ -827,7 +1129,7 @@ mod tests {
         handle(DrawMsg::LockAll(false));
         // 全部隐藏：一个都不画
         handle(DrawMsg::HideAll(true));
-        assert!(visible_items(sym, "hour").is_empty());
+        assert!(visible_items(sym, "hour", "1h").is_empty());
         handle(DrawMsg::HideAll(false));
         // 收藏：点一下加、再点一下去
         let before = prefs().favorites.len();
@@ -835,6 +1137,117 @@ mod tests {
         handle(DrawMsg::Favorite(Kind::Rect));
         assert_eq!(prefs().favorites.len(), before);
         // 价格轴：水平线的价位都标；选中的趋势线标两端
-        assert_eq!(axis_marks(sym, "hour").len(), 2);
+        assert_eq!(axis_marks(sym, "hour", "1h").len(), 2);
+
+        // ── G2：多锚点工具共用一套放置与编辑 ──
+        let sym = "TEST:G2";
+        let v = view();
+        // 平行通道：点三下
+        handle(DrawMsg::Tool(Some(Kind::Channel)));
+        assert!(place_at(sym, &v, Point::new(390.0, 200.0)).is_none());
+        assert!(place_at(sym, &v, Point::new(400.0, 200.0)).is_none());
+        assert_eq!(placing(sym).map(|(_, p)| p.len()), Some(2));
+        let ch = place_at(sym, &v, Point::new(400.0, 220.0)).expect("第三下建好");
+        assert_eq!(items(sym).iter().find(|d| d.id == ch).map(|d| d.anchors.len()), Some(3));
+        // 折线：点几下都行；在最后一个点上再点一下结束
+        handle(DrawMsg::Tool(Some(Kind::Polyline)));
+        for x in [300.0, 320.0, 340.0] {
+            assert!(place_at(sym, &v, Point::new(x, 200.0)).is_none());
+        }
+        let pl = place_at(sym, &v, Point::new(340.0, 200.0)).expect("在最后一点上再点一下结束");
+        assert_eq!(items(sym).iter().find(|d| d.id == pl).map(|d| d.anchors.len()), Some(3));
+        // 回车也能结束；只有一个点时回车不建
+        handle(DrawMsg::Tool(Some(Kind::Polyline)));
+        place_at(sym, &v, Point::new(300.0, 210.0));
+        assert!(finish(sym).is_none());
+        place_at(sym, &v, Point::new(310.0, 210.0));
+        assert!(finish(sym).is_some());
+        // 仓位：点一下就放好三个价位，右边界 20 根之后；拖止损，目标的右边界跟着走
+        handle(DrawMsg::Tool(Some(Kind::LongPos)));
+        let pos = place_at(sym, &v, Point::new(390.0, 200.0)).expect("点一下");
+        let d = items(sym).into_iter().find(|d| d.id == pos).unwrap();
+        assert_eq!((d.anchors.len(), d.anchors[1].t, d.anchors[1].p > d.anchors[0].p, d.anchors[2].p < d.anchors[0].p), (3, 1_740_000, true, true));
+        select(sym, Some(pos.clone()));
+        let stop = v.to_screen(d.anchors[2]);
+        assert!(press(sym, &v, stop));
+        drag_to(&v, Point::new(stop.x + 50.0, stop.y));
+        drop_drag();
+        let d = items(sym).into_iter().find(|d| d.id == pos).unwrap();
+        assert_eq!(d.anchors[1].t, d.anchors[2].t, "目标与止损同一个右边界");
+        // 参数：文字、斐波那契比例、仓位数量；认不得的不改
+        handle(DrawMsg::Edit(param_key(&pos, Param::Qty), "3".into()));
+        handle(DrawMsg::ApplyParam(sym.into(), pos.clone(), Param::Qty));
+        handle(DrawMsg::Edit(param_key(&pos, Param::Fee), "负数".into()));
+        handle(DrawMsg::ApplyParam(sym.into(), pos.clone(), Param::Fee));
+        let d = items(sym).into_iter().find(|d| d.id == pos).unwrap();
+        assert_eq!((d.qty, d.fee_bp), (Some(3.0), None));
+        handle(DrawMsg::Tool(Some(Kind::FibRetrace)));
+        place_at(sym, &v, Point::new(390.0, 200.0));
+        let fib = place_at(sym, &v, Point::new(400.0, 240.0)).unwrap();
+        handle(DrawMsg::Edit(param_key(&fib, Param::Levels), "0, 0.5，1".into()));
+        handle(DrawMsg::ApplyParam(sym.into(), fib.clone(), Param::Levels));
+        assert_eq!(items(sym).into_iter().find(|d| d.id == fib).unwrap().levels, vec![0.0, 0.5, 1.0]);
+        assert_eq!(tool_for_key("f", false), Some(Kind::FibRetrace));
+
+        // ── G3：来源周期、只在来源周期显示、样式模板与缺省 ──
+        let sym = "TEST:G3";
+        let v15 = DrawView { tf: "15m".into(), ..view() };
+        let v1 = view(); // 1m
+        handle(DrawMsg::Tool(Some(Kind::HLine)));
+        let id = place_at(sym, &v15, Point::new(390.0, 200.0)).unwrap();
+        let d = items(sym)[0].clone();
+        assert_eq!((d.origin_tf.as_deref(), d.origin_tag("1m"), d.origin_tag("15m")), (Some("15m"), Some("15m"), None));
+        assert_eq!((visible_items(sym, "min", "1m").len(), visible_items(sym, "min", "15m").len()), (1, 1), "缺省处处显示");
+        handle(DrawMsg::OnlyOrigin(sym.into(), id.clone(), true));
+        assert_eq!((visible_items(sym, "min", "1m").len(), visible_items(sym, "min", "15m").len()), (0, 1));
+        assert!(!press(sym, &v1, Point::new(100.0, 200.0)), "1m 上看不见也点不中");
+        handle(DrawMsg::OnlyOrigin(sym.into(), id.clone(), false));
+        // 模板：存、套用；同名覆盖
+        handle(DrawMsg::Color(sym.into(), id.clone(), [10, 20, 30, 255]));
+        handle(DrawMsg::Edit(template_key(&id), "支撑蓝".into()));
+        handle(DrawMsg::SaveTemplate(sym.into(), id.clone()));
+        handle(DrawMsg::Edit(template_key(&id), "支撑蓝".into()));
+        handle(DrawMsg::SaveTemplate(sym.into(), id.clone()));
+        let tpls: Vec<_> = prefs().templates.into_iter().filter(|t| t.name == "支撑蓝").collect();
+        assert_eq!((tpls.len(), tpls[0].kind, tpls[0].style.color), (1, Kind::HLine, [10, 20, 30, 255]));
+        handle(DrawMsg::Color(sym.into(), id.clone(), [0, 0, 0, 255]));
+        let i = prefs().templates.iter().position(|t| t.name == "支撑蓝").unwrap();
+        handle(DrawMsg::ApplyTemplate(sym.into(), id.clone(), i));
+        assert_eq!(items(sym)[0].style.color, [10, 20, 30, 255]);
+        handle(DrawMsg::DeleteTemplate(i));
+        assert!(prefs().templates.iter().all(|t| t.name != "支撑蓝"));
+        // 缺省样式：新画的水平线直接用它；清掉之后回到出厂样式
+        handle(DrawMsg::SetDefault(sym.into(), id.clone()));
+        handle(DrawMsg::Tool(Some(Kind::HLine)));
+        let id2 = place_at(sym, &v1, Point::new(390.0, 220.0)).unwrap();
+        assert_eq!(items(sym).iter().find(|d| d.id == id2).unwrap().style.color, [10, 20, 30, 255]);
+        handle(DrawMsg::ClearDefault(Kind::HLine));
+        handle(DrawMsg::Tool(Some(Kind::HLine)));
+        let id3 = place_at(sym, &v1, Point::new(390.0, 240.0)).unwrap();
+        assert_eq!(items(sym).iter().find(|d| d.id == id3).unwrap().style, model::Style::default());
+
+        // ── G4：系统对象只读、可复制成手工对象、按来源隐藏 ──
+        let sym = "TEST:G4";
+        let mut sys_obj = Drawing::new(Kind::HLine, vec![Anchor { t: 0, p: 10_000 }]);
+        sys_obj.id = "x:test:1".into();
+        sys_obj.source = model::Source::Research;
+        sys_obj.tone = Some(model::Tone::Up);
+        sys_obj.text = Some("研究支撑".into());
+        feeds::inject(sym, sys_obj);
+        assert_eq!(items(sym).len(), 1);
+        assert!(press(sym, &v1, Point::new(100.0, 200.0)), "系统对象点得中");
+        assert!(!dragging() && !delete_selected(sym), "但拖不动、删不掉");
+        handle(DrawMsg::Color(sym.into(), "x:test:1".into(), [1, 1, 1, 255]));
+        assert_eq!(items(sym)[0].style.color, model::Style::default().color, "也改不了");
+        handle(DrawMsg::CopyToManual(sym.into(), "x:test:1".into()));
+        let copy = items(sym).into_iter().find(|d| d.source == model::Source::Manual).expect("复制出一个手工对象");
+        assert!(copy.editable() && copy.text.as_deref() == Some("研究支撑") && copy.group.as_deref() == Some("复制自研究"));
+        assert_eq!(copy.style.color, color_bytes(crate::ui::chart::up_strong()), "主题色落成具体颜色");
+        assert_eq!(selected(sym).as_deref(), Some(copy.id.as_str()));
+        handle(DrawMsg::ShowSource(model::Source::Research, false));
+        assert_eq!(items(sym).len(), 1, "隐藏「研究」来源：只剩复制出来的手工对象");
+        handle(DrawMsg::ShowSource(model::Source::Research, true));
+        assert_eq!(items(sym).len(), 2);
+        assert!(!needs_volume(sym));
     }
 }

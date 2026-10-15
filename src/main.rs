@@ -61,7 +61,10 @@ fn main() {
     // 样张模式（docs/35）是日常 Cockpit 之外的第二个实例：**不碰守护**——
     // 否则它退出时 stop_all 会把日常那个 Cockpit 的全部守护一起停掉。
     let specimen = ws::specimen::enabled();
-    if !specimen {
+    // 隔离实例（`WS_ISOLATED=1`，验收用：独立数据目录、真实键鼠）同样**不碰守护**：不拉起、不停，
+    // 「启动时关闭对外连接」也只在本进程里关行情订阅，不 systemctl 停别人的服务（docs/46 G3 实测踩到）
+    let isolated = std::env::var_os("WS_ISOLATED").is_some();
+    if !specimen && !isolated {
         ws::lifecycle::install_panic_hook();
         if let Err(e) = ws::lifecycle::start_all() {
             log::warn!("拉起后台守护失败（{}）：{e}", ws::lifecycle::TARGET);
@@ -74,7 +77,9 @@ fn main() {
     ws::egress::start();
     // 「启动时对外连接开/关」（网络出口页上的设置）。**必须在 iced 起来之前**：
     // 设成关时行情订阅要在第一帧建连前就关掉，否则是先连上再断开
-    if !specimen {
+    if isolated {
+        ws::egress::apply_startup_local();
+    } else if !specimen {
         ws::egress::apply_startup();
     }
 
@@ -774,7 +779,9 @@ impl Flowsurface {
                 // 关界面 = 关掉全部后台守护（docs/26 S4b）。**先存盘再停**：
                 // 反过来的话，停服务那几十毫秒里用户已经看不到窗口了，
                 // 而布局还没落盘——崩在这中间就丢布局。
+                // 样张与隔离实例（WS_ISOLATED）不碰守护：它们关窗不能把日常那个 Cockpit 的守护停掉
                 if self.specimen.is_none()
+                    && std::env::var_os("WS_ISOLATED").is_none()
                     && let Err(e) = ws::lifecycle::stop_all()
                 {
                     log::warn!("停止后台守护失败（{}）：{e}", ws::lifecycle::TARGET);

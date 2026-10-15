@@ -30,17 +30,70 @@ pub enum Kind {
     Ray,
     /// 矩形：两个对角
     Rect,
+    /// 折线：任意多个顶点（至少两个；回车或在最后一个点上再点一下结束）
+    Polyline,
+    /// 平行通道：前两个锚点是一条边，第三个锚点定另一条边（平行）；中线虚线
+    Channel,
+    /// 斐波那契回撤：两个锚点；只存锚点与比例，各条线由引擎算
+    FibRetrace,
+    /// 斐波那契延伸（按趋势）：A → B 是趋势，C 是回调点，比例从 C 起量
+    FibExt,
+    /// 文字：一个锚点 + 文字
+    Text,
+    /// 标注：指向的点 + 文字框的位置
+    Callout,
+    /// 价格区间：两个锚点之间的价差、百分比、tick 数、基点
+    PriceRange,
+    /// 日期区间：两个锚点之间的 K 线根数与实际时长
+    DateRange,
+    /// 多头仓位：入场、目标、止损三个价位（点一下放下，再拖改）；盈亏只是**估算**，不是委托
+    LongPos,
+    /// 空头仓位
+    ShortPos,
+    /// 标记：一个点上的 ▲ / ▼ / ● 加文字（成交、订单流事件、策略决策；G4）
+    Marker,
+    /// 成交量分布：时间区间里各价位的成交量，算出 POC / VAH / VAL（存参数，画的时候按数据重算；G4）
+    VolProfile,
 }
 
 impl Kind {
-    pub const ALL: [Self; 5] = [Self::HLine, Self::VLine, Self::Trend, Self::Ray, Self::Rect];
+    pub const ALL: [Self; 17] = [
+        Self::HLine,
+        Self::VLine,
+        Self::Trend,
+        Self::Ray,
+        Self::Rect,
+        Self::Polyline,
+        Self::Channel,
+        Self::FibRetrace,
+        Self::FibExt,
+        Self::Text,
+        Self::Callout,
+        Self::PriceRange,
+        Self::DateRange,
+        Self::LongPos,
+        Self::ShortPos,
+        Self::Marker,
+        Self::VolProfile,
+    ];
 
-    /// 要放几个锚点。
+    /// 存几个锚点（折线不定，返回 0）。
     #[must_use]
     pub const fn anchors(self) -> usize {
         match self {
-            Self::HLine | Self::VLine => 1,
-            Self::Trend | Self::Ray | Self::Rect => 2,
+            Self::HLine | Self::VLine | Self::Text | Self::Marker => 1,
+            Self::Trend | Self::Ray | Self::Rect | Self::FibRetrace | Self::Callout | Self::PriceRange | Self::DateRange | Self::VolProfile => 2,
+            Self::Channel | Self::FibExt | Self::LongPos | Self::ShortPos => 3,
+            Self::Polyline => 0,
+        }
+    }
+
+    /// 放下它要在图上点几下（折线不定，返回 0；仓位点一下，另两个价位按缺省比例摆好）。
+    #[must_use]
+    pub const fn clicks(self) -> usize {
+        match self {
+            Self::LongPos | Self::ShortPos => 1,
+            k => k.anchors(),
         }
     }
 
@@ -52,6 +105,28 @@ impl Kind {
             Self::Trend => "趋势线",
             Self::Ray => "射线",
             Self::Rect => "矩形",
+            Self::Polyline => "折线",
+            Self::Channel => "平行通道",
+            Self::FibRetrace => "斐波那契回撤",
+            Self::FibExt => "斐波那契延伸",
+            Self::Text => "文字",
+            Self::Callout => "标注",
+            Self::PriceRange => "价格区间",
+            Self::DateRange => "日期区间",
+            Self::LongPos => "多头仓位",
+            Self::ShortPos => "空头仓位",
+            Self::Marker => "标记",
+            Self::VolProfile => "成交量分布",
+        }
+    }
+
+    /// 斐波那契的缺省比例。
+    #[must_use]
+    pub fn default_levels(self) -> Vec<f64> {
+        match self {
+            Self::FibRetrace => vec![0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0],
+            Self::FibExt => vec![0.0, 0.618, 1.0, 1.272, 1.618, 2.618],
+            _ => Vec::new(),
         }
     }
 }
@@ -93,6 +168,40 @@ pub enum Source {
     Strategy,
     Calendar,
     Order,
+    /// 订单流事件（docs/40 订单流层析；G4）
+    OrderFlow,
+    /// 研究脚本经 Python 接口写上来的（G4）
+    Research,
+}
+
+impl Source {
+    /// 系统来源（菜单里按它们分别显示 / 隐藏）。
+    pub const SYSTEM: [Self; 6] = [Self::Order, Self::Calendar, Self::Strategy, Self::Backtest, Self::OrderFlow, Self::Research];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "手工",
+            Self::Backtest => "回测",
+            Self::Strategy => "策略",
+            Self::Calendar => "日历",
+            Self::Order => "订单",
+            Self::OrderFlow => "订单流",
+            Self::Research => "研究",
+        }
+    }
+}
+
+/// 主题色（系统对象用：跟着主题与「红涨绿跌」走，不写死颜色；G4）。设了就盖过 `style.color`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tone {
+    Up,
+    Down,
+    Warn,
+    Danger,
+    Accent,
+    Dim,
 }
 
 /// 一个绘图对象。
@@ -115,6 +224,34 @@ pub struct Drawing {
     /// 在哪几类周期上**不**显示（[`TF_CATS`] 的键；空 = 处处显示；G1）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hide_on: Vec<String>,
+    /// 文字 / 标注的内容（G2）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// 斐波那契的比例（空 = 缺省那一组；G2）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub levels: Vec<f64>,
+    /// 仓位工具：数量（张 / 个）与单边手续费（基点）——只用于估算（G2）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qty: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_bp: Option<f64>,
+    /// 画它时那张图的周期（如 `15m`、`50T`；G3）：到别的周期看时线头标出来
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_tf: Option<String>,
+    /// 只在画它的那个周期显示（G3）
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_origin: bool,
+    /// 主题色（G4）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<Tone>,
+    /// 标记的方向：1 = ▲（在价位下方）、−1 = ▼（上方）、0 = ●（G4）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<i8>,
+    /// 成交量分布：价位分几档、价值区占比（缺省 24 档、0.7；G4）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub va: Option<f64>,
     /// 认不得的字段（新版本加的）原样保留
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -125,7 +262,9 @@ impl Drawing {
     #[must_use]
     pub fn new(kind: Kind, mut anchors: Vec<Anchor>) -> Self {
         let n = kind.anchors();
-        if let Some(&last) = anchors.last() {
+        if n > 0
+            && let Some(&last) = anchors.last()
+        {
             anchors.resize(n, last);
         }
         Self {
@@ -138,7 +277,44 @@ impl Drawing {
             source: Source::Manual,
             group: None,
             hide_on: Vec::new(),
+            text: matches!(kind, Kind::Text | Kind::Callout).then(|| "文字".to_string()),
+            levels: Vec::new(),
+            qty: None,
+            fee_bp: None,
+            origin_tf: None,
+            only_origin: false,
+            tone: None,
+            dir: None,
+            rows: None,
+            va: None,
             extra: Map::new(),
+        }
+    }
+
+    /// 在这张图上显不显示：这一类周期没关、没设「只在来源周期显示」或者正是来源周期。`tf`：这张图的周期。
+    #[must_use]
+    pub fn visible_in(&self, cat: &str, tf: &str) -> bool {
+        self.shown_on(cat) && (!self.only_origin || self.origin_tf.as_deref().is_none_or(|o| o == tf))
+    }
+
+    /// 到 `tf` 这张图上看时要不要标来源周期：画它的周期不是这一个。
+    #[must_use]
+    pub fn origin_tag(&self, tf: &str) -> Option<&str> {
+        self.origin_tf.as_deref().filter(|o| *o != tf)
+    }
+
+    /// 斐波那契用的比例（没设就是缺省那一组）。
+    #[must_use]
+    pub fn fib_levels(&self) -> Vec<f64> {
+        if self.levels.is_empty() { self.kind.default_levels() } else { self.levels.clone() }
+    }
+
+    /// 拖了第 `i` 个锚点之后保持形状的约束：仓位工具的目标与止损在同一个右边界上。
+    pub fn constrain(&mut self, moved: usize) {
+        if matches!(self.kind, Kind::LongPos | Kind::ShortPos) && self.anchors.len() == 3 && moved >= 1 {
+            let t = self.anchors[moved].t;
+            self.anchors[1].t = t;
+            self.anchors[2].t = t;
         }
     }
 
@@ -218,6 +394,102 @@ pub fn parse_time(s: &str) -> Option<u64> {
     u64::try_from(t.and_utc().timestamp_millis()).ok()
 }
 
+/// 成交量分布的结果（G4）：各档 (价位下沿, 上沿, 成交量)、POC 那档、价值区的上下沿。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Profile {
+    pub bins: Vec<(i64, i64, f64)>,
+    pub poc: usize,
+    pub vah: i64,
+    pub val: i64,
+}
+
+/// 把一组 K 线（开始时间, 低, 高, 成交量）按价位分档：每根的量**均摊到它高低之间**（K 线没有逐价位成交时的近似；
+/// 有足迹数据时更准，G4 先用均摊）。价值区从 POC 往两边、每次加量大的那一侧，直到够 `va` 占比。
+#[must_use]
+pub fn volume_profile(bars: &[(u64, i64, i64, f64)], rows: u32, va: f64) -> Option<Profile> {
+    let lo = bars.iter().map(|b| b.1).min()?;
+    let hi = bars.iter().map(|b| b.2).max()?;
+    let rows = rows.clamp(4, 200) as usize;
+    let step = ((hi - lo) as f64 / rows as f64).max(1.0);
+    let mut vol = vec![0.0; rows];
+    for &(_, l, h, v) in bars {
+        if v <= 0.0 {
+            continue;
+        }
+        let span = (h - l).max(1) as f64;
+        for (i, slot) in vol.iter_mut().enumerate() {
+            let (b0, b1) = (lo as f64 + i as f64 * step, lo as f64 + (i + 1) as f64 * step);
+            let overlap = (b1.min(h as f64) - b0.max(l as f64)).max(0.0);
+            if h == l {
+                if (l as f64) >= b0 && ((l as f64) < b1 || i == rows - 1) {
+                    *slot += v;
+                }
+            } else {
+                *slot += v * overlap / span;
+            }
+        }
+    }
+    let total: f64 = vol.iter().sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let poc = vol.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i);
+    let (mut a, mut b, mut got) = (poc, poc, vol[poc]);
+    while got < total * va.clamp(0.0, 1.0) && (a > 0 || b + 1 < rows) {
+        let up = if b + 1 < rows { vol[b + 1] } else { -1.0 };
+        let down = if a > 0 { vol[a - 1] } else { -1.0 };
+        if up >= down {
+            b += 1;
+            got += vol[b];
+        } else {
+            a -= 1;
+            got += vol[a];
+        }
+    }
+    let edge = |i: usize| (lo as f64 + i as f64 * step).round() as i64;
+    Some(Profile { bins: (0..rows).map(|i| (edge(i), edge(i + 1), vol[i])).collect(), poc, vah: edge(b + 1), val: edge(a) })
+}
+
+/// 仓位工具点一下时的缺省摆法：目标 +2%、止损 −1%（空头反过来），右边界在 `right` 时刻。
+#[must_use]
+pub fn position_anchors(kind: Kind, entry: Anchor, right: u64, snap: i64) -> Vec<Anchor> {
+    let snap = snap.max(1);
+    let pct = |f: f64| ((entry.p as f64 * f) / snap as f64).round() as i64 * snap;
+    let (up, down) = (entry.p + pct(0.02).max(snap), entry.p - pct(0.01).max(snap));
+    let (target, stop) = if kind == Kind::ShortPos { (entry.p - pct(0.02).max(snap), entry.p + pct(0.01).max(snap)) } else { (up, down) };
+    vec![entry, Anchor { t: right, p: target }, Anchor { t: right, p: stop }]
+}
+
+/// 仓位工具的估算（G2）：风险收益比与扣手续费后的盈亏。**只是估算，不是委托**。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PosEstimate {
+    /// 目标 / 止损相对入场的幅度（%）
+    pub target_pct: f64,
+    pub stop_pct: f64,
+    /// 风险收益比：目标幅度 ÷ 止损幅度
+    pub rr: f64,
+    /// 到目标、到止损的盈亏（报价币，已扣进出两边手续费）
+    pub win: f64,
+    pub loss: f64,
+}
+
+/// `multiplier`：合约乘数（现货 / U 本位按 1）。
+#[must_use]
+pub fn estimate(d: &Drawing, multiplier: f64) -> Option<PosEstimate> {
+    let [e, t, s] = <[Anchor; 3]>::try_from(d.anchors.as_slice()).ok()?;
+    let f = |u: i64| u as f64 / PRICE_SCALE as f64;
+    let (pe, pt, ps) = (f(e.p), f(t.p), f(s.p));
+    if pe <= 0.0 {
+        return None;
+    }
+    let dir = if d.kind == Kind::ShortPos { -1.0 } else { 1.0 };
+    let qty = d.qty.unwrap_or(1.0) * multiplier;
+    let fee = d.fee_bp.unwrap_or(4.5) / 10_000.0;
+    let pnl = |exit: f64| dir * (exit - pe) * qty - (pe + exit) * qty * fee;
+    let (tp, sp) = (dir * (pt - pe) / pe * 100.0, dir * (ps - pe) / pe * 100.0);
+    Some(PosEstimate { target_pct: tp, stop_pct: sp, rr: if sp.abs() > 0.0 { tp / -sp } else { f64::INFINITY }, win: pnl(pt), loss: pnl(ps) })
+}
+
 /// 对象 id：毫秒时间戳 + 进程内序号（同一毫秒里连建几个也不撞）。
 fn new_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -265,6 +537,60 @@ mod tests {
         assert!(!d.shown_on("min") && d.shown_on("hour"));
         let j = serde_json::to_value(&Drawing::new(Kind::HLine, vec![Anchor { t: 1, p: 1 }])).unwrap();
         assert!(j.get("group").is_none() && j.get("hide_on").is_none(), "没设的不写进库，G0 的对象原样");
+    }
+
+    #[test]
+    fn position_tool_defaults_constraint_and_estimate() {
+        let e = Anchor { t: 1_000, p: 100 * PRICE_SCALE };
+        let a = position_anchors(Kind::LongPos, e, 5_000, PRICE_SCALE / 100);
+        assert_eq!((a[1].p, a[2].p, a[1].t, a[2].t), (102 * PRICE_SCALE, 99 * PRICE_SCALE, 5_000, 5_000), "目标 +2%、止损 −1%");
+        let s = position_anchors(Kind::ShortPos, e, 5_000, PRICE_SCALE / 100);
+        assert_eq!((s[1].p, s[2].p), (98 * PRICE_SCALE, 101 * PRICE_SCALE));
+        let mut d = Drawing::new(Kind::LongPos, a);
+        d.anchors[2].t = 9_000;
+        d.constrain(2);
+        assert_eq!(d.anchors[1].t, 9_000, "目标与止损同一个右边界");
+        d.qty = Some(2.0);
+        d.fee_bp = Some(5.0);
+        let est = estimate(&d, 1.0).unwrap();
+        assert!((est.target_pct - 2.0).abs() < 1e-9 && (est.stop_pct + 1.0).abs() < 1e-9 && (est.rr - 2.0).abs() < 1e-9);
+        // 到目标：(102 − 100) × 2 − (100 + 102) × 2 × 0.0005 = 4 − 0.202
+        assert!((est.win - 3.798).abs() < 1e-9, "{}", est.win);
+        assert!((est.loss - (-2.0 - 0.199)).abs() < 1e-9, "到止损：−1 × 2 − (100 + 99) × 2 × 0.0005；{}", est.loss);
+        let mut short = Drawing::new(Kind::ShortPos, s);
+        short.fee_bp = Some(0.0);
+        let es = estimate(&short, 10.0).unwrap();
+        assert!((es.win - 20.0).abs() < 1e-9 && (es.loss + 10.0).abs() < 1e-9, "空头按合约乘数 10：目标赚 2×10，止损亏 1×10");
+        assert_eq!(Drawing::new(Kind::FibRetrace, vec![e, e]).fib_levels().len(), 7);
+        assert_eq!(Drawing::new(Kind::Text, vec![e]).text.as_deref(), Some("文字"));
+    }
+
+    #[test]
+    fn origin_timeframe_tag_and_only_origin() {
+        let mut d = Drawing::new(Kind::HLine, vec![Anchor { t: 1, p: 1 }]);
+        assert!(d.visible_in("min", "1m") && d.origin_tag("1m").is_none(), "没记来源周期（G2 之前画的）：处处显示、不标");
+        d.origin_tf = Some("15m".into());
+        assert_eq!((d.origin_tag("1m"), d.origin_tag("15m")), (Some("15m"), None));
+        d.only_origin = true;
+        assert!(d.visible_in("min", "15m") && !d.visible_in("min", "1m") && !d.visible_in("tick", "50T"));
+        let j = serde_json::to_value(&Drawing::new(Kind::HLine, vec![Anchor { t: 1, p: 1 }])).unwrap();
+        assert!(j.get("only_origin").is_none() && j.get("origin_tf").is_none());
+    }
+
+    #[test]
+    fn volume_profile_poc_and_value_area() {
+        // 三根 K 线：两根在 100–110（各 10），一根在 110–120（量 30）→ POC 在上半段
+        let bars = [(1, 100, 110, 10.0), (2, 100, 110, 10.0), (3, 110, 120, 30.0)];
+        let p = volume_profile(&bars, 4, 0.7).unwrap();
+        assert_eq!(p.bins.len(), 4);
+        let total: f64 = p.bins.iter().map(|b| b.2).sum();
+        assert!((total - 50.0).abs() < 1e-9, "均摊后总量不变");
+        assert!(p.poc >= 2, "量大的那根在上半段：{p:?}");
+        assert!(p.vah == 120 && p.val >= 100 && p.val < 115, "{p:?}");
+        assert!(volume_profile(&[], 4, 0.7).is_none());
+        assert!(volume_profile(&[(1, 5, 5, 0.0)], 4, 0.7).is_none(), "没有量");
+        // 单价位的 K 线（高 = 低）落进它所在的那一档
+        assert!(volume_profile(&[(1, 100, 100, 3.0), (2, 100, 104, 1.0)], 4, 0.7).is_some());
     }
 
     #[test]

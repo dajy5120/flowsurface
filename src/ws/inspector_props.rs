@@ -91,12 +91,13 @@ impl Drop for PartScope {
     }
 }
 
-/// 支持画线的图（docs/46）：(品种键, 价格小数位)。K 线（蜡烛 / 足迹）与热力图。
-fn drawing_target(content: &Content) -> Option<(String, usize)> {
+/// 支持画线的图（docs/46）：(品种键, 价格小数位, 合约乘数)。K 线（蜡烛 / 足迹）与热力图。
+fn drawing_target(content: &Content) -> Option<(String, usize, f64)> {
     use crate::chart::Chart;
+    let of = |st: &crate::chart::ViewState| (st.drawing_symbol(), st.price_decimals(), st.contract_multiplier());
     match content {
-        Content::Kline { chart: Some(c), .. } => Some((c.state().drawing_symbol(), c.state().price_decimals())),
-        Content::Heatmap { chart: Some(c), .. } => Some((c.state().drawing_symbol(), c.state().price_decimals())),
+        Content::Kline { chart: Some(c), .. } => Some(of(c.state())),
+        Content::Heatmap { chart: Some(c), .. } => Some(of(c.state())),
         _ => None,
     }
 }
@@ -187,7 +188,7 @@ pub fn view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
         }),
         // 图表：画线（docs/46 G1）——选中对象的属性与这个品种的对象树
         Content::Kline { .. } | Content::Heatmap { .. } => {
-            drawing_target(content).map(|(sym, dec)| super::drawing_view::inspector(&sym, dec).map(Event::Drawing))
+            drawing_target(content).map(|(sym, dec, mult)| super::drawing_view::inspector(&sym, dec, mult).map(Event::Drawing))
         }
         _ => None,
     }
@@ -344,7 +345,7 @@ pub fn has_props(content: &Content) -> bool {
         Content::Orders => super::orders_view::selected_detail().is_some(),
         // 图表：选中了一个画线对象才自动展开（平时看图不挤主区，docs/42）
         Content::Kline { .. } | Content::Heatmap { .. } => {
-            drawing_target(content).is_some_and(|(sym, _)| super::drawing::selected(&sym).is_some())
+            drawing_target(content).is_some_and(|(sym, ..)| super::drawing::selected(&sym).is_some())
         }
         _ => false,
     }

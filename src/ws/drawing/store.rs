@@ -11,6 +11,8 @@ use super::model::{Drawing, FORMAT};
 pub const UNDO_LIMIT: usize = 200;
 
 /// 一条命令。
+// 「改」带前后两份对象，比另两种大一倍；撤销栈最多 200 条，不值得为它装箱
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
     Create(Drawing),
@@ -30,6 +32,8 @@ impl Cmd {
 }
 
 /// 写盘要做的事。
+// 一次操作只有一两条，大小不值得装箱
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     Upsert(Drawing),

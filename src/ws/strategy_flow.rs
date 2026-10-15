@@ -1832,6 +1832,26 @@ fn bt_symbol(bt: &Value) -> Option<String> {
     bt_symbol_written(bt).or_else(|| (bt_source(bt) == "dukascopy").then(|| "XAUUSD".to_string()))
 }
 
+/// 图上画策略决策用（docs/46 G4）：这次运行的品种代码与带价格的成交事件（最近 500 条）。没跑过返回 `None`。
+#[must_use]
+pub fn chart_events() -> Option<(String, Vec<Value>)> {
+    with(|g| {
+        if g.events.is_empty() {
+            return None;
+        }
+        let sym = bt_symbol(&g.graph.backtest)?;
+        let fills: Vec<Value> = g
+            .events
+            .iter()
+            .filter(|e| e.get("kind").and_then(Value::as_str) == Some("fill") && e.get("why").and_then(|w| w.get("price")).is_some())
+            .cloned()
+            .collect();
+        let skip = fills.len().saturating_sub(500);
+        Some((sym, fills.into_iter().skip(skip).collect()))
+    })
+    .flatten()
+}
+
 /// `[backtest]` 的起止日（没写结束日 = 起始那一天）。
 #[must_use]
 pub fn data_range(bt: &Value) -> (String, String) {

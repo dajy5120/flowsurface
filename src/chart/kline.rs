@@ -20,7 +20,7 @@ use exchange::{Kline, OpenInterest as OIData, TickerInfo, Trade, UnixMs};
 
 use iced::task::Handle;
 use iced::theme::palette::Extended;
-use iced::widget::canvas::{self, Event, Geometry, LineDash, Path, Stroke};
+use iced::widget::canvas::{self, Event, Geometry, Path, Stroke};
 use iced::{Alignment, Element, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
 
 use enum_map::EnumMap;
@@ -140,7 +140,17 @@ impl Chart for KlineChart {
                 ta.datapoints.iter().skip(skip).map(|dp| (dp.kline.time.as_u64(), ohlc(&dp.kline))).collect()
             }
         };
-        Some((crate::ws::drawing::symbol_key(&st.ticker_info.ticker), st.draw_view(self.interval_keys(), bars)?))
+        let symbol = crate::ws::drawing::symbol_key(&st.ticker_info.ticker);
+        let mut view = st.draw_view(self.interval_keys(), bars)?;
+        // 成交量分布（G4）：这个品种有那种对象才带全部 K 线的（开始, 低, 高, 量）
+        if crate::ws::drawing::needs_volume(&symbol) {
+            let row = |k: &exchange::Kline| (k.time.as_u64(), k.low.units, k.high.units, f64::from(k.volume.total().to_f32_lossy()));
+            view.vol = match &self.data_source {
+                PlotData::TimeBased(ts) => ts.datapoints.values().map(|dp| row(&dp.kline)).collect(),
+                PlotData::TickBased(ta) => ta.datapoints.iter().map(|dp| row(&dp.kline)).collect(),
+            };
+        }
+        Some((symbol, view))
     }
 }
 
@@ -1130,20 +1140,10 @@ impl canvas::Program<Message> for KlineChart {
 
             // 金融日历（docs/43 K5b）：P0/P1 事件的时刻画虚线竖线——读提醒线程的旁路快照，不读库。仅时间基
             if matches!(chart.basis, Basis::Time(_)) {
-                draw_calendar_marks(frame, interval_to_x, region, chart.scaling, earliest, latest);
+                draw_calendar_edge_hint(frame, region, chart.scaling, earliest, latest);
             }
 
-            // F3b：在蜡烛/足迹图上叠加成交标记 ▲（买）/▼（卖）——读进程级旁路缓存（来自 ws::orders）。
-            draw_ws_fill_markers(
-                frame,
-                price_to_y,
-                interval_to_x,
-                chart.scaling,
-                palette,
-                earliest,
-                latest,
-                matches!(chart.basis, Basis::Time(_)),
-            );
+            // 成交 ▲▼、持仓线、挂单线、日历事件竖线：绘图对象（docs/46 G4，`ws::drawing::feeds`），由绘图层画
 
             // F4c：combo 实时总分曲线叠加主图底带（读 ws::signals 旁路），仅时间基。
             if matches!(chart.basis, Basis::Time(_)) {
@@ -1158,11 +1158,6 @@ impl canvas::Program<Message> for KlineChart {
                 );
             }
 
-            // §11.1：当前仓位线（avg_px 处）+ 费后 PnL 读数（读 ws::orders 旁路）。
-            draw_ws_position_line(frame, price_to_y, region, chart.scaling, palette);
-
-            // §11.1：活动挂单（resting limit）虚线标注（读 ws::orders 旁路）。
-            draw_ws_working_orders(frame, price_to_y, region, chart.scaling, palette);
 
             chart.draw_last_price_line(frame, palette, region);
         });
@@ -1333,7 +1328,9 @@ fn draw_candle_dp(
 #[allow(clippy::too_many_arguments)]
 /// 金融日历的事件竖线（docs/43 K5b）：P0 红、P1 橙（状态色，不是涨跌色），顶部写短名（FOMC、CPI、非农……）。
 /// 「提醒」页可以关。线宽 / 字号 ÷scaling，屏幕上恒定。视野里没有事件时，左右边缘提示最近的前一个 / 下一个。
-fn draw_calendar_marks(frame: &mut canvas::Frame, interval_to_x: impl Fn(u64) -> f32, region: Rectangle, scaling: f32, earliest: u64, latest: u64) {
+/// 金融日历（docs/43 K5b）：视野里一条事件竖线都没有时，在左右边缘标出最近的前一个 / 下一个事件。
+/// 视野里的竖线本身是绘图对象（docs/46 G4，`ws::drawing::feeds` 的日历来源），由绘图层画。
+fn draw_calendar_edge_hint(frame: &mut canvas::Frame, region: Rectangle, scaling: f32, earliest: u64, latest: u64) {
     if scaling <= f32::EPSILON {
         return;
     }
@@ -1365,116 +1362,6 @@ fn draw_calendar_marks(frame: &mut canvas::Frame, interval_to_x: impl Fn(u64) ->
                 font: crate::ui::text::ui_font(),
                 align_x: align.into(),
                 align_y: Alignment::Start.into(),
-                ..canvas::Text::default()
-            });
-        }
-        return;
-    }
-    let mut last_label_x = f32::MIN;
-    for m in snap.marks.iter().filter(in_view) {
-        let x = interval_to_x(m.at_ms as u64);
-        let col = if m.importance == 0 {
-            crate::ui::widgets::Tone::Danger.color()
-        } else {
-            crate::ui::widgets::Tone::Warning.color()
-        };
-        frame.stroke(
-            &Path::line(Point::new(x, region.y), Point::new(x, region.y + region.height)),
-            Stroke::with_color(
-                Stroke {
-                    width: 1.0 / scaling,
-                    line_dash: LineDash { segments: &[3.0, 3.0], offset: 0 },
-                    ..Default::default()
-                },
-                col.scale_alpha(0.75),
-            ),
-        );
-        // 两条线挨得太近时，后一个不写字（线照画）：字叠在一起什么都看不清
-        if x - last_label_x < 36.0 / scaling {
-            continue;
-        }
-        last_label_x = x;
-        frame.fill_text(canvas::Text {
-            content: m.label.clone(),
-            position: Point::new(x + 2.0 / scaling, region.y + 2.0 / scaling),
-            size: iced::Pixels(10.0 / scaling),
-            color: col,
-            font: crate::ui::text::ui_font(),
-            align_x: Alignment::Start.into(),
-            align_y: Alignment::Start.into(),
-            ..canvas::Text::default()
-        });
-    }
-}
-
-fn draw_ws_fill_markers(
-    frame: &mut canvas::Frame,
-    price_to_y: impl Fn(Price) -> f32,
-    interval_to_x: impl Fn(u64) -> f32,
-    scaling: f32,
-    palette: &Extended,
-    earliest: u64,
-    latest: u64,
-    time_basis: bool,
-) {
-    let fills = crate::ws::orders::chart_fills_snapshot();
-    if fills.is_empty() || scaling <= f32::EPSILON {
-        return;
-    }
-    let hw = 4.0 / scaling; // 半宽
-    let h = 7.0 / scaling; // 高
-    let gap = 3.0 / scaling; // 与成交价的间隙
-    let outline = Stroke::with_color(
-        Stroke {
-            width: 1.0,
-            ..Default::default()
-        },
-        palette.background.base.text.scale_alpha(0.7),
-    );
-    for f in &fills {
-        if f.ts == 0 || f.px <= 0.0 {
-            continue;
-        }
-        // 时间基：跳过可视区外的标记（fill.ts 与 interval 同为 ms）。
-        if time_basis && (f.ts < earliest || f.ts > latest) {
-            continue;
-        }
-        let x = interval_to_x(f.ts);
-        let y = price_to_y(Price::from_f32(f.px as f32));
-        let (color, p0, p1, p2) = if f.side == 1 {
-            (
-                crate::ui::chart::up_strong(),
-                Point::new(x, y + gap),
-                Point::new(x - hw, y + gap + h),
-                Point::new(x + hw, y + gap + h),
-            )
-        } else {
-            (
-                crate::ui::chart::down_strong(),
-                Point::new(x, y - gap),
-                Point::new(x - hw, y - gap - h),
-                Point::new(x + hw, y - gap - h),
-            )
-        };
-        let tri = Path::new(|b| {
-            b.move_to(p0);
-            b.line_to(p1);
-            b.line_to(p2);
-            b.close();
-        });
-        frame.fill(&tri, color);
-        frame.stroke(&tri, outline);
-        // 订单序号：标在三角上方（短小字号，÷scaling 屏幕恒定，居中+底对齐贴三角顶）。
-        if f.seq > 0 {
-            let top_y = if f.side == 1 { y + gap } else { y - gap - h };
-            frame.fill_text(canvas::Text {
-                content: format!("{}", f.seq),
-                position: Point::new(x, top_y - 1.0 / scaling),
-                size: iced::Pixels(7.0 / scaling),
-                color,
-                font: style::AZERET_MONO,
-                align_x: Alignment::Center.into(),
-                align_y: Alignment::End.into(),
                 ..canvas::Text::default()
             });
         }
@@ -1566,126 +1453,7 @@ fn draw_ws_combo_overlay(
     });
 }
 
-/// §11.1：当前仓位/费后 PnL 叠加主图。在 avg_px 处画持仓线（多绿空红），左上贴两行读数：
-/// ①「SIDE qty @ avg」②「u±未实现 r±已实现」（按总 PnL 符号着色，均为费后值）。
-/// 数据来自进程级旁路 `ws::orders::chart_position_snapshot()`；FLAT/空仓不画。
-fn draw_ws_position_line(
-    frame: &mut canvas::Frame,
-    price_to_y: impl Fn(Price) -> f32,
-    region: Rectangle,
-    scaling: f32,
-    _palette: &Extended,
-) {
-    if scaling <= f32::EPSILON {
-        return;
-    }
-    let pos = crate::ws::orders::chart_position_snapshot();
-    if pos.side == "FLAT" || pos.net_qty.abs() < 1e-12 || pos.avg_px <= 0.0 {
-        return;
-    }
-    let long = pos.net_qty > 0.0;
-    let col = if long {
-        crate::ui::chart::up_strong()
-    } else {
-        crate::ui::chart::down_strong()
-    };
-    let y = price_to_y(Price::from_f32(pos.avg_px as f32));
-    // 持仓线（avg_px 处，整宽）
-    frame.stroke(
-        &Path::line(
-            Point::new(region.x, y),
-            Point::new(region.x + region.width, y),
-        ),
-        Stroke::default()
-            .with_width(1.2 / scaling)
-            .with_color(col.scale_alpha(0.85)),
-    );
-    // 读数行 1：方向 + 数量 + 均价
-    let x0 = region.x + 4.0 / scaling;
-    frame.fill_text(canvas::Text {
-        content: format!("{} {:.4} @ {:.1}", pos.side, pos.net_qty.abs(), pos.avg_px),
-        position: Point::new(x0, y - 24.0 / scaling),
-        size: iced::Pixels(11.0 / scaling),
-        color: col,
-        font: style::AZERET_MONO,
-        ..canvas::Text::default()
-    });
-    // 读数行 2：费后 PnL（未实现盯市 + 已实现），按总额符号着色
-    let upnl = pos.unrealized.unwrap_or(0.0);
-    let total = upnl + pos.realized;
-    let pcol = if total >= 0.0 {
-        crate::ui::chart::up_strong()
-    } else {
-        crate::ui::chart::down_strong()
-    };
-    let utxt = match pos.unrealized {
-        Some(v) => format!("u{v:+.2}"),
-        None => "u—".to_string(),
-    };
-    frame.fill_text(canvas::Text {
-        content: format!("{utxt}  r{:+.2}", pos.realized),
-        position: Point::new(x0, y - 12.0 / scaling),
-        size: iced::Pixels(11.0 / scaling),
-        color: pcol,
-        font: style::AZERET_MONO,
-        ..canvas::Text::default()
-    });
-}
 
-/// §11.1：活动挂单（resting limit order）标注。在挂单价处画**虚线**（买绿卖红、半透，
-/// 以区别于实线持仓线/last-price 线）+ 右端「LMT SIDE qty」小标。空挂单不画。
-/// 数据来自进程级旁路 `ws::orders::chart_working_snapshot()`。
-fn draw_ws_working_orders(
-    frame: &mut canvas::Frame,
-    price_to_y: impl Fn(Price) -> f32,
-    region: Rectangle,
-    scaling: f32,
-    _palette: &Extended,
-) {
-    if scaling <= f32::EPSILON {
-        return;
-    }
-    let orders = crate::ws::orders::chart_working_snapshot();
-    for o in &orders {
-        if o.price <= 0.0 {
-            continue;
-        }
-        let y = price_to_y(Price::from_f32(o.price as f32));
-        let buy = o.side == 1;
-        let col = if buy {
-            crate::ui::chart::up()
-        } else {
-            crate::ui::chart::down()
-        };
-        let dashed = Stroke::with_color(
-            Stroke {
-                width: 1.0 / scaling,
-                line_dash: LineDash {
-                    segments: &[4.0, 4.0],
-                    offset: 0,
-                },
-                ..Default::default()
-            },
-            col.scale_alpha(0.7),
-        );
-        frame.stroke(
-            &Path::line(
-                Point::new(region.x, y),
-                Point::new(region.x + region.width, y),
-            ),
-            dashed,
-        );
-        let side = if buy { "BUY" } else { "SELL" };
-        frame.fill_text(canvas::Text {
-            content: format!("LMT {side} {:.4} @ {:.1}", o.qty, o.price),
-            position: Point::new(region.x + 4.0 / scaling, y - 12.0 / scaling),
-            size: iced::Pixels(10.0 / scaling),
-            color: col,
-            font: style::AZERET_MONO,
-            ..canvas::Text::default()
-        });
-    }
-}
 
 fn render_data_source<F>(
     data_source: &PlotData<KlineDataPoint>,

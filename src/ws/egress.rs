@@ -724,6 +724,13 @@ fn prefs_path() -> std::path::PathBuf {
 ///
 /// 设成「开」时：服务已由 target 拉起，这里只补上被上次「关」停掉的定时任务
 /// （它们不在 target 里，停了就一直停着）。
+/// 隔离实例用：只在本进程里照「启动时对外连接」的设置关行情订阅，不 systemctl 启停任何服务。
+pub fn apply_startup_local() {
+    if !startup_external_on() {
+        set_streams_enabled(false);
+    }
+}
+
 pub fn apply_startup() {
     let on = startup_external_on();
     if !on {
