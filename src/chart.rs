@@ -38,6 +38,10 @@ pub enum Interaction {
     Ruler {
         start: Option<Point>,
     },
+    /// 画线（docs/46）：两个锚点的工具放下了第一个点，等第二下（状态在 `ws::drawing`）
+    DrawPlace,
+    /// 画线：正在拖一个对象或它的锚点（状态在 `ws::drawing`）
+    DrawDrag,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -81,6 +85,11 @@ pub trait Chart: PlotConstants + canvas::Program<Message> {
     fn supports_fit_autoscaling(&self) -> bool;
 
     fn is_empty(&self) -> bool;
+
+    /// 画线（docs/46）：这张图的品种键与此刻的坐标换算。不支持画线的图返回 `None`。
+    fn drawing(&self) -> Option<(String, crate::ws::drawing::geometry::DrawView)> {
+        None
+    }
 }
 
 fn canvas_interaction<T: Chart>(
@@ -96,11 +105,19 @@ fn canvas_interaction<T: Chart>(
 
     let shrunken_bounds = bounds.shrink(DRAG_SIZE * 4.0);
     let cursor_position = cursor.position_in(shrunken_bounds);
+    // 画线（docs/46）：品种键与坐标换算；光标在画布里的位置（与绘制同一个坐标系）
+    let drawing = chart.drawing();
+    let local = cursor.position_in(bounds);
 
     if let Event::Mouse(mouse::Event::ButtonReleased(_)) = event {
         match interaction {
             Interaction::Panning { .. } | Interaction::Zoomin { .. } => {
                 *interaction = Interaction::None;
+            }
+            Interaction::DrawDrag => {
+                crate::ws::drawing::drop_drag();
+                *interaction = Interaction::None;
+                return Some(canvas::Action::request_redraw().and_capture());
             }
             _ => {}
         }
@@ -118,13 +135,34 @@ fn canvas_interaction<T: Chart>(
 
             match mouse_event {
                 mouse::Event::ButtonPressed(button) => {
+                    // 画线（docs/46 §3.5）：选了工具 → 放锚点；没选工具 → 先看点没点中对象，没点中才平移
+                    if let mouse::Button::Left = button
+                        && let (Some((symbol, view)), Some(p)) = (&drawing, local)
+                        && !matches!(interaction, Interaction::Ruler { .. })
+                    {
+                        if crate::ws::drawing::tool().is_some() {
+                            crate::ws::drawing::place(symbol, view.anchor_at(p));
+                            *interaction = if crate::ws::drawing::placing(symbol).is_some() {
+                                Interaction::DrawPlace
+                            } else {
+                                Interaction::None
+                            };
+                            return Some(canvas::Action::publish(Message::CrosshairMoved).and_capture());
+                        }
+                        if crate::ws::drawing::press(symbol, view, p) {
+                            *interaction = if crate::ws::drawing::dragging() { Interaction::DrawDrag } else { Interaction::None };
+                            return Some(canvas::Action::request_redraw().and_capture());
+                        }
+                    }
                     let cursor_in_bounds = cursor_position?;
 
                     if let mouse::Button::Left = button {
                         match interaction {
                             Interaction::None
                             | Interaction::Panning { .. }
-                            | Interaction::Zoomin { .. } => {
+                            | Interaction::Zoomin { .. }
+                            | Interaction::DrawPlace
+                            | Interaction::DrawDrag => {
                                 *interaction = Interaction::Panning {
                                     translation: state.translation,
                                     start: cursor_in_bounds,
@@ -150,8 +188,14 @@ fn canvas_interaction<T: Chart>(
                         );
                         Some(canvas::Action::publish(msg).and_capture())
                     }
-                    Interaction::None | Interaction::Ruler { .. } => {
+                    Interaction::None | Interaction::Ruler { .. } | Interaction::DrawPlace => {
                         Some(canvas::Action::publish(Message::CrosshairMoved))
+                    }
+                    Interaction::DrawDrag => {
+                        if let (Some((_, view)), Some(p)) = (&drawing, local) {
+                            crate::ws::drawing::drag_to(view, p);
+                        }
+                        Some(canvas::Action::publish(Message::CrosshairMoved).and_capture())
                     }
                     _ => None,
                 },
@@ -255,17 +299,51 @@ fn canvas_interaction<T: Chart>(
         Event::Keyboard(keyboard_event) => {
             cursor_position?;
             match keyboard_event {
-                iced::keyboard::Event::KeyPressed { key, .. } => match key.as_ref() {
+                iced::keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                    // 画线（docs/46 G0）：Alt+H / V / T / R、Alt+Shift+R 选工具；Delete 删选中；Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 撤销重做
+                    if let Some((symbol, _)) = &drawing {
+                        let (ctrl, shift, alt) = (modifiers.control(), modifiers.shift(), modifiers.alt());
+                        let handled = match key.as_ref() {
+                            keyboard::Key::Character(c) if alt && !ctrl => {
+                                crate::ws::drawing::tool_for_key(c, shift).map(|k| crate::ws::drawing::set_tool(Some(k))).is_some()
+                            }
+                            keyboard::Key::Character(c) if ctrl && !alt => match (c.to_ascii_lowercase().as_str(), shift) {
+                                ("z", false) => {
+                                    crate::ws::drawing::undo(symbol);
+                                    true
+                                }
+                                ("z", true) | ("y", false) => {
+                                    crate::ws::drawing::redo(symbol);
+                                    true
+                                }
+                                _ => false,
+                            },
+                            keyboard::Key::Named(keyboard::key::Named::Delete | keyboard::key::Named::Backspace) if !ctrl && !alt => {
+                                crate::ws::drawing::delete_selected(symbol)
+                            }
+                            _ => false,
+                        };
+                        if handled {
+                            *interaction = Interaction::None;
+                            return Some(canvas::Action::publish(Message::CrosshairMoved).and_capture());
+                        }
+                    }
+                    match key.as_ref() {
                     keyboard::Key::Named(keyboard::key::Named::Shift) => {
                         *interaction = Interaction::Ruler { start: None };
                         Some(canvas::Action::request_redraw().and_capture())
                     }
                     keyboard::Key::Named(keyboard::key::Named::Escape) => {
                         *interaction = Interaction::None;
+                        if drawing.is_some() {
+                            crate::ws::drawing::escape();
+                            return Some(canvas::Action::publish(Message::CrosshairMoved).and_capture());
+                        }
                         Some(canvas::Action::request_redraw().and_capture())
                     }
                     _ => None,
-                },
+                    }
+                }
                 _ => None,
             }
         }
@@ -628,10 +706,13 @@ pub struct Caches {
     x_labels: Cache,
     y_labels: Cache,
     crosshair: Cache,
+    /// 画线（docs/46）：单独一层，移动光标只重画十字线、不重画所有画线
+    drawings: Cache,
 }
 
 impl Caches {
     fn clear_all(&self) {
+        self.drawings.clear();
         self.main.clear();
         self.x_labels.clear();
         self.y_labels.clear();
@@ -662,6 +743,8 @@ pub struct ViewState {
     layout: ViewConfig,
     /// 上次看到的联动时间版本（docs/41 E 期）；变了就重画十字线
     linked_seen: std::sync::atomic::AtomicU64,
+    /// 上次画绘图层时的画线版本（docs/46）：变了就重画绘图层与十字线层
+    drawings_seen: std::sync::atomic::AtomicU64,
     /// 价格轴宽度的高水位（f32 位）：只增不减。见 [`ViewState::y_labels_width`]。
     y_labels_max: std::sync::atomic::AtomicU32,
     /// 见过的「在图上看」请求版本（[`goto_time`]）。
@@ -851,9 +934,49 @@ impl ViewState {
             ticker_info,
             layout,
             linked_seen: std::sync::atomic::AtomicU64::new(0),
+            drawings_seen: std::sync::atomic::AtomicU64::new(0),
             y_labels_max: std::sync::atomic::AtomicU32::new(0),
             goto_seen: 0,
         }
+    }
+
+    /// 画线的坐标换算（docs/46 §3.2）：与本图绘制同一个变换。按逐笔的图要给各根 K 线的开始时间（按先后），
+    /// 一根都没有时不能画线。
+    pub fn draw_view(&self, tick_times: Option<Vec<u64>>) -> Option<crate::ws::drawing::geometry::DrawView> {
+        use crate::ws::drawing::geometry::{DrawView, XMode};
+        let x = match self.basis {
+            Basis::Time(tf) => XMode::Time { latest: self.latest_x, interval_ms: tf.to_milliseconds(), cell_w: self.cell_width },
+            Basis::Tick(_) => {
+                let times = tick_times.filter(|t| !t.is_empty())?;
+                XMode::Tick { times, cell_w: self.cell_width }
+            }
+        };
+        let min_step: PriceStep = self.ticker_info.min_ticksize.into();
+        Some(DrawView {
+            size: self.bounds.size(),
+            scaling: self.scaling,
+            translation: self.translation,
+            x,
+            base: self.base_price_y.units,
+            tick: self.effective_tick_units(),
+            cell_h: self.cell_height,
+            snap: min_step.units.max(1),
+        })
+    }
+
+    /// 绘图层（docs/46）：画线版本变了就把这一层与十字线层清掉重画。
+    pub fn draw_drawings_layer(
+        &self,
+        renderer: &iced::Renderer,
+        size: Size,
+        drawing: Option<&(String, crate::ws::drawing::geometry::DrawView)>,
+    ) -> Option<canvas::Geometry> {
+        let (symbol, view) = drawing?;
+        if crate::ws::drawing::changed_since(&self.drawings_seen) {
+            self.cache.drawings.clear();
+            self.cache.crosshair.clear();
+        }
+        Some(self.cache.drawings.draw(renderer, size, |frame| crate::ws::drawing::draw_layer(frame, view, symbol)))
     }
 
     fn effective_tick_units(&self) -> i64 {

@@ -46,3 +46,14 @@ pub fn down_strong() -> Color {
 pub fn down_weak() -> Color {
     weak(domain().down)
 }
+
+/// 画线（docs/46）：用户给对象选的颜色（RGBA 字节）→ iced 颜色。画线颜色是用户数据而不是界面 token，
+/// 换算放在适配层，面板代码里不出现颜色字面量。
+pub fn drawing_color(rgba: [u8; 4]) -> Color {
+    Color::from_rgba8(rgba[0], rgba[1], rgba[2], f32::from(rgba[3]) / 255.0)
+}
+
+/// 画线选中时锚点手柄的底色：面板底色（手柄是「挖空」的圆点）。
+pub fn drawing_handle_fill() -> Color {
+    color(core().surface_primary)
+}

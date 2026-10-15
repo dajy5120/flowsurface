@@ -125,6 +125,11 @@ impl Chart for KlineChart {
             PlotData::TickBased(tick_aggr) => tick_aggr.datapoints.is_empty(),
         }
     }
+
+    fn drawing(&self) -> Option<(String, crate::ws::drawing::geometry::DrawView)> {
+        let st = self.state();
+        Some((crate::ws::drawing::symbol_key(&st.ticker_info.ticker), st.draw_view(self.interval_keys())?))
+    }
 }
 
 impl PlotConstants for KlineChart {
@@ -1150,8 +1155,15 @@ impl canvas::Program<Message> for KlineChart {
             chart.draw_last_price_line(frame, palette, region);
         });
 
+        // 画线（docs/46）：单独一层；版本变了才重画
+        let drawing = self.drawing();
+        let drawings = chart.draw_drawings_layer(renderer, bounds_size, drawing.as_ref());
+
         chart.sync_linked_cursor();
         let crosshair = chart.cache.crosshair.draw(renderer, bounds_size, |frame| {
+            if let Some((symbol, view)) = &drawing {
+                crate::ws::drawing::draw_hint(frame, view, symbol, cursor.position_in(bounds));
+            }
             let visible_region = chart.visible_region(bounds_size);
             let visible_range = chart.interval_range(&visible_region);
 
@@ -1187,7 +1199,10 @@ impl canvas::Program<Message> for KlineChart {
             }
         });
 
-        vec![klines, crosshair]
+        let mut out = vec![klines];
+        out.extend(drawings);
+        out.push(crosshair);
+        out
     }
 
     fn mouse_interaction(
@@ -1197,9 +1212,9 @@ impl canvas::Program<Message> for KlineChart {
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
         match interaction {
-            Interaction::Panning { .. } => mouse::Interaction::Grabbing,
+            Interaction::Panning { .. } | Interaction::DrawDrag => mouse::Interaction::Grabbing,
             Interaction::Zoomin { .. } => mouse::Interaction::ZoomIn,
-            Interaction::None | Interaction::Ruler { .. } => {
+            Interaction::None | Interaction::Ruler { .. } | Interaction::DrawPlace => {
                 if cursor.is_over(bounds) {
                     mouse::Interaction::Crosshair
                 } else {

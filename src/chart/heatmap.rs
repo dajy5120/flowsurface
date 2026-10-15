@@ -110,6 +110,11 @@ impl Chart for HeatmapChart {
     fn is_empty(&self) -> bool {
         self.heatmap.is_empty()
     }
+
+    fn drawing(&self) -> Option<(String, crate::ws::drawing::geometry::DrawView)> {
+        let st = self.state();
+        Some((crate::ws::drawing::symbol_key(&st.ticker_info.ticker), st.draw_view(self.interval_keys())?))
+    }
 }
 
 impl PlotConstants for HeatmapChart {
@@ -773,9 +778,16 @@ impl canvas::Program<Message> for HeatmapChart {
             }
         });
 
+        // 画线（docs/46）：单独一层；版本变了才重画
+        let drawing = self.drawing();
+        let drawings = chart.draw_drawings_layer(renderer, bounds_size, drawing.as_ref());
+
         if !self.is_empty() {
             chart.sync_linked_cursor();
             let crosshair = chart.cache.crosshair.draw(renderer, bounds_size, |frame| {
+                if let Some((symbol, view)) = &drawing {
+                    crate::ws::drawing::draw_hint(frame, view, symbol, cursor.position_in(bounds));
+                }
                 if cursor.position_in(bounds).is_none() {
                     // 同页图表时间联动（docs/41 E 期）：自己没光标就画别的图指着的时间
                     chart.publish_linked_cursor(None);
@@ -904,7 +916,10 @@ impl canvas::Program<Message> for HeatmapChart {
                 }
             });
 
-            vec![heatmap, crosshair]
+            let mut out = vec![heatmap];
+            out.extend(drawings);
+            out.push(crosshair);
+            out
         } else {
             vec![heatmap]
         }
@@ -917,9 +932,9 @@ impl canvas::Program<Message> for HeatmapChart {
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
         match interaction {
-            Interaction::Panning { .. } => mouse::Interaction::Grabbing,
+            Interaction::Panning { .. } | Interaction::DrawDrag => mouse::Interaction::Grabbing,
             Interaction::Zoomin { .. } => mouse::Interaction::ZoomIn,
-            Interaction::None | Interaction::Ruler { .. } => {
+            Interaction::None | Interaction::Ruler { .. } | Interaction::DrawPlace => {
                 if cursor.is_over(bounds) {
                     return mouse::Interaction::Crosshair;
                 }
