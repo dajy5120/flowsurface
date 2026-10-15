@@ -26,6 +26,8 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::data_picker::{self as dp, BSource, DataPick, DataPickMsg, PickOpts, Purpose, Selection, TimeMode};
+
 // ── 数据形状（与 strategies/swe/graph.py 的 JSON 一致）───────────────────
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -416,6 +418,8 @@ pub struct Job {
     pub path: String,
     pub start: String,
     pub end: String,
+    /// 数据根目录不是缺省时传给子进程的环境变量（`WS_DATABENTO_ROOT` …）
+    pub roots: Vec<(String, String)>,
     /// waiting / running / done / failed / cancelled
     pub status: String,
     pub study_id: String,
@@ -560,6 +564,28 @@ pub struct Issue {
     pub msg: String,
 }
 
+/// 这张图要什么数据（`strategies/swe/datareq.py`，docs/45 §21）：抽象类 price / book / trades 与原因。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(default)]
+pub struct Needs {
+    pub kinds: Vec<String>,
+    pub why: BTreeMap<String, String>,
+    pub grid_ms: u64,
+}
+
+impl Needs {
+    /// 抽象类的中文名（与 `datareq.KINDS` 同一组）。
+    #[must_use]
+    pub fn label(kind: &str) -> &str {
+        match kind {
+            "price" => "价格（买一 / 卖一）",
+            "book" => "盘口增量",
+            "trades" => "逐笔成交",
+            other => other,
+        }
+    }
+}
+
 /// 能打开的东西：画布存的图，或者现有的工作流（导入成副本）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileItem {
@@ -616,8 +642,10 @@ pub enum FlMsg {
     Check,
     Run,
     Stop,
-    Start(String),
-    End(String),
+    /// 共用数据选择组件（docs/45 §21）：选完写回 `[backtest]`
+    Data(DataPickMsg),
+    /// 回到 Dukascopy 黄金报价（D3 并入「B5 本地自有数据」之前的临时入口）
+    UseDukascopy,
     Pace(String),
     MetaId(String),
     MetaName(String),
@@ -732,6 +760,7 @@ struct St {
     form: BTreeMap<String, String>,
     issues: Vec<Issue>,
     warnings: Vec<String>,
+    needs: Needs,
     /// 轨迹定位表：`线名|模块 id` → 节点 id
     whence: HashMap<String, String>,
     checked: Option<bool>,
@@ -739,8 +768,10 @@ struct St {
     msg: String,
     pan: (f32, f32),
     zoom: f32,
-    start: String,
-    end: String,
+    /// 数据选择器的状态（根目录等与机器有关的东西只在这里，不进图）
+    pick: DataPick,
+    /// 端到端自测钩子（`WS_FLOW_RUN`）用：这次运行把结束日改成它，不改图
+    auto_end: Option<String>,
     pace: String,
     run_id: String,
     child: Option<Child>,
@@ -807,14 +838,15 @@ impl Default for St {
             form: BTreeMap::new(),
             issues: Vec::new(),
             warnings: Vec::new(),
+            needs: Needs::default(),
             whence: HashMap::new(),
             checked: None,
             busy: false,
             msg: String::new(),
             pan: (24.0, 16.0),
             zoom: 1.0,
-            start: "2026-06-01".into(),
-            end: "2026-06-05".into(),
+            pick: DataPick::default(),
+            auto_end: None,
             pace: "3600".into(),
             run_id: String::new(),
             child: None,
@@ -881,13 +913,13 @@ pub struct View {
     pub form: BTreeMap<String, String>,
     pub issues: Vec<Issue>,
     pub warnings: Vec<String>,
+    pub needs: Needs,
     pub checked: Option<bool>,
     pub busy: bool,
     pub msg: String,
     pub pan: (f32, f32),
     pub zoom: f32,
-    pub start: String,
-    pub end: String,
+    pub pick: DataPick,
     pub pace: String,
     pub run_id: String,
     pub running: bool,
@@ -942,13 +974,13 @@ pub fn view() -> View {
         form: g.form.clone(),
         issues: g.issues.clone(),
         warnings: g.warnings.clone(),
+        needs: g.needs.clone(),
         checked: g.checked,
         busy: g.busy,
         msg: g.msg.clone(),
         pan: g.pan,
         zoom: g.zoom,
-        start: g.start.clone(),
-        end: g.end.clone(),
+        pick: g.pick.clone(),
         pace: g.pace.clone(),
         run_id: g.run_id.clone(),
         running: g.running,
@@ -1149,7 +1181,7 @@ fn ensure_started() {
                     std::thread::sleep(std::time::Duration::from_secs(5));
                     with(|g| {
                         g.pace = "0".into();
-                        g.end = "2026-06-02".into();
+                        g.auto_end = Some("2026-06-02".into());
                     });
                     handle(FlMsg::Run);
                 });
@@ -1316,6 +1348,7 @@ struct CheckOut {
     errors: Vec<Issue>,
     /// 不挡编译的提醒（表达式两边量纲不同之类）
     warnings: Vec<String>,
+    needs: Needs,
     #[serde(rename = "where")]
     whence: HashMap<String, String>,
     toml: String,
@@ -1328,6 +1361,7 @@ fn apply_check(g: &mut St, r: Result<CheckOut, String>, what: &str) -> Option<St
             g.checked = Some(c.ok);
             g.issues = c.errors;
             g.warnings = c.warnings;
+            g.needs = c.needs;
             if c.ok {
                 g.whence = c.whence;
                 g.msg = format!("{what}通过");
@@ -1406,14 +1440,22 @@ fn run_async() {
         stop();
         let run_id = format!("flow-{}", chrono::Local::now().format("%H%M%S"));
         write_breakpoints(&run_id); // 回测一起来就要读到，所以在起进程之前写
-        let (start, end, pace) = with(|g| (g.start.clone(), g.end.clone(), g.pace.clone())).unwrap_or_default();
+        let (args, roots, pace, auto_end) = with(|g| (run_overrides(&g.graph.backtest), root_env(&g.pick), g.pace.clone(), g.auto_end.take())).unwrap_or_default();
         let log = std::env::temp_dir().join(format!("ws-{run_id}.log"));
         let out = std::fs::File::create(&log).ok();
         let mut cmd = Command::new(super::paths::python());
-        cmd.args(["-m", "strategies.swe.run", &toml, "--run-id", &run_id, "--start", &start, "--end", &end]);
+        cmd.args(["-m", "strategies.swe.run", &toml, "--run-id", &run_id]);
+        // 数据：图里 `[backtest]` 的每一项都作为覆盖传进去——界面上看到的就是实际跑的（docs/45 §21）
+        cmd.args(&args);
+        if let Some(e) = &auto_end {
+            cmd.args(["--end", e]);
+        }
+        cmd.envs(roots);
         if pace.trim().parse::<f64>().map(|p| p > 0.0).unwrap_or(false) {
             cmd.args(["--pace", pace.trim()]);
         }
+        let (start, end) = with(|g| data_range(&g.graph.backtest)).unwrap_or_default();
+        let end = auto_end.unwrap_or(end);
         cmd.current_dir(super::paths::repo_root()).stdin(Stdio::null());
         match out {
             Some(f) => {
@@ -1744,7 +1786,142 @@ fn record(g: &mut St, tag: &str) {
 }
 
 /// 换了一张图：选择、撤销栈、弹窗都清掉。
+// ── 数据（docs/45 §21）：共用数据选择组件 ⇄ 图的 `[backtest]` ──────────────────────
+
+/// 画布对数据选择组件的要求：计算用途、本地已购数据（B5 本地自有数据在 D3）、一段日期 + 每日时段、列出数据类型。
+#[must_use]
+pub fn pick_opts() -> PickOpts {
+    PickOpts {
+        purpose: Purpose::Compute,
+        sources: Some(vec![BSource::Purchased]),
+        vendors: None,
+        time: TimeMode::Window,
+        local_only: true,
+        hide_types: false,
+        range: true,
+    }
+}
+
+/// `[backtest]` 的标的（字符串或列表取第一个）。
+fn bt_symbol(bt: &Value) -> Option<String> {
+    match bt.get("symbols") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Array(a)) => a.first().and_then(Value::as_str).map(str::to_string),
+        _ => None,
+    }
+}
+
+/// `[backtest]` 的起止日（没写结束日 = 起始那一天）。
+#[must_use]
+pub fn data_range(bt: &Value) -> (String, String) {
+    let s = |k: &str| bt.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let start = s("start");
+    let end = Some(s("end")).filter(|e| !e.is_empty()).unwrap_or_else(|| start.clone());
+    (start, end)
+}
+
+/// 画布左上角数据牌上的一行：数据商 · 标的 · 日期（· 时段）（· 类型）。
+#[must_use]
+pub fn data_label(bt: &Value) -> String {
+    let src = bt.get("source").and_then(Value::as_str).unwrap_or("dukascopy");
+    let (start, end) = data_range(bt);
+    let mut out = vec![dp::source_label(src).replace("dukascopy", "Dukascopy"), bt_symbol(bt).unwrap_or_else(|| "?".into())];
+    out.push(match (start.is_empty(), start == end) {
+        (true, _) => "最新一天".into(),
+        (false, true) => start,
+        (false, false) => format!("{start} → {end}"),
+    });
+    if let Some(sess) = bt.get("session") {
+        let st = sess.get("start").and_then(Value::as_str).unwrap_or("?");
+        let m = sess.get("minutes").and_then(Value::as_u64).unwrap_or(0);
+        out.push(format!("{st} 起 {m} 分钟"));
+    }
+    if let Some(t) = bt.get("types").and_then(Value::as_array).filter(|t| !t.is_empty()) {
+        out.push(t.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("+"));
+    }
+    out.join(" · ")
+}
+
+/// `[backtest]` → `strategies.swe.run` 的覆盖参数（给了才传）。
+#[must_use]
+pub fn run_overrides(bt: &Value) -> Vec<String> {
+    let s = |k: &str| bt.get(k).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_string);
+    let sess = bt.get("session");
+    let mut out = Vec::new();
+    for (flag, v) in [
+        ("--source", s("source")),
+        ("--symbol", bt_symbol(bt)),
+        ("--start", s("start")),
+        ("--end", s("end")),
+        ("--session-start", sess.and_then(|x| x.get("start")).and_then(Value::as_str).map(str::to_string)),
+        ("--minutes", sess.and_then(|x| x.get("minutes")).and_then(Value::as_u64).map(|m| m.to_string())),
+    ] {
+        if let Some(v) = v {
+            out.push(flag.to_string());
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// 根目录不是缺省时，子进程要的环境变量（根目录与机器有关，不写进图）。
+fn root_env(p: &DataPick) -> Vec<(String, String)> {
+    let Some(k) = p.local_key() else { return Vec::new() };
+    let root = p.root_or_default();
+    let var = match k {
+        "databento" => "WS_DATABENTO_ROOT",
+        "tardis" => "WS_TARDIS_ROOT",
+        _ => return Vec::new(),
+    };
+    if root == dp::default_root(k) { Vec::new() } else { vec![(var.to_string(), root)] }
+}
+
+/// 图的 `[backtest]` → 选择器（打开图、撤销重做之后）。Dukascopy / 没写数据源的图：选择器从头选。
+/// 同一家数据商时保留手填的根目录。
+fn sync_pick(g: &mut St) {
+    let bt = &g.graph.backtest;
+    let s = |k: &str| bt.get(k).and_then(Value::as_str);
+    let mut p = DataPick::default();
+    if let Some(src @ ("databento" | "tardis")) = s("source")
+        && let Some(sym) = bt_symbol(bt)
+    {
+        let sess = bt.get("session");
+        let window = sess
+            .and_then(|x| Some((x.get("start")?.as_str()?, u32::try_from(x.get("minutes")?.as_u64()?).ok()?)));
+        p.preset_local(BSource::Purchased, Some(src), &sym, s("start"), s("end"), window);
+        if g.pick.vendor == p.vendor && !g.pick.root.trim().is_empty() {
+            p.root = g.pick.root.clone();
+        }
+    }
+    g.pick = p;
+}
+
+/// 选择器选完了 → 写回 `[backtest]`（其余项如手续费照留）。没变就不记撤销、不算改动。
+fn write_pick(g: &mut St) {
+    let Some(Selection::Local { source, symbol, date, end, window, types, .. }) = g.pick.selection(&pick_opts()) else {
+        return;
+    };
+    let mut bt = g.graph.backtest.as_object().cloned().unwrap_or_default();
+    bt.insert("source".into(), source.into());
+    bt.insert("symbols".into(), symbol.into());
+    bt.insert("start".into(), date.into());
+    bt.insert("end".into(), end.into());
+    match window {
+        Some((s, m)) => bt.insert("session".into(), serde_json::json!({"start": s, "minutes": m})),
+        None => bt.remove("session"),
+    };
+    bt.insert("types".into(), types.into());
+    let bt = Value::Object(bt);
+    if bt != g.graph.backtest {
+        edit(g, "c.backtest.data");
+        g.graph.backtest = bt;
+        g.form.retain(|k, _| !k.starts_with(&form_key("backtest", "")));
+        touch(g);
+    }
+}
+
 fn reset_editing(g: &mut St) {
+    sync_pick(g);
     g.selected.clear();
     g.undo.clear();
     g.redo.clear();
@@ -1759,6 +1936,7 @@ fn reset_editing(g: &mut St) {
 
 /// 撤销 / 重做之后：输入框里的原文作废（照图上的值重显），选择里去掉已经不在的节点。
 fn after_swap(g: &mut St) {
+    sync_pick(g);
     g.form.clear();
     g.tables.clear();
     g.undo_tag = None;
@@ -2191,11 +2369,28 @@ pub fn handle(m: FlMsg) {
         }
         FlMsg::Run => run_async(),
         FlMsg::Stop => stop(),
-        FlMsg::Start(v) => {
-            with(|g| g.start = v);
+        FlMsg::Data(m) => {
+            with(|g| {
+                g.pick.update(m);
+                write_pick(g);
+            });
         }
-        FlMsg::End(v) => {
-            with(|g| g.end = v);
+        FlMsg::UseDukascopy => {
+            with(|g| {
+                let mut bt = g.graph.backtest.as_object().cloned().unwrap_or_default();
+                for k in ["session", "types"] {
+                    bt.remove(k);
+                }
+                bt.insert("source".into(), "dukascopy".into());
+                bt.insert("symbols".into(), "XAUUSD".into());
+                let bt = Value::Object(bt);
+                if bt != g.graph.backtest {
+                    edit(g, "c.backtest.data");
+                    g.graph.backtest = bt;
+                    g.form.retain(|k, _| !k.starts_with(&form_key("backtest", "")));
+                }
+                sync_pick(g);
+            });
         }
         FlMsg::Pace(v) => {
             with(|g| g.pace = v);
@@ -2697,11 +2892,13 @@ fn enqueue() {
         }
         with(|g| {
             let n_vary: usize = g.graph.nodes.iter().filter(|n| !n.vary.is_empty()).count();
+            let (start, end) = data_range(&g.graph.backtest);
             let job = Job {
-                title: format!("{}（{} → {}）", g.graph.name, g.start, g.end),
+                title: format!("{}（{start} → {end}）", g.graph.name),
                 path: g.path.clone().unwrap_or_default(),
-                start: g.start.clone(),
-                end: g.end.clone(),
+                start,
+                end,
+                roots: root_env(&g.pick),
                 status: "waiting".into(),
                 ..Default::default()
             };
@@ -2730,7 +2927,8 @@ fn queue_kick() {
     super::spawn_named("ws-flowqueue", move || {
         use std::io::BufRead;
         let mut cmd = Command::new(super::paths::python());
-        cmd.args(["-m", "strategies.swe.variants", "run", &job.path, "--start", &job.start, "--end", &job.end, "--workers", "2"]);
+        cmd.args(["-m", "strategies.swe.variants", "run", &job.path, "--workers", "2"]); // 起止日用图里 `[backtest]` 的
+        cmd.envs(job.roots.clone());
         cmd.current_dir(super::paths::repo_root()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -3243,6 +3441,55 @@ mod tests {
         assert_eq!(g.find("n=200", None), ["n3"]);
         assert_eq!(g.find("trend", None), ["n4"]);
         assert!(g.find("  ", None).is_empty() && g.find("zzz", None).is_empty());
+    }
+
+    #[test]
+    fn backtest_section_becomes_run_overrides_and_badge() {
+        let bt = serde_json::json!({"source": "databento", "symbols": "ESU6", "start": "2026-09-01", "end": "2026-09-01",
+            "session": {"start": "13:30", "minutes": 30}, "types": ["mbo", "trades"], "maker_bp": 1.0});
+        assert_eq!(
+            run_overrides(&bt),
+            ["--source", "databento", "--symbol", "ESU6", "--start", "2026-09-01", "--end", "2026-09-01", "--session-start", "13:30", "--minutes", "30"]
+        );
+        assert_eq!(data_label(&bt), "Databento · ESU6 · 2026-09-01 · 13:30 起 30 分钟 · mbo+trades");
+        let gold = serde_json::json!({"source": "dukascopy", "symbols": ["XAUUSD"], "start": "2026-06-01", "end": "2026-06-30"});
+        assert_eq!(data_label(&gold), "Dukascopy · XAUUSD · 2026-06-01 → 2026-06-30");
+        assert_eq!(data_range(&serde_json::json!({"start": "2026-06-01"})), ("2026-06-01".into(), "2026-06-01".into()));
+        assert!(run_overrides(&serde_json::json!({})).is_empty(), "没写的项不传，按工作流里的");
+    }
+
+    #[test]
+    fn picker_round_trips_through_the_graph_backtest() {
+        let mut g = St::default();
+        g.graph.backtest = serde_json::json!({"source": "databento", "symbols": "ESU6", "start": "2026-09-01", "session": {"start": "13:30", "minutes": 30}, "maker_bp": 1.0});
+        sync_pick(&mut g);
+        assert_eq!((g.pick.vendor.as_deref(), g.pick.symbol.as_deref(), g.pick.date.as_deref()), (Some("databento"), Some("ESU6"), Some("2026-09-01")));
+        assert_eq!((g.pick.start.as_str(), g.pick.minutes), ("13:30", 30));
+        // 自己的根目录 + 注入扫描结果 → 换时长写回 `[backtest]`，其余项（手续费）照留，可撤销
+        g.pick.root = "/画布往返测试".into();
+        dp::inject_scan("databento", "/画布往返测试", "root\t/x\t1\nitem\tfuture\tESU6\t2026-09-01\tmbo,trades\n");
+        g.pick.update(DataPickMsg::Minutes(60));
+        write_pick(&mut g);
+        assert_eq!(g.graph.backtest["session"]["minutes"], 60);
+        assert_eq!(g.graph.backtest["types"], serde_json::json!(["mbo", "trades"]));
+        assert_eq!((g.graph.backtest["end"].as_str(), g.graph.backtest["maker_bp"].as_f64()), (Some("2026-09-01"), Some(1.0)));
+        assert_eq!(g.undo.len(), 1);
+        assert_eq!(root_env(&g.pick), [("WS_DATABENTO_ROOT".to_string(), "/画布往返测试".to_string())]);
+        write_pick(&mut g);
+        assert_eq!(g.undo.len(), 1, "没变就不记撤销");
+        // Dukascopy 的图：选择器从头选
+        g.graph.backtest = serde_json::json!({"source": "dukascopy", "symbols": "XAUUSD"});
+        sync_pick(&mut g);
+        assert_eq!(g.pick.pipeline, None);
+    }
+
+    #[test]
+    fn check_output_carries_data_needs() {
+        let c: CheckOut = serde_json::from_str(r#"{"ok":true,"needs":{"kinds":["price","book","trades"],"why":{"book":"订单流特征 z"},"grid_ms":100}}"#).unwrap();
+        assert_eq!(c.needs.kinds, ["price", "book", "trades"]);
+        assert_eq!((c.needs.grid_ms, Needs::label("book")), (100, "盘口增量"));
+        let old: CheckOut = serde_json::from_str(r#"{"ok":true}"#).unwrap();
+        assert!(old.needs.kinds.is_empty(), "旧的检查输出没有 needs 也能读");
     }
 
     #[test]

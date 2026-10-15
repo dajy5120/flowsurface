@@ -355,6 +355,7 @@ pub fn opts() -> PickOpts {
         time: TimeMode::Window,
         local_only: true,
         hide_types: true,
+        range: false,
     }
 }
 

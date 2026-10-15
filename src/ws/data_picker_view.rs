@@ -323,8 +323,10 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
 
     // 市场
     let mks: Vec<Choice> = sc.markets().into_iter().map(|m| Choice { label: market_label(&m), key: m }).collect();
-    b = b.push(line(vec![label("市场"), pick(mks, p.market.as_deref(), "选市场".into(), 130.0, DataPickMsg::Market)]));
-    let Some(mk) = p.market.as_deref() else {
+    // 宿主预置了标的而没给市场（按已存的选择打开）：按扫描补上
+    let guessed = p.market.clone().or_else(|| p.symbol.as_deref().and_then(|s| sc.market_of(s)));
+    b = b.push(line(vec![label("市场"), pick(mks, guessed.as_deref(), "选市场".into(), 130.0, DataPickMsg::Market)]));
+    let Some(mk) = guessed.as_deref() else {
         return b.into();
     };
 
@@ -345,8 +347,20 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
     let latest = dates.last().cloned();
     let n = dates.len();
     let dchoices: Vec<Choice> = dates.into_iter().rev().map(|d| Choice { key: d.clone(), label: d }).collect();
-    let mut v = vec![label("时间"), pick(dchoices, p.date.as_deref(), format!("选日期（{n}）"), 130.0, DataPickMsg::Date)];
-    if let Some(d) = latest
+    let mut v = vec![label("时间"), pick(dchoices.clone(), p.date.as_deref(), format!("选日期（{n}）"), 130.0, DataPickMsg::Date)];
+    if opts.range {
+        // 一段日期：结束日只能选在起始日之后；不选 = 只跑那一天
+        v.push(dim("到".into()));
+        let later: Vec<Choice> = dchoices.into_iter().filter(|c| p.date.as_deref().is_none_or(|d| c.key.as_str() >= d)).collect();
+        v.push(pick(later, p.end.as_deref().or(p.date.as_deref()), "结束日".into(), 130.0, DataPickMsg::End));
+        if let (Some(d), Some(last)) = (p.date.as_deref(), latest.as_deref()) {
+            let days = sc.dates_in(sym, d, p.end.as_deref().unwrap_or(d)).len();
+            v.push(dim(format!("{days} 天有数据")));
+            if p.end.as_deref() != Some(last) && last > d {
+                v.push(chip("到最新".into(), false, Some(DataPickMsg::End(last.to_string()))));
+            }
+        }
+    } else if let Some(d) = latest
         && p.date.as_deref() != Some(d.as_str())
     {
         v.push(chip("最新".into(), false, Some(DataPickMsg::Date(d))));
@@ -379,7 +393,7 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
     }
     match p.date.as_deref() {
         Some(d) => {
-            let types = sc.types(sym, d);
+            let types = if opts.range { sc.types_in(sym, d, p.end.as_deref().unwrap_or(d)) } else { sc.types(sym, d) };
             let mut v = vec![label("数据类型")];
             for t in &types {
                 let on = !p.excluded.contains(t);

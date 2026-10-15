@@ -239,6 +239,31 @@ impl Scan {
             .unwrap_or_default()
     }
 
+    /// 某标的所在的市场（扫描里第一次出现的那个）。宿主按已存的选择预置时还不知道市场，靠它补上。
+    #[must_use]
+    pub fn market_of(&self, symbol: &str) -> Option<String> {
+        self.items.iter().find(|i| i.symbol == symbol).map(|i| i.market.clone())
+    }
+
+    /// `from..=to` 里有数据的日期（升序）。
+    #[must_use]
+    pub fn dates_in(&self, symbol: &str, from: &str, to: &str) -> Vec<String> {
+        self.dates(symbol).into_iter().filter(|d| d.as_str() >= from && d.as_str() <= to).collect()
+    }
+
+    /// `from..=to` 里**每一个有数据的日子都有**的数据类型（跑一段日期时，缺一天就缺一天）。
+    #[must_use]
+    pub fn types_in(&self, symbol: &str, from: &str, to: &str) -> Vec<String> {
+        let days = self.dates_in(symbol, from, to);
+        let Some(first) = days.first() else { return Vec::new() };
+        let mut v = self.types(symbol, first);
+        for d in &days[1..] {
+            let t = self.types(symbol, d);
+            v.retain(|x| t.contains(x));
+        }
+        v
+    }
+
     /// 某标的全部日期里出现过的数据类型（各类型出现的天数）。
     #[must_use]
     pub fn type_days(&self, symbol: &str) -> Vec<(String, usize)> {
@@ -300,6 +325,12 @@ pub fn default_root(src: &str) -> String {
         "databento" => env("WS_DATABENTO_ROOT", "/data/ubuntu/HistoricalData/data/bronze/Databento"),
         _ => std::env::var("WS_DATA_DIR").unwrap_or_else(|_| super::paths::data_dir().to_string_lossy().into_owned()),
     }
+}
+
+/// 测试用：把一份扫描输出直接放进缓存（不起子进程）。
+#[cfg(test)]
+pub fn inject_scan(src: &str, root: &str, text: &str) {
+    SCANS.get_or_init(Default::default).lock().unwrap().insert((src.to_string(), root.to_string()), Load::Ready(Scan::parse(text)));
 }
 
 /// 扫描结果（第一次问时后台扫；`force` = 重扫）。
@@ -385,6 +416,8 @@ pub struct PickOpts {
     pub local_only: bool,
     /// 宿主自己选数据类型（单选、有自己的类型名）：组件不列类型勾选。
     pub hide_types: bool,
+    /// 选一段日期（起 → 止），不只是一天。数据类型取这段里每天都有的。
+    pub range: bool,
 }
 
 /// 一个面板的选择。
@@ -401,6 +434,8 @@ pub struct DataPick {
     pub market: Option<String>,
     pub symbol: Option<String>,
     pub date: Option<String>,
+    /// `PickOpts::range` 时的结束日（含）；`None` = 只跑 `date` 一天。
+    pub end: Option<String>,
     /// 起始时刻（UTC，`HH:MM`）与时长（分钟）。
     pub start: String,
     pub minutes: u32,
@@ -423,6 +458,7 @@ impl Default for DataPick {
             market: None,
             symbol: None,
             date: None,
+            end: None,
             start: "13:30".into(),
             minutes: 30,
             excluded: BTreeSet::new(),
@@ -446,6 +482,8 @@ pub enum DataPickMsg {
     Market(String),
     Symbol(String),
     Date(String),
+    /// 结束日（`PickOpts::range`）。
+    End(String),
     Start(String),
     Minutes(u32),
     /// 常用时段一键选：起始（UTC）+ 时长（ui::widgets::time_range）
@@ -473,6 +511,8 @@ pub enum Selection {
         window: Option<(String, u32)>,
         /// 选用的数据类型（数据商原名）。
         types: Vec<String>,
+        /// 结束日（含）；不选一段时 = `date`。
+        end: String,
     },
     /// B4：第三方 API（实时）。
     ThirdParty { provider: String, market: String, symbol: String },
@@ -485,11 +525,12 @@ impl Selection {
         match self {
             Self::Native { venue, market, symbol } => format!("A · {venue} {} · {symbol} · 实时", market_label(market)),
             Self::Live { venue, market, symbol } => format!("B1 · {venue} {} · {symbol} · 实时", market_label(market)),
-            Self::Local { source, market, symbol, date, window, types, .. } => format!(
-                "{} · {} · {} · {symbol} · {date}{} · {} 类数据",
+            Self::Local { source, market, symbol, date, window, types, end, .. } => format!(
+                "{} · {} · {} · {symbol} · {date}{}{} · {} 类数据",
                 if source == "recorder" { "B3" } else { "B2" },
                 source_label(source),
                 market_label(market),
+                if end == date { String::new() } else { format!(" → {end}") },
                 window.as_ref().map(|(s, m)| format!(" {s} 起 {m} 分钟")).unwrap_or_default(),
                 types.len()
             ),
@@ -555,6 +596,7 @@ impl DataPick {
 
     fn clear_below_symbol(&mut self) {
         self.date = None;
+        self.end = None;
         self.excluded.clear();
     }
 
@@ -633,7 +675,13 @@ impl DataPick {
                     self.clear_below_symbol();
                 }
             }
-            DataPickMsg::Date(d) => self.date = Some(d),
+            DataPickMsg::Date(d) => {
+                if self.end.as_deref().is_some_and(|e| e < d.as_str()) {
+                    self.end = None; // 结束日不能早于起始日
+                }
+                self.date = Some(d);
+            }
+            DataPickMsg::End(d) => self.end = Some(d),
             DataPickMsg::Start(s) => self.start = s,
             DataPickMsg::Minutes(n) => self.minutes = n,
             DataPickMsg::Window(s, n) => {
@@ -646,6 +694,25 @@ impl DataPick {
                 }
             }
             DataPickMsg::Search(q) => self.search = q,
+        }
+    }
+
+    /// 宿主按已存的选择预置（管线 B 的本地来源）：市场留空，扫描出来后按标的补（视图与 `selection` 都会补）。
+    /// `vendor`：B2 的数据商；根目录用缺省。
+    pub fn preset_local(&mut self, source: BSource, vendor: Option<&str>, symbol: &str, date: Option<&str>, end: Option<&str>, window: Option<(&str, u32)>) {
+        *self = Self { start: self.start.clone(), minutes: self.minutes, ..Self::default() };
+        self.pipeline = Some(Pipeline::B);
+        self.source = Some(source);
+        self.vendor = vendor.map(str::to_string);
+        if let Some(k) = self.local_key() {
+            self.root = default_root(k);
+        }
+        self.symbol = Some(symbol.to_string());
+        self.date = date.map(str::to_string);
+        self.end = end.filter(|e| Some(*e) != date && date.is_some()).map(str::to_string);
+        if let Some((s, m)) = window {
+            self.start = s.to_string();
+            self.minutes = m;
         }
     }
 
@@ -685,10 +752,13 @@ impl DataPick {
                 let key = self.local_key()?.to_string();
                 let symbol = self.symbol.clone()?;
                 let date = self.date.clone()?;
-                let types = match self.local_scan() {
-                    Some(Load::Ready(sc)) => sc.types(&symbol, &date),
-                    _ => Vec::new(),
-                }
+                let end = if opts.range { self.end.clone().unwrap_or_else(|| date.clone()) } else { date.clone() };
+                let scanned = match self.local_scan() {
+                    Some(Load::Ready(sc)) => Some(sc),
+                    _ => None,
+                };
+                let market = self.market.clone().or_else(|| scanned.as_ref().and_then(|sc| sc.market_of(&symbol)))?;
+                let types = scanned.map(|sc| sc.types_in(&symbol, &date, &end)).unwrap_or_default()
                 .into_iter()
                 .filter(|t| !self.excluded.contains(t))
                 .collect::<Vec<_>>();
@@ -698,11 +768,12 @@ impl DataPick {
                 Some(Selection::Local {
                     source: key,
                     root: self.root_or_default(),
-                    market: self.market.clone()?,
+                    market,
                     symbol,
                     date,
                     window: (opts.time == TimeMode::Window).then(|| (self.start.clone(), self.minutes)),
                     types,
+                    end,
                 })
             }
             _ => None,
@@ -732,6 +803,33 @@ junk\n";
         assert_eq!(s.dates("GCZ6"), vec!["2026-09-01".to_string(), "2026-09-02".into()]);
         assert_eq!(s.types("GCZ6", "2026-09-02"), vec!["mbo".to_string(), "trades".into()]);
         assert_eq!(s.type_days("GCZ6"), vec![("mbo".to_string(), 2), ("trades".into(), 1)]);
+    }
+
+    #[test]
+    fn 一段日期取每天都有的类型_预置按标的补市场() {
+        let sc = Scan::parse(SCAN);
+        assert_eq!(sc.market_of("GCZ6").as_deref(), Some("future"));
+        assert_eq!(sc.dates_in("GCZ6", "2026-09-01", "2026-09-30"), vec!["2026-09-01".to_string(), "2026-09-02".into()]);
+        assert_eq!(sc.types_in("GCZ6", "2026-09-01", "2026-09-02"), vec!["mbo".to_string()], "trades 只有一天：一段里缺一天就不算有");
+        assert_eq!(sc.types_in("GCZ6", "2026-09-02", "2026-09-02"), vec!["mbo".to_string(), "trades".into()]);
+        // 宿主按已存的选择预置（不知道市场）→ 扫描出来后选择完整
+        let root = "/预置测试".to_string();
+        SCANS.get_or_init(Default::default).lock().unwrap().insert(("databento".into(), root.clone()), Load::Ready(Scan::parse(SCAN)));
+        let mut p = DataPick::default();
+        p.preset_local(BSource::Purchased, Some("databento"), "GCZ6", Some("2026-09-01"), Some("2026-09-02"), Some(("13:30", 30)));
+        p.root = root;
+        let opts = PickOpts { range: true, ..PickOpts::default() };
+        let Some(Selection::Local { market, date, end, window, types, .. }) = p.selection(&opts) else { panic!("预置之后应能选出结果") };
+        assert_eq!((market.as_str(), date.as_str(), end.as_str()), ("future", "2026-09-01", "2026-09-02"));
+        assert_eq!((window, types), (Some(("13:30".to_string(), 30)), vec!["mbo".to_string()]));
+        // 起始日挪到结束日之后：结束日作废（= 只跑那一天）
+        p.update(DataPickMsg::Date("2026-09-03".into()));
+        assert_eq!(p.end, None);
+        // 不选一段的宿主：结束日 = 起始日
+        p.update(DataPickMsg::Date("2026-09-02".into()));
+        p.update(DataPickMsg::End("2026-09-09".into()));
+        let Some(Selection::Local { end, .. }) = p.selection(&PickOpts::default()) else { panic!() };
+        assert_eq!(end, "2026-09-02");
     }
 
     #[test]

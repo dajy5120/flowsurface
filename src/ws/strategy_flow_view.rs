@@ -21,7 +21,7 @@ use iced::widget::{Space, button, checkbox, column, container, opaque, pick_list
 use iced::{Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 use serde_json::Value;
 
-use super::strategy_flow::{self as sf, Control, DebugTab, EXEC, Edge, FlMsg, ModDef, Node, NodeLive, Palette, ParamDef, Quick, View, form_key, value_text};
+use super::strategy_flow::{self as sf, Control, DebugTab, EXEC, Edge, FlMsg, ModDef, Needs, Node, NodeLive, Palette, ParamDef, Quick, View, form_key, value_text};
 use crate::ui::metrics::space;
 use crate::ui::pal;
 use crate::ui::text as t;
@@ -1192,6 +1192,33 @@ fn param_field<'a>(v: &View, n: &Node, pd: &ParamDef) -> Element<'a, FlMsg> {
     labelled(label, control, note)
 }
 
+/// 「数据」一节（docs/45 §21）：共用数据选择组件，选完写回 `[backtest]`。Dukascopy 黄金报价在 D3 并入
+/// 「B5 本地自有数据」之前走表单里的起止日。
+fn data_section<'a>(v: &View, p: &Palette) -> Element<'a, FlMsg> {
+    let bt = &v.graph.backtest;
+    let src = bt.get("source").and_then(Value::as_str).unwrap_or("dukascopy");
+    let mut col = column![w::section("数据"), t::caption(sf::data_label(bt))].spacing(space(1));
+    if src == "dukascopy" {
+        col = col.push(t::metadata("Dukascopy 黄金报价（整日）。D3 把它并入来源「B5 本地自有数据」之前，起止日在这里填：").color(pal::dim()));
+        for pd in p.backtest_params.iter().filter(|pd| pd.name == "start" || pd.name == "end") {
+            col = col.push(config_field(v, "backtest", bt, pd));
+        }
+        col = col.push(t::metadata("或者在下面选已购数据（Databento / Tardis）：").color(pal::dim()));
+    } else {
+        col = col.push(row![w::btn("↩ 用 Dukascopy 报价", Kind::Ghost, Some(FlMsg::UseDukascopy))]);
+    }
+    col = col.push(super::data_picker_view::view(&v.pick, &sf::pick_opts()).map(FlMsg::Data));
+    col.into()
+}
+
+/// 画布左上角的数据牌：这张图拿什么数据跑。点一下 = 取消选中，检查器回到「这份策略」（数据选择器在那里）。
+fn data_badge<'a>(v: &View) -> Element<'a, FlMsg> {
+    let label = t::caption(format!("数据 · {}", sf::data_label(&v.graph.backtest)));
+    container(opaque(button(label).on_press(FlMsg::Select(None)).padding(crate::ui::metrics::pad2(1, 2)).style(|th, st| w::button_style(Kind::Standard, th, st))))
+        .padding(space(2))
+        .into()
+}
+
 /// 表单里的一项（运行配置 / 强制风控）：留空 = 用缺省值，缺省值显示成提示。
 fn config_field<'a>(v: &View, section: &'static str, root: &Value, pd: &ParamDef) -> Element<'a, FlMsg> {
     let name = pd.name.clone();
@@ -1267,12 +1294,18 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
         .color(pal::dim()));
         if let Some(p) = &v.palette {
             // 表单（docs/45 §3.5）：运行配置与账户底线不是节点
+            col = col.push(data_section(v, p));
             col = col.push(w::section("运行配置"));
-            for pd in p.backtest_params.iter() {
-                col = col.push(config_field(v, "backtest", &v.graph.backtest, pd));
-            }
             for pd in p.settings_params.iter() {
                 col = col.push(config_field(v, "settings", &v.graph.settings, pd));
+            }
+            // 这张图要什么数据（docs/45 §21）：数据源喂不了的，下面「提醒」里有一条「数据：…」
+            if !v.needs.kinds.is_empty() {
+                let kinds: Vec<&str> = v.needs.kinds.iter().map(|k| Needs::label(k)).collect();
+                col = col.push(t::caption(format!("要的数据：{}", kinds.join("、"))));
+                if let Some(why) = v.needs.why.get("book") {
+                    col = col.push(t::metadata(format!("盘口与成交：{why}")).color(pal::dim()));
+                }
             }
             col = col.push(w::section("强制风控（账户底线）"));
             col = col.push(t::metadata("不在图上，图怎么连都绕不过它；只能拒绝或缩量。留空 = 用缺省的底线，不能关掉。").color(pal::dim()));
@@ -1701,8 +1734,6 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
         w::btn("↶", Kind::Ghost, v.can_undo.then_some(FlMsg::Undo)),
         w::btn("↷", Kind::Ghost, v.can_redo.then_some(FlMsg::Redo)),
         Space::new().width(Length::Fixed(space(3))),
-        text_input("开始", &v.start).on_input(FlMsg::Start).size(t::s_small()).width(Length::Fixed(96.0)),
-        text_input("结束", &v.end).on_input(FlMsg::End).size(t::s_small()).width(Length::Fixed(96.0)),
         t::caption("倍速"),
         text_input("3600", &v.pace).on_input(FlMsg::Pace).size(t::s_small()).width(Length::Fixed(64.0)),
         if v.running { w::btn("■ 停止", Kind::Standard, Some(FlMsg::Stop)) } else { w::btn("▶ 运行", Kind::Primary, idle.then_some(FlMsg::Run)) },
@@ -1745,7 +1776,7 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
     };
     sf::bench_note(Some(t0.elapsed().as_secs_f32() * 1000.0), None);
     let title = format!("策略画布 · {}{}", v.graph.name, if v.dirty { " *" } else { "" });
-    let mut layers = stack![canvas::Canvas::new(program).width(Length::Fill).height(Length::Fill)];
+    let mut layers = stack![canvas::Canvas::new(program).width(Length::Fill).height(Length::Fill), data_badge(&v)];
     if let Some(q) = &v.quick {
         // 弹在松手的地方（世界坐标 → 画布内的屏幕坐标）；用占位把它推过去
         let (x, y) = ((q.x * v.zoom + v.pan.0).max(0.0), (q.y * v.zoom + v.pan.1).max(0.0));
