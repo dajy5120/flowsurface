@@ -128,7 +128,19 @@ impl Chart for KlineChart {
 
     fn drawing(&self) -> Option<(String, crate::ws::drawing::geometry::DrawView)> {
         let st = self.state();
-        Some((crate::ws::drawing::symbol_key(&st.ticker_info.ticker), st.draw_view(self.interval_keys())?))
+        let ohlc = |k: &exchange::Kline| [k.open.units, k.high.units, k.low.units, k.close.units];
+        // 看得见的 K 线（磁吸用）：按时间的图取视野内那几根；按逐笔的图取最近 2000 根
+        let bars: Vec<(u64, [i64; 4])> = match &self.data_source {
+            PlotData::TimeBased(ts) => {
+                let (lo, hi) = st.visible_interval_range();
+                ts.datapoints.range(UnixMs(lo)..=UnixMs(hi)).map(|(t, dp)| (t.as_u64(), ohlc(&dp.kline))).collect()
+            }
+            PlotData::TickBased(ta) => {
+                let skip = ta.datapoints.len().saturating_sub(2000);
+                ta.datapoints.iter().skip(skip).map(|dp| (dp.kline.time.as_u64(), ohlc(&dp.kline))).collect()
+            }
+        };
+        Some((crate::ws::drawing::symbol_key(&st.ticker_info.ticker), st.draw_view(self.interval_keys(), bars)?))
     }
 }
 
@@ -1214,6 +1226,15 @@ impl canvas::Program<Message> for KlineChart {
         match interaction {
             Interaction::Panning { .. } | Interaction::DrawDrag => mouse::Interaction::Grabbing,
             Interaction::Zoomin { .. } => mouse::Interaction::ZoomIn,
+            // 画线（docs/46 G1）：没选工具时悬停在对象上 = 手形，提示可以点
+            Interaction::None
+                if crate::ws::drawing::tool().is_none()
+                    && let Some(p) = cursor.position_in(bounds)
+                    && let Some((symbol, v)) = self.drawing()
+                    && crate::ws::drawing::hovering(&symbol, &v, p) =>
+            {
+                mouse::Interaction::Pointer
+            }
             Interaction::None | Interaction::Ruler { .. } | Interaction::DrawPlace => {
                 if cursor.is_over(bounds) {
                     mouse::Interaction::Crosshair

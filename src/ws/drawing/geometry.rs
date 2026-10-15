@@ -31,6 +31,10 @@ pub struct DrawView {
     pub cell_h: f32,
     /// 放锚点时价格取整到的最小变动价位（units）：合约的最小价位，不是合并之后的格子
     pub snap: i64,
+    /// 这张图的周期类别（`model::tf_cat`）：对象按它决定显不显示
+    pub cat: &'static str,
+    /// 看得见的 K 线：(开始时间, [开, 高, 低, 收])。磁吸用；热力图没有
+    pub bars: Vec<(u64, [i64; 4])>,
 }
 
 /// 命中了什么。
@@ -111,6 +115,22 @@ impl DrawView {
         let wx = (pt.x - c.x) / s - self.translation.x;
         let wy = (pt.y - c.y) / s - self.translation.y;
         Anchor { t: self.time_at(wx), p: self.price_at(wy) }
+    }
+
+    /// 磁吸（G1）：锚点的时间落在某根 K 线上时，价格换成那根的开 / 高 / 低 / 收里离光标最近的一个。
+    #[must_use]
+    pub fn magnet(&self, a: Anchor, cursor: Point) -> Anchor {
+        let Some((_, ohlc)) = self.bars.iter().find(|(t, _)| *t == a.t) else { return a };
+        let best = ohlc
+            .iter()
+            .min_by(|x, y| {
+                let dx = (self.to_screen(Anchor { t: a.t, p: **x }).y - cursor.y).abs();
+                let dy = (self.to_screen(Anchor { t: a.t, p: **y }).y - cursor.y).abs();
+                dx.total_cmp(&dy)
+            })
+            .copied()
+            .unwrap_or(a.p);
+        Anchor { t: a.t, p: best }
     }
 
     /// 一个锚点挪动屏幕上的 `delta` 之后（再吸附）。拖整体时每个锚点各挪一份。
@@ -269,6 +289,8 @@ mod tests {
             tick: 10,
             cell_h: 4.0,
             snap: 10,
+            cat: "min",
+            bars: Vec::new(),
         }
     }
 
@@ -285,6 +307,22 @@ mod tests {
         let v2 = DrawView { scaling: 2.0, translation: Vector::new(30.0, -12.0), ..time_view() };
         assert_eq!(v2.anchor_at(v2.to_screen(a)), a);
         assert_eq!(v2.shift(a, Vector::new(20.0, 0.0)), Anchor { t: 600_000, p: 9_950 }, "缩放 2 倍时 20 像素 = 一根");
+        // 最小变动价位比格子细：取整到最小价位
+        let fine = DrawView { snap: 1, ..time_view() };
+        assert_eq!(fine.anchor_at(Point::new(393.0, 221.0)).p, 9_948);
+    }
+
+    #[test]
+    fn magnet_snaps_to_the_nearest_of_open_high_low_close() {
+        let v = DrawView { bars: vec![(540_000, [9_960, 10_000, 9_900, 9_930])], ..time_view() };
+        // 光标在 y = 205（价位 9 987.5）附近：最近的是高 10 000（y = 200）
+        let a = v.anchor_at(Point::new(390.0, 205.0));
+        assert_eq!(v.magnet(a, Point::new(390.0, 205.0)), Anchor { t: 540_000, p: 10_000 });
+        // 光标靠下：低 9 900（y = 240）
+        assert_eq!(v.magnet(a, Point::new(390.0, 236.0)).p, 9_900);
+        // 没有 K 线的时刻不动
+        let b = Anchor { t: 600_000, p: 9_950 };
+        assert_eq!(v.magnet(b, Point::new(400.0, 200.0)), b);
     }
 
     #[test]

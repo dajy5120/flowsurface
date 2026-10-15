@@ -129,6 +129,8 @@ pub enum Event {
     TardisReplayInteraction(crate::ws::tardis_replay::TardisReplayMsg),
     /// Tardis 历史面板交互（docs/20 §9）：选源/类型/窗口 + 加载。
     TardisBoardInteraction(crate::ws::tardis_board::TardisBoardMsg),
+    /// 图表绘图（docs/46 G1）：检查器「画线」一节的操作。状态是全局的（按品种），与 pane 无关。
+    Drawing(crate::ws::drawing::DrawMsg),
     PmReplayInteraction(crate::ws::pm_replay::PmReplayMsg),
     /// Factory 面板交互（docs/20 §26）：nightly 手动启停。
     FactoryInteraction(crate::ws::factory::FactoryMsg),
@@ -1506,6 +1508,11 @@ impl State {
                     let base = chart::view(chart, indicators, timezone).map(move |message| {
                         Message::PaneEvent(id, Event::ChartInteraction(message))
                     });
+                    // 画线（docs/46 G1）：选中对象旁的小操作条叠在图上
+                    let base = match chart::drawing_overlay(chart, is_focused) {
+                        Some(bar) => iced::widget::stack![base, bar.map(move |m| Message::PaneEvent(id, Event::Drawing(m)))].into(),
+                        None => base,
+                    };
                     let settings_modal = || {
                         heatmap_cfg_view(
                             chart.visual_config(),
@@ -1613,9 +1620,14 @@ impl State {
                         )
                         .map(move |m| Message::PaneEvent(id, Event::KlineTable(m)))
                     } else {
-                        chart::view(chart, indicators, timezone).map(move |message| {
+                        let base = chart::view(chart, indicators, timezone).map(move |message| {
                             Message::PaneEvent(id, Event::ChartInteraction(message))
-                        })
+                        });
+                        // 画线（docs/46 G1）：选中对象旁的小操作条叠在图上
+                        match chart::drawing_overlay(chart, is_focused) {
+                            Some(bar) => iced::widget::stack![base, bar.map(move |m| Message::PaneEvent(id, Event::Drawing(m)))].into(),
+                            None => base,
+                        }
                     };
                     let settings_modal = || {
                         kline_cfg_view(
@@ -1979,6 +1991,7 @@ impl State {
                 // 进程级静态里，与 pane 无关——同一份口径对所有雷达 pane 生效）。
                 crate::ws::radar::handle(m);
             }
+            Event::Drawing(m) => crate::ws::drawing::handle(m),
             Event::TardisBoardInteraction(m) => {
                 // Tardis 历史面板（docs/20 §9）：改选择 + 副作用（调 Python 生成面板 JSON）。
                 if let Content::TardisBoard(tb) = &mut self.content {

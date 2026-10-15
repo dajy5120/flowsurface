@@ -569,6 +569,8 @@ pub struct AxisLabelsY<'a> {
     pub cell_height: f32,
     pub basis: Basis,
     pub chart_bounds: Rectangle,
+    /// 画线的价位（docs/46 G1）：(价格, 线的颜色 RGBA)——水平线与选中对象的锚点
+    pub marks: Vec<(f32, [u8; 4])>,
 }
 
 impl AxisLabelsY<'_> {
@@ -692,6 +694,25 @@ impl canvas::Program<Message> for AxisLabelsY<'_> {
                 palette.background.base.text,
                 Some(self.decimals),
             );
+
+            // 画线价位（docs/46 G1）：背景是线的颜色，字色按背景取对比色
+            for (price, rgba) in &self.marks {
+                if *price < lowest || *price > highest {
+                    continue;
+                }
+                let bg = crate::ui::chart::drawing_color(*rgba);
+                let y_pos = bounds.height - ((price - lowest) / range * bounds.height);
+                all_labels.push(AxisLabel::Y {
+                    bounds: calc_label_rect(y_pos, 1, text_size, bounds),
+                    value_label: LabelContent {
+                        content: format!("{:.*}", self.decimals, price),
+                        background_color: Some(bg),
+                        text_color: crate::ui::pal::on(bg),
+                        text_size: crate::style::text_size::BODY,
+                    },
+                    timer_label: None,
+                });
+            }
 
             // Last price (priority 2)
             if let Some(label) = self.last_price {

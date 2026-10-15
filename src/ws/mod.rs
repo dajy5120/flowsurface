@@ -20,6 +20,7 @@ pub mod strategy_center_view;
 pub mod strategy_layers;
 pub mod strategy_flow;
 pub mod drawing;
+pub mod drawing_view;
 pub mod strategy_layers_view;
 pub mod strategy_flow_view;
 pub mod ofms_lab;

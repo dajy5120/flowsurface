@@ -141,7 +141,7 @@ fn canvas_interaction<T: Chart>(
                         && !matches!(interaction, Interaction::Ruler { .. })
                     {
                         if crate::ws::drawing::tool().is_some() {
-                            crate::ws::drawing::place(symbol, view.anchor_at(p));
+                            crate::ws::drawing::place_at(symbol, view, p);
                             *interaction = if crate::ws::drawing::placing(symbol).is_some() {
                                 Interaction::DrawPlace
                             } else {
@@ -579,6 +579,7 @@ pub fn view<'a, T: Chart>(
     }
 
     let state = chart.state();
+    let drawing = chart.drawing();
 
     let axis_labels_x = Canvas::new(AxisLabelsX {
         labels_cache: &state.cache.x_labels,
@@ -638,6 +639,15 @@ pub fn view<'a, T: Chart>(
             cell_height: state.cell_height,
             basis: state.basis,
             chart_bounds: state.bounds,
+            marks: drawing
+                .as_ref()
+                .map(|(symbol, v)| {
+                    crate::ws::drawing::axis_marks(symbol, v.cat)
+                        .into_iter()
+                        .map(|(p, c)| (Price::from_units(p).to_f32_lossy(), c))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
         .width(Length::Fill)
         .height(Length::Fill);
@@ -688,6 +698,27 @@ pub fn view<'a, T: Chart>(
     ]
     .padding(padding::left(1).right(1).bottom(1))
     .into()
+}
+
+/// 画线（docs/46 G1）：选中面板上，选中对象旁浮出的小操作条，叠在 [`view`] 上方（坐标与画布同一个原点）。
+/// 没有选中对象、对象在这张图上不显示、不是选中面板时为 `None`。
+pub fn drawing_overlay<'a, T: Chart>(chart: &T, focused: bool) -> Option<Element<'a, crate::ws::drawing::DrawMsg>> {
+    if !focused || chart.is_empty() {
+        return None;
+    }
+    let (symbol, v) = chart.drawing()?;
+    let d = crate::ws::drawing::selected_drawing(&symbol).filter(|d| !d.hidden && d.shown_on(v.cat))?;
+    let at = d.anchors.first().map(|a| v.to_screen(*a)).unwrap_or_default();
+    let x = at.x.clamp(4.0, (v.size.width - 340.0).max(4.0));
+    let y = if at.y > 44.0 { at.y - 40.0 } else { (at.y + 16.0).min((v.size.height - 34.0).max(0.0)) };
+    let bar = crate::ws::drawing_view::floating(&symbol, &d);
+    Some(
+        column![
+            iced::widget::Space::new().height(Length::Fixed(y.max(0.0))),
+            row![iced::widget::Space::new().width(Length::Fixed(x)), iced::widget::opaque(bar)]
+        ]
+        .into(),
+    )
 }
 
 pub trait PlotConstants {
@@ -941,14 +972,17 @@ impl ViewState {
     }
 
     /// 画线的坐标换算（docs/46 §3.2）：与本图绘制同一个变换。按逐笔的图要给各根 K 线的开始时间（按先后），
-    /// 一根都没有时不能画线。
-    pub fn draw_view(&self, tick_times: Option<Vec<u64>>) -> Option<crate::ws::drawing::geometry::DrawView> {
+    /// 一根都没有时不能画线。`bars`：看得见的 K 线（开始时间, [开高低收] 定点），磁吸用；没有就空。
+    pub fn draw_view(&self, tick_times: Option<Vec<u64>>, bars: Vec<(u64, [i64; 4])>) -> Option<crate::ws::drawing::geometry::DrawView> {
         use crate::ws::drawing::geometry::{DrawView, XMode};
-        let x = match self.basis {
-            Basis::Time(tf) => XMode::Time { latest: self.latest_x, interval_ms: tf.to_milliseconds(), cell_w: self.cell_width },
+        let (x, cat) = match self.basis {
+            Basis::Time(tf) => (
+                XMode::Time { latest: self.latest_x, interval_ms: tf.to_milliseconds(), cell_w: self.cell_width },
+                crate::ws::drawing::model::tf_cat(Some(tf.to_milliseconds())),
+            ),
             Basis::Tick(_) => {
                 let times = tick_times.filter(|t| !t.is_empty())?;
-                XMode::Tick { times, cell_w: self.cell_width }
+                (XMode::Tick { times, cell_w: self.cell_width }, crate::ws::drawing::model::tf_cat(None))
             }
         };
         let min_step: PriceStep = self.ticker_info.min_ticksize.into();
@@ -961,7 +995,24 @@ impl ViewState {
             tick: self.effective_tick_units(),
             cell_h: self.cell_height,
             snap: min_step.units.max(1),
+            cat,
+            bars,
         })
+    }
+
+    /// 看得见的时间范围（磁吸取 K 线用）：按时间的图是毫秒，按逐笔的图是根序号。
+    pub fn visible_interval_range(&self) -> (u64, u64) {
+        self.interval_range(&self.visible_region(self.bounds.size()))
+    }
+
+    /// 画线的品种键（docs/46）：同一品种的所有图共用一套画线。
+    pub fn drawing_symbol(&self) -> String {
+        crate::ws::drawing::symbol_key(&self.ticker_info.ticker)
+    }
+
+    /// 价格的显示小数位。
+    pub fn price_decimals(&self) -> usize {
+        self.decimals
     }
 
     /// 绘图层（docs/46）：画线版本变了就把这一层与十字线层清掉重画。
@@ -975,6 +1026,7 @@ impl ViewState {
         if crate::ws::drawing::changed_since(&self.drawings_seen) {
             self.cache.drawings.clear();
             self.cache.crosshair.clear();
+            self.cache.y_labels.clear(); // 价格轴上的画线价位
         }
         Some(self.cache.drawings.draw(renderer, size, |frame| crate::ws::drawing::draw_layer(frame, view, symbol)))
     }

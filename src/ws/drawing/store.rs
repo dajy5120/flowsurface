@@ -178,6 +178,20 @@ impl Db {
         (out, errs)
     }
 
+    /// 读一项设置（`meta` 表；绘图的偏好存在 `prefs`）。
+    #[must_use]
+    pub fn get_meta(&self, key: &str) -> Option<String> {
+        let c = self.open().ok()?;
+        c.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get::<_, String>(0)).ok()
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<(), String> {
+        let c = self.open().map_err(|e| e.to_string())?;
+        c.execute("INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [key, value])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// 写一批变化（一个事务）。
     pub fn write(&self, symbol: &str, fx: &[Effect]) -> Result<(), String> {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
@@ -246,6 +260,9 @@ mod tests {
         let (got, errs) = db.load("BINANCE:BTCUSDT");
         assert!(errs.is_empty());
         assert_eq!(got, vec![a2.clone(), b.clone()], "改过的对象留在原来的位置（先后不变）");
+        db.set_meta("prefs", "{\"magnet\":true}").unwrap();
+        db.set_meta("prefs", "{\"magnet\":false}").unwrap();
+        assert_eq!((db.get_meta("prefs").as_deref(), db.get_meta("format").as_deref(), db.get_meta("nope")), (Some("{\"magnet\":false}"), Some("1"), None));
         db.write("BINANCE:BTCUSDT", &[Effect::Remove(b.id.clone())]).unwrap();
         let c = rusqlite::Connection::open(dir.join("drawings.sqlite")).unwrap();
         c.execute("INSERT INTO drawings VALUES ('BINANCE:BTCUSDT', 'bad', '{not json', 0)", []).unwrap();

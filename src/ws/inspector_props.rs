@@ -91,6 +91,21 @@ impl Drop for PartScope {
     }
 }
 
+/// 支持画线的图（docs/46）：(品种键, 价格小数位)。K 线（蜡烛 / 足迹）与热力图。
+fn drawing_target(content: &Content) -> Option<(String, usize)> {
+    use crate::chart::Chart;
+    match content {
+        Content::Kline { chart: Some(c), .. } => Some((c.state().drawing_symbol(), c.state().price_decimals())),
+        Content::Heatmap { chart: Some(c), .. } => Some((c.state().drawing_symbol(), c.state().price_decimals())),
+        _ => None,
+    }
+}
+
+/// 这个面板能不能画线（顶部工具栏据此显示「绘图」组）。
+pub fn supports_drawing(content: &Content) -> bool {
+    drawing_target(content).is_some()
+}
+
 /// 检查器「属性」页：选中面板的可编辑设置。没有的面板返回 `None`。
 ///
 /// 返回的元素发 pane 事件，调用方负责包成送回那个 pane 的消息。
@@ -170,6 +185,10 @@ pub fn view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
             }
             b.width(Length::Fill).into()
         }),
+        // 图表：画线（docs/46 G1）——选中对象的属性与这个品种的对象树
+        Content::Kline { .. } | Content::Heatmap { .. } => {
+            drawing_target(content).map(|(sym, dec)| super::drawing_view::inspector(&sym, dec).map(Event::Drawing))
+        }
         _ => None,
     }
 }
@@ -323,6 +342,10 @@ pub fn has_props(content: &Content) -> bool {
         | Content::StrategyFlow
         | Content::Calendar => true,
         Content::Orders => super::orders_view::selected_detail().is_some(),
+        // 图表：选中了一个画线对象才自动展开（平时看图不挤主区，docs/42）
+        Content::Kline { .. } | Content::Heatmap { .. } => {
+            drawing_target(content).is_some_and(|(sym, _)| super::drawing::selected(&sym).is_some())
+        }
         _ => false,
     }
 }
@@ -352,7 +375,7 @@ pub fn about(content: &Content) -> Option<String> {
         Content::WealthSpring(data::layout::pane::WsPaneMode::SelfChart) => "自有数据图：把任意 CSV / JSON 数据画成自适应折线（横轴时间或数值按数据自动判定），与策略运行无关，纯展示。\n\n数据文件在「数据」页选（选择文件… 或直接填路径），选过的会记住；文件改了自动重读。",
         Content::Orders => "订单：活动挂单与成交明细；选中一行，「属性」页列出它的全部字段。",
         Content::Kline { .. } | Content::Heatmap { .. } | Content::ShaderHeatmap { .. } | Content::TimeAndSales(_) | Content::Ladder(_) | Content::Comparison(_) => {
-            "行情图表：标的与周期在顶部工具栏改（作用于选中的这张图，开了 ⛓ 联动时同组一起改）。指标与显示设置在面板标题栏的齿轮里。\n\n同页按时间轴的图会联动十字线：光标放在一张上，其他图在同一时刻画竖线。"
+            "行情图表：标的与周期在顶部工具栏改（作用于选中的这张图，开了 ⛓ 联动时同组一起改）。指标与显示设置在面板标题栏的齿轮里。\n\n同页按时间轴的图会联动十字线：光标放在一张上，其他图在同一时刻画竖线。\n\n画线（docs/46）：顶部工具栏「绘图」选工具（或光标在图上按 Alt+T 趋势线、Alt+H 水平线、Alt+V 垂直线、Alt+R 射线、Alt+Shift+R 矩形）；点线选中、拖动，Delete 删除，Ctrl+Z 撤销。画线跟着品种走：同一品种的所有图、所有周期共用一套，重启照旧。选中的对象在「属性」页改颜色、线型、精确价格与时间、在哪类周期上显示，下面是这个品种的对象树。"
         }
         _ => return None,
     };

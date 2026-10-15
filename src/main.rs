@@ -259,6 +259,8 @@ struct Flowsurface {
 enum Message {
     /// 页面操作（docs/41 B 期）：新建 / 复制 / 改名 / 排序 / 关闭 / 模板 / 锁定
     Page(ws::pages::PageMsg),
+    /// 图表绘图（docs/46 G1）：工具栏「绘图」组与它的菜单
+    Draw(ws::drawing::DrawMsg),
     Sidebar(dashboard::sidebar::Message),
     MarketWsEvent(exchange::Event),
     WsActiveRun(Option<ws::active_run::ActiveRun>), // WealthSpring 三态切换
@@ -740,6 +742,7 @@ impl Flowsurface {
                 }
             }
             Message::Page(m) => return self.page_action(m),
+            Message::Draw(m) => ws::drawing::handle(m),
             Message::SpecimenShot(shot) => {
                 // 焦点顺序表（docs/35 §13.3「每个工作区一份焦点顺序表」）：F6 / Ctrl 1–9 走的面板次序
                 if let Some(sp) = &self.specimen {
@@ -1334,6 +1337,20 @@ impl Flowsurface {
                     |uid| Message::Layouts(modal::layout_manager::Message::SelectActive(uid)),
                     vec![],
                 );
+                // 绘图菜单（docs/46 G1）：与页面菜单同一种做法——盖在内容上方的卡片
+                let dashboard_view: Element<'_, Message> = if ws::drawing::menu_open() {
+                    let card = container(ws::drawing_view::menu().map(Message::Draw))
+                        .padding(ui::metrics::space(3))
+                        .width(iced::Length::Fill)
+                        .style(|t: &iced::Theme| container::Style {
+                            background: Some(iced::Background::Color(t.extended_palette().background.weak.color)),
+                            border: iced::Border { color: ui::pal::accent(), width: 1.0, radius: 4.0.into() },
+                            ..Default::default()
+                        });
+                    iced::widget::stack![dashboard_view, column![card]].into()
+                } else {
+                    dashboard_view
+                };
                 let body: Element<'_, Message> = if self.page_menu {
                     // 页面菜单：盖在内容上方的下拉卡片（不透明），点「⋯ 页面」收起
                     let card = container(self.page_toolbar()).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
@@ -1836,6 +1853,10 @@ impl Flowsurface {
                 }
                 if let Some((v, e)) = spec.basis {
                     r = r.push(tool_pick("周期", v, Some(ev(e)), false));
+                }
+                // 画线（docs/46 G1）：当前工具（点开菜单）+ 收藏的工具
+                if ws::inspector_props::supports_drawing(&st.content) {
+                    r = r.push(ws::drawing_view::toolbar().map(Message::Draw));
                 }
                 for (label, on, e) in spec.actions {
                     r = r.push(ui::widgets::btn(label, if on { ui::widgets::Kind::Standard } else { ui::widgets::Kind::Primary }, Some(ev(e))));

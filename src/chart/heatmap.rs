@@ -113,7 +113,7 @@ impl Chart for HeatmapChart {
 
     fn drawing(&self) -> Option<(String, crate::ws::drawing::geometry::DrawView)> {
         let st = self.state();
-        Some((crate::ws::drawing::symbol_key(&st.ticker_info.ticker), st.draw_view(self.interval_keys())?))
+        Some((crate::ws::drawing::symbol_key(&st.ticker_info.ticker), st.draw_view(self.interval_keys(), Vec::new())?))
     }
 }
 
@@ -934,6 +934,15 @@ impl canvas::Program<Message> for HeatmapChart {
         match interaction {
             Interaction::Panning { .. } | Interaction::DrawDrag => mouse::Interaction::Grabbing,
             Interaction::Zoomin { .. } => mouse::Interaction::ZoomIn,
+            // 画线（docs/46 G1）：没选工具时悬停在对象上 = 手形，提示可以点
+            Interaction::None
+                if crate::ws::drawing::tool().is_none()
+                    && let Some(p) = cursor.position_in(bounds)
+                    && let Some((symbol, v)) = self.drawing()
+                    && crate::ws::drawing::hovering(&symbol, &v, p) =>
+            {
+                mouse::Interaction::Pointer
+            }
             Interaction::None | Interaction::Ruler { .. } | Interaction::DrawPlace => {
                 if cursor.is_over(bounds) {
                     return mouse::Interaction::Crosshair;
