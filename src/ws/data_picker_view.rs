@@ -201,7 +201,10 @@ pub fn view<'a>(p: &DataPick, opts: &PickOpts) -> El<'a> {
                             if opts.vendors.as_ref().is_some_and(|only| !only.contains(&k)) {
                                 continue;
                             }
-                            v.push(chip(name.into(), p.vendor.as_deref() == Some(k), Some(DataPickMsg::Vendor(k.into()))));
+                            // 宿主要的数据这家根本给不了：置灰并说明（docs/45 §21 D2）
+                            let lacks = opts.require.as_ref().map(|r| r.vendor_lacks(k)).unwrap_or_default();
+                            let c = chip(name.into(), p.vendor.as_deref() == Some(k), lacks.is_empty().then(|| DataPickMsg::Vendor(k.into())));
+                            v.push(if lacks.is_empty() { c } else { with_tip(c, format!("{name} 没有{}", lacks.join("、"))) });
                         }
                         v.push(dim("两家各走自己的接口读原始文件，不互相转换格式".into()));
                         b = b.push(line(v));
@@ -346,7 +349,17 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
     let dates = sc.dates(sym);
     let latest = dates.last().cloned();
     let n = dates.len();
-    let dchoices: Vec<Choice> = dates.into_iter().rev().map(|d| Choice { key: d.clone(), label: d }).collect();
+    // 缺要的数据的日子在下拉里标出来（还能选，选了会提示，运行前拦下）
+    let req = opts.require.as_ref();
+    let vendor = p.local_key().unwrap_or("");
+    let dchoices: Vec<Choice> = dates
+        .into_iter()
+        .rev()
+        .map(|d| {
+            let lack = req.map(|r| r.day_lacks(vendor, &sc.types(sym, &d))).unwrap_or_default();
+            Choice { label: if lack.is_empty() { d.clone() } else { format!("{d} · 缺{}", lack.join("、")) }, key: d }
+        })
+        .collect();
     let mut v = vec![label("时间"), pick(dchoices.clone(), p.date.as_deref(), format!("选日期（{n}）"), 130.0, DataPickMsg::Date)];
     if opts.range {
         // 一段日期：结束日只能选在起始日之后；不选 = 只跑那一天
@@ -382,6 +395,20 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
         }));
     }
     b = b.push(line(v));
+    if let Some(cov) = p.coverage(opts) {
+        if cov.days == 0 {
+            *warn = Some(("所选日期里本地没有这个标的的数据".into(), crate::ui::pal::bad()));
+        } else if !cov.missing.is_empty() {
+            let mut lack: Vec<&str> = cov.missing.iter().flat_map(|(_, l)| l.iter().map(String::as_str)).collect();
+            lack.sort_unstable();
+            lack.dedup();
+            let days: Vec<&str> = cov.missing.iter().take(4).map(|(d, _)| d.as_str()).collect();
+            *warn = Some((
+                format!("{} 天里有 {} 天缺{}（{}{}）：运行前会被拦下", cov.days, cov.missing.len(), lack.join("、"), days.join("、"), if cov.missing.len() > 4 { " …" } else { "" }),
+                crate::ui::pal::bad(),
+            ));
+        }
+    }
     // 常用时段 + 换算后的绝对范围（UTC 与北京时间）
     if opts.time == TimeMode::Window {
         b = b.push(crate::ui::widgets::time_range(p.date.as_deref(), &p.start, p.minutes, DataPickMsg::Window));
@@ -396,6 +423,11 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
             let types = if opts.range { sc.types_in(sym, d, p.end.as_deref().unwrap_or(d)) } else { sc.types(sym, d) };
             let mut v = vec![label("数据类型")];
             for t in &types {
+                // 必需的类型（满足宿主要的数据）锁住，不能取消
+                if req.is_some_and(|r| r.needs_type(vendor, t)) {
+                    v.push(with_tip(chip(format!("☑ {t} · 必需"), true, None), "这张图要用它，取消不了".into()));
+                    continue;
+                }
                 let on = !p.excluded.contains(t);
                 v.push(chip(format!("{} {t}", if on { "☑" } else { "☐" }), on, Some(DataPickMsg::ToggleType(t.clone()))));
             }

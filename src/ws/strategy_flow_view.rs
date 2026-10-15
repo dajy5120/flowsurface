@@ -1207,7 +1207,7 @@ fn data_section<'a>(v: &View, p: &Palette) -> Element<'a, FlMsg> {
     } else {
         col = col.push(row![w::btn("↩ 用 Dukascopy 报价", Kind::Ghost, Some(FlMsg::UseDukascopy))]);
     }
-    col = col.push(super::data_picker_view::view(&v.pick, &sf::pick_opts()).map(FlMsg::Data));
+    col = col.push(super::data_picker_view::view(&v.pick, &sf::pick_opts(&v.needs, v.palette.as_ref())).map(FlMsg::Data));
     col.into()
 }
 

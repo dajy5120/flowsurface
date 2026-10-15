@@ -28,6 +28,7 @@ pub fn pick_opts() -> PickOpts {
         local_only: true,
         hide_types: true,
         range: false,
+        require: None,
     }
 }
 

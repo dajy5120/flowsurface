@@ -123,6 +123,10 @@ pub struct Palette {
     pub settings_params: Vec<ParamDef>,
     /// 新建时可选的起步图（docs/45 §4.6）
     pub templates: Vec<Template>,
+    /// 抽象数据的名字（price / book / trades → 中文），数据选择器置灰用（docs/45 §21 D2）
+    pub data_kinds: BTreeMap<String, String>,
+    /// 数据商 → 类型 → 满足的抽象数据（`datareq.VENDOR_TYPES`）
+    pub vendor_types: BTreeMap<String, BTreeMap<String, Vec<String>>>,
 }
 
 /// 一份模板：只是起点，新建出来的图与它不保持关联。
@@ -1788,9 +1792,14 @@ fn record(g: &mut St, tag: &str) {
 /// 换了一张图：选择、撤销栈、弹窗都清掉。
 // ── 数据（docs/45 §21）：共用数据选择组件 ⇄ 图的 `[backtest]` ──────────────────────
 
-/// 画布对数据选择组件的要求：计算用途、本地已购数据（B5 本地自有数据在 D3）、一段日期 + 每日时段、列出数据类型。
+/// 画布对数据选择组件的要求：计算用途、本地已购数据（B5 本地自有数据在 D3）、一段日期 + 每日时段、列出数据类型；
+/// 检查过的图带上它要的数据（D2）——给不了的数据商置灰、缺数据的日子标出、必需的类型锁住。
 #[must_use]
-pub fn pick_opts() -> PickOpts {
+pub fn pick_opts(needs: &Needs, pal: Option<&Palette>) -> PickOpts {
+    let require = pal.filter(|_| !needs.kinds.is_empty()).map(|p| dp::Require {
+        kinds: needs.kinds.iter().map(|k| (k.clone(), p.data_kinds.get(k).cloned().unwrap_or_else(|| Needs::label(k).to_string()))).collect(),
+        provides: p.vendor_types.clone(),
+    });
     PickOpts {
         purpose: Purpose::Compute,
         sources: Some(vec![BSource::Purchased]),
@@ -1799,6 +1808,7 @@ pub fn pick_opts() -> PickOpts {
         local_only: true,
         hide_types: false,
         range: true,
+        require,
     }
 }
 
@@ -1898,7 +1908,7 @@ fn sync_pick(g: &mut St) {
 
 /// 选择器选完了 → 写回 `[backtest]`（其余项如手续费照留）。没变就不记撤销、不算改动。
 fn write_pick(g: &mut St) {
-    let Some(Selection::Local { source, symbol, date, end, window, types, .. }) = g.pick.selection(&pick_opts()) else {
+    let Some(Selection::Local { source, symbol, date, end, window, types, .. }) = g.pick.selection(&pick_opts(&g.needs, g.palette.as_ref())) else {
         return;
     };
     let mut bt = g.graph.backtest.as_object().cloned().unwrap_or_default();
@@ -1928,10 +1938,15 @@ fn reset_editing(g: &mut St) {
     g.undo_tag = None;
     g.quick = None;
     g.tables.clear();
-    g.touched = None;
     g.envelope_hit = None;
     g.focus = None;
     g.find_i = 0;
+    g.needs = Needs::default();
+    // 打开就检查一次（不算改动）：问题清单、这张图要的数据（数据选择器按它置灰，docs/45 §21 D2）都要现成的
+    g.touched = (g.graph.nodes.len() > 1).then(Instant::now);
+    if g.touched.is_some() && !std::mem::replace(&mut g.auto_on, true) {
+        auto_check();
+    }
 }
 
 /// 撤销 / 重做之后：输入框里的原文作废（照图上的值重显），选择里去掉已经不在的节点。

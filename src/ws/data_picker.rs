@@ -403,6 +403,52 @@ pub enum TimeMode {
     Window,
 }
 
+/// 宿主要的数据（docs/45 §21 D2）：抽象类，以及各数据商哪种类型满足哪几类。
+/// 组件按它置灰给不了的数据商、标出缺数据的日子、锁住必需的类型。对应表由宿主给（策略画布取自 `datareq`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Require {
+    /// (抽象类键, 显示名)
+    pub kinds: Vec<(String, String)>,
+    /// 数据商 → 类型（数据商原名）→ 它满足的抽象类
+    pub provides: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+}
+
+impl Require {
+    fn lacking(&self, got: &BTreeSet<&str>) -> Vec<String> {
+        self.kinds.iter().filter(|(k, _)| !got.contains(k.as_str())).map(|(_, l)| l.clone()).collect()
+    }
+
+    /// 这家数据商**无论哪天**都给不了的类（显示名）。对应表里没有这家 = 不知道，不拦。
+    #[must_use]
+    pub fn vendor_lacks(&self, vendor: &str) -> Vec<String> {
+        let Some(ts) = self.provides.get(vendor) else { return Vec::new() };
+        self.lacking(&ts.values().flatten().map(String::as_str).collect())
+    }
+
+    /// 有这些类型的一天还缺哪些类（显示名）。
+    #[must_use]
+    pub fn day_lacks(&self, vendor: &str, types: &[String]) -> Vec<String> {
+        let Some(ts) = self.provides.get(vendor) else { return Vec::new() };
+        self.lacking(&types.iter().filter_map(|t| ts.get(t)).flatten().map(String::as_str).collect())
+    }
+
+    /// 这个类型满足至少一个要的类（取消不了）。
+    #[must_use]
+    pub fn needs_type(&self, vendor: &str, t: &str) -> bool {
+        self.provides
+            .get(vendor)
+            .and_then(|ts| ts.get(t))
+            .is_some_and(|ks| ks.iter().any(|k| self.kinds.iter().any(|(x, _)| x == k)))
+    }
+}
+
+/// 一段日期的覆盖：有数据的天数，以及缺要的数据的那些天（日, 缺的类）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Coverage {
+    pub days: usize,
+    pub missing: Vec<(String, Vec<String>)>,
+}
+
 /// 宿主对组件的要求。
 #[derive(Debug, Clone, Default)]
 pub struct PickOpts {
@@ -418,6 +464,8 @@ pub struct PickOpts {
     pub hide_types: bool,
     /// 选一段日期（起 → 止），不只是一天。数据类型取这段里每天都有的。
     pub range: bool,
+    /// 宿主要的数据（`None` = 不查）。
+    pub require: Option<Require>,
 }
 
 /// 一个面板的选择。
@@ -724,6 +772,25 @@ impl DataPick {
         }
     }
 
+    /// 所选日期（一段）的覆盖：宿主给了 `require`、扫描好了、选了标的与日期才有。
+    #[must_use]
+    pub fn coverage(&self, opts: &PickOpts) -> Option<Coverage> {
+        let req = opts.require.as_ref()?;
+        let vendor = self.local_key()?;
+        let Some(Load::Ready(sc)) = self.local_scan() else { return None };
+        let (sym, d) = (self.symbol.as_deref()?, self.date.as_deref()?);
+        let end = if opts.range { self.end.as_deref().unwrap_or(d) } else { d };
+        let days = sc.dates_in(sym, d, end);
+        let missing = days
+            .iter()
+            .filter_map(|day| {
+                let lack = req.day_lacks(vendor, &sc.types(sym, day));
+                (!lack.is_empty()).then(|| (day.clone(), lack))
+            })
+            .collect();
+        Some(Coverage { days: days.len(), missing })
+    }
+
     /// 选完了才有结果。
     #[must_use]
     pub fn selection(&self, opts: &PickOpts) -> Option<Selection> {
@@ -758,9 +825,10 @@ impl DataPick {
                     _ => None,
                 };
                 let market = self.market.clone().or_else(|| scanned.as_ref().and_then(|sc| sc.market_of(&symbol)))?;
+                let req = opts.require.as_ref();
                 let types = scanned.map(|sc| sc.types_in(&symbol, &date, &end)).unwrap_or_default()
                 .into_iter()
-                .filter(|t| !self.excluded.contains(t))
+                .filter(|t| !self.excluded.contains(t) || req.is_some_and(|r| r.needs_type(&key, t))) // 必需的取消不了
                 .collect::<Vec<_>>();
                 if types.is_empty() {
                     return None;
@@ -830,6 +898,32 @@ junk\n";
         p.update(DataPickMsg::End("2026-09-09".into()));
         let Some(Selection::Local { end, .. }) = p.selection(&PickOpts::default()) else { panic!() };
         assert_eq!(end, "2026-09-02");
+    }
+
+    #[test]
+    fn 宿主要的数据_置灰数据商_标出缺的日子_锁住必需类型() {
+        let mut provides = BTreeMap::new();
+        provides.insert("databento".to_string(), BTreeMap::from([("mbo".to_string(), vec!["price".to_string(), "book".into(), "trades".into()])]));
+        provides.insert("dukascopy".to_string(), BTreeMap::from([("quotes".to_string(), vec!["price".to_string()])]));
+        let req = Require { kinds: vec![("book".into(), "盘口增量".into()), ("trades".into(), "逐笔成交".into())], provides };
+        assert_eq!(req.vendor_lacks("dukascopy"), ["盘口增量", "逐笔成交"]);
+        assert!(req.vendor_lacks("databento").is_empty() && req.vendor_lacks("recorder").is_empty(), "对应表里没有的不拦");
+        assert_eq!(req.day_lacks("databento", &["trades".into()]), ["盘口增量", "逐笔成交"]);
+        assert!(req.needs_type("databento", "mbo") && !req.needs_type("databento", "trades"));
+        // GCZ6：09-01 只有 mbo（够），把 09-02 的 mbo 拿掉来造一个缺的日子
+        let root = "/覆盖测试";
+        inject_scan("databento", root, "root\t/x\t1\nitem\tfuture\tGCZ6\t2026-09-01\tmbo\nitem\tfuture\tGCZ6\t2026-09-02\ttrades\n");
+        let mut p = DataPick::default();
+        p.preset_local(BSource::Purchased, Some("databento"), "GCZ6", Some("2026-09-01"), Some("2026-09-02"), None);
+        p.root = root.into();
+        let opts = PickOpts { range: true, require: Some(req), ..PickOpts::default() };
+        assert_eq!(p.coverage(&opts), Some(Coverage { days: 2, missing: vec![("2026-09-02".into(), vec!["盘口增量".into(), "逐笔成交".into()])] }));
+        // 必需的类型取消了也还在结果里
+        p.update(DataPickMsg::End("2026-09-01".into()));
+        p.update(DataPickMsg::ToggleType("mbo".into()));
+        let Some(Selection::Local { types, .. }) = p.selection(&opts) else { panic!() };
+        assert_eq!(types, ["mbo"]);
+        assert_eq!(p.coverage(&opts).map(|c| (c.days, c.missing.len())), Some((1, 0)));
     }
 
     #[test]
