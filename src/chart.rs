@@ -709,9 +709,10 @@ pub fn drawing_overlay<'a, T: Chart>(chart: &T, focused: bool) -> Option<Element
     }
     let (symbol, v) = chart.drawing()?;
     let d = crate::ws::drawing::selected_drawing(&symbol).filter(|d| !d.hidden && d.visible_in(v.cat, &v.tf))?;
-    let at = d.anchors.first().map(|a| v.to_screen(*a)).unwrap_or_default();
-    let x = at.x.clamp(4.0, (v.size.width - 340.0).max(4.0));
-    let y = if at.y > 44.0 { at.y - 40.0 } else { (at.y + 16.0).min((v.size.height - 34.0).max(0.0)) };
+    // 放在整个对象的上方（不盖住它自己的标签，如仓位工具的风险收益）；上面放不下就放在下方
+    let bb = crate::ws::drawing::geometry::bbox(&v, &d)?;
+    let x = bb.x.clamp(4.0, (v.size.width - 340.0).max(4.0));
+    let y = if bb.y > 44.0 { bb.y - 40.0 } else { (bb.y + bb.height + 8.0).min((v.size.height - 34.0).max(0.0)) };
     let bar = crate::ws::drawing_view::floating(&symbol, &d);
     Some(
         column![

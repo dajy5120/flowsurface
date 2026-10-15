@@ -144,10 +144,14 @@ impl Chart for KlineChart {
         let mut view = st.draw_view(self.interval_keys(), bars)?;
         // 成交量分布（G4）：这个品种有那种对象才带全部 K 线的（开始, 低, 高, 量）
         if crate::ws::drawing::needs_volume(&symbol) {
-            let row = |k: &exchange::Kline| (k.time.as_u64(), k.low.units, k.high.units, f64::from(k.volume.total().to_f32_lossy()));
+            // 有足迹数据（逐价位买卖量）就带上：成交量分布按价位精确落档
+            let row = |k: &exchange::Kline, fp: &KlineTrades| {
+                let levels = fp.trades.iter().map(|(p, g)| (p.units, f64::from((g.buy_qty + g.sell_qty).to_f32_lossy()))).collect();
+                (k.time.as_u64(), k.low.units, k.high.units, f64::from(k.volume.total().to_f32_lossy()), levels)
+            };
             view.vol = match &self.data_source {
-                PlotData::TimeBased(ts) => ts.datapoints.values().map(|dp| row(&dp.kline)).collect(),
-                PlotData::TickBased(ta) => ta.datapoints.iter().map(|dp| row(&dp.kline)).collect(),
+                PlotData::TimeBased(ts) => ts.datapoints.values().map(|dp| row(&dp.kline, &dp.footprint)).collect(),
+                PlotData::TickBased(ta) => ta.datapoints.iter().map(|dp| row(&dp.kline, &dp.footprint)).collect(),
             };
         }
         Some((symbol, view))

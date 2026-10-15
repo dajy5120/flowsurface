@@ -41,8 +41,8 @@ pub struct DrawView {
     pub decimals: usize,
     /// 合约乘数（仓位工具的估算；现货 / U 本位按 1）
     pub multiplier: f64,
-    /// 成交量分布用的 K 线：(开始时间, 低, 高, 成交量)。只在这个品种有成交量分布对象时才带（G4）
-    pub vol: Vec<(u64, i64, i64, f64)>,
+    /// 成交量分布用的 K 线（`model::VolBar`）。只在这个品种有成交量分布对象时才带（G4）
+    pub vol: Vec<super::model::VolBar>,
 }
 
 /// 命中了什么。
@@ -340,7 +340,7 @@ pub fn prims(v: &DrawView, d: &Drawing) -> Vec<Prim> {
         (Kind::VolProfile, Some(b), _) => {
             // 区间里的 K 线按价位分档（均摊）；横条从左边界往右，最长占区间宽度的 60%
             let (t0, t1) = (d.anchors[0].t.min(d.anchors[1].t), d.anchors[0].t.max(d.anchors[1].t));
-            let bars: Vec<_> = v.vol.iter().filter(|x| x.0 >= t0 && x.0 <= t1).copied().collect();
+            let bars: Vec<_> = v.vol.iter().filter(|x| x.0 >= t0 && x.0 <= t1).cloned().collect();
             let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
             let Some(p) = super::model::volume_profile(&bars, d.rows.unwrap_or(24), d.va.unwrap_or(0.7)) else {
                 return vec![Frame(rect_of(a, b)), Label { at: Point::new(x0, a.y.min(b.y) - 10.0), text: "区间里没有成交量数据".into(), align: Align::Left, boxed: false }];
@@ -394,25 +394,33 @@ pub fn prims(v: &DrawView, d: &Drawing) -> Vec<Prim> {
         }
         (Kind::FibRetrace, Some(b), _) => {
             let (pa, pb) = (d.anchors[0].p, d.anchors[1].p);
-            let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+            let x0 = a.x.min(b.x);
+            let x1 = if d.extend { w } else { a.x.max(b.x) };
             let mut out = vec![Line(a, b, Role::Aux)];
             for r in d.fib_levels() {
                 let p = pb + ((pa - pb) as f64 * r).round() as i64;
                 let y = v.to_screen(Anchor { t: d.anchors[0].t, p }).y;
                 out.push(Line(Point::new(x0, y), Point::new(x1, y), Role::Main));
-                out.push(Label { at: Point::new(x0 - 4.0, y), text: format!("{r} ({})", v.ptext(p)), align: Align::Right, boxed: false });
+                // 标签写在左边；左边放不下（锚点靠左或在视野外）就写在线上方、从图的左边缘起
+                let text = format!("{r} ({})", v.ptext(p));
+                if x0 - 4.0 - label_rect(Point::ORIGIN, &text, Align::Left).width >= 0.0 {
+                    out.push(Label { at: Point::new(x0 - 4.0, y), text, align: Align::Right, boxed: false });
+                } else {
+                    out.push(Label { at: Point::new(x0.max(0.0) + 4.0, y - 8.0), text, align: Align::Left, boxed: false });
+                }
             }
             out
         }
         (Kind::FibExt, Some(b), Some(c)) => {
             let diff = d.anchors[1].p - d.anchors[0].p;
-            let (x0, x1) = (c.x, c.x + (b.x - a.x).abs().max(60.0));
+            let (x0, x1) = (c.x, if d.extend { w } else { c.x + (b.x - a.x).abs().max(60.0) });
             let mut out = vec![Line(a, b, Role::Aux), Line(b, c, Role::Aux)];
             for r in d.fib_levels() {
                 let p = d.anchors[2].p + (diff as f64 * r).round() as i64;
                 let y = v.to_screen(Anchor { t: d.anchors[2].t, p }).y;
                 out.push(Line(Point::new(x0, y), Point::new(x1, y), Role::Main));
-                out.push(Label { at: Point::new(x1 + 4.0, y), text: format!("{r} ({})", v.ptext(p)), align: Align::Left, boxed: false });
+                let (lx, la) = if d.extend { (x0 + 4.0, Align::Left) } else { (x1 + 4.0, Align::Left) };
+                out.push(Label { at: Point::new(lx, y - if d.extend { 8.0 } else { 0.0 }), text: format!("{r} ({})", v.ptext(p)), align: la, boxed: false });
             }
             out
         }
@@ -491,6 +499,44 @@ pub fn tests_view() -> DrawView {
         multiplier: 1.0,
         vol: Vec::new(),
     }
+}
+
+/// 对象在屏幕上的外接框（浮动小条按它放：放在整个对象上方，免得盖住对象自己的标签）。裁到视野里。
+#[must_use]
+pub fn bbox(v: &DrawView, d: &Drawing) -> Option<Rectangle> {
+    let mut pts: Vec<Point> = Vec::new();
+    for pr in prims(v, d) {
+        match pr {
+            Prim::Line(a, b, _) => pts.extend([a, b]),
+            Prim::Area(r, _) | Prim::Frame(r) => pts.extend([r.position(), Point::new(r.x + r.width, r.y + r.height)]),
+            Prim::Poly(p, _) => pts.extend(p),
+            Prim::Label { at, text, align, .. } => {
+                let r = label_rect(at, &text, align);
+                pts.extend([r.position(), Point::new(r.x + r.width, r.y + r.height)]);
+            }
+        }
+    }
+    let clamp = |p: &Point| Point::new(p.x.clamp(0.0, v.size.width), p.y.clamp(0.0, v.size.height));
+    let pts: Vec<Point> = pts.iter().map(clamp).collect();
+    let (x0, y0) = pts.iter().fold((f32::MAX, f32::MAX), |(x, y), p| (x.min(p.x), y.min(p.y)));
+    let (x1, y1) = pts.iter().fold((f32::MIN, f32::MIN), |(x, y), p| (x.max(p.x), y.max(p.y)));
+    (x0 <= x1).then(|| Rectangle::new(Point::new(x0, y0), Size::new(x1 - x0, y1 - y0)))
+}
+
+/// 一排文字（日历竖线顶上的事件名）里挑出不相叠的：按给的顺序，和已经留下的叠了就不写（线照画）。
+#[must_use]
+pub fn keep_apart(rects: &[Rectangle]) -> Vec<bool> {
+    let mut kept: Vec<Rectangle> = Vec::new();
+    rects
+        .iter()
+        .map(|r| {
+            let free = kept.iter().all(|k| k.intersection(r).is_none());
+            if free {
+                kept.push(*r);
+            }
+            free
+        })
+        .collect()
 }
 
 /// 点到线段的距离。
@@ -691,5 +737,15 @@ mod tests {
         assert!(ps.iter().any(|p| matches!(p, Prim::Area(_, Role::Up))) && ps.iter().any(|p| matches!(p, Prim::Area(_, Role::Down))));
         assert!(ps.iter().any(|p| matches!(p, Prim::Label { text, .. } if text.contains("估算，不是委托"))));
         assert_eq!(v.bars_later(540_000, 20.0), 1_740_000);
+        // 斐波那契向右延伸：各档线画到图的右边缘
+        let mut fx = fib.clone();
+        fx.extend = true;
+        assert!(prims(&v, &fx).iter().any(|p| matches!(p, Prim::Line(_, b, Role::Main) if b.x == 800.0)));
+        // 外接框：仓位工具的框包住盈亏区与标签
+        let bb = bbox(&v, &pos).unwrap();
+        assert!(bb.y < 200.0 - 20.0 && bb.height > 40.0, "{bb:?}");
+        // 顶上的文字挨太近：后一个不写
+        let r = |x: f32| label_rect(Point::new(x, 12.0), "FOMC", Align::Left);
+        assert_eq!(keep_apart(&[r(10.0), r(20.0), r(200.0)]), vec![true, false, true]);
     }
 }

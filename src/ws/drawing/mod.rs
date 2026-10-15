@@ -137,6 +137,10 @@ pub enum DrawMsg {
     ShowSource(model::Source, bool),
     /// 系统对象复制成手工对象（之后能拖、能改；G4）
     CopyToManual(String, String),
+    /// 斐波那契向右延伸
+    Extend(String, String, bool),
+    /// 打开检查器的「属性」页（浮动小条的「属性…」）：图表不自动开检查器，免得一选中图就变窄、刚画的东西滑出视野
+    OpenInspector,
     /// 对象树里展开 / 折叠一个系统分组
     ToggleGroup(String),
     /// 到价提醒（G5）：设条件（`None` = 关）、只提醒一次、也发 Telegram、重新开启
@@ -193,6 +197,13 @@ struct State {
 }
 
 static VERSION: AtomicU64 = AtomicU64::new(1);
+static INSPECT_REQ: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 有没有人要打开检查器（主程序每条消息看一次）。
+#[must_use]
+pub fn take_inspector_request() -> bool {
+    INSPECT_REQ.swap(false, Ordering::Relaxed)
+}
 
 fn cell() -> &'static Mutex<State> {
     static C: OnceLock<Mutex<State>> = OnceLock::new();
@@ -301,9 +312,10 @@ pub fn on_price(symbol: &str, price: i64, now: u64, decimals: usize) -> usize {
             .iter()
             .filter_map(|d| {
                 let a = d.alert.as_ref().filter(|a| a.armed)?;
-                let level = d.level_at(now)?;
                 let cool = a.last_fired.is_none_or(|t| now.saturating_sub(t) >= ALERT_COOLDOWN_MS);
-                (cool && a.when.hit(prev, price, level)).then(|| (d.clone(), level, prev))
+                // 线是一个价位；矩形是上下两条边（进出区域都算）
+                let level = d.alert_levels(now).into_iter().find(|l| a.when.hit(prev, price, *l))?;
+                cool.then(|| (d.clone(), level, prev))
             })
             .collect()
     });
@@ -511,6 +523,9 @@ fn anchor_for(v: &DrawView, p: Point) -> Anchor {
 
 /// 选了工具时在图上点了一下（屏幕位置）。
 pub fn place_at(symbol: &str, v: &DrawView, p: Point) -> Option<String> {
+    if std::env::var_os("WS_DRAWING_BENCH").is_some() {
+        log::info!("[drawing-place] size {:?} scaling {} translation {:?} p {:?} → {:?}", v.size, v.scaling, v.translation, p, v.anchor_at(p));
+    }
     place_in(symbol, anchor_for(v, p), Some(v))
 }
 
@@ -912,6 +927,8 @@ pub fn handle(m: DrawMsg) {
                 st.expanded.insert(g);
             }
         }),
+        DrawMsg::Extend(sym, id, v) => modify(&sym, &id, false, |d| d.extend = v),
+        DrawMsg::OpenInspector => INSPECT_REQ.store(true, Ordering::Relaxed),
         DrawMsg::ShowSource(src, show) => set_prefs(|p| {
             p.hide_sources.retain(|s| *s != src);
             if !show {
@@ -997,6 +1014,11 @@ fn fill(d: &Drawing, role: Role) -> iced::Color {
 }
 
 fn draw_one(frame: &mut Frame, v: &DrawView, d: &Drawing, selected: bool) {
+    draw_one_with(frame, v, d, selected, false);
+}
+
+/// `quiet_labels`：这个对象的文字不写（日历竖线挨得太近时，线照画、字只写前一个）。
+fn draw_one_with(frame: &mut Frame, v: &DrawView, d: &Drawing, selected: bool, quiet_labels: bool) {
     if d.hidden {
         return;
     }
@@ -1020,6 +1042,7 @@ fn draw_one(frame: &mut Frame, v: &DrawView, d: &Drawing, selected: bool) {
                     frame.fill(&path, fill(d, role));
                 }
             }
+            Prim::Label { .. } if quiet_labels => {}
             Prim::Label { at, text, align, boxed } => {
                 let r = geometry::label_rect(at, &text, align);
                 if boxed {
@@ -1083,9 +1106,24 @@ pub fn draw_layer(frame: &mut Frame, v: &DrawView, symbol: &str) {
     let sel = selected(symbol);
     let items = visible_items(symbol, v.cat, &v.tf);
     // 裁到画布里：画布不会自己裁，锚点在视野外的文字会越界画到旁边的面板上（G2 实测）
+    // 垂直线顶上的文字（日历事件名）挨太近就只写前一个——从左往右挑
+    let mut tops: Vec<(f32, usize, iced::Rectangle)> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.kind == Kind::VLine)
+        .filter_map(|(i, d)| {
+            geometry::prims(v, d).into_iter().find_map(|p| match p {
+                Prim::Label { at, text, align, .. } => Some((at.x, i, geometry::label_rect(at, &text, align))),
+                _ => None,
+            })
+        })
+        .collect();
+    tops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let keep = geometry::keep_apart(&tops.iter().map(|t| t.2).collect::<Vec<_>>());
+    let quiet: std::collections::HashSet<usize> = tops.iter().zip(keep).filter(|(_, k)| !k).map(|(t, _)| t.1).collect();
     frame.with_clip(iced::Rectangle::with_size(v.size), |f| {
-        for d in &items {
-            draw_one(f, v, d, sel.as_deref() == Some(d.id.as_str()));
+        for (i, d) in items.iter().enumerate() {
+            draw_one_with(f, v, d, sel.as_deref() == Some(d.id.as_str()), quiet.contains(&i));
         }
     });
     bench_note(items.len(), t0.elapsed());
@@ -1422,6 +1460,19 @@ mod tests {
         assert!(items(sym)[0].alert.as_ref().is_some_and(|a| a.once), "撤回到勾着「只提醒一次」");
         handle(DrawMsg::SetAlert(sym.into(), id.clone(), None));
         assert!(items(sym)[0].alert.is_none());
+        // 矩形：价格进出区域（上下两条边）都算；区间外的时刻不看
+        let sym = "TEST:G5R";
+        handle(DrawMsg::Tool(Some(Kind::Rect)));
+        place(sym, Anchor { t: 0, p: 9_900 });
+        let rid = place(sym, Anchor { t: 1_000_000, p: 10_100 }).unwrap();
+        handle(DrawMsg::SetAlert(sym.into(), rid.clone(), Some(model::AlertWhen::Cross)));
+        on_price(sym, 9_800, 1_000, 1);
+        assert_eq!(on_price(sym, 9_950, 2_000, 1), 1, "从下面进入区域");
+        assert_eq!(on_price(sym, 10_000, 100_000, 1), 0, "在区域里走不算");
+        assert_eq!(on_price(sym, 10_200, 200_000, 1), 1, "从上面出去");
+        assert!(fired_log().last().unwrap().1.contains("穿越 矩形"));
+        on_price(sym, 9_800, 2_000_000, 1);
+        assert_eq!(on_price(sym, 10_000, 2_100_000, 1), 0, "矩形的时间区间之后不看");
     }
 
     /// 性能（G5）：2000 个对象的取对象、图元、命中测试。`cargo test --release perf_ -- --ignored --nocapture`

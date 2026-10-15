@@ -284,6 +284,9 @@ pub struct Drawing {
     pub rows: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub va: Option<f64>,
+    /// 斐波那契：各档线向右延伸到图边（缺省只画在两个锚点之间）
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub extend: bool,
     /// 到价提醒（G5）：价格穿过这条线时提醒——**只提醒，不下单**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alert: Option<Alert>,
@@ -323,6 +326,7 @@ impl Drawing {
             rows: None,
             va: None,
             alert: None,
+            extend: false,
             extra: Map::new(),
         }
     }
@@ -490,10 +494,10 @@ fn yes() -> bool {
 }
 
 impl Kind {
-    /// 能不能设到价提醒：水平线、趋势线、射线。
+    /// 能不能设到价提醒：水平线、趋势线、射线、矩形（上下两条边，价格进出区域时提醒）。
     #[must_use]
     pub fn alertable(self) -> bool {
-        matches!(self, Kind::HLine | Kind::Trend | Kind::Ray)
+        matches!(self, Kind::HLine | Kind::Trend | Kind::Ray | Kind::Rect)
     }
 }
 
@@ -517,7 +521,25 @@ impl Drawing {
             _ => None,
         }
     }
+
+    /// 到价提醒看的价位：线就是 `level_at` 那一个；矩形是时间区间内的上下两条边（之外没有）。
+    #[must_use]
+    pub fn alert_levels(&self, t: u64) -> Vec<i64> {
+        match self.kind {
+            Kind::Rect => {
+                let (Some(a), Some(b)) = (self.anchors.first(), self.anchors.get(1)) else { return Vec::new() };
+                if t < a.t.min(b.t) || t > a.t.max(b.t) {
+                    return Vec::new();
+                }
+                vec![a.p.min(b.p), a.p.max(b.p)]
+            }
+            _ => self.level_at(t).into_iter().collect(),
+        }
+    }
 }
+
+/// 成交量分布的一根 K 线：(开始时间, 低, 高, 总量, 逐价位成交量)。逐价位那一项来自足迹数据（有就用、没有是空）。
+pub type VolBar = (u64, i64, i64, f64, Vec<(i64, f64)>);
 
 /// 成交量分布的结果（G4）：各档 (价位下沿, 上沿, 成交量)、POC 那档、价值区的上下沿。
 #[derive(Debug, Clone, PartialEq)]
@@ -528,16 +550,24 @@ pub struct Profile {
     pub val: i64,
 }
 
-/// 把一组 K 线（开始时间, 低, 高, 成交量）按价位分档：每根的量**均摊到它高低之间**（K 线没有逐价位成交时的近似；
-/// 有足迹数据时更准，G4 先用均摊）。价值区从 POC 往两边、每次加量大的那一侧，直到够 `va` 占比。
+/// 把一组 K 线按价位分档：有足迹数据（逐价位成交量）的 K 线按价位精确落档；没有的把总量**均摊到它高低之间**
+/// （近似）。价值区从 POC 往两边、每次加量大的那一侧，直到够 `va` 占比。
 #[must_use]
-pub fn volume_profile(bars: &[(u64, i64, i64, f64)], rows: u32, va: f64) -> Option<Profile> {
+pub fn volume_profile(bars: &[VolBar], rows: u32, va: f64) -> Option<Profile> {
     let lo = bars.iter().map(|b| b.1).min()?;
     let hi = bars.iter().map(|b| b.2).max()?;
     let rows = rows.clamp(4, 200) as usize;
     let step = ((hi - lo) as f64 / rows as f64).max(1.0);
     let mut vol = vec![0.0; rows];
-    for &(_, l, h, v) in bars {
+    for (_, l, h, v, levels) in bars {
+        let (l, h, v) = (*l, *h, *v);
+        if !levels.is_empty() {
+            for &(px, q) in levels {
+                let i = (((px - lo) as f64 / step).floor() as i64).clamp(0, rows as i64 - 1) as usize;
+                vol[i] += q;
+            }
+            continue;
+        }
         if v <= 0.0 {
             continue;
         }
@@ -705,7 +735,7 @@ mod tests {
     #[test]
     fn volume_profile_poc_and_value_area() {
         // 三根 K 线：两根在 100–110（各 10），一根在 110–120（量 30）→ POC 在上半段
-        let bars = [(1, 100, 110, 10.0), (2, 100, 110, 10.0), (3, 110, 120, 30.0)];
+        let bars = [(1, 100, 110, 10.0, vec![]), (2, 100, 110, 10.0, vec![]), (3, 110, 120, 30.0, vec![])];
         let p = volume_profile(&bars, 4, 0.7).unwrap();
         assert_eq!(p.bins.len(), 4);
         let total: f64 = p.bins.iter().map(|b| b.2).sum();
@@ -713,9 +743,12 @@ mod tests {
         assert!(p.poc >= 2, "量大的那根在上半段：{p:?}");
         assert!(p.vah == 120 && p.val >= 100 && p.val < 115, "{p:?}");
         assert!(volume_profile(&[], 4, 0.7).is_none());
-        assert!(volume_profile(&[(1, 5, 5, 0.0)], 4, 0.7).is_none(), "没有量");
+        assert!(volume_profile(&[(1, 5, 5, 0.0, vec![])], 4, 0.7).is_none(), "没有量");
         // 单价位的 K 线（高 = 低）落进它所在的那一档
-        assert!(volume_profile(&[(1, 100, 100, 3.0), (2, 100, 104, 1.0)], 4, 0.7).is_some());
+        assert!(volume_profile(&[(1, 100, 100, 3.0, vec![]), (2, 100, 104, 1.0, vec![])], 4, 0.7).is_some());
+        // 有足迹数据：按价位精确落档（量全在 119 这一价，均摊的话会摊到整根）
+        let fp = volume_profile(&[(1, 100, 120, 40.0, vec![(119, 40.0)]), (2, 100, 120, 0.0, vec![(101, 4.0)])], 4, 0.7).unwrap();
+        assert_eq!((fp.bins[3].2, fp.bins[0].2, fp.poc), (40.0, 4.0, 3));
     }
 
     #[test]
@@ -730,6 +763,9 @@ mod tests {
         assert!(AlertWhen::Up.hit(99, 100, 100) && !AlertWhen::Up.hit(101, 99, 100));
         assert!(AlertWhen::Down.hit(101, 100, 100) && !AlertWhen::Down.hit(99, 101, 100));
         assert!(AlertWhen::Cross.hit(99, 101, 100) && AlertWhen::Cross.hit(101, 99, 100) && !AlertWhen::Cross.hit(100, 100, 100));
+        let rect = Drawing::new(Kind::Rect, vec![Anchor { t: 1_000, p: 300 }, Anchor { t: 3_000, p: 100 }]);
+        assert_eq!((rect.alert_levels(2_000), rect.alert_levels(4_000)), (vec![100, 300], vec![]), "矩形：时间区间内的上下两条边");
+        assert_eq!(h.alert_levels(5), vec![100]);
         let j: Alert = serde_json::from_str(r#"{"when":"up"}"#).unwrap();
         assert!(j.armed && !j.once, "缺省：开着、不止一次");
         assert!(serde_json::from_str::<Drawing>(r#"{"id":"x","kind":"tool_from_the_future","anchors":[]}"#).is_err(), "不认识的种类读不进来（整条跳过，库里不动）");

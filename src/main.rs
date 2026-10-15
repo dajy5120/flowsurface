@@ -479,6 +479,10 @@ impl Flowsurface {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // 画线的浮动小条点了「属性…」（docs/46）：打开检查器的「属性」页
+        if ws::drawing::take_inspector_request() {
+            let _ = self.run_command(ui::command::Cmd::InspectorOpen(ui::shell::InspTab::Props));
+        }
         match message {
             Message::WsActiveRun(ar) => {
                 // WealthSpring 三态：记录活动 run（subscription() 据此切 live/回测 流）。
@@ -1874,6 +1878,8 @@ impl Flowsurface {
                     let changed = ws::inspector_props::changed(st).len();
                     let has_props = ws::inspector_props::has_props(&st.content);
                     let has_data = ws::inspector_props::data_view(st).is_some();
+                    // 能画线的图也给入口：画线的属性与对象树在检查器里（docs/46）
+                    let has_props = has_props || ws::inspector_props::supports_drawing(&st.content);
                     if has_props || has_data || changed > 0 {
                         let tab = if has_props { ui::shell::InspTab::Props } else { ui::shell::InspTab::Data };
                         r = r.push(tool_pick(

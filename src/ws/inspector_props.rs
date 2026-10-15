@@ -343,10 +343,8 @@ pub fn has_props(content: &Content) -> bool {
         | Content::StrategyFlow
         | Content::Calendar => true,
         Content::Orders => super::orders_view::selected_detail().is_some(),
-        // 图表：选中了一个画线对象才自动展开（平时看图不挤主区，docs/42）
-        Content::Kline { .. } | Content::Heatmap { .. } => {
-            drawing_target(content).is_some_and(|(sym, ..)| super::drawing::selected(&sym).is_some())
-        }
+        // 图表：不自动展开（docs/46 G5 后实测：选中 / 新建对象时检查器一开，图变窄、「居中最新」把刚画的东西推出视野）。
+        // 画线的属性在浮动小条「属性…」或工具栏「⚙ 设置」里打开
         _ => false,
     }
 }

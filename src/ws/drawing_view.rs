@@ -302,6 +302,12 @@ fn selected_props<'a>(sym: &str, d: &Drawing, decimals: usize, multiplier: f64) 
         Kind::FibRetrace | Kind::FibExt => {
             let cur = d.fib_levels().iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
             col = col.push(kv("比例", param_input(sym, d, Param::Levels, "0, 0.382, 0.5, 0.618, 1", cur, 220.0, ro)));
+            let (s2, id2) = (s.clone(), id.clone());
+            let mut cb = checkbox(d.extend).size(t::s_small());
+            if !ro {
+                cb = cb.on_toggle(move |v| DrawMsg::Extend(s2.clone(), id2.clone(), v));
+            }
+            col = col.push(kv("", row![cb, t::caption("各档线向右延伸到图边")].spacing(space(1)).align_y(Alignment::Center).into()));
         }
         Kind::VolProfile => {
             col = col.push(kv(
@@ -601,7 +607,13 @@ fn tree<'a>(sym: &str, decimals: usize) -> Element<'a, DrawMsg> {
 pub fn floating<'a>(sym: &str, d: &Drawing) -> Element<'a, DrawMsg> {
     let (s, id) = (sym.to_string(), d.id.clone());
     if d.source != Source::Manual {
-        return container(t::metadata(format!("{} · {}（只读）", d.kind.label(), source_label(d.source))).color(pal::dim())).padding(space(1)).into();
+        return container(
+            row![t::metadata(format!("{} · {}（只读）", d.kind.label(), source_label(d.source))).color(pal::dim()), w::btn("属性…", Btn::Ghost, Some(DrawMsg::OpenInspector))]
+                .spacing(space(1))
+                .align_y(Alignment::Center),
+        )
+        .padding(space(1))
+        .into();
     }
     let mut r = row![].spacing(space(1)).align_y(Alignment::Center);
     for c in &COLORS[..4] {
@@ -617,7 +629,8 @@ pub fn floating<'a>(sym: &str, d: &Drawing) -> Element<'a, DrawMsg> {
         .push(w::btn(format!("线宽 {}", d.style.width), Btn::Ghost, Some(DrawMsg::Width(s.clone(), id.clone(), next_w))))
         .push(w::btn(dash_label(d.style.dash), Btn::Ghost, Some(DrawMsg::DashStyle(s.clone(), id.clone(), next_d))))
         .push(w::btn(if d.locked { "解锁" } else { "锁定" }, Btn::Ghost, Some(DrawMsg::Lock(s.clone(), id.clone(), !d.locked))))
-        .push(w::btn("删除", Btn::Ghost, (!d.locked).then_some(DrawMsg::Delete(s, id))));
+        .push(w::btn("删除", Btn::Ghost, (!d.locked).then_some(DrawMsg::Delete(s, id))))
+        .push(w::btn("属性…", Btn::Ghost, Some(DrawMsg::OpenInspector)));
     container(r)
         .padding(space(1))
         .style(|_| container::Style {
