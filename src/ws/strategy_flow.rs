@@ -1790,7 +1790,7 @@ fn record(g: &mut St, tag: &str) {
 /// 换了一张图：选择、撤销栈、弹窗都清掉。
 // ── 数据（docs/45 §21）：共用数据选择组件 ⇄ 图的 `[backtest]` ──────────────────────
 
-/// 画布对数据选择组件的要求：计算用途、B2 已购数据 + B5 本地自有数据、一段日期 + 每日时段（自有数据按整日）、列出数据类型；
+/// 画布对数据选择组件的要求：计算用途、B2 已购数据 + B3 本地录制（单日）+ B5 本地自有数据、一段日期 + 每日时段（自有数据按整日）、列出数据类型；
 /// 检查过的图带上它要的数据（D2）——给不了的数据商置灰、缺数据的日子标出、必需的类型锁住。
 #[must_use]
 pub fn pick_opts(needs: &Needs, pal: Option<&Palette>) -> PickOpts {
@@ -1800,7 +1800,7 @@ pub fn pick_opts(needs: &Needs, pal: Option<&Palette>) -> PickOpts {
     });
     PickOpts {
         purpose: Purpose::Compute,
-        sources: Some(vec![BSource::Purchased, BSource::Own]),
+        sources: Some(vec![BSource::Purchased, BSource::Recorded, BSource::Own]),
         vendors: None,
         time: TimeMode::Window,
         local_only: true,
@@ -1894,13 +1894,14 @@ fn root_env(p: &DataPick) -> Vec<(String, String)> {
         "databento" => "WS_DATABENTO_ROOT",
         "tardis" => "WS_TARDIS_ROOT",
         "own" => "WS_OWN_ROOT", // 运行入口据此找到渠道目录（`datareq.own_channel_dir`）
+        "recorder" => "WS_DATA_DIR",
         _ => return Vec::new(),
     };
     if root == dp::default_root(k) { Vec::new() } else { vec![(var.to_string(), root)] }
 }
 
-/// 图的 `[backtest]` → 选择器（打开图、撤销重做之后）。Tardis / Databento → B2；其余数据源名（没写 = dukascopy）
-/// 是 B5 本地自有数据的渠道。`auto`：选择器从头选。同一个来源 / 数据商时保留手填的根目录。
+/// 图的 `[backtest]` → 选择器（打开图、撤销重做之后）。Tardis / Databento → B2；recorder → B3；其余数据源名
+/// （没写 = dukascopy）是 B5 本地自有数据的渠道。`auto`：选择器从头选。同一个来源 / 数据商时保留手填的根目录。
 fn sync_pick(g: &mut St) {
     let bt = &g.graph.backtest;
     let s = |k: &str| bt.get(k).and_then(Value::as_str);
@@ -1914,6 +1915,8 @@ fn sync_pick(g: &mut St) {
             .and_then(|x| Some((x.get("start")?.as_str()?, u32::try_from(x.get("minutes")?.as_u64()?).ok()?)));
         if PURCHASED.contains(&src) {
             p.preset_local(BSource::Purchased, Some(src), &sym, s("start"), s("end"), window);
+        } else if src == "recorder" {
+            p.preset_local(BSource::Recorded, None, &sym, s("start"), s("end"), window);
         } else {
             p.preset_local(BSource::Own, None, &sym, s("start"), s("end"), None);
         }
@@ -3509,6 +3512,18 @@ mod tests {
         assert!(bt.get("session").is_none(), "自有数据按整日");
         assert_eq!(bt["types"], serde_json::json!(["quotes"]));
         assert_eq!(root_env(&g.pick), [("WS_OWN_ROOT".to_string(), "/自有数据测试".to_string())]);
+        // 本地录制（B3）：预置、写回 source = recorder 与时段，根目录走 WS_DATA_DIR
+        g.graph.backtest = serde_json::json!({"source": "recorder", "symbols": "BTCUSDT", "start": "2026-10-09", "session": {"start": "08:00", "minutes": 60}});
+        sync_pick(&mut g);
+        assert_eq!((g.pick.source, g.pick.local_key()), (Some(BSource::Recorded), Some("recorder")));
+        g.pick.root = "/录制测试".into();
+        dp::inject_scan("recorder", "/录制测试", "root\t/x\t1\nitem\tcrypto\tBTCUSDT\t2026-10-09\tl2,mark,trades\n");
+        g.pick.update(DataPickMsg::Minutes(30));
+        write_pick(&mut g);
+        let bt = &g.graph.backtest;
+        assert_eq!((bt["source"].as_str(), bt["end"].as_str(), bt["session"]["minutes"].as_u64()), (Some("recorder"), Some("2026-10-09"), Some(30)));
+        assert_eq!(data_label(bt), "本地录制 · BTCUSDT · 2026-10-09 · 08:00 起 30 分钟 · l2+mark+trades");
+        assert_eq!(root_env(&g.pick), [("WS_DATA_DIR".to_string(), "/录制测试".to_string())]);
         // auto：选择器从头选
         g.graph.backtest = serde_json::json!({"source": "auto", "symbols": "ESU6"});
         sync_pick(&mut g);
