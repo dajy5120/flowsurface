@@ -4,8 +4,8 @@
 风格参照 TradingView / Bloomberg Launchpad / Refinitiv 的左栏：统一 2 单位描边、圆端圆角、
 不填色（个别实心点除外），一个工作区一个专属图形，不复用。
 
-用法（只依赖 fontTools，主环境 ~/ws-venv 自带）：
-    ~/ws-venv/bin/python scripts/ws_icons.py
+用法（只依赖 fontTools，主环境（WealthSpring 仓库 .venv）自带）：
+    .venv/bin/python scripts/ws_icons.py
 
 可重复运行：先删掉本脚本管辖码位（WS_BASE 起）的旧字形与配置再重写。
 码位与 `src/style.rs` 的 `Icon` 枚举一一对应，改这里要同步改那里。

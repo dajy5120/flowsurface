@@ -339,7 +339,9 @@ pub fn repo_root() -> PathBuf {
 ///
 /// **`~/dev/ws-venv` 这一档已删除（2026-09-11，整改 E-01）**：机器上原本并存两个
 /// venv，numpy 分别是 2.2.6 与 2.4.6，而它们共享同一份计算代码。现已合并为唯一的
-/// `~/ws-venv`；留着那一档等于给「哪天有人重建了那个目录、代码又悄悄选错」留一扇门。
+/// venv；留着那一档等于给「哪天有人重建了那个目录、代码又悄悄选错」留一扇门。
+///
+/// **2026-10-16 起这个唯一 venv 搬进仓库内 `<仓库>/.venv`**，旧的 `~/ws-venv` 同样不再是候选。
 ///
 /// ⚠ 本文件是 `crates/wealthspring-paths` 的**逐字孪生**（docs/26 S3）——
 /// 那边改了这里必须跟着改，两边同名的单测就是钉住这件事的。
@@ -349,7 +351,7 @@ pub fn python_from(ws_python: Option<&str>, home: Option<&str>, exists: &dyn Fn(
     }
     let mut cands = vec!["/usr/lib/wealthspring/venv/bin/python".to_string()];
     if let Some(h) = ok(home) {
-        cands.push(format!("{h}/ws-venv/bin/python"));
+        cands.push(format!("{h}/dev/WealthSpring/.venv/bin/python"));
     }
     for c in &cands {
         if exists(c) {
@@ -476,10 +478,10 @@ mod tests {
 
     #[test]
     fn an_unset_python_picks_one_that_actually_exists() {
-        let only_home = |p: &str| p == "/home/x/ws-venv/bin/python";
+        let only_home = |p: &str| p == "/home/x/dev/WealthSpring/.venv/bin/python";
         assert_eq!(
             python_from(None, Some("/home/x"), &only_home),
-            PathBuf::from("/home/x/ws-venv/bin/python")
+            PathBuf::from("/home/x/dev/WealthSpring/.venv/bin/python")
         );
     }
 
@@ -491,6 +493,16 @@ mod tests {
         assert_ne!(
             python_from(None, Some("/home/x"), &only_dev),
             PathBuf::from("/home/x/dev/ws-venv/bin/python")
+        );
+    }
+
+    /// 2026-10-16：venv 搬进仓库 `.venv` 后，家目录下的旧 `~/ws-venv` 也不再是候选。
+    #[test]
+    fn the_retired_home_venv_is_never_picked() {
+        let only_old = |p: &str| p == "/home/x/ws-venv/bin/python";
+        assert_ne!(
+            python_from(None, Some("/home/x"), &only_old),
+            PathBuf::from("/home/x/ws-venv/bin/python")
         );
     }
 

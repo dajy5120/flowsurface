@@ -76,7 +76,7 @@ pub static ALL: &[Dep] = &[
         upd: Upd::FetchOnly,
         core: true,
     },
-    // ── Python（ws-venv）──
+    // ── Python（仓库 .venv）──
     Dep { key: "hftbacktest", label: "hftbacktest", what: "高频回测（排队仿真、做市影子）", name: "hftbacktest", src: Src::PyPi, upd: Upd::Pip, core: false },
     Dep { key: "duckdb", label: "DuckDB", what: "历史面板的查询引擎（parquet 直查）", name: "duckdb", src: Src::PyPi, upd: Upd::Pip, core: false },
     Dep { key: "scipy", label: "SciPy", what: "因子统计检验", name: "scipy", src: Src::PyPi, upd: Upd::Pip, core: false },

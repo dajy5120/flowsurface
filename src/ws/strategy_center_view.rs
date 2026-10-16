@@ -166,7 +166,7 @@ fn library<'a>(v: &View) -> Element<'a, ScMsg> {
 
     let mut lower = column![].spacing(space(2));
     if !v.catalog_err.is_empty() {
-        lower = lower.push(w::error("策略目录读不出来", v.catalog_err.clone(), "确认 ~/ws-venv 可用后点「刷新」", None));
+        lower = lower.push(w::error("策略目录读不出来", v.catalog_err.clone(), "确认仓库内 .venv 可用后点「刷新」", None));
     } else if v.catalog.is_empty() {
         lower = lower.push(if v.catalog_loading {
             w::loading("策略目录")

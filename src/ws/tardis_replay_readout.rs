@@ -122,7 +122,7 @@ mod tests {
 
     /// 真机集成（需活的 redis + 先跑一次 feeder）：poller 能读到 feeder 写的进度。
     /// 默认忽略；手动：
-    ///   ~/ws-venv/bin/python -m factory.replay.tardis_cockpit_feed BTCUSDT 2026-06-15 \
+    ///   .venv/bin/python -m factory.replay.tardis_cockpit_feed BTCUSDT 2026-06-15 \
     ///       --from 09:00 --minutes 2 --speed 0
     ///   cargo test -- --ignored reads_live_status
     #[test]

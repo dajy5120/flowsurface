@@ -464,7 +464,7 @@ fn matrix<'a>(v: &View) -> Element<'a, LyMsg> {
         return w::loading("共用件目录").into();
     }
     if !v.comps_err.is_empty() {
-        return w::error("共用件目录读不出来", v.comps_err.clone(), "确认 ~/ws-venv 可用后点「重新读取」", None).into();
+        return w::error("共用件目录读不出来", v.comps_err.clone(), "确认仓库内 .venv 可用后点「重新读取」", None).into();
     }
     let Some(c) = &v.comps else {
         return Space::new().into();
