@@ -5,7 +5,7 @@
 //! | 订单 | `ws::orders` 的旁路快照（回测 / 观察模式的成交、持仓、挂单） | 成交 ▲▼ + 序号；持仓线（方向、数量、均价、费后盈亏）；挂单虚线 |
 //! | 日历 | `ws::calendar_alerts` 的图上标记（P0 / P1 事件） | 虚线竖线 + 短名 |
 //! | 策略 | 策略画布这次运行的决策轨迹（`ws::strategy_flow::chart_events`） | 成交处的 ● + 「线 原因」 |
-//! | 外部 | `~/ws-data/chart_drawings/*.json`（Python：`strategies/chart_drawings.py`） | 文件里写的任何对象，来源按文件定（研究 / 订单流 / 回测 / 策略） |
+//! | 外部 | `<小文件目录>/chart_drawings/*.json`（Python：`strategies/chart_drawings.py`） | 文件里写的任何对象，来源按文件定（研究 / 订单流 / 回测 / 策略） |
 //!
 //! 以前前三样是 K 线图里各画各的叠加层（不分品种、按逐笔的图上位置也不对）；现在都是同一套引擎画的对象，
 //! 在对象树里看得见、能按来源隐藏、点了能看属性。
@@ -126,10 +126,10 @@ fn strategy(symbol: &str) -> Vec<Drawing> {
 
 // ── 外部（Python 接口）────────────────────────────────────────────────────────
 
-/// 外部文件的目录：`$WS_CHART_DRAWINGS`，否则 `~/ws-data/chart_drawings`（与 `strategies/chart_drawings.py` 同一处）。
+/// 外部文件的目录：`$WS_CHART_DRAWINGS`，否则 `<小文件目录>/chart_drawings`（与 `strategies/chart_drawings.py` 同一处）。
 #[must_use]
 pub fn external_dir() -> PathBuf {
-    std::env::var_os("WS_CHART_DRAWINGS").map_or_else(|| crate::ws::paths::data_dir().join("chart_drawings"), PathBuf::from)
+    std::env::var_os("WS_CHART_DRAWINGS").map_or_else(|| crate::ws::paths::hot_dir().join("chart_drawings"), PathBuf::from)
 }
 
 /// 外部文件格式（`format = 1`）。价格写成数，时间写毫秒。

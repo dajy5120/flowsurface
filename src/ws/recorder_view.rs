@@ -400,8 +400,9 @@ pub fn pane_body<'a>(app: &'a RecorderPaneState, lock: Option<&str>) -> Element<
         text("录制驾驶舱 — 24/7 守护录制控制").size(crate::ui::text::s_title()).color(crate::ui::pal::head()),
         row![
             text("保存位置").size(crate::ui::text::s_emph()),
-            text_input("~/ws-data", &app.data_dir)
-                .on_input(RecorderMsg::DataDir)
+            text(format!("{}（在 设置 → 数据目录… 里改）", super::recorder::config_data_dir()))
+                .size(crate::ui::text::s_body())
+                .color(crate::ui::pal::dim())
                 .width(Length::FillPortion(4)),
             button(text("应用配置并重启").size(crate::ui::text::s_emph())).on_press(RecorderMsg::ApplyConfig),
         ]

@@ -1180,7 +1180,7 @@ impl State {
                 )
             }
             Content::FeatureLab => {
-                // 特征库（docs/30）：只读 ~/ws-data/cockpit/feature_lab.json。
+                // 特征库（docs/30）：只读 <小文件目录>/cockpit/feature_lab.json。
                 // **零交易所流**——数据由 factory.prediction.feature_lab 批量算好落盘。
                 self.compose_stack_view(
                     crate::ws::feature_lab_view::pane_body(),
@@ -1193,7 +1193,7 @@ impl State {
                 )
             }
             Content::FeatureMatrix => {
-                // 特征矩阵（docs/31 §8.1）：只读 ~/ws-data/cockpit/feature_matrix.json，
+                // 特征矩阵（docs/31 §8.1）：只读 <小文件目录>/cockpit/feature_matrix.json，
                 // 由 wealthspring-features 的引擎周期性写出。**零交易所流、零计算**。
                 // 筛选/视图切换发 FeatureMatrixMsg → 包成 pane 事件。
                 let base = crate::ws::feature_matrix_view::pane_body(hosted, self.settings.view.as_deref())
@@ -1223,7 +1223,7 @@ impl State {
                 )
             }
             Content::PmBinance => {
-                // 币安钱包预测市场：只读 ~/ws-data/live/pm_binance.json 旁路快照。
+                // 币安钱包预测市场：只读 <小文件目录>/live/pm_binance.json 旁路快照。
                 // **零交易所流**——WS 连接在 ws-pm-recorder 守护里，面板里没有一行网络代码。
                 self.compose_stack_view(
                     crate::ws::pm_binance_view::pane_body(),

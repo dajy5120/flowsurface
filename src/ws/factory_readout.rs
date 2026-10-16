@@ -1,7 +1,7 @@
 //! Alpha Factory 只读快照（docs/08 F6 — P2）。
 //!
 //! 把独立 `wealthspring-factory-gui` 的后台 poller 移植进 cockpit 进程:每 4s 轮询 Registry
-//! （`~/ws-data/registry.sqlite`,WAL 与 Python 写端共存,只读打开）+ nightly 报告 + 数据湖扫描,
+//! （`<小文件目录>/registry.sqlite`,WAL 与 Python 写端共存,只读打开）+ nightly 报告 + 数据湖扫描,
 //! 发布到进程级快照,供 `Content::Factory` pane 渲染(`ws/factory_view.rs`)。
 //!
 //! 沿用 F6 旁路模式:poller 在后台线程跑 IO,pane 视图只读快照、不阻塞渲染。首次 [`snapshot`]
@@ -136,7 +136,7 @@ fn home() -> PathBuf {
 fn db_path() -> PathBuf {
     std::env::var("WS_REGISTRY")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join("ws-data/registry.sqlite"))
+        .unwrap_or_else(|_| super::paths::hot_dir().join("registry.sqlite"))
 }
 
 /// pane 渲染时读快照(惰性起 poller:首次调用才开后台线程)。
@@ -583,7 +583,7 @@ fn table_exists(c: &rusqlite::Connection, t: &str) -> bool {
 }
 
 fn scan_lake(st: &mut FactoryReadout) {
-    let dd = home().join("ws-data");
+    let dd = super::paths::data_dir();
     let syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"];
     for sym in syms {
         let raw_days = count_dir(&dd.join("raw/l2").join(sym));
@@ -615,7 +615,7 @@ fn count_glob(p: &PathBuf, suffix: &str) -> i64 {
 }
 
 fn read_nightly(st: &mut FactoryReadout) {
-    let dir = home().join("ws-data/reports");
+    let dir = super::paths::hot_dir().join("reports");
     let mut reports: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map(|rd| {
             rd.flatten()

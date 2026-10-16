@@ -867,7 +867,7 @@ pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoar
             let b = button(text("📷 存图").size(crate::ui::text::s_body())).padding(crate::ui::metrics::pad2(0, 3));
             if loading.is_none() && p.loaded { b.on_press(TardisBoardMsg::ExportPng) } else { b }
         },
-        text("→ ~/ws-data/cockpit/export/").size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
+        text(format!("→ {}", super::paths::hot_dir().join("cockpit/export").display())).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
     ]
     .spacing(6)
     .align_y(Alignment::Center);

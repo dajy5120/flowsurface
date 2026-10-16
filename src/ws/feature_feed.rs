@@ -1,6 +1,6 @@
 //! 订单流特征引擎的图表事件流（docs/31 §8.2）。
 //!
-//! 读 `~/ws-data/cockpit/feature_chart.jsonl`（`WS_FEATURE_CHART` 可覆盖）——
+//! 读 `<小文件目录>/cockpit/feature_chart.jsonl`（`WS_FEATURE_CHART` 可覆盖）——
 //! 由主仓 `wealthspring-features` 的 `ChartFeedWriter` 写出，内容是**引擎看到的那条流**：
 //! 逐笔成交 + 按 250ms 节流的深度快照（取自引擎重建出来的簿）+ 扫单/冰山检出。
 //! 转成 `exchange::Event` 喂现有的 Footprint / 热图 / Ladder / Tape，**不改图表层一行**。
@@ -62,7 +62,7 @@ pub fn feed_path() -> PathBuf {
 pub fn default_feed_path() -> PathBuf {
     std::env::var("WS_FEATURE_CHART")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| super::paths::data_dir().join("cockpit").join("feature_chart.jsonl"))
+        .unwrap_or_else(|_| super::paths::hot_dir().join("cockpit").join("feature_chart.jsonl"))
 }
 
 /// 订阅最近一次把数据交给图的时刻：`(图表流路径, 那批数据里最新的事件时间 ns, 墙钟)`。

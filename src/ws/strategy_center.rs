@@ -5,7 +5,7 @@
 //! | 什么 | 从哪来 | 怎么来 |
 //! |---|---|---|
 //! | 策略目录 + 参数表 | `python -m factory.lab catalog --json --with-params` | 打开 / 点「刷新」时后台跑一次 |
-//! | 运行记录 + 汇总 | `~/ws-data/research.sqlite`（只读） | 后台线程轮询：有运行在跑 2 秒，否则 10 秒 |
+//! | 运行记录 + 汇总 | `<小文件目录>/research.sqlite`（只读） | 后台线程轮询：有运行在跑 2 秒，否则 10 秒 |
 //! | 发起 / 停止回测 | ws-control 的 `run_spec` / `stop` | 控制 socket 一行 JSON |
 //!
 //! 视图每帧都会调用，所以**视图里不做任何 IO**——只读这里的快照。
@@ -409,7 +409,7 @@ fn with<R>(f: impl FnOnce(&mut St) -> R) -> Option<R> {
 fn db_path() -> PathBuf {
     std::env::var("WS_RESEARCH_DB")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("ws-data/research.sqlite"))
+        .unwrap_or_else(|_| super::paths::hot_dir().join("research.sqlite"))
 }
 
 fn control_sock() -> PathBuf {

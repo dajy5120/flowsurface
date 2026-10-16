@@ -216,7 +216,7 @@ fn spawn(args: &[String], desc: &str) -> String {
     if poll().is_some() {
         return "上一次还没跑完，稍等".into();
     }
-    let out = super::paths::data_dir().join("cockpit");
+    let out = super::paths::hot_dir().join("cockpit");
     let _ = std::fs::create_dir_all(&out);
     let child = Command::new(venv_py())
         .current_dir(repo())

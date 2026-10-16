@@ -1,7 +1,7 @@
 //! 预测市场（Polymarket）面板只读快照（docs/19）。
 //!
 //! **独立新增面板**（`Content::PredictionBoard`）——不改任何既有面板/readout。数据源（全只读）：
-//! `~/ws-data/live/prediction_board.json`（`factory.prediction.run` 产出：市场列表 + 基线关注档 +
+//! `<小文件目录>/live/prediction_board.json`（`factory.prediction.run` 产出：市场列表 + 基线关注档 +
 //! 可选 AI 决策支持）。沿用 c4_readout/options_readout 旁路 poller 模式（惰性 10s 刷新）。
 
 use std::path::PathBuf;
@@ -89,12 +89,12 @@ fn home() -> PathBuf {
 fn board_path() -> PathBuf {
     std::env::var("WS_PREDICTION_BOARD")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join("ws-data/live/prediction_board.json"))
+        .unwrap_or_else(|_| super::paths::hot_dir().join("live/prediction_board.json"))
 }
 fn calib_path() -> PathBuf {
     std::env::var("WS_PREDICTION_CALIB")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join("ws-data/live/prediction_calibration.json"))
+        .unwrap_or_else(|_| super::paths::hot_dir().join("live/prediction_calibration.json"))
 }
 
 pub fn snapshot() -> PredictionReadout {

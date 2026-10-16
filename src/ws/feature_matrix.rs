@@ -585,7 +585,7 @@ fn cell() -> &'static Mutex<ViewState> {
 /// 面板自己的界面偏好（列宽）。与引擎配置分开：它不影响计算，也不该随选择集走。
 #[must_use]
 pub fn ui_path() -> std::path::PathBuf {
-    super::paths::data_dir().join("cockpit").join("feature_matrix_ui.json")
+    super::paths::hot_dir().join("cockpit").join("feature_matrix_ui.json")
 }
 
 /// 界面偏好（列宽 + 涨跌箭头设置）。
@@ -814,7 +814,7 @@ pub fn handle(m: FeatureMatrixMsg) -> Option<f32> {
 pub fn config_path() -> std::path::PathBuf {
     std::env::var("WS_FEATURE_CONFIG")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| super::paths::data_dir().join("cockpit").join("feature_config.json"))
+        .unwrap_or_else(|_| super::paths::hot_dir().join("cockpit").join("feature_config.json"))
 }
 
 /// 整份配置（没有文件 / 写坏了 = 空对象，与引擎「退回默认」同一约定）。

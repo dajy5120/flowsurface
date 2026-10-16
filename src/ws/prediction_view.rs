@@ -156,7 +156,7 @@ fn market_block<'a, M: 'a>(m: &MarketRow) -> Element<'a, M> {
 /// Polymarket 那些是长周期市场（按天/月结算），这里是 **5 分钟一轮的实时盘口**。
 /// 混在一起会让「实时」这个属性消失在列表里。
 ///
-/// 数据来自 `~/ws-data/live/pm_binance.json`，由 `factory.prediction.pm_recorder`
+/// 数据来自 `<小文件目录>/live/pm_binance.json`，由 `factory.prediction.pm_recorder`
 /// 兼职写出——面板零交易所流，与 radar/news 同一模式。
 pub fn pane_body<'a>() -> Element<'a, PredictionMsg> {
     let st: PredictionReadout = super::prediction_readout::snapshot();

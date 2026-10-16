@@ -14,7 +14,7 @@
 //!
 //! ## 数据从哪来
 //!
-//! 只读 `~/ws-data/live/pm_binance.json`（[`super::pm_binance_readout`] 每秒轮询）。
+//! 只读 `<小文件目录>/live/pm_binance.json`（[`super::pm_binance_readout`] 每秒轮询）。
 //! **面板里没有一行网络代码**——WS 连接在 `ws-pm-recorder` 守护里。让面板自己连的话，
 //! 同一份行情就有了两个真相源，还多占一份 WS 配额。启停在「进程」和「网络出口」两页。
 

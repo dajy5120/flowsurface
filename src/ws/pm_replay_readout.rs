@@ -17,7 +17,7 @@ use std::time::SystemTime;
 use super::tardis_board_readout::Chart;
 
 fn base() -> PathBuf {
-    super::paths::data_dir().join("cockpit")
+    super::paths::hot_dir().join("cockpit")
 }
 
 pub fn catalog_path() -> PathBuf {

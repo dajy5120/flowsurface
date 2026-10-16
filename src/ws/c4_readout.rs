@@ -1,7 +1,7 @@
 //! C4 活体影子只读快照（docs/14 §2「live 指标接 P2 面板」）。
 //!
 //! **独立新增面板**的数据层——不改任何既有面板/readout。数据源（全只读）：
-//! ① 守护 checkpoint `~/ws-data/live/maker_shadow-SOLUSDT.json`（maker_shadow --daemon
+//! ① 守护 checkpoint `<小文件目录>/live/maker_shadow-SOLUSDT.json`（maker_shadow --daemon
 //!    每 5min + SIGTERM 原子写）→ 今日实时行（fills/库存/日净值/在线/FIFO 回合胜率）；
 //! ② Registry `live_metrics`：kind=maker_shadow_day（UTC 日切落账）+ live_vs_replay
 //!    （同日活体 vs 重放对照，preregister-c4 证伪旗）。
@@ -87,12 +87,12 @@ fn home() -> PathBuf {
 fn db_path() -> PathBuf {
     std::env::var("WS_REGISTRY")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join("ws-data/registry.sqlite"))
+        .unwrap_or_else(|_| super::paths::hot_dir().join("registry.sqlite"))
 }
 fn ckpt_path() -> PathBuf {
     std::env::var("WS_C4_STATE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join("ws-data/live/maker_shadow-SOLUSDT.json"))
+        .unwrap_or_else(|_| super::paths::hot_dir().join("live/maker_shadow-SOLUSDT.json"))
 }
 
 /// pane 渲染时读快照（惰性起 poller：首次调用才开后台线程）。

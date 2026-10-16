@@ -702,3 +702,23 @@ pub fn float_card(_theme: &Theme) -> container::Style {
         ..Default::default()
     }
 }
+
+/// 模态浮层：铺满全窗口的遮罩 + 居中偏上的一张卡片（docs/47 数据目录提醒与设置）。
+/// `on_scrim` = 点遮罩发的消息（`None` = 点遮罩不关，必须在卡片里处理）。
+pub fn modal_layer<'a, M: Clone + 'a>(card: Element<'a, M>, width: f32, on_scrim: Option<M>) -> Element<'a, M> {
+    let c = core();
+    let mut scrim = iced::widget::mouse_area(container(Space::new()).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
+        background: Some(Background::Color(color(c.state_scrim))),
+        ..Default::default()
+    }));
+    if let Some(m) = on_scrim {
+        scrim = scrim.on_press(m);
+    }
+    let card = container(card).padding(metrics::space(5)).width(Length::Fixed(width)).style(float_card);
+    iced::widget::stack![
+        // 遮罩挡住后面的界面：提醒处理掉之前点不到后面（mouse_area 本身不接住点击）
+        iced::widget::opaque(scrim),
+        container(iced::widget::opaque(card)).width(Length::Fill).align_x(Alignment::Center).padding(Padding { top: 96.0, ..Padding::ZERO }),
+    ]
+    .into()
+}

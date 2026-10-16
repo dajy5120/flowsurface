@@ -1,6 +1,6 @@
 //! 币安钱包预测市场的实时读数（预测市场面板的 Binance 视图）。
 //!
-//! 读 `~/ws-data/live/pm_binance.json`——由 `factory.prediction.pm_recorder` 兼职写出。
+//! 读 `<小文件目录>/live/pm_binance.json`——由 `factory.prediction.pm_recorder` 兼职写出。
 //!
 //! **为什么由录制器写而不是面板自己连**：录制器本来就握着 WS 实时流，面板再连一条
 //! 等于对同一份行情建两个真相源（还多占一份 WS 配额）。面板只读快照，零交易所流——
@@ -152,8 +152,7 @@ static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
 
 fn board_path() -> PathBuf {
     std::env::var("WS_PM_BINANCE_BOARD").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join("ws-data/live/pm_binance.json")
+        super::paths::hot_dir().join("live/pm_binance.json")
     })
 }
 
@@ -305,9 +304,7 @@ pub fn load(path: &std::path::Path) -> PmBinanceReadout {
 }
 
 fn data_root() -> PathBuf {
-    std::env::var("WS_DATA_DIR").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("ws-data")
-    })
+    super::paths::data_dir()
 }
 
 /// 扫 `raw/pm_book/<symbol>/<date>/*.parquet`，按天算覆盖；顺带数那天的轮次。
@@ -482,7 +479,7 @@ mod live_scan {
     use super::*;
 
     #[test]
-    #[ignore = "需要本机 ~/ws-data 有预测市场录制"]
+    #[ignore = "需要本机 <数据目录> 有预测市场录制"]
     fn 扫真实目录() {
         let days = scan_days(&data_root(), "BTCUSDT-5M");
         assert!(!days.is_empty(), "没扫到任何一天——录制器跑过吗？");

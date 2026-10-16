@@ -1,6 +1,6 @@
 //! 特征库面板 — 只读数据（docs/30）。
 //!
-//! 读 `~/ws-data/cockpit/feature_lab.json`，由主仓 `factory.prediction.feature_lab`
+//! 读 `<小文件目录>/cockpit/feature_lab.json`，由主仓 `factory.prediction.feature_lab`
 //! 批量算好落盘。**零交易所连接。**
 
 use std::path::PathBuf;
@@ -87,7 +87,7 @@ static CACHE: OnceLock<Mutex<(Option<SystemTime>, FeatureLab)>> = OnceLock::new(
 
 pub fn board_path() -> PathBuf {
     std::env::var("WS_FEATURE_BOARD").map(PathBuf::from).unwrap_or_else(|_| {
-        super::paths::data_dir().join("cockpit").join("feature_lab.json")
+        super::paths::hot_dir().join("cockpit").join("feature_lab.json")
     })
 }
 

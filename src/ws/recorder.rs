@@ -67,6 +67,7 @@ pub struct SymSel {
 /// pane 携带的可编辑状态(从 recorder.toml 初始化)。
 #[derive(Clone)]
 pub struct RecorderPaneState {
+    /// recorder.toml 里手写的 `data_dir`（空 = 没写，走 docs/47 的大数据目录）。录制页不再编辑它
     pub data_dir: String,
     pub syms: BTreeMap<String, SymSel>,
     pub custom: String,
@@ -98,7 +99,7 @@ impl Default for RecorderPaneState {
 impl RecorderPaneState {
     /// 从 recorder.toml 读现有配置(保存位置 + 币种/档位);读不到则给预设默认。
     pub fn load() -> Self {
-        let mut data_dir = "~/ws-data".to_string();
+        let mut data_dir = String::new();
         let mut syms: BTreeMap<String, SymSel> = PRESETS
             .iter()
             .map(|s| (s.to_string(), SymSel { enabled: false, tier: TierOpt::Light }))
@@ -121,7 +122,7 @@ impl RecorderPaneState {
             data_dir,
             syms,
             custom: String::new(),
-            hint: "24/7 守护录制:启停服务、改保存位置/币种、看已录总览".into(),
+            hint: "24/7 守护录制:启停服务、改币种、看已录总览（保存位置在 设置 → 数据目录…）".into(),
             det_sym: ALL.into(),
             det_stream: ALL.into(),
             det_limit: DET_PAGE,
@@ -139,7 +140,6 @@ pub enum RecorderMsg {
     Table2(crate::ui::grid::GridMsg),
     /// 预测市场录制按日表
     Table3(crate::ui::grid::GridMsg),
-    DataDir(String),
     ToggleSym(String, bool),
     TierPick(String, TierOpt),
     CustomInput(String),
@@ -165,7 +165,6 @@ pub enum RecorderMsg {
 /// 处理一条交互:改状态 + 必要的副作用(systemctl / 写 toml)。
 pub fn handle(st: &mut RecorderPaneState, msg: RecorderMsg) {
     match msg {
-        RecorderMsg::DataDir(s) => st.data_dir = s,
         RecorderMsg::ToggleSym(s, on) => {
             if let Some(e) = st.syms.get_mut(&s) {
                 e.enabled = on;
@@ -225,12 +224,12 @@ fn expand(s: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// 当前 recorder.toml 里的 data_dir(poller 扫数据湖用);读不到给默认。
+/// 录制器实际写的根目录(poller 扫数据湖用):recorder.toml 里手写了 data_dir 就用它,否则 docs/47 的大数据目录。
 pub fn config_data_dir() -> String {
     std::fs::read_to_string(toml_path())
         .ok()
         .and_then(|c| parse_toml(&c).0)
-        .unwrap_or_else(|| "~/ws-data".into())
+        .unwrap_or_else(|| super::paths::data_dir().to_string_lossy().into_owned())
 }
 
 /// 录制来源交易所的展示名。
@@ -294,17 +293,16 @@ fn zh(a: &str) -> &'static str {
 
 /// 改写 recorder.toml(保存位置 + 选中币种/档位),运行中则重启生效。
 fn apply_config(st: &RecorderPaneState) -> String {
-    if st.data_dir.trim().is_empty() || expand(&st.data_dir).starts_with("/tmp") {
-        return "✗ 保存位置非法(空 / /tmp 易失目录)".into();
+    if !st.data_dir.trim().is_empty() && expand(&st.data_dir).starts_with("/tmp") {
+        return "✗ recorder.toml 里的 data_dir 在 /tmp(易失目录)".into();
     }
     let chosen: Vec<(&String, &SymSel)> = st.syms.iter().filter(|(_, v)| v.enabled).collect();
     if chosen.is_empty() {
         return "✗ 至少选一个币种".into();
     }
-    let mut toml = format!(
-        "# WealthSpring Recorder 配置(录制驾驶舱写入)\ndata_dir = \"{}\"\nrotate_secs = 600\nflush_secs = 2\n",
-        st.data_dir
-    );
+    // 保存位置不写这里(docs/47 paths.toml 的大数据目录);原来手写了 data_dir 的照抄保留
+    let dd = if st.data_dir.trim().is_empty() { String::new() } else { format!("data_dir = \"{}\"\n", st.data_dir) };
+    let mut toml = format!("# WealthSpring Recorder 配置(录制驾驶舱写入)\n{dd}rotate_secs = 600\nflush_secs = 2\n");
     for (name, sel) in chosen {
         let tier = if sel.tier == TierOpt::Full { "full" } else { "light" };
         toml.push_str(&format!("\n[[symbols]]\nname = \"{name}\"\ntier = \"{tier}\"\n"));

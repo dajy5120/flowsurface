@@ -152,7 +152,7 @@ fn cell() -> &'static Mutex<St> {
 /// 回放输出目录。
 #[must_use]
 pub fn replay_dir() -> PathBuf {
-    super::paths::data_dir().join("cockpit").join("feature_replay")
+    super::paths::hot_dir().join("cockpit").join("feature_replay")
 }
 
 /// `replay_source` 可执行文件（主仓 release 例子；`WS_REPLAY_SOURCE_BIN` 可覆盖）。

@@ -158,7 +158,7 @@ fn take_picked(g: &mut St) {
 /// 运行日志。
 #[must_use]
 pub fn log_path() -> PathBuf {
-    super::paths::data_dir().join("cockpit").join("backtest_launch.log")
+    super::paths::hot_dir().join("cockpit").join("backtest_launch.log")
 }
 
 fn last_line() -> String {

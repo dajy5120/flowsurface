@@ -193,7 +193,7 @@ pub fn db_path() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("WS_CALENDAR_DB") {
         return std::path::PathBuf::from(p);
     }
-    super::paths::data_dir().join("calendar.sqlite")
+    super::paths::hot_dir().join("calendar.sqlite")
 }
 
 /// 数据多旧就自动刷新一次（docs/43 §12）。

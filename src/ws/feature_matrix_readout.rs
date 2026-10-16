@@ -1,6 +1,6 @@
 //! 特征矩阵面板 — 只读数据（docs/31 §8.1）。
 //!
-//! 读 `~/ws-data/cockpit/feature_matrix.json`，由主仓 `wealthspring-features`
+//! 读 `<小文件目录>/cockpit/feature_matrix.json`，由主仓 `wealthspring-features`
 //! 的 `sidecar::SidecarWriter` 周期性写出。**零交易所连接、零计算**——
 //! 面板不重算任何特征值。
 //!
@@ -262,7 +262,7 @@ pub fn board_path() -> PathBuf {
     }
     std::env::var("WS_FEATURE_MATRIX")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| super::paths::data_dir().join("cockpit").join("feature_matrix.json"))
+        .unwrap_or_else(|_| super::paths::hot_dir().join("cockpit").join("feature_matrix.json"))
 }
 
 pub fn snapshot() -> std::sync::Arc<Matrix> {

@@ -7,6 +7,8 @@
 #![allow(dead_code)] // F1 先落读取层；replay 订阅 / 三态接线见后续阶段
 
 pub mod active_run;
+pub mod data_dirs;
+pub mod data_dirs_view;
 pub mod backtest_readout;
 pub mod backtest_view;
 pub mod strategy_center;
@@ -217,7 +219,7 @@ mod subscription_liveness_tests {
 mod data_lake_date_tests {
     //! 数据湖索引日期必须与写入端同口径（RELEASE_REMEDIATION_PLAN F-01）。
     //!
-    //! 录制器把 parquet 落在 `~/ws-data/raw/{stream}/{SYM}/{YYYY-MM-DD}/` 下，
+    //! 录制器把 parquet 落在 `<大数据目录>/raw/{stream}/{SYM}/{YYYY-MM-DD}/` 下，
     //! 目录名由**数据自己的 UTC 时间戳**决定
     //! （`crates/wealthspring-recorder/src/writer.rs` 的 `partition_date`，
     //!  那边有一条对应的行为测试 `partition_date_is_utc_not_local`）。

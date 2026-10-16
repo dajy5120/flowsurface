@@ -75,6 +75,8 @@ fn main() {
     // 「今日用量」要连续才有意义——挂在渲染上的话，那个数的真实含义
     // 会变成「你盯着那一页看的时候我看到了多少」。没人看时 20 秒一轮
     ws::egress::start();
+    // 数据目录（docs/47）：启动时查一次、之后每 30 秒一次；挂载盘没挂上就在界面里弹提醒
+    ws::data_dirs::start();
     // 「启动时对外连接开/关」（网络出口页上的设置）。**必须在 iced 起来之前**：
     // 设成关时行情订阅要在第一帧建连前就关掉，否则是先连上再断开
     if isolated {
@@ -266,6 +268,8 @@ enum Message {
     Page(ws::pages::PageMsg),
     /// 图表绘图（docs/46 G1）：工具栏「绘图」组与它的菜单
     Draw(ws::drawing::DrawMsg),
+    /// 数据目录提醒与设置（docs/47）
+    DataDirs(ws::data_dirs::DataDirsMsg),
     Sidebar(dashboard::sidebar::Message),
     MarketWsEvent(exchange::Event),
     WsActiveRun(Option<ws::active_run::ActiveRun>), // WealthSpring 三态切换
@@ -752,6 +756,7 @@ impl Flowsurface {
             }
             Message::Page(m) => return self.page_action(m),
             Message::Draw(m) => ws::drawing::handle(m),
+            Message::DataDirs(m) => ws::data_dirs::handle(m),
             Message::SpecimenShot(shot) => {
                 // 焦点顺序表（docs/35 §13.3「每个工作区一份焦点顺序表」）：F6 / Ctrl 1–9 走的面板次序
                 if let Some(sp) = &self.specimen {
@@ -1503,6 +1508,12 @@ impl Flowsurface {
                 .into()
             } else {
                 base
+            };
+
+            // 数据目录提醒 / 设置卡片（docs/47）：盖在界面上，命令面板之下
+            let base: Element<'_, Message> = match ws::data_dirs_view::overlay() {
+                Some(layer) => iced::widget::stack![base, layer.map(Message::DataDirs)].into(),
+                None => base,
             };
 
             // 命令面板（Ctrl K）浮在一切之上（UPDS V2 §12：e3 覆盖层）
@@ -2464,6 +2475,7 @@ impl Flowsurface {
             Cmd::OpenSettings => self.sidebar.set_menu(Some(sidebar::Menu::Settings)),
             Cmd::OpenLayouts => self.sidebar.set_menu(Some(sidebar::Menu::Layout)),
             Cmd::OpenDataFolder => return self.update(Message::DataFolderRequested),
+            Cmd::DataDirs => ws::data_dirs::handle(ws::data_dirs::DataDirsMsg::Open),
             Cmd::OpenInStudio => match ws::bridge::open_in_studio() {
                 Ok(m) => self.notifications.push(Toast::info(m)),
                 Err(m) => self.notifications.push(Toast::warn(m)),
@@ -2557,6 +2569,7 @@ impl Flowsurface {
         });
         ui::shell::Info {
             alerts_unseen: self.shell.alerts.unseen(),
+            data_dirs: ws::data_dirs::problem_summary(),
             link,
             workspace: self
                 .layout_manager
@@ -2854,6 +2867,9 @@ impl Flowsurface {
                         ("声音", "audio sound 声音 音量 提示音 成交", false, "", None, toggle_audio_editor.into()),
                         ("网络与代理", "network proxy 代理 网络", false, "", None, toggle_network_editor.into()),
                         ("数据文件夹", "data folder 文件夹 配置", false, "", None, open_data_folder.into()),
+                        // docs/47：大数据目录 / 小文件目录 / 挂载点，写 ~/.config/wealthspring/paths.toml
+                        ("数据目录", "data dir 数据目录 挂载 mount 路径 paths.toml ws-data", false, "paths.toml", None,
+                            button(text("数据目录…")).on_press(run(Cmd::DataDirs)).into()),
                     ];
                     let q = self.settings_query.trim().to_lowercase();
                     let mut list = column![

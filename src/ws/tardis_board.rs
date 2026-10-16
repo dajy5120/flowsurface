@@ -605,7 +605,7 @@ fn stop_play() -> String {
 /// 与加载共用后台槽位：两者都改面板输入，同时跑没有意义。
 /// 导出目录（与 Python 侧默认一致）。
 fn export_root() -> std::path::PathBuf {
-    super::paths::data_dir().join("cockpit/export")
+    super::paths::hot_dir().join("cockpit/export")
 }
 
 /// 导 CSV：交给 `factory.replay.export` 从已加载的面板 JSON 生成（每图一表）。

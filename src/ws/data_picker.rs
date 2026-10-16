@@ -340,7 +340,7 @@ pub fn default_root(src: &str) -> String {
         "databento" => env("WS_DATABENTO_ROOT", "/data/ubuntu/HistoricalData/data/bronze/Databento"),
         // 与 `wealthspring_vendors::own::DEFAULT_ROOT` 同一处：bronze 本身，只认带 `_own.toml` 的标的目录
         "own" => env("WS_OWN_ROOT", "/data/ubuntu/HistoricalData/data/bronze"),
-        _ => std::env::var("WS_DATA_DIR").unwrap_or_else(|_| super::paths::data_dir().to_string_lossy().into_owned()),
+        _ => super::paths::data_dir().to_string_lossy().into_owned(), // docs/47：已含 WS_DATA_DIR
     }
 }
 

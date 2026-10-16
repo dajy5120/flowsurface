@@ -149,7 +149,7 @@ pub static ALL: &[Proc] = &[
     Proc {
         key: "recorder",
         label: "行情录制器",
-        what: "Binance USDS-M L2/成交/标记价 → ~/ws-data parquet",
+        what: "Binance USDS-M L2/成交/标记价 → 大数据目录 raw/ parquet",
         unit: "wealthspring-recorder",
         kind: Kind::Daemon,
         if_stopped: "录制出现空洞，且事后无法补——研究数据是一次性的",
@@ -157,7 +157,7 @@ pub static ALL: &[Proc] = &[
     Proc {
         key: "pm-recorder",
         label: "预测市场录制器",
-        what: "币安钱包 BTC 5 分钟涨跌：WS 盘口(Up) + REST(Down) → ~/ws-data/raw/pm_book",
+        what: "币安钱包 BTC 5 分钟涨跌：WS 盘口(Up) + REST(Down) → 大数据目录 raw/pm_book",
         unit: "ws-pm-recorder",
         kind: Kind::Daemon,
         if_stopped: "这份数据没有第三方历史源——5 分钟市场结束即消失，不录就永远没有，\

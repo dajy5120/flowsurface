@@ -512,7 +512,7 @@ struct Ui {
 static UI: std::sync::OnceLock<std::sync::Mutex<Ui>> = std::sync::OnceLock::new();
 
 fn ui_path() -> std::path::PathBuf {
-    super::paths::data_dir().join("cockpit").join("chart_params_ui.json")
+    super::paths::hot_dir().join("cockpit").join("chart_params_ui.json")
 }
 
 fn ui_cell() -> &'static std::sync::Mutex<Ui> {

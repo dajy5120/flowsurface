@@ -817,7 +817,8 @@ mod real_data_tests {
     /// 那些本该被切掉的空隙，逐行核对立刻露馅。
     #[test]
     fn 真实数据的子段切分与逐行核对一致() {
-        let day = std::path::Path::new("/home/dajy/ws-data/raw/l2/BTCUSDT");
+        let day = super::super::paths::data_dir().join("raw/l2/BTCUSDT");
+        let day = day.as_path();
         let Some(sub) = std::fs::read_dir(day)
             .ok()
             .and_then(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).max())

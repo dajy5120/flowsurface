@@ -518,6 +518,8 @@ pub struct Info {
     pub streams_down: Vec<(String, String)>,
     /// 上次打开「告警」页之后新命中的告警条数
     pub alerts_unseen: usize,
+    /// 数据目录有问题（docs/47）：（状态栏标签, 悬停说明）；`None` = 都好
+    pub data_dirs: Option<(String, String)>,
     /// 整机网速（下行, 上行）字节/秒
     pub wire: Option<(f64, f64)>,
     /// 本项目对外连接条数
@@ -691,6 +693,19 @@ pub fn status_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
                 iced::widget::Space::new().into()
             },
             sep(),
+            // 数据目录（docs/47）：挂载盘没挂上 / 目录不可用时常驻，点开数据目录设置
+            match &info.data_dirs {
+                Some((label, tip)) => iced::widget::tooltip(
+                    button(t::metadata(label.clone()).color(color(c.status_danger)))
+                        .padding(0)
+                        .style(|th, st| crate::style::button::transparent(th, st, false))
+                        .on_press(ShellEvent::Run(Cmd::DataDirs)),
+                    container(t::caption(tip.clone())).padding(metrics::space(2)).style(crate::style::tooltip),
+                    iced::widget::tooltip::Position::Top,
+                )
+                .into(),
+                None => Element::from(iced::widget::Space::new()),
+            },
             // 告警（附录 A V6 §49）：上次打开「告警」页之后的新命中；点它打开告警页
             if info.alerts_unseen > 0 {
                 button(t::metadata(format!("▲ 告警 {} 条新", info.alerts_unseen)).color(color(c.status_warning)))

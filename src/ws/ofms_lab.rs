@@ -616,7 +616,7 @@ fn start_run() {
 fn cache_root() -> PathBuf {
     std::env::var_os("WS_OFMS_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("ws-data/ofms"))
+        .unwrap_or_else(|| super::paths::data_dir().join("ofms"))
 }
 
 /// 打开面板时读最近一次生成完成的窗口（`meta.json` 里 status=done、修改时间最新的那个）。
@@ -723,10 +723,7 @@ impl Tail {
 
 /// 常驻引擎 OFMS 输出的根：`<数据根>/ofms/live/`（与 `ws_features` 同一处）。
 pub fn live_root() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(|x| PathBuf::from(x).join("wealthspring"))
-        .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("ws-data"))
-        .join("ofms/live")
+    super::paths::data_dir().join("ofms/live")
 }
 
 fn utc_day_dir(sym_dir: &Path) -> PathBuf {

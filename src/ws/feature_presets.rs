@@ -1,6 +1,6 @@
 //! 特征选择集：把自定义启用集存成有名字的配置，可保存 / 加载 / 更新 / 改名 / 删除 / 导出 / 导入。
 //!
-//! 每个选择集一个文件：`~/ws-data/cockpit/feature_presets/<名字>.json`（`WS_FEATURE_PRESETS` 可覆盖目录）。
+//! 每个选择集一个文件：`<小文件目录>/cockpit/feature_presets/<名字>.json`（`WS_FEATURE_PRESETS` 可覆盖目录）。
 //! 导出的文件与库里的是**同一个格式**，所以导出给别人、别人导入，拿到的就是同一份。
 //!
 //! ```json
@@ -110,7 +110,7 @@ impl Preset {
 pub fn dir() -> PathBuf {
     std::env::var("WS_FEATURE_PRESETS")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| super::paths::data_dir().join("cockpit").join("feature_presets"))
+        .unwrap_or_else(|_| super::paths::hot_dir().join("cockpit").join("feature_presets"))
 }
 
 /// 名字 → 文件名。名字原样存在 JSON 里，文件名只去掉路径分隔等不能进文件名的字符。
