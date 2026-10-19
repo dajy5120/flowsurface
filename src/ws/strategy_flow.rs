@@ -643,6 +643,23 @@ pub fn apply_values(values: &mut HashMap<String, NodeValue>, probes: &HashMap<St
     }
 }
 
+/// 成本线的一句话：平掉的那些笔平均毛赚多少 bp、手续费吃掉多少 bp、净多少，开仓 / 平仓里被动成交各占几成。
+#[must_use]
+pub fn cost_line(c: &Map<String, Value>) -> String {
+    let num = |k: &str| c.get(k).and_then(Value::as_f64);
+    let bp = |k: &str| num(k).map_or("—".to_string(), |x| format!("{x:+.2}"));
+    let pct = |k: &str| num(k).map_or("—".to_string(), |x| format!("{:.0}%", x * 100.0));
+    format!(
+        "成本线：{} 笔，平均毛 {} bp − 手续费 {} bp = 净 {} bp（按开仓名义额）；被动成交 开仓 {} · 平仓 {}",
+        num("trades").unwrap_or(0.0),
+        bp("gross_bp"),
+        num("fee_bp").map_or("—".to_string(), |x| format!("{x:.2}")),
+        bp("net_bp"),
+        pct("maker_open"),
+        pct("maker_close"),
+    )
+}
+
 /// 一个节点的运行态：最近一次决策是什么、什么时候（墙上时间）。
 #[derive(Debug, Clone)]
 pub struct NodeLive {
@@ -877,6 +894,8 @@ struct St {
     /// 节点实时数值（docs/49 M2）：节点 → 怎么取值；节点 → 最近收到的值
     probes: HashMap<String, Probe>,
     values: HashMap<String, NodeValue>,
+    /// 这次运行的成本线（docs/49 M4，宿主结束时推的 `costs`）
+    costs: Option<Map<String, Value>>,
     /// 这次运行里强制风控层最近一次出手：(拒绝 / 缩量 / 停手, 原因, 共几次)
     envelope_hit: Option<(String, String, u32)>,
     /// 这次运行收到的决策轨迹（调试面板用；最多留 5 万条）
@@ -954,6 +973,7 @@ impl Default for St {
             live_n: 0,
             probes: HashMap::new(),
             values: HashMap::new(),
+            costs: None,
             envelope_hit: None,
             events: Vec::new(),
             trade_idx: Vec::new(),
@@ -1027,6 +1047,8 @@ pub struct View {
     pub live: HashMap<String, NodeLive>,
     /// 节点实时数值（docs/49 M2）
     pub values: HashMap<String, NodeValue>,
+    /// 成本线（docs/49 M4）
+    pub costs: Option<Map<String, Value>>,
     pub live_n: usize,
     pub envelope_hit: Option<(String, String, u32)>,
     /// 这次运行的成交（一笔结束）：(事件序号, 事件)
@@ -1089,6 +1111,7 @@ pub fn view() -> View {
         running: g.running,
         live: g.live.clone(),
         values: g.values.clone(),
+        costs: g.costs.clone(),
         live_n: g.live_n,
         envelope_hit: g.envelope_hit.clone(),
         trades: if g.debug_open { g.trade_idx.iter().filter_map(|&i| g.events.get(i).map(|e| (i, e.clone()))).collect() } else { Vec::new() },
@@ -1582,6 +1605,7 @@ fn run_async() {
                     g.live.clear();
                     g.live_n = 0;
                     g.values.clear();
+                    g.costs = None;
                     g.envelope_hit = None;
                     g.events.clear();
                     g.trade_idx.clear();
@@ -1730,6 +1754,14 @@ fn follow_trace(run_id: String, generation: u64) {
                         let worst = g.profile.iter().max_by(|a, b| a.1.0.total_cmp(&b.1.0)).map(|(n, (ms, _))| (n.clone(), *ms));
                         if let Some((n, ms)) = worst {
                             g.msg = format!("耗时最多：{n}（{ms:.0} ms）；工具条「耗时」叠在节点上");
+                        }
+                        continue;
+                    }
+                    if kind == "costs" {
+                        // 宿主结束时报的成本线（docs/49 M4）：毛 / 手续费 / 净（bp）与被动成交占比
+                        g.costs = v.get("why").and_then(Value::as_object).cloned();
+                        if let Some(c) = &g.costs {
+                            g.msg = cost_line(c);
                         }
                         continue;
                     }
@@ -3750,5 +3782,15 @@ mod tests {
             apply_values(&mut vals, &probes, &serde_json::json!({"ts": i, "e": {"z > 1": true}}));
         }
         assert_eq!(vals["a"].hist.len(), VALUE_HIST);
+    }
+
+    #[test]
+    fn 成本线一句话() {
+        let c: Map<String, Value> = serde_json::from_value(serde_json::json!({
+            "trades": 75, "gross_bp": -0.245, "fee_bp": 6.441, "net_bp": -6.686, "maker_open": 1.0, "maker_close": 0.0
+        })).unwrap();
+        assert_eq!(cost_line(&c), "成本线：75 笔，平均毛 -0.24 bp − 手续费 6.44 bp = 净 -6.69 bp（按开仓名义额）；被动成交 开仓 100% · 平仓 0%");
+        let empty = Map::new();
+        assert!(cost_line(&empty).contains("平均毛 — bp"));
     }
 }

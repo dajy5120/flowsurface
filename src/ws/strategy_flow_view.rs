@@ -1848,6 +1848,11 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
         let what = if s("kind") == "pause" { "手动暂停".to_string() } else { format!("{} · {} · {}", live_label(&s("kind")), if s("module").is_empty() { "内核".to_string() } else { s("module") }, s("reason")) };
         col = col.push(row![w::badge("已暂停", Tone::Warning), t::caption(format!("线 {} · {what}", s("lane"))), t::metadata(sf::ts_text(p.get("ts").and_then(Value::as_i64).unwrap_or(0))).color(pal::dim())].spacing(space(2)).align_y(Alignment::Center));
     }
+    if let Some(c) = &v.costs {
+        // 成本线（docs/49 M4）：毛利要高过手续费 + 逆向选择才有得赚；净为负标警示色
+        let net = c.get("net_bp").and_then(Value::as_f64).unwrap_or(0.0);
+        col = col.push(row![w::badge("成本", if net > 0.0 { Tone::Success } else { Tone::Warning }), t::caption(sf::cost_line(c))].spacing(space(2)).align_y(Alignment::Center).wrap());
+    }
     if let Some(gr) = v.focus.as_ref().and_then(|f| v.graph.group(f)) {
         // 进了子图：面包屑，点「顶层」回去
         col = col.push(
