@@ -33,6 +33,10 @@ const NODE_W: f32 = 168.0;
 const HEAD_H: f32 = 24.0;
 const ROW_H: f32 = 17.0;
 const FOOT_H: f32 = 18.0;
+/// 读数区的高度（docs/50）：大字一行、小图、刻度一行
+const READ_H: f32 = sf::READOUT_H;
+/// 读数区里一行进度的高度（docs/50 R3）
+const PROG_ROW_H: f32 = 16.0;
 const PORT_R: f32 = 4.5;
 /// 端口的命中半径（比画出来的大，好点）
 const PORT_HIT: f32 = 10.0;
@@ -141,6 +145,22 @@ struct Geom {
     live: Option<NodeLive>,
     /// 运行时这个节点的实时数值（docs/49 M2；数值节点、特征节点才有）
     value: Option<sf::NodeValue>,
+    /// 比较节点：被比的那一边的数值；门限（数值节点：拿它比较的那些常数；比较节点：它自己的常数）（docs/50 R4）
+    operand: Option<sf::NodeValue>,
+    thresholds: Vec<f64>,
+    /// 此刻的进度（docs/50 R3）；报过进度、此刻没有的：它的标签（读数区留着，写「标签 —」）
+    prog: Option<sf::NodeProg>,
+    prog_idle: Option<String>,
+    /// 画读数区（docs/50）：有数值、开着「读数」时节点向下长出 `READ_H`
+    readout: bool,
+    /// 宽（缺省 `NODE_W`；用户拖过就是拖的，docs/50 R2）
+    w: f32,
+    /// 标题 + 端口区的高度：读数区从这里开始
+    ports_h: f32,
+    /// 按端口算的最小高度（标题 + 端口 + 底栏）
+    base_h: f32,
+    /// 用户拖过大小（运行时不再自动长高，按拖的大小显示）
+    sized: bool,
 }
 
 impl Geom {
@@ -160,13 +180,18 @@ impl Geom {
             .and_then(|l| l.get("name").and_then(|v| v.as_str()).map(|s| format!("线 {s}")))
             .or_else(|| n.name.clone())
             .unwrap_or_else(|| if def.is_some_and(|d| d.kind == "value") { brief.chars().take(22).collect() } else { String::new() });
+        let base_h = HEAD_H + rows * ROW_H + FOOT_H;
         Geom {
             id: n.id.clone(),
             group: None,
             members: vec![n.id.clone()],
             x: n.x,
             y: n.y,
-            h: HEAD_H + rows * ROW_H + FOOT_H,
+            h: n.h.map_or(base_h, |h| h.max(base_h)),
+            w: n.w.map_or(NODE_W, |w| w.max(NODE_W)),
+            ports_h: HEAD_H + rows * ROW_H,
+            base_h,
+            sized: n.h.is_some() || n.w.is_some(),
             in_ref: ins.iter().map(|p| (n.id.clone(), p.clone())).collect(),
             out_ref: outs.iter().map(|p| (n.id.clone(), p.clone())).collect(),
             ins,
@@ -182,6 +207,11 @@ impl Geom {
             bad: 0,
             live: None,
             value: None,
+            operand: None,
+            thresholds: Vec::new(),
+            prog: None,
+            prog_idle: None,
+            readout: false,
         }
     }
 
@@ -190,17 +220,17 @@ impl Geom {
     }
 
     fn out_pos(&self, k: usize) -> Point {
-        Point::new(self.x + NODE_W, self.y + HEAD_H + ROW_H * (k as f32 + 0.5))
+        Point::new(self.x + self.w, self.y + HEAD_H + ROW_H * (k as f32 + 0.5))
     }
 
     fn contains(&self, p: Point) -> bool {
-        p.x >= self.x && p.x <= self.x + NODE_W && p.y >= self.y && p.y <= self.y + self.h
+        p.x >= self.x && p.x <= self.x + self.w && p.y >= self.y && p.y <= self.y + self.h
     }
 
     /// 与框选矩形（任意两个对角点）有没有交叠。
     fn touches(&self, a: Point, b: Point) -> bool {
         let (x0, x1, y0, y1) = (a.x.min(b.x), a.x.max(b.x), a.y.min(b.y), a.y.max(b.y));
-        self.x <= x1 && self.x + NODE_W >= x0 && self.y <= y1 && self.y + self.h >= y0
+        self.x <= x1 && self.x + self.w >= x0 && self.y <= y1 && self.y + self.h >= y0
     }
 }
 
@@ -298,6 +328,19 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
         ge.bad = bad.get(n.id.as_str()).copied().unwrap_or(0);
         ge.live = v.live.get(&n.id).cloned();
         ge.value = v.values.get(&n.id).cloned();
+        ge.operand = v.values.get(&sf::operand_key(&n.id)).cloned();
+        ge.thresholds = v.thresholds.get(&n.id).cloned().unwrap_or_default();
+        // 「执行」节点画整次运行的进度；别的节点画宿主报的
+        let exec = n.module == sf::EXEC;
+        ge.prog = if exec { v.run_prog.clone() } else { v.progress.get(&n.id).cloned() };
+        ge.prog_idle = if exec { None } else { v.prog_seen.get(&n.id).cloned() };
+        if v.readout_on && ge.value.is_some() {
+            ge.readout = true;                       // 只往下长：标题、端口位置不变，连线不跳
+            ge.h = ge.h.max(ge.base_h + READ_H);     // 拖过大小的：够大就按拖的，不再长高
+        } else if v.readout_on && (ge.prog.is_some() || ge.prog_idle.is_some()) {
+            ge.readout = true;                       // 只有进度：一行
+            ge.h = ge.h.max(ge.base_h + sf::PROGRESS_H);
+        }
         where_.insert(n.id.as_str(), sc.geoms.len());
         sc.geoms.push(ge);
     }
@@ -356,6 +399,10 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
                 x: members.iter().map(|m| m.x).fold(f32::MAX, f32::min),
                 y: members.iter().map(|m| m.y).fold(f32::MAX, f32::min),
                 h: HEAD_H + rows * ROW_H + FOOT_H,
+                w: NODE_W,
+                ports_h: HEAD_H + rows * ROW_H,
+                base_h: HEAD_H + rows * ROW_H + FOOT_H,
+                sized: false,
                 ins: ins.iter().map(|x| x.2.clone()).collect(),
                 outs: outs.iter().map(|x| x.2.clone()).collect(),
                 in_types: ins.iter().map(|x| x.3.clone()).collect(),
@@ -371,6 +418,11 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
                 bad: members.iter().map(|m| bad.get(m.id.as_str()).copied().unwrap_or(0)).sum(),
                 live,
                 value: None,
+                operand: None,
+                thresholds: Vec::new(),
+                prog: None,
+                prog_idle: None,
+                readout: false,
             });
         }
         // 2. 展开着的子图：一个框
@@ -386,7 +438,7 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
                 continue;
             }
             let (x0, y0) = (ms.iter().map(|m| m.x).fold(f32::MAX, f32::min), ms.iter().map(|m| m.y).fold(f32::MAX, f32::min));
-            let (x1, y1) = (ms.iter().map(|m| m.x + NODE_W).fold(f32::MIN, f32::max), ms.iter().map(|m| m.y + m.h).fold(f32::MIN, f32::max));
+            let (x1, y1) = (ms.iter().map(|m| m.x + m.w).fold(f32::MIN, f32::max), ms.iter().map(|m| m.y + m.h).fold(f32::MIN, f32::max));
             sc.frames.push(GroupFrame {
                 id: gr.id.clone(),
                 title: gr.title.clone(),
@@ -433,13 +485,34 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
     sc
 }
 
+/// 刻度用的短写法：约四位有效数字（4560.96 → 4561，0.15234 → 0.152）。
+fn num_short(x: f64) -> String {
+    let a = x.abs();
+    if a >= 1000.0 {
+        format!("{x:.0}")
+    } else if a >= 100.0 {
+        format!("{x:.1}")
+    } else if a >= 1.0 || a == 0.0 {
+        format!("{x:.2}")
+    } else if a >= 0.01 {
+        format!("{x:.3}")
+    } else {
+        format!("{x:.1e}")
+    }
+}
+
+/// 小号字一段文字大约多宽（世界坐标）：汉字按一格、其余按半格算——右对齐用。
+fn text_w(s: &str) -> f32 {
+    s.chars().map(|c| if c.is_ascii() { 6.2 } else { 11.5 }).sum()
+}
+
 /// 节点实时数值的文字与颜色：条件写「成立 / 不成立」，数写有效数字，没算好写「—」。
 fn value_label(v: sf::Val) -> (String, Color) {
     match v {
         sf::Val::Flag(true) => ("= 成立".into(), pal::ok()),
         sf::Val::Flag(false) => ("= 不成立".into(), pal::dim()),
         sf::Val::Num(x) => (format!("= {}", num_text(x)), pal::txt()),
-        sf::Val::Missing => ("= —（未就绪）".into(), pal::dim()),
+        sf::Val::Missing => ("= 预热中".into(), pal::dim()),
     }
 }
 
@@ -471,7 +544,18 @@ struct FlowCanvas {
     pan: (f32, f32),
     zoom: f32,
     now: Instant,
+    /// 「读数」开着吗（拖大了、还没数值的节点在读数区写个提示）
+    readout_on: bool,
+    /// 正在画「选中节点之下」的内容（见 `label`）
+    under: std::cell::Cell<bool>,
+    /// 选中节点占的矩形（世界坐标 x, y, w, h）：构造时算一次，别每段字都扫全部节点（大图，docs/45 C8）
+    covers: Vec<(f32, f32, f32, f32)>,
 }
+
+/// 改大小的手柄：选中节点右下角一个小三角，屏幕上约这么大（像素）。
+const HANDLE: f32 = 10.0;
+/// 拖大小时按这么多吸附（按住 Shift 不吸附）。
+const SNAP: f32 = 8.0;
 
 #[derive(Default)]
 enum Drag {
@@ -497,6 +581,13 @@ enum Drag {
     Box {
         start: Point,
         at: Point,
+    },
+    /// 拖手柄改大小（docs/50 R2）：按住的那个节点原来的宽高；选中的各节点原来的大小（按同一比例一起改）
+    Resize {
+        origin: Point,
+        w0: f32,
+        h0: f32,
+        items: Vec<(String, f32, f32)>,
     },
 }
 
@@ -549,6 +640,15 @@ impl FlowCanvas {
         None
     }
 
+    /// 选中的（不是折叠子图的）节点里，`p` 落在哪个的右下角手柄上。
+    fn handle_at(&self, p: Point) -> Option<&Geom> {
+        let r = HANDLE / self.zoom.max(0.5);
+        self.scene.geoms.iter().rev().filter(|g| g.group.is_none() && self.is_selected(g)).find(|g| {
+            let (cx, cy) = (g.x + g.w, g.y + g.h);
+            p.x <= cx + 2.0 && p.y <= cy + 2.0 && p.x >= cx - r && p.y >= cy - r
+        })
+    }
+
     fn node_at(&self, p: Point) -> Option<&Geom> {
         self.scene.geoms.iter().rev().find(|g| g.contains(p))
     }
@@ -599,13 +699,17 @@ impl FlowCanvas {
     }
 
     fn label(&self, frame: &mut Frame, s: impl Into<String>, at: Point, color: Color, size: f32) {
+        // 画被盖住的那些时：落在选中节点范围里的字不画（iced 把文字统一画在图形上面，盖不住，docs/50 R2）
+        if self.under.get() && self.covers.iter().any(|&(x, y, w, h)| at.x >= x && at.x <= x + w && at.y >= y && at.y <= y + h) {
+            return;
+        }
         frame.fill_text(Text { content: s.into(), position: self.to_screen(at), color, size: iced::Pixels(size * self.zoom), ..Default::default() });
     }
 
     fn draw_node(&self, frame: &mut Frame, g: &Geom) {
         let z = self.zoom;
         let tl = self.to_screen(Point::new(g.x, g.y));
-        let size = Size::new(NODE_W * z, g.h * z);
+        let size = Size::new(g.w * z, g.h * z);
         let glow = self.glow(g);
         let body = Path::rounded_rectangle(tl, size, (5.0 * z).into());
         frame.fill(&body, if g.bypass { pal::alpha(pal::card_bg(), 0.35) } else { pal::card_bg() });
@@ -613,7 +717,7 @@ impl FlowCanvas {
             frame.fill(&body, pal::alpha(c, 0.28 * k));
         }
         // 标题条（折叠的子图用强调色，一眼看得出它不是一个模块）
-        let head = Path::rounded_rectangle(tl, Size::new(NODE_W * z, HEAD_H * z), (5.0 * z).into());
+        let head = Path::rounded_rectangle(tl, Size::new(g.w * z, HEAD_H * z), (5.0 * z).into());
         frame.fill(&head, if g.group.is_some() { pal::alpha(pal::accent(), 0.35) } else { pal::band() });
         // 边框：出错 > 运行中的高亮 > 选中 > 平常
         let selected = self.is_selected(g);
@@ -633,13 +737,25 @@ impl FlowCanvas {
         // 选中的那笔成交经过这里：粗框 + 第几步
         if let Some(k) = self.path.iter().position(|n| g.members.contains(n)) {
             frame.stroke(&body, Stroke::default().with_width(3.0).with_color(pal::warn()));
-            let c = Point::new(tl.x + NODE_W * z - 2.0 * z, tl.y - 2.0 * z);
+            let c = Point::new(tl.x + g.w * z - 2.0 * z, tl.y - 2.0 * z);
             frame.fill(&Path::circle(c, 9.0 * z), pal::warn());
             frame.fill_text(Text { content: (k + 1).to_string(), position: Point::new(c.x - 4.0 * z, c.y - 7.0 * z), color: pal::card_bg(), size: iced::Pixels(t::s_meta() * z), ..Default::default() });
         }
         // 断点：左上角一个红点
         if g.members.iter().any(|m| self.breakpoints.contains(m)) {
             frame.fill(&Path::circle(Point::new(tl.x, tl.y), 5.0 * z), pal::bad());
+        }
+        // 改大小的手柄：选中的节点右下角一个小三角（docs/50 R2）
+        if selected && g.group.is_none() {
+            let (cx, cy) = (tl.x + g.w * z, tl.y + g.h * z);
+            let r = HANDLE;
+            let tri = Path::new(|p| {
+                p.move_to(Point::new(cx - 1.0, cy - r));
+                p.line_to(Point::new(cx - 1.0, cy - 1.0));
+                p.line_to(Point::new(cx - r, cy - 1.0));
+                p.close();
+            });
+            frame.fill(&tri, pal::accent());
         }
         if g.group.is_some() {
             // 叠一层边，看着像一摞
@@ -664,7 +780,7 @@ impl FlowCanvas {
         self.label(frame, g.kind_label.clone(), Point::new(g.x + 8.0, g.y + 5.0), pal::dim(), small);
         self.label(frame, g.title.clone(), Point::new(g.x + 8.0 + 13.0 * g.kind_label.chars().count() as f32, g.y + 5.0), pal::head(), small);
         if g.wireless {
-            self.label(frame, "↯", Point::new(g.x + NODE_W - 16.0, g.y + 5.0), pal::accent(), small);
+            self.label(frame, "↯", Point::new(g.x + g.w - 16.0, g.y + 5.0), pal::accent(), small);
         }
         if !g.tag.is_empty() {
             // 旁路 / 静音 / 待比较：标在节点上方，缩小了也看得见
@@ -681,18 +797,20 @@ impl FlowCanvas {
             self.port_mark(frame, p, &g.out_types[k]);
             self.label(frame, port_label(port), Point::new(p.x - 8.0 - 12.0 * port_label(port).chars().count() as f32, p.y - 6.5), pal::txt(), small);
         }
+        if g.readout {
+            self.draw_readout(frame, g);
+        } else if g.sized && self.readout_on && g.h - g.base_h > 14.0 {
+            // 拖大了、还没数值：多出来的那块就是读数区，先写个提示
+            self.label(frame, "读数区（运行时显示）", Point::new(g.x + 8.0, g.y + g.ports_h + 4.0), pal::alpha(pal::dim(), 0.7), small);
+        }
         // 底栏：线名 / 状态名；运行时换成最近一次决策与计数；开着「耗时」时换成耗时
         let foot_y = g.y + g.h - FOOT_H + 3.0;
         let spent = g.members.iter().filter_map(|m| self.profile.get(m)).fold(None::<(f64, u64)>, |a, x| Some(a.map_or(*x, |a| (a.0 + x.0, a.1 + x.1))));
         if let Some((ms, calls)) = spent {
             let worst = self.profile.values().map(|x| x.0).fold(0.0, f64::max).max(1e-9);
             let k = (ms / worst) as f32;
-            frame.fill(&Path::rectangle(self.to_screen(Point::new(g.x, g.y + g.h - 3.0)), Size::new(NODE_W * k * self.zoom, 3.0 * self.zoom)), pal::warn());
+            frame.fill(&Path::rectangle(self.to_screen(Point::new(g.x, g.y + g.h - 3.0)), Size::new(g.w * k * self.zoom, 3.0 * self.zoom)), pal::warn());
             self.label(frame, format!("{ms:.1} ms · {calls} 次"), Point::new(g.x + 8.0, foot_y), if k > 0.5 { pal::warn() } else { pal::dim() }, small);
-            return;
-        }
-        if let Some(val) = &g.value {
-            self.draw_value(frame, g, val, foot_y, small);
             return;
         }
         match &g.live {
@@ -714,36 +832,153 @@ impl FlowCanvas {
         }
     }
 
-    /// 节点实时数值（docs/49 M2）：底栏左边写当前值，右边一条小图（最近约半分钟墙上时间推来的值）。
-    fn draw_value(&self, frame: &mut Frame, g: &Geom, val: &sf::NodeValue, foot_y: f32, small: f32) {
-        let (s, c) = value_label(val.v);
-        self.label(frame, s, Point::new(g.x + 8.0, foot_y), c, small);
-        let pts: Vec<(usize, f32)> = val.hist.iter().copied().enumerate().filter(|(_, x)| x.is_finite()).collect();
-        if pts.len() < 2 {
-            return;
+    /// 读数区（docs/50）：底栏上方单独一块——数值（大字、小图、刻度），有进度时底下再一行进度条（R3）。
+    fn draw_readout(&self, frame: &mut Frame, g: &Geom) {
+        let z = self.zoom;
+        // 读数区 = 端口区与底栏之间的全部空间：拖大的节点，多出来的都给它（docs/50 R2）
+        let (y0, rh) = (g.y + g.ports_h, g.h - FOOT_H - g.ports_h);
+        // 底色与上下分隔线：一眼分得出这是读数，不是端口
+        frame.fill(&Path::rectangle(self.to_screen(Point::new(g.x + 1.0, y0)), Size::new((g.w - 2.0) * z, rh * z)), pal::alpha(pal::band(), 0.45));
+        for y in [y0, y0 + rh] {
+            let l = Path::line(self.to_screen(Point::new(g.x + 1.0, y)), self.to_screen(Point::new(g.x + g.w - 1.0, y)));
+            frame.stroke(&l, Stroke::default().with_width(1.0).with_color(pal::alpha(pal::line(), 0.7)));
         }
-        let (lo, hi) = pts.iter().fold((f32::MAX, f32::MIN), |(a, b), (_, x)| (a.min(*x), b.max(*x)));
-        let span = if hi - lo > 1e-12 { hi - lo } else { 1.0 };
-        // 小图占底栏右半边，留出上下 3 像素
-        let (x0, w) = (g.x + NODE_W * 0.5, NODE_W * 0.5 - 8.0);
-        let (y0, h) = (g.y + g.h - FOOT_H + 3.0, FOOT_H - 6.0);
-        let n = (sf::VALUE_HIST - 1) as f32;
-        let at = |i: usize, x: f32| self.to_screen(Point::new(x0 + w * (i as f32 + (sf::VALUE_HIST - val.hist.len()) as f32) / n, y0 + h * (1.0 - (x - lo) / span)));
-        let line = Path::new(|p| {
-            let mut first = true;
-            let mut prev = 0usize;
-            for &(i, x) in &pts {
-                // 中间断了（没算好的那几步）就断开，不硬连
-                if first || i != prev + 1 {
-                    p.move_to(at(i, x));
-                } else {
-                    p.line_to(at(i, x));
-                }
-                first = false;
-                prev = i;
+        let row = PROG_ROW_H;
+        let idle = g.prog_idle.as_ref().map(|l| format!("{l} —"));
+        match (&g.value, &g.prog) {
+            (Some(val), Some(pr)) => {
+                // 进度占最底下一行，数值部分让出这一行（节点不变高）
+                self.draw_value(frame, g, val, y0, rh - row);
+                self.draw_progress(frame, g, Some(pr), None, y0 + rh - row);
             }
-        });
-        frame.stroke(&line, Stroke::default().with_width(1.0).with_color(pal::alpha(c, 0.9)));
+            (Some(val), None) => self.draw_value(frame, g, val, y0, rh),
+            (None, pr) => self.draw_progress(frame, g, pr.as_ref(), idle, y0 + (rh - row) / 2.0),
+        }
+    }
+
+    /// 一行进度：左边「标签 已完成/总数 单位」，右边进度条。计时快到上限转警示色；没进度时只写「标签 —」。
+    fn draw_progress(&self, frame: &mut Frame, g: &Geom, pr: Option<&sf::NodeProg>, idle: Option<String>, y: f32) {
+        let z = self.zoom;
+        let pad = 8.0;
+        let Some(pr) = pr else {
+            if let Some(s) = idle {
+                self.label(frame, s, Point::new(g.x + pad, y + 2.0), pal::alpha(pal::dim(), 0.8), t::s_meta());
+            }
+            return;
+        };
+        let warn = pr.near_limit();
+        let s = pr.text();
+        self.label(frame, s.clone(), Point::new(g.x + pad, y + 2.0), if warn { pal::warn() } else { pal::dim() }, t::s_meta());
+        // 进度条：字后面剩下的宽度；太窄（不到 24）就放到字底下贴边一条
+        let x0 = g.x + pad + text_w(&s) + 6.0;
+        let (bx, bw, by, bh) = if g.x + g.w - pad - x0 >= 24.0 { (x0, g.x + g.w - pad - x0, y + 6.0, 5.0) } else { (g.x + pad, g.w - 2.0 * pad, y + PROG_ROW_H - 3.0, 2.0) };
+        frame.fill(&Path::rectangle(self.to_screen(Point::new(bx, by)), Size::new(bw * z, bh * z)), pal::alpha(pal::line(), 0.6));
+        let fill = if warn { pal::warn() } else { pal::accent() };
+        frame.fill(&Path::rectangle(self.to_screen(Point::new(bx, by)), Size::new(bw * pr.frac() * z, bh * z)), fill);
+    }
+
+    /// 数值部分：大字当前值与变化、占满宽度的小图、最小 · 回测时间跨度 · 最大。占 `y0` 起 `rh` 高。
+    fn draw_value(&self, frame: &mut Frame, g: &Geom, val: &sf::NodeValue, y0: f32, rh: f32) {
+        let z = self.zoom;
+        let (pad, w) = (8.0, g.w - 16.0);
+        let (text, color) = value_label(val.v);
+        // 大字随宽度升档（168 → 1.15 倍正文，拉宽到 300 以上 → 约 2 倍）
+        let big = t::s_body() * 1.15 * (g.w / NODE_W).clamp(1.0, 1.75);
+        self.label(frame, text.trim_start_matches("= ").to_string(), Point::new(g.x + pad, y0 + 3.0), color, big);
+        // 右上角：数是相对上一次的变化（中性色：涨跌色 ≠ 状态色，docs/35）；条件是小图这段里成立的占比（R4）
+        let badge = match val.v {
+            sf::Val::Num(_) => sf::last_change(&val.hist).filter(|d| *d != 0.0).map(|d| format!("{}{}", if d > 0.0 { "▲+" } else { "▼" }, num_text(f64::from(d)))),
+            sf::Val::Flag(_) => sf::true_share(&val.hist).map(|r| format!("成立 {:.0}%", r * 100.0)),
+            sf::Val::Missing => None,
+        };
+        if let Some(s) = badge {
+            let x = g.x + g.w - pad - text_w(&s);
+            self.label(frame, s, Point::new(x, y0 + 6.0), pal::dim(), t::s_meta());
+        }
+        // 小图：大字一行之下、刻度行之上的全部高度
+        let top = 6.0 + big * 1.1;
+        let (cy, ch) = (y0 + top, (rh - top - 18.0).max(12.0));
+        let flag = matches!(val.v, sf::Val::Flag(_));
+        // 折线画谁：数值节点画自己；比较节点画被比的那一边（R4）；别的条件只有色带
+        let series = if flag { g.operand.as_ref().map(|o| &o.hist) } else { Some(&val.hist) };
+        let ks: &[f64] = if series.is_some() { &g.thresholds } else { &[] };
+        // 取值范围把门限也包进来：门限画得出来，才看得出离成立还差多远
+        let range = series.and_then(sf::hist_range).map(|(lo, hi)| ks.iter().fold((lo, hi), |(a, b), &k| (a.min(k as f32), b.max(k as f32))));
+        let step = w / (sf::VALUE_HIST - 1) as f32;
+        if flag && val.hist.len() >= 2 {
+            // 条件：成立的时段填色带（下面还有折线时淡一些）
+            let n = val.hist.len();
+            let x_of = |i: usize| g.x + pad + step * (i + sf::VALUE_HIST - n) as f32;
+            let a = if series.is_some() { 0.22 } else { 0.55 };
+            for (i, x) in val.hist.iter().enumerate() {
+                if *x > 0.5 {
+                    let tl = self.to_screen(Point::new(x_of(i), cy));
+                    frame.fill(&Path::rectangle(tl, Size::new((step + 0.5) * z, ch * z)), pal::alpha(pal::ok(), a));
+                }
+            }
+            if series.is_none() {
+                let base = Path::line(self.to_screen(Point::new(g.x + pad, cy + ch)), self.to_screen(Point::new(g.x + pad + w, cy + ch)));
+                frame.stroke(&base, Stroke::default().with_width(1.0).with_color(pal::alpha(pal::dim(), 0.6)));
+            }
+        }
+        if let (Some(h), Some((lo, hi))) = (series, range) {
+            let span = if hi - lo > 1e-12 { hi - lo } else { 1.0 };
+            let y_of = |v: f32| cy + ch * (1.0 - (v - lo) / span);
+            // 门限：虚线（数写在刻度行里——标在线上会和折线叠在一起）
+            for &k in ks {
+                let y = y_of(k as f32);
+                let l = Path::line(self.to_screen(Point::new(g.x + pad, y)), self.to_screen(Point::new(g.x + pad + w, y)));
+                frame.stroke(&l, Stroke { line_dash: canvas::LineDash { segments: &[4.0, 3.0], offset: 0 }, ..Stroke::default().with_width(1.0).with_color(pal::alpha(pal::accent(), 0.85)) });
+            }
+            let n = h.len();
+            if n >= 2 {
+                let x_of = |i: usize| g.x + pad + step * (i + sf::VALUE_HIST - n) as f32;
+                let line = Path::new(|p| {
+                    let mut prev: Option<usize> = None;
+                    for (i, x) in h.iter().enumerate() {
+                        if !x.is_finite() {
+                            prev = None;                 // 没算好的那几步断开，不硬连
+                            continue;
+                        }
+                        let pt = self.to_screen(Point::new(x_of(i), y_of(*x)));
+                        if prev.is_some() {
+                            p.line_to(pt);
+                        } else {
+                            p.move_to(pt);
+                        }
+                        prev = Some(i);
+                    }
+                });
+                frame.stroke(&line, Stroke::default().with_width(1.2).with_color(pal::alpha(pal::txt(), 0.9)));
+            }
+        }
+        // 刻度行：左「最小 – 最大」（比较节点是被比那一边的），右「回测时间跨度」（窄节点上三段并排会叠在一起）
+        let yl = y0 + rh - 14.0;
+        let mut left = match (series, range) {
+            (Some(_), Some((lo, hi))) => format!("{} – {}", num_short(f64::from(lo)), num_short(f64::from(hi))),
+            _ => String::new(),
+        };
+        if !left.is_empty() && !ks.is_empty() {
+            let with = format!("{left} ┄{}", ks.iter().map(|k| num_short(*k)).collect::<Vec<_>>().join("/"));
+            if text_w(&with) <= w {
+                left = with;                                   // 门限的数：放得下才写
+            }
+        }
+        if !left.is_empty() {
+            self.label(frame, left.clone(), Point::new(g.x + pad, yl), pal::dim(), t::s_meta());
+        }
+        if let (Some(a), Some(b)) = (val.ts_hist.front(), val.ts_hist.back()) {
+            if b > a {
+                let mut s = sf::span_text(*a, *b);
+                if text_w(&left) + text_w(&s) + 8.0 > w {
+                    s = s.trim_start_matches("最近 ").to_string();   // 窄：省掉「最近」
+                }
+                if text_w(&left) + text_w(&s) + 8.0 <= w {
+                    let x = g.x + g.w - pad - text_w(&s);
+                    self.label(frame, s, Point::new(x, yl), pal::dim(), t::s_meta());
+                }
+            }
+        }
     }
 
     /// 小地图的换算：世界坐标的包围盒 → 小地图里的位置与比例。
@@ -753,7 +988,7 @@ impl FlowCanvas {
             return None; // 几个节点一眼看得全，不用小地图
         }
         let (x0, y0) = (gs.iter().map(|g| g.x).fold(f32::MAX, f32::min), gs.iter().map(|g| g.y).fold(f32::MAX, f32::min));
-        let (x1, y1) = (gs.iter().map(|g| g.x + NODE_W).fold(f32::MIN, f32::max), gs.iter().map(|g| g.y + g.h).fold(f32::MIN, f32::max));
+        let (x1, y1) = (gs.iter().map(|g| g.x + g.w).fold(f32::MIN, f32::max), gs.iter().map(|g| g.y + g.h).fold(f32::MIN, f32::max));
         let k = ((MAP.width - 8.0) / (x1 - x0).max(1.0)).min((MAP.height - 8.0) / (y1 - y0).max(1.0));
         let origin = Point::new(bounds.width - MAP.width - MAP_PAD, bounds.height - MAP.height - MAP_PAD);
         Some((origin, k, Point::new(x0, y0)))
@@ -785,7 +1020,7 @@ impl FlowCanvas {
             } else {
                 pal::dim()
             };
-            frame.fill(&Path::rectangle(at(g.x, g.y), Size::new((NODE_W * k).max(2.0), (g.h * k).max(2.0))), c);
+            frame.fill(&Path::rectangle(at(g.x, g.y), Size::new((g.w * k).max(2.0), (g.h * k).max(2.0))), c);
         }
         // 当前视野
         let (a, b) = (self.to_world(Point::ORIGIN), self.to_world(Point::new(bounds.width, bounds.height)));
@@ -871,6 +1106,15 @@ impl canvas::Program<FlMsg> for FlowCanvas {
                     state.last_click = if hit { None } else { Some((what.to_string(), Instant::now())) };
                     hit
                 };
+                if let Some(hg) = self.handle_at(p) {
+                    let items: Vec<(String, f32, f32)> = self.scene.geoms.iter().filter(|g| g.group.is_none() && self.is_selected(g)).map(|g| (g.id.clone(), g.w, g.h)).collect();
+                    if double(state, &format!("resize:{}", hg.id)) {
+                        // 双击手柄：选中的都恢复缺省大小
+                        return Some(canvas::Action::publish(FlMsg::ResetSize(items.into_iter().map(|x| x.0).collect())).and_capture());
+                    }
+                    state.drag = Drag::Resize { origin: p, w0: hg.w, h0: hg.h, items };
+                    return Some(canvas::Action::capture());
+                }
                 if let Some(g) = self.node_at(p) {
                     if multi {
                         return Some(canvas::Action::publish(FlMsg::SelectToggleMany(g.members.clone())).and_capture());
@@ -918,6 +1162,17 @@ impl canvas::Program<FlMsg> for FlowCanvas {
                         let (dx, dy) = (screen.x - last.x, screen.y - last.y);
                         *last = screen;
                         Some(canvas::Action::publish(FlMsg::Pan(dx, dy)).and_capture())
+                    }
+                    Drag::Resize { origin, w0, h0, items } => {
+                        let p = self.to_world(screen);
+                        let snap = !state.mods.shift();
+                        let r = |x: f32| if snap { (x / SNAP).round() * SNAP } else { x };
+                        let nw = r((*w0 + p.x - origin.x).max(NODE_W));
+                        let nh = r((*h0 + p.y - origin.y).max(HEAD_H + ROW_H + FOOT_H));
+                        // 多选：都按这个节点的比例改；最小值由节点自己的端口数在显示时兜住
+                        let (fx, fy) = (nw / *w0, nh / *h0);
+                        let sizes = items.iter().map(|(id, w, h)| (id.clone(), (w * fx).max(NODE_W), h * fy)).collect();
+                        Some(canvas::Action::publish(FlMsg::Resize(sizes)).and_capture())
                     }
                     Drag::None => None,
                 }
@@ -1007,14 +1262,23 @@ impl FlowCanvas {
             };
             self.wire_of(&mut frame, a.out_pos(l.ka), b.in_pos(l.kb), color, width, &l.ty);
         }
-        for g in sc.geoms.iter().filter(|g| seen(g.x, g.y - 16.0, g.x + NODE_W, g.y + g.h)) {
+        // 选中的画在单独一层：正在拖 / 改大小的节点压在别的上面（docs/50 R2）。同一层里 iced 先画图形、后画全部文字，
+        // 后画的方块盖不住先画节点的字——所以要分层
+        let mut top = Frame::new(renderer, bounds.size());
+        self.under.set(true);
+        for g in sc.geoms.iter().filter(|g| seen(g.x, g.y - 16.0, g.x + g.w, g.y + g.h) && !self.is_selected(g)) {
             self.draw_node(&mut frame, g);
         }
+        self.under.set(false);
+        for g in sc.geoms.iter().filter(|g| seen(g.x, g.y - 16.0, g.x + g.w, g.y + g.h) && self.is_selected(g)) {
+            self.draw_node(&mut top, g);
+        }
+        self.under.set(true);
         // 端口旁的标签：无线引用、通到子图外面的线。选中另一头时高亮
         if self.zoom >= LOD_PLAIN {
             for s in &sc.stubs {
                 let g = &sc.geoms[s.geom];
-                if !seen(g.x - 140.0, g.y, g.x + NODE_W + 140.0, g.y + g.h) {
+                if !seen(g.x - 140.0, g.y, g.x + g.w + 140.0, g.y + g.h) {
                     continue;
                 }
                 let lit = self.selected.contains(&s.other);
@@ -1055,8 +1319,10 @@ impl FlowCanvas {
                 ..Default::default()
             });
         }
-        self.draw_map(&mut frame, bounds.size());
-        vec![frame.into_geometry()]
+        self.under.set(false);
+        let mut map = Frame::new(renderer, bounds.size());
+        self.draw_map(&mut map, bounds.size());
+        vec![frame.into_geometry(), top.into_geometry(), map.into_geometry()]
     }
 
     fn interaction(&self, state: &CanvasState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
@@ -1064,6 +1330,8 @@ impl FlowCanvas {
         let p = self.to_world(screen);
         match &state.drag {
             Drag::Nodes { .. } | Drag::Pan { .. } => mouse::Interaction::Grabbing,
+            Drag::Resize { .. } => mouse::Interaction::ResizingDiagonallyDown,
+            Drag::None if self.handle_at(p).is_some() => mouse::Interaction::ResizingDiagonallyDown,
             Drag::Wire { .. } | Drag::Box { .. } => mouse::Interaction::Crosshair,
             Drag::None if self.map_click(screen, bounds.size()).is_some() => mouse::Interaction::Pointer,
             Drag::None if self.out_at(p).is_some() || self.in_at(p).is_some() => mouse::Interaction::Crosshair,
@@ -1919,12 +2187,14 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
         t::metadata(if v.find.trim().is_empty() { String::new() } else { format!("{}/{}", v.find_hits.1, v.find_hits.0) }).color(pal::dim()),
         w::btn("整理", Kind::Ghost, idle.then_some(FlMsg::Tidy)),
         w::btn("耗时", if v.profile_on { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::ProfileToggle)),
+        w::btn("读数", if v.readout_on { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::ReadoutToggle)),
         state,
         w::btn(format!("{:.0}%", v.zoom * 100.0), Kind::Ghost, Some(FlMsg::ResetView)),
         w::btn("刷新", Kind::Ghost, Some(FlMsg::Refresh)),
     ]
     .spacing(space(2))
     .align_y(Alignment::Center)
+    .wrap()                                          // 窄了就换行，别把状态徽标挤成竖排
     .into()
 }
 
@@ -1937,9 +2207,12 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
     let v = sf::view();
     let empty = Palette::default();
     let pal_ = v.palette.as_ref().unwrap_or(&empty);
+    let scene = build_scene(&v, pal_);
+    let covers = scene.geoms.iter().filter(|g| !g.members.is_empty() && g.members.iter().all(|m| v.selected.contains(m))).map(|g| (g.x, g.y, g.w, g.h)).collect();
     let program = FlowCanvas {
         profile: v.profile.clone(),
-        scene: build_scene(&v, pal_),
+        scene,
+        covers,
         edges: v.graph.edges.clone(),
         selected: v.selected.clone(),
         path: v.path_nodes.clone(),
@@ -1947,6 +2220,8 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
         pan: v.pan,
         zoom: v.zoom,
         now: Instant::now(),
+        readout_on: v.readout_on,
+        under: std::cell::Cell::new(false),
     };
     sf::bench_note(Some(t0.elapsed().as_secs_f32() * 1000.0), None);
     let title = format!("策略画布 · {}{}", v.graph.name, if v.dirty { " *" } else { "" });

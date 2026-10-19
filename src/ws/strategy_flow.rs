@@ -193,6 +193,8 @@ pub struct ModDef {
     pub path: String,
     pub inner: Vec<String>,
     pub validations: Vec<Value>,
+    /// 运行时会报进度（docs/50 R3）：「整理」给它预留读数区
+    pub progress: bool,
 }
 
 impl ModDef {
@@ -286,6 +288,11 @@ pub struct Node {
     /// 由连线驱动的参数（docs/45 C8）：每个变成一个「数」输入端口，接上的数值链在运行时给它取值
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub driven: Vec<String>,
+    /// 用户拖出来的大小（docs/50 R2）：没写 = 缺省。只影响显示，不进工作流、不影响运行
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub w: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h: Option<f32>,
     /// 这份代码不认识的字段：原样留着、原样写回（新版画布加的东西不会被旧版存丢）
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -677,6 +684,130 @@ pub struct NodeValue {
     pub hist: std::collections::VecDeque<f32>,
     /// 回测时刻（纳秒）
     pub ts: i64,
+    /// 小图每个点的回测时刻（与 `hist` 一一对应；读数区写「最近多久」用，docs/50）
+    pub ts_hist: std::collections::VecDeque<i64>,
+}
+
+/// 小图覆盖的回测时间跨度的说法：「最近 40 秒」「最近 12 分钟」「最近 3.5 小时」「最近 2 天」。
+#[must_use]
+pub fn span_text(first: i64, last: i64) -> String {
+    let s = (last - first).max(0) as f64 / 1e9;
+    if s < 90.0 {
+        format!("最近 {s:.0} 秒")
+    } else if s < 90.0 * 60.0 {
+        format!("最近 {:.0} 分钟", s / 60.0)
+    } else if s < 48.0 * 3600.0 {
+        format!("最近 {:.1} 小时", s / 3600.0)
+    } else {
+        format!("最近 {:.0} 天", s / 86400.0)
+    }
+}
+
+/// 小图里有限值的最小、最大（全是 NaN 给 None）。
+#[must_use]
+pub fn hist_range(h: &std::collections::VecDeque<f32>) -> Option<(f32, f32)> {
+    h.iter().filter(|x| x.is_finite()).fold(None, |acc, &x| Some(acc.map_or((x, x), |(a, b): (f32, f32)| (a.min(x), b.max(x)))))
+}
+
+/// 最近两个有限值之差（相对上一次推值的变化）。
+#[must_use]
+pub fn last_change(h: &std::collections::VecDeque<f32>) -> Option<f32> {
+    let mut it = h.iter().rev().filter(|x| x.is_finite());
+    let (a, b) = (it.next()?, it.next()?);
+    Some(a - b)
+}
+
+/// 节点读数区的高度（docs/50）。视图画它、「整理」给它让位，用同一个数。
+pub const READOUT_H: f32 = 58.0;
+/// 只有进度、没有数值的节点（执行、出场、入场）的读数区高度：一行进度
+pub const PROGRESS_H: f32 = 24.0;
+
+/// 一段进度（docs/50 R3）：宿主推来的 `p` 里的一段，或回测脚本写的整次运行进度。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeProg {
+    pub label: String,
+    pub done: f64,
+    pub total: f64,
+    pub unit: String,
+    /// 计时类（持仓、挂单）：接近上限转警示色
+    pub timer: bool,
+}
+
+impl NodeProg {
+    fn of(v: &Value) -> Option<Self> {
+        let total = v.get("t")?.as_f64()?;
+        (total > 0.0).then(|| NodeProg {
+            label: v.get("l").and_then(Value::as_str).unwrap_or("").to_string(),
+            done: v.get("d").and_then(Value::as_f64).unwrap_or(0.0),
+            total,
+            unit: v.get("u").and_then(Value::as_str).unwrap_or("").to_string(),
+            timer: v.get("w").and_then(Value::as_bool).unwrap_or(false),
+        })
+    }
+
+    /// 走了几成（0~1）。
+    #[must_use]
+    pub fn frac(&self) -> f32 {
+        (self.done / self.total).clamp(0.0, 1.0) as f32
+    }
+
+    /// 计时快到上限了（八成以上）。
+    #[must_use]
+    pub fn near_limit(&self) -> bool {
+        self.timer && self.frac() >= 0.8
+    }
+
+    /// 「预热 820/1000 格」「回测 42%」「持仓 12/30 秒」。
+    #[must_use]
+    pub fn text(&self) -> String {
+        let n = |x: f64| if self.total >= 10.0 || x.fract() == 0.0 { format!("{x:.0}") } else { format!("{x:.1}") };
+        if self.unit == "%" {
+            format!("{} {:.0}%", self.label, self.done / self.total * 100.0)
+        } else if self.unit.is_empty() {
+            format!("{} {}/{}", self.label, n(self.done), n(self.total))
+        } else {
+            format!("{} {}/{} {}", self.label, n(self.done), n(self.total), self.unit)
+        }
+    }
+}
+
+/// 宿主推来的进度（`values` 里的 `p`）落到节点上：表达式、特征按取值方式对回，线上的模块按「线|模块」对回（与决策轨迹同一套）。
+/// 每一份都是此刻的全部进度：这一份里没有的就是没有了（满了收起）。`seen` 记下报过进度的节点和它的标签——
+/// 没进度时读数区也留着（写「标签 —」），节点不随持仓开平一伸一缩。
+pub fn apply_progress(progress: &mut HashMap<String, NodeProg>, seen: &mut HashMap<String, String>, probes: &HashMap<String, Probe>, whence: &HashMap<String, String>, got: &Value) {
+    let Some(p) = got.get("p") else { return };
+    progress.clear();
+    let mut put = |nid: String, v: &Value| {
+        if let Some(pr) = NodeProg::of(v) {
+            seen.insert(nid.clone(), pr.label.clone());
+            progress.insert(nid, pr);
+        }
+    };
+    for (nid, pb) in probes {
+        let v = match pb {
+            Probe { expr: Some(e), .. } => p.get("e").and_then(|m| m.get(e)),
+            Probe { feature: Some(f), .. } => p.get("f").and_then(|m| m.get(f)),
+            _ => None,
+        };
+        if let Some(v) = v {
+            put(nid.clone(), v);
+        }
+    }
+    if let Some(m) = p.get("m").and_then(Value::as_object) {
+        for (key, v) in m {
+            let (lane, module) = key.split_once('|').unwrap_or(("", key));
+            if let Some(nid) = locate(whence, lane, module) {
+                put(nid, v);
+            }
+        }
+    }
+}
+
+/// 回测脚本写的整次运行进度（`ws:bt:<运行号>:progress`，`{"pct": …}`）。
+#[must_use]
+pub fn run_progress(raw: &Value) -> Option<NodeProg> {
+    let pct = raw.get("pct")?.as_f64()?;
+    Some(NodeProg { label: "回测".into(), done: pct.clamp(0.0, 100.0), total: 100.0, unit: "%".into(), timer: false })
 }
 
 /// 小图留多少个点。宿主每 0.25 秒（墙上时间）推一次，约半分钟。
@@ -684,12 +815,119 @@ pub const VALUE_HIST: usize = 120;
 /// 节点实时数值只在不小于这个缩放时显示（再小就不画底栏了，见视图的细节层级）。
 pub const VALUE_MIN_ZOOM: f32 = 0.5;
 
+/// 「数 比较 常数」形状的比较（docs/50 R4）：被比的那一边的写法与门限。两边都不是常数、或不止一个比较
+/// （`a < 1 and b > 2`）就不是。常数在左边（`30 > rsi(…)`）也认。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cmp {
+    pub lhs: String,
+    pub k: f64,
+}
+
+#[must_use]
+pub fn parse_cmp(text: &str) -> Option<Cmp> {
+    let t = text.trim();
+    let b = t.as_bytes();
+    let (mut depth, mut at) = (0i32, None::<(usize, usize)>);
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'<' | b'>' | b'=' | b'!' if depth == 0 => {
+                let len = if b.get(i + 1) == Some(&b'=') { 2 } else { 1 };
+                if b[i] == b'=' && len == 1 {
+                    return None; // 单个 = 不是比较
+                }
+                if at.is_some() {
+                    return None; // 连写的比较（a < b < c）
+                }
+                at = Some((i, len));
+                i += len;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let (i, len) = at?;
+    let (l, r) = (t[..i].trim(), t[i + len..].trim());
+    // 顶层有 and / or / not：是逻辑组合，不是一个比较
+    let top_word = |s: &str| {
+        let mut d = 0i32;
+        let padded = format!(" {s} ");
+        let pb = padded.as_bytes();
+        for (j, c) in pb.iter().enumerate() {
+            match c {
+                b'(' => d += 1,
+                b')' => d -= 1,
+                _ if d == 0 => {
+                    for w in [" and ", " or ", " not "] {
+                        if pb[j..].starts_with(w.as_bytes()) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    };
+    if l.is_empty() || r.is_empty() || top_word(l) || top_word(r) {
+        return None;
+    }
+    match (l.parse::<f64>(), r.parse::<f64>()) {
+        (Err(_), Ok(k)) => Some(Cmp { lhs: l.to_string(), k }),
+        (Ok(k), Err(_)) => Some(Cmp { lhs: r.to_string(), k }),
+        _ => None,
+    }
+}
+
+/// 比较节点「被比的那一边」的数值存在 `values` 的哪个键下（不是节点 id，不会对到别的节点上）。
+#[must_use]
+pub fn operand_key(nid: &str) -> String {
+    format!("{nid}#lhs")
+}
+
+/// 节点上要画的门限（docs/50 R4）：数值节点 = 哪些比较拿它和常数比（按写法对上，与推值同一套文本）；
+/// 比较节点 = 它自己的常数。节点 → 门限们。
+#[must_use]
+pub fn thresholds(probes: &HashMap<String, Probe>) -> HashMap<String, Vec<f64>> {
+    let mut by_text: HashMap<String, Vec<f64>> = HashMap::new();
+    for p in probes.values() {
+        if let Some(c) = p.expr.as_deref().and_then(parse_cmp) {
+            by_text.entry(c.lhs).or_default().push(c.k);
+        }
+    }
+    let mut out = HashMap::new();
+    for (nid, p) in probes {
+        // 比较节点自己：它的常数（小图画被比的那一边与这条线）
+        if let Some(c) = p.expr.as_deref().and_then(parse_cmp) {
+            out.insert(nid.clone(), vec![c.k]);
+            continue;
+        }
+        if let Some(ks) = p.expr.as_ref().and_then(|e| by_text.get(e.trim())) {
+            let mut ks = ks.clone();
+            ks.sort_by(f64::total_cmp);
+            ks.dedup();
+            out.insert(nid.clone(), ks);
+        }
+    }
+    out
+}
+
+/// 条件在小图这段里成立的占比（没有值的步不算）。
+#[must_use]
+pub fn true_share(h: &std::collections::VecDeque<f32>) -> Option<f32> {
+    let n = h.iter().filter(|x| x.is_finite()).count();
+    (n > 0).then(|| h.iter().filter(|x| x.is_finite() && **x > 0.5).count() as f32 / n as f32)
+}
+
 /// 要宿主推哪些：屏幕上看得见的、有取值方式的节点（docs/49 M2「按需」）。缩得太小、底栏不画时一个都不要。
 /// 返回（表达式文本, 特征名），各自去重排序。
 #[must_use]
-pub fn watch_of(graph: &Graph, probes: &HashMap<String, Probe>, focus: Option<&str>, pan: (f32, f32), zoom: f32, size: (f32, f32)) -> (Vec<String>, Vec<String>) {
+pub fn watch_of(graph: &Graph, probes: &HashMap<String, Probe>, focus: Option<&str>, pan: (f32, f32), zoom: f32, size: (f32, f32), on: bool) -> (Vec<String>, Vec<String>) {
     let (mut exprs, mut feats) = (Vec::new(), Vec::new());
-    if zoom < VALUE_MIN_ZOOM {
+    if !on || zoom < VALUE_MIN_ZOOM {
         return (exprs, feats);
     }
     let folded: std::collections::HashSet<&str> = graph.groups.iter().filter(|g| g.collapsed).map(|g| g.id.as_str()).collect();
@@ -705,7 +943,12 @@ pub fn watch_of(graph: &Graph, probes: &HashMap<String, Probe>, focus: Option<&s
             continue;
         }
         match probes.get(&n.id) {
-            Some(Probe { expr: Some(e), .. }) => exprs.push(e.clone()),
+            Some(Probe { expr: Some(e), .. }) => {
+                exprs.push(e.clone());
+                if let Some(c) = parse_cmp(e) {
+                    exprs.push(c.lhs); // 比较节点的小图画被比的那一边与门限（docs/50 R4）
+                }
+            }
             Some(Probe { feature: Some(f), .. }) => feats.push(f.clone()),
             _ => {}
         }
@@ -720,6 +963,9 @@ pub fn watch_of(graph: &Graph, probes: &HashMap<String, Probe>, focus: Option<&s
 /// 宿主推来的一份值（`ws:swe:<运行号>:values`）落到节点上。这一份里没有的节点（不在屏幕上）不动。
 pub fn apply_values(values: &mut HashMap<String, NodeValue>, probes: &HashMap<String, Probe>, got: &Value) {
     let ts = got.get("ts").and_then(Value::as_i64).unwrap_or(0);
+    if ts <= 0 {
+        return; // 还没开始走（扩展层预算中，docs/50 R3）：这一份只有进度，没有值；记进小图会把时间跨度拉到 1970 年
+    }
     for (nid, p) in probes {
         let raw = match p {
             Probe { expr: Some(e), .. } => got.get("e").and_then(|m| m.get(e)),
@@ -727,22 +973,36 @@ pub fn apply_values(values: &mut HashMap<String, NodeValue>, probes: &HashMap<St
             _ => None,
         };
         let Some(raw) = raw else { continue };
-        let v = match raw {
-            Value::Bool(b) => Val::Flag(*b),
-            Value::Number(x) => x.as_f64().map_or(Val::Missing, Val::Num),
-            _ => Val::Missing,
-        };
-        let e = values.entry(nid.clone()).or_insert_with(|| NodeValue { v, hist: std::collections::VecDeque::new(), ts });
-        e.v = v;
-        e.ts = ts;
-        e.hist.push_back(match v {
-            Val::Num(x) => x as f32,
-            Val::Flag(b) => f32::from(u8::from(b)),
-            Val::Missing => f32::NAN,
-        });
-        while e.hist.len() > VALUE_HIST {
-            e.hist.pop_front();
+        push_value(values, nid.clone(), raw, ts);
+        // 比较节点：被比的那一边也记一份
+        if let Some(c) = p.expr.as_deref().and_then(parse_cmp) {
+            if let Some(raw) = got.get("e").and_then(|m| m.get(&c.lhs)) {
+                push_value(values, operand_key(nid), raw, ts);
+            }
         }
+    }
+}
+
+fn push_value(values: &mut HashMap<String, NodeValue>, key: String, raw: &Value, ts: i64) {
+    let v = match raw {
+        Value::Bool(b) => Val::Flag(*b),
+        Value::Number(x) => x.as_f64().map_or(Val::Missing, Val::Num),
+        _ => Val::Missing,
+    };
+    let e = values.entry(key).or_insert_with(|| NodeValue { v, hist: std::collections::VecDeque::new(), ts, ts_hist: std::collections::VecDeque::new() });
+    e.v = v;
+    e.ts = ts;
+    e.ts_hist.push_back(ts);
+    while e.ts_hist.len() > VALUE_HIST {
+        e.ts_hist.pop_front();
+    }
+    e.hist.push_back(match v {
+        Val::Num(x) => x as f32,
+        Val::Flag(b) => f32::from(u8::from(b)),
+        Val::Missing => f32::NAN,
+    });
+    while e.hist.len() > VALUE_HIST {
+        e.hist.pop_front();
     }
 }
 
@@ -855,6 +1115,12 @@ pub enum FlMsg {
     Drive(String, String, bool),
     /// 节点上叠显示上次运行各模块的耗时
     ProfileToggle,
+    /// 工具条「读数」：节点读数区开 / 关（docs/50）
+    ReadoutToggle,
+    /// 拖手柄改节点大小：(节点, 宽, 高)，拖动中连续发，一秒内的合成一步撤销（docs/50 R2）
+    Resize(Vec<(String, f32, f32)>),
+    /// 双击手柄：这些节点恢复缺省大小
+    ResetSize(Vec<String>),
     Open(FileItem),
     Save,
     Check,
@@ -1001,6 +1267,12 @@ struct St {
     /// 节点实时数值（docs/49 M2）：节点 → 怎么取值；节点 → 最近收到的值
     probes: HashMap<String, Probe>,
     values: HashMap<String, NodeValue>,
+    /// 节点进度（docs/50 R3）：此刻进行中的；报过进度的节点 → 标签；整次运行（画在「执行」节点上）
+    progress: HashMap<String, NodeProg>,
+    prog_seen: HashMap<String, String>,
+    run_prog: Option<NodeProg>,
+    /// 数值节点上的门限虚线（docs/50 R4）：拿到取值方式时算一次
+    thresholds: HashMap<String, Vec<f64>>,
     /// 这次运行的成本线（docs/49 M4，宿主结束时推的 `costs`）
     costs: Option<Map<String, Value>>,
     /// 特征选择器（docs/49 M5）：关键字与 OFMS 层筛选
@@ -1038,6 +1310,8 @@ struct St {
     /// 上次运行各节点的耗时：节点 → (毫秒, 调用次数)
     profile: HashMap<String, (f64, u64)>,
     profile_on: bool,
+    /// 节点读数区（docs/50）：关掉就不画，也不向宿主要值
+    readout_on: bool,
 }
 
 impl Default for St {
@@ -1083,6 +1357,10 @@ impl Default for St {
             live_n: 0,
             probes: HashMap::new(),
             values: HashMap::new(),
+            progress: HashMap::new(),
+            prog_seen: HashMap::new(),
+            run_prog: None,
+            thresholds: HashMap::new(),
             costs: None,
             cat_query: String::new(),
             cat_layer: None,
@@ -1109,6 +1387,7 @@ impl Default for St {
             queue_child: None,
             profile: HashMap::new(),
             profile_on: false,
+            readout_on: true,
         }
     }
 }
@@ -1159,6 +1438,12 @@ pub struct View {
     pub live: HashMap<String, NodeLive>,
     /// 节点实时数值（docs/49 M2）
     pub values: HashMap<String, NodeValue>,
+    /// 节点进度（docs/50 R3）
+    pub progress: HashMap<String, NodeProg>,
+    pub prog_seen: HashMap<String, String>,
+    pub run_prog: Option<NodeProg>,
+    /// 数值节点上的门限（docs/50 R4）
+    pub thresholds: HashMap<String, Vec<f64>>,
     /// 成本线（docs/49 M4）
     pub costs: Option<Map<String, Value>>,
     /// 特征选择器的筛选（docs/49 M5）
@@ -1186,6 +1471,8 @@ pub struct View {
     pub queue_pick: Option<usize>,
     pub profile: HashMap<String, (f64, u64)>,
     pub profile_on: bool,
+    /// 节点读数区开着吗（docs/50）
+    pub readout_on: bool,
 }
 
 /// 「新建代码节点」能生成哪些环节（与 `strategies/swe/codegen.py` 的模板一致）。
@@ -1226,6 +1513,10 @@ pub fn view() -> View {
         running: g.running,
         live: g.live.clone(),
         values: g.values.clone(),
+        progress: g.progress.clone(),
+        prog_seen: g.prog_seen.clone(),
+        run_prog: g.run_prog.clone(),
+        thresholds: g.thresholds.clone(),
         costs: g.costs.clone(),
         cat_query: g.cat_query.clone(),
         cat_layer: g.cat_layer,
@@ -1250,6 +1541,7 @@ pub fn view() -> View {
         queue_pick: g.queue_pick,
         profile: if g.profile_on { g.profile.clone() } else { HashMap::new() },
         profile_on: g.profile_on,
+        readout_on: g.readout_on,
     })
     .expect("策略画布状态锁中毒")
 }
@@ -1612,6 +1904,7 @@ fn apply_check(g: &mut St, r: Result<CheckOut, String>, what: &str) -> Option<St
             if c.ok {
                 g.whence = c.whence;
                 g.probes = c.probes;
+                g.thresholds = thresholds(&g.probes);
                 g.msg = format!("{what}通过");
                 return Some(c.toml);
             }
@@ -1721,6 +2014,9 @@ fn run_async() {
                     g.run_id = run_id.clone();
                     g.live.clear();
                     g.values.clear(); // 节点实时数值按节点 id 存：换了图（或重跑）就清，别显示到别的图的同名节点上
+                    g.progress.clear();
+                    g.prog_seen.clear();
+                    g.run_prog = None;
                     g.costs = None;
                     g.live_n = 0;
                     g.envelope_hit = None;
@@ -1770,6 +2066,10 @@ fn wait_child(run_id: String, generation: u64, log: PathBuf) {
                     g.running = false;
                     g.child = None;
                     g.msg = if ok { format!("跑完了：{run_id}（{} 个决策）", g.live_n) } else { format!("运行失败：{tail}") };
+                    if ok {
+                        // 回测脚本按回测时钟隔一段写一次进度，最后一段常常不到 100%
+                        g.run_prog = Some(NodeProg { label: "回测".into(), done: 100.0, total: 100.0, unit: "%".into(), timer: false });
+                    }
                 });
             }
             return;
@@ -1813,7 +2113,7 @@ fn follow_trace(run_id: String, generation: u64) {
                 Err(_) => return,
             };
             // 节点实时数值（docs/49 M2）：告诉宿主屏幕上有哪些节点，取回它推来的最新一份
-            let watch = with(|g| watch_of(&g.graph, &g.probes, g.focus.as_deref(), g.pan, g.zoom, g.view_size)).unwrap_or_default();
+            let watch = with(|g| watch_of(&g.graph, &g.probes, g.focus.as_deref(), g.pan, g.zoom, g.view_size, g.readout_on)).unwrap_or_default();
             if watch != last_watch {
                 let body = serde_json::json!({"exprs": watch.0, "features": watch.1}).to_string();
                 let _: redis::RedisResult<()> = conn.set_ex(format!("ws:swe:{run_id}:watch"), body, 3600);
@@ -1828,10 +2128,22 @@ fn follow_trace(run_id: String, generation: u64) {
                         if g.generation == generation {
                             let probes = std::mem::take(&mut g.probes);
                             apply_values(&mut g.values, &probes, &got);
+                            let (mut prog, mut seen) = (std::mem::take(&mut g.progress), std::mem::take(&mut g.prog_seen));
+                            apply_progress(&mut prog, &mut seen, &probes, &g.whence, &got);
+                            (g.progress, g.prog_seen) = (prog, seen);
                             g.probes = probes;
                         }
                     });
                 }
+            }
+            // 整次运行的进度（docs/50 R3）：回测脚本写的那条，画在「执行」节点上
+            let bt: Option<String> = conn.get(format!("ws:bt:{run_id}:progress")).ok().flatten();
+            if let Some(pr) = bt.and_then(|s| serde_json::from_str::<Value>(&s).ok()).as_ref().and_then(run_progress) {
+                with(|g| {
+                    if g.generation == generation && g.running {
+                        g.run_prog = Some(pr);
+                    }
+                });
             }
             // 调试器停住时写的「停在哪」
             let state: Option<String> = conn.get(format!("ws:swe:{run_id}:state")).ok().flatten();
@@ -1979,6 +2291,9 @@ fn open(item: FileItem) {
                     g.checked = None;
                     g.live.clear();
                     g.values.clear(); // 节点实时数值按节点 id 存：换了图（或重跑）就清，别显示到别的图的同名节点上
+                    g.progress.clear();
+                    g.prog_seen.clear();
+                    g.run_prog = None;
                     g.costs = None;
                     g.live_n = 0;
                 }
@@ -2366,6 +2681,9 @@ pub fn handle(m: FlMsg) {
                 g.checked = None;
                 g.live.clear();
                 g.values.clear(); // 节点实时数值按节点 id 存：换了图（或重跑）就清，别显示到别的图的同名节点上
+                g.progress.clear();
+                g.prog_seen.clear();
+                g.run_prog = None;
                 g.costs = None;
                 g.live_n = 0;
                 g.msg = "新画布：从左边的模块库点模块加节点，拖端口连线".to_string();
@@ -2475,6 +2793,34 @@ pub fn handle(m: FlMsg) {
                     }
                 }
             });
+        }
+        FlMsg::Resize(sizes) => {
+            with(|g| {
+                // 改大小不改变策略：记撤销，但不触发检查（同挪位置）
+                record(g, "resize");
+                g.dirty = true;
+                for (id, w, h) in sizes {
+                    if let Some(n) = g.graph.node_mut(&id) {
+                        n.w = Some(w);
+                        n.h = Some(h);
+                    }
+                }
+            });
+        }
+        FlMsg::ResetSize(ids) => {
+            with(|g| {
+                record(g, "");
+                g.dirty = true;
+                for id in ids {
+                    if let Some(n) = g.graph.node_mut(&id) {
+                        n.w = None;
+                        n.h = None;
+                    }
+                }
+            });
+        }
+        FlMsg::ReadoutToggle => {
+            with(|g| g.readout_on = !g.readout_on);
         }
         FlMsg::ProfileToggle => {
             with(|g| {
@@ -3067,6 +3413,9 @@ fn open_template(t: Template) {
                     g.checked = None;
                     g.live.clear();
                     g.values.clear(); // 节点实时数值按节点 id 存：换了图（或重跑）就清，别显示到别的图的同名节点上
+                    g.progress.clear();
+                    g.prog_seen.clear();
+                    g.run_prog = None;
                     g.costs = None;
                     g.live_n = 0;
                     g.msg = format!("从模板「{}」新建（只是起点，与模板不保持关联；改个 id 再保存）", t.title);
@@ -3474,20 +3823,42 @@ fn write_breakpoints(run_id: &str) {
 
 /// 自动整理：位置由 Python 算（`graph layout`，排版只有一份），这里只是把结果放回去。
 fn tidy_async() {
-    let Some((graph, ids)) = with(|g| {
+    let Some((graph, ids, extra)) = with(|g| {
         if g.busy {
             return None;
         }
         g.busy = true;
         // 选中了就只整理选中的；进了子图就整理它的成员；否则全图
         let ids: Option<Vec<String>> = if g.selected.len() > 1 { Some(g.selected.clone()) } else { g.focus.as_ref().map(|f| g.graph.members(f)) };
-        Some((g.graph.clone(), ids))
+        // 运行时会长出读数区的节点（有取值方式、不是常数的数值 / 特征节点）预先让出那一截（docs/50）：
+        // 等运行起来才让，运行前「整理」好的图一跑就叠在一起
+        // 只报进度的节点（执行、计时的出场 / 入场）让出一行进度（docs/50 R3）
+        let extra: HashMap<String, f32> = if g.readout_on {
+            let reports: std::collections::HashSet<&str> = g.palette.as_ref().map(|p| p.modules.iter().filter(|m| m.progress).map(|m| m.refer.as_str()).collect()).unwrap_or_default();
+            g.graph
+                .nodes
+                .iter()
+                .filter(|n| reports.contains(n.module.as_str()))
+                .map(|n| (n.id.clone(), PROGRESS_H))
+                .chain(g.prog_seen.keys().map(|k| (k.clone(), PROGRESS_H)))
+                .chain(
+                    g.probes
+                        .iter()
+                        .filter(|(_, p)| p.feature.is_some() || p.expr.as_deref().is_some_and(|e| e.trim().parse::<f64>().is_err()))
+                        .map(|(k, _)| (k.clone(), READOUT_H)),
+                )
+                .chain(g.values.keys().map(|k| (k.clone(), READOUT_H)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        Some((g.graph.clone(), ids, extra))
     })
     .flatten() else {
         return;
     };
     super::spawn_named("ws-flowtidy", move || {
-        let body = serde_json::to_vec(&serde_json::json!({"graph": graph, "ids": ids})).unwrap_or_default();
+        let body = serde_json::to_vec(&serde_json::json!({"graph": graph, "ids": ids, "extra": extra})).unwrap_or_default();
         let r = python(&["-m", "strategies.swe.graph", "layout", "-"], Some(&body))
             .and_then(|b| serde_json::from_slice::<HashMap<String, (f32, f32)>>(&b).map_err(|e| format!("整理结果解析失败：{e}")));
         with(|g| {
@@ -3907,10 +4278,10 @@ mod tests {
         let p = |e: Option<&str>, f: Option<&str>| Probe { expr: e.map(str::to_string), feature: f.map(str::to_string) };
         let probes: HashMap<String, Probe> = [("a", p(Some("rsi(close, 14)"), None)), ("b", p(Some("x > 1"), None)),
             ("c", p(None, Some("obi"))), ("d", p(Some("y < 2"), None))].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-        let (e, f) = watch_of(&g, &probes, None, (0.0, 0.0), 1.0, (1280.0, 800.0));
+        let (e, f) = watch_of(&g, &probes, None, (0.0, 0.0), 1.0, (1280.0, 800.0), true);
         assert_eq!((e, f), (vec!["rsi(close, 14)".to_string()], vec!["obi".to_string()]));   // b 在屏幕外，d 折叠着
-        assert_eq!(watch_of(&g, &probes, Some("G"), (0.0, 0.0), 1.0, (1280.0, 800.0)).0, vec!["y < 2".to_string()]);
-        assert_eq!(watch_of(&g, &probes, None, (0.0, 0.0), 0.3, (1280.0, 800.0)), (vec![], vec![]));   // 太小不画底栏
+        assert_eq!(watch_of(&g, &probes, Some("G"), (0.0, 0.0), 1.0, (1280.0, 800.0), true).0, vec!["y".to_string(), "y < 2".to_string()]);   // 比较节点连被比的一边（docs/50 R4）
+        assert_eq!(watch_of(&g, &probes, None, (0.0, 0.0), 0.3, (1280.0, 800.0), true), (vec![], vec![]));   // 太小不画底栏
     }
 
     #[test]
@@ -3970,5 +4341,107 @@ mod tests {
         assert_eq!(order, ["perp_basis", "obi_l5", "funding_z", "l3_queue"]);   // 能用的在前，各自按层、key 排
         assert_eq!(feature_hits(&rows, "OBI", None, "tardis", &caps).len(), 1);       // 不分大小写
         assert_eq!(feature_hits(&rows, "中文", Some(1), "tardis", &caps).len(), 2);  // 中文名 + 层
+    }
+
+    #[test]
+    fn 读数区的小函数() {
+        assert_eq!(span_text(0, 40_000_000_000), "最近 40 秒");
+        assert_eq!(span_text(0, 12 * 60_000_000_000), "最近 12 分钟");
+        assert_eq!(span_text(0, 7 * 1_800_000_000_000), "最近 3.5 小时");
+        assert_eq!(span_text(0, 3 * 86_400_000_000_000), "最近 3 天");
+        let h: std::collections::VecDeque<f32> = [f32::NAN, 2.0, -1.0, f32::NAN, 4.0].into_iter().collect();
+        assert_eq!(hist_range(&h), Some((-1.0, 4.0)));
+        assert_eq!(last_change(&h), Some(5.0));                 // 跳过 NaN：4 − (−1)
+        let empty: std::collections::VecDeque<f32> = [f32::NAN].into_iter().collect();
+        assert_eq!((hist_range(&empty), last_change(&empty)), (None, None));
+    }
+
+    #[test]
+    fn 读数关掉就不要值() {
+        let g: Graph = serde_json::from_value(serde_json::json!({"nodes": [{"id": "a", "use": "value.rsi@1.0", "x": 10.0, "y": 10.0}]})).unwrap();
+        let probes: HashMap<String, Probe> = [("a".to_string(), Probe { expr: Some("x".into()), feature: None })].into_iter().collect();
+        assert_eq!(watch_of(&g, &probes, None, (0.0, 0.0), 1.0, (800.0, 600.0), true).0.len(), 1);
+        assert_eq!(watch_of(&g, &probes, None, (0.0, 0.0), 1.0, (800.0, 600.0), false).0.len(), 0);
+    }
+
+    #[test]
+    fn 节点大小存进图文件_没拖过的不写() {
+        let n: Node = serde_json::from_value(serde_json::json!({"id": "a", "use": "value.rsi@1.0", "x": 1.0, "y": 2.0, "w": 300.0, "h": 180.0})).unwrap();
+        assert_eq!((n.w, n.h), (Some(300.0), Some(180.0)));
+        assert!(!n.extra.contains_key("w"), "w / h 是正式字段，不该落进 extra");
+        let back = serde_json::to_value(&n).unwrap();
+        assert_eq!((back["w"].as_f64(), back["h"].as_f64()), (Some(300.0), Some(180.0)));
+        let plain: Node = serde_json::from_value(serde_json::json!({"id": "b", "use": "value.rsi@1.0"})).unwrap();
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v.get("w").is_none() && v.get("h").is_none(), "没拖过的节点不写 w / h，旧图存回去不变样");
+    }
+
+    #[test]
+    fn 进度按取值方式与线模块对回节点_没报的收起() {
+        let probes: HashMap<String, Probe> = [
+            ("e1".to_string(), Probe { expr: Some("sma(close, 20)".into()), feature: None }),
+            ("f1".to_string(), Probe { expr: None, feature: Some("z".into()) }),
+        ]
+        .into_iter()
+        .collect();
+        let mut whence = HashMap::new();
+        whence.insert("L1|exit.max_hold".to_string(), "x1".to_string());
+        let (mut prog, mut seen) = (HashMap::new(), HashMap::new());
+        let got = serde_json::json!({"p": {
+            "e": {"sma(close, 20)": {"l": "预热", "d": 5, "t": 20, "u": "步", "w": false}},
+            "f": {"z": {"l": "校准", "d": 820, "t": 1000, "u": "格", "w": false}},
+            "m": {"L1|exit.max_hold": {"l": "持仓", "d": 27.5, "t": 30, "u": "秒", "w": true}}}});
+        apply_progress(&mut prog, &mut seen, &probes, &whence, &got);
+        assert_eq!(prog["e1"].text(), "预热 5/20 步");
+        assert_eq!(prog["f1"].text(), "校准 820/1000 格");
+        assert!(prog["x1"].near_limit() && !prog["f1"].near_limit());
+        assert!((prog["f1"].frac() - 0.82).abs() < 1e-6);
+        // 下一份里只剩持仓：预热、校准满了收起，但读数区留着（seen）
+        let got = serde_json::json!({"p": {"m": {"L1|exit.max_hold": {"l": "持仓", "d": 3, "t": 30, "u": "秒", "w": true}}}});
+        apply_progress(&mut prog, &mut seen, &probes, &whence, &got);
+        assert_eq!(prog.keys().collect::<Vec<_>>(), vec!["x1"]);
+        assert_eq!(seen.len(), 3);
+        assert!(!prog["x1"].near_limit());
+        // 没有 p 的一份（旧宿主）不动
+        apply_progress(&mut prog, &mut seen, &probes, &whence, &serde_json::json!({"e": {}}));
+        assert_eq!(prog.len(), 1);
+        // 预算期间（回测时刻 0）的一份：只收进度，不记值
+        let mut vals = HashMap::new();
+        apply_values(&mut vals, &probes, &serde_json::json!({"ts": 0, "f": {"z": 1.0}}));
+        assert!(vals.is_empty());
+        let r = run_progress(&serde_json::json!({"pct": 42.4, "run_id": "x"})).unwrap();
+        assert_eq!(r.text(), "回测 42%");
+    }
+
+    #[test]
+    fn 比较拆成被比的一边与门限_门限画到数值节点上() {
+        let c = |t: &str| parse_cmp(t).map(|c| (c.lhs, c.k));
+        assert_eq!(c("rsi(close, 14) < 30"), Some(("rsi(close, 14)".into(), 30.0)));
+        assert_eq!(c("z >= -1.5"), Some(("z".into(), -1.5)));
+        assert_eq!(c("0.3 > side * z"), Some(("side * z".into(), 0.3)));
+        assert_eq!(c("select(a > 1, b, c) <= 2"), Some(("select(a > 1, b, c)".into(), 2.0)));
+        for t in ["a < b", "a < 1 and b > 2", "not z > 1", "1 < 2", "crossup(a, b)", "a < b < 3", "rsi(close, 14)"] {
+            assert_eq!(c(t), None, "{t}");
+        }
+        let p = |e: &str| Probe { expr: Some(e.into()), feature: None };
+        let probes: HashMap<String, Probe> = [("r", p("rsi(close, 14)")), ("lo", p("rsi(close, 14) < 30")), ("hi", p("rsi(close, 14) > 70")), ("x", p("close"))]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let th = thresholds(&probes);
+        assert_eq!(th["r"], vec![30.0, 70.0]);
+        assert_eq!(th["lo"], vec![30.0]);
+        assert!(!th.contains_key("x"));
+        // 屏幕上的比较节点：被比的那一边也要；推来的值记在 operand_key 下
+        let g: Graph = serde_json::from_value(serde_json::json!({"nodes": [{"id": "lo", "use": "value.lt@1.0", "x": 10.0, "y": 10.0}]})).unwrap();
+        let (e, _) = watch_of(&g, &probes, None, (0.0, 0.0), 1.0, (800.0, 600.0), true);
+        assert_eq!(e, vec!["rsi(close, 14)".to_string(), "rsi(close, 14) < 30".to_string()]);
+        let mut vals = HashMap::new();
+        for (i, (v, f)) in [(25.0, true), (40.0, false), (28.0, true), (35.0, false)].into_iter().enumerate() {
+            apply_values(&mut vals, &probes, &serde_json::json!({"ts": i + 1, "e": {"rsi(close, 14)": v, "rsi(close, 14) < 30": f}}));
+        }
+        assert_eq!(vals[&operand_key("lo")].hist.len(), 4);
+        assert_eq!(true_share(&vals["lo"].hist), Some(0.5));
+        assert!(!vals.contains_key(&operand_key("r")), "数值节点不记被比的一边");
     }
 }
