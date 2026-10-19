@@ -550,6 +550,99 @@ impl Quick {
     }
 }
 
+/// 节点实时数值（docs/49 M2）：编译结果里这个节点在运行时按什么取值——数值节点按表达式文本，特征节点按特征名。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(default)]
+pub struct Probe {
+    pub expr: Option<String>,
+    pub feature: Option<String>,
+}
+
+/// 节点上显示的一个值。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Val {
+    Num(f64),
+    Flag(bool),
+    /// 还没算好（预热中、这一格没有数据）
+    Missing,
+}
+
+/// 一个节点的实时数值：当前值与最近一段（小图用）。小图里条件记 1 / 0，没算好记 NaN。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeValue {
+    pub v: Val,
+    pub hist: std::collections::VecDeque<f32>,
+    /// 回测时刻（纳秒）
+    pub ts: i64,
+}
+
+/// 小图留多少个点。宿主每 0.25 秒（墙上时间）推一次，约半分钟。
+pub const VALUE_HIST: usize = 120;
+/// 节点实时数值只在不小于这个缩放时显示（再小就不画底栏了，见视图的细节层级）。
+pub const VALUE_MIN_ZOOM: f32 = 0.5;
+
+/// 要宿主推哪些：屏幕上看得见的、有取值方式的节点（docs/49 M2「按需」）。缩得太小、底栏不画时一个都不要。
+/// 返回（表达式文本, 特征名），各自去重排序。
+#[must_use]
+pub fn watch_of(graph: &Graph, probes: &HashMap<String, Probe>, focus: Option<&str>, pan: (f32, f32), zoom: f32, size: (f32, f32)) -> (Vec<String>, Vec<String>) {
+    let (mut exprs, mut feats) = (Vec::new(), Vec::new());
+    if zoom < VALUE_MIN_ZOOM {
+        return (exprs, feats);
+    }
+    let folded: std::collections::HashSet<&str> = graph.groups.iter().filter(|g| g.collapsed).map(|g| g.id.as_str()).collect();
+    // 节点的大小在视图里按端口数算；这里只判断在不在屏幕上，取一个宽松的高度
+    let (w, h) = (168.0 * zoom, 120.0 * zoom);
+    for n in &graph.nodes {
+        let shown = match focus {
+            Some(f) => n.group.as_deref() == Some(f),
+            None => !n.group.as_deref().is_some_and(|g| folded.contains(g)),
+        };
+        let (x, y) = (n.x * zoom + pan.0, n.y * zoom + pan.1);
+        if !shown || x + w < 0.0 || y + h < 0.0 || x > size.0 || y > size.1 {
+            continue;
+        }
+        match probes.get(&n.id) {
+            Some(Probe { expr: Some(e), .. }) => exprs.push(e.clone()),
+            Some(Probe { feature: Some(f), .. }) => feats.push(f.clone()),
+            _ => {}
+        }
+    }
+    exprs.sort();
+    exprs.dedup();
+    feats.sort();
+    feats.dedup();
+    (exprs, feats)
+}
+
+/// 宿主推来的一份值（`ws:swe:<运行号>:values`）落到节点上。这一份里没有的节点（不在屏幕上）不动。
+pub fn apply_values(values: &mut HashMap<String, NodeValue>, probes: &HashMap<String, Probe>, got: &Value) {
+    let ts = got.get("ts").and_then(Value::as_i64).unwrap_or(0);
+    for (nid, p) in probes {
+        let raw = match p {
+            Probe { expr: Some(e), .. } => got.get("e").and_then(|m| m.get(e)),
+            Probe { feature: Some(f), .. } => got.get("f").and_then(|m| m.get(f)),
+            _ => None,
+        };
+        let Some(raw) = raw else { continue };
+        let v = match raw {
+            Value::Bool(b) => Val::Flag(*b),
+            Value::Number(x) => x.as_f64().map_or(Val::Missing, Val::Num),
+            _ => Val::Missing,
+        };
+        let e = values.entry(nid.clone()).or_insert_with(|| NodeValue { v, hist: std::collections::VecDeque::new(), ts });
+        e.v = v;
+        e.ts = ts;
+        e.hist.push_back(match v {
+            Val::Num(x) => x as f32,
+            Val::Flag(b) => f32::from(u8::from(b)),
+            Val::Missing => f32::NAN,
+        });
+        while e.hist.len() > VALUE_HIST {
+            e.hist.pop_front();
+        }
+    }
+}
+
 /// 一个节点的运行态：最近一次决策是什么、什么时候（墙上时间）。
 #[derive(Debug, Clone)]
 pub struct NodeLive {
@@ -781,6 +874,9 @@ struct St {
     running: bool,
     live: HashMap<String, NodeLive>,
     live_n: usize,
+    /// 节点实时数值（docs/49 M2）：节点 → 怎么取值；节点 → 最近收到的值
+    probes: HashMap<String, Probe>,
+    values: HashMap<String, NodeValue>,
     /// 这次运行里强制风控层最近一次出手：(拒绝 / 缩量 / 停手, 原因, 共几次)
     envelope_hit: Option<(String, String, u32)>,
     /// 这次运行收到的决策轨迹（调试面板用；最多留 5 万条）
@@ -856,6 +952,8 @@ impl Default for St {
             running: false,
             live: HashMap::new(),
             live_n: 0,
+            probes: HashMap::new(),
+            values: HashMap::new(),
             envelope_hit: None,
             events: Vec::new(),
             trade_idx: Vec::new(),
@@ -927,6 +1025,8 @@ pub struct View {
     pub run_id: String,
     pub running: bool,
     pub live: HashMap<String, NodeLive>,
+    /// 节点实时数值（docs/49 M2）
+    pub values: HashMap<String, NodeValue>,
     pub live_n: usize,
     pub envelope_hit: Option<(String, String, u32)>,
     /// 这次运行的成交（一笔结束）：(事件序号, 事件)
@@ -988,6 +1088,7 @@ pub fn view() -> View {
         run_id: g.run_id.clone(),
         running: g.running,
         live: g.live.clone(),
+        values: g.values.clone(),
         live_n: g.live_n,
         envelope_hit: g.envelope_hit.clone(),
         trades: if g.debug_open { g.trade_idx.iter().filter_map(|&i| g.events.get(i).map(|e| (i, e.clone()))).collect() } else { Vec::new() },
@@ -1355,6 +1456,9 @@ struct CheckOut {
     #[serde(rename = "where")]
     whence: HashMap<String, String>,
     toml: String,
+    /// 节点实时数值的取值方式（docs/49 M2）
+    #[serde(default)]
+    probes: HashMap<String, Probe>,
 }
 
 fn apply_check(g: &mut St, r: Result<CheckOut, String>, what: &str) -> Option<String> {
@@ -1367,6 +1471,7 @@ fn apply_check(g: &mut St, r: Result<CheckOut, String>, what: &str) -> Option<St
             g.needs = c.needs;
             if c.ok {
                 g.whence = c.whence;
+                g.probes = c.probes;
                 g.msg = format!("{what}通过");
                 return Some(c.toml);
             }
@@ -1476,6 +1581,7 @@ fn run_async() {
                     g.run_id = run_id.clone();
                     g.live.clear();
                     g.live_n = 0;
+                    g.values.clear();
                     g.envelope_hit = None;
                     g.events.clear();
                     g.trade_idx.clear();
@@ -1554,6 +1660,7 @@ fn follow_trace(run_id: String, generation: u64) {
         };
         let key = format!("ws:swe:{run_id}:trace");
         let mut last = "0".to_string();
+        let (mut last_watch, mut last_seq) = ((Vec::new(), Vec::new()), -1i64);
         let opts = StreamReadOptions::default().block(300).count(400);
         loop {
             let (alive, running) = with(|g| (g.generation == generation, g.running)).unwrap_or((false, false));
@@ -1564,6 +1671,27 @@ fn follow_trace(run_id: String, generation: u64) {
                 Ok(r) => r,
                 Err(_) => return,
             };
+            // 节点实时数值（docs/49 M2）：告诉宿主屏幕上有哪些节点，取回它推来的最新一份
+            let watch = with(|g| watch_of(&g.graph, &g.probes, g.focus.as_deref(), g.pan, g.zoom, g.view_size)).unwrap_or_default();
+            if watch != last_watch {
+                let body = serde_json::json!({"exprs": watch.0, "features": watch.1}).to_string();
+                let _: redis::RedisResult<()> = conn.set_ex(format!("ws:swe:{run_id}:watch"), body, 3600);
+                last_watch = watch;
+            }
+            let vals: Option<String> = conn.get(format!("ws:swe:{run_id}:values")).ok().flatten();
+            if let Some(got) = vals.and_then(|s| serde_json::from_str::<Value>(&s).ok()) {
+                let seq = got.get("seq").and_then(Value::as_i64).unwrap_or(0);
+                if seq != last_seq {
+                    last_seq = seq;
+                    with(|g| {
+                        if g.generation == generation {
+                            let probes = std::mem::take(&mut g.probes);
+                            apply_values(&mut g.values, &probes, &got);
+                            g.probes = probes;
+                        }
+                    });
+                }
+            }
             // 调试器停住时写的「停在哪」
             let state: Option<String> = conn.get(format!("ws:swe:{run_id}:state")).ok().flatten();
             let paused = state.and_then(|s| serde_json::from_str::<Value>(&s).ok());
@@ -3582,5 +3710,45 @@ mod tests {
         assert_eq!(p("array", None).control(), Control::List);
         assert_eq!(p("object", None).control(), Control::Table);
         assert_eq!(p("number", None).control(), Control::Text);
+    }
+
+    #[test]
+    fn 实时数值只要屏幕上看得见的节点() {
+        let g: Graph = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id": "a", "use": "value.rsi@1.0", "x": 10.0, "y": 10.0},
+                {"id": "b", "use": "value.gt@1.0", "x": 5000.0, "y": 10.0},
+                {"id": "c", "use": "features.ext@1.0", "x": 300.0, "y": 10.0},
+                {"id": "d", "use": "value.lt@1.0", "x": 20.0, "y": 200.0, "group": "G"},
+                {"id": "e", "use": "value.const@1.0", "x": 40.0, "y": 40.0}
+            ],
+            "groups": [{"id": "G", "title": "子图", "collapsed": true}]
+        })).unwrap();
+        let p = |e: Option<&str>, f: Option<&str>| Probe { expr: e.map(str::to_string), feature: f.map(str::to_string) };
+        let probes: HashMap<String, Probe> = [("a", p(Some("rsi(close, 14)"), None)), ("b", p(Some("x > 1"), None)),
+            ("c", p(None, Some("obi"))), ("d", p(Some("y < 2"), None))].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        let (e, f) = watch_of(&g, &probes, None, (0.0, 0.0), 1.0, (1280.0, 800.0));
+        assert_eq!((e, f), (vec!["rsi(close, 14)".to_string()], vec!["obi".to_string()]));   // b 在屏幕外，d 折叠着
+        assert_eq!(watch_of(&g, &probes, Some("G"), (0.0, 0.0), 1.0, (1280.0, 800.0)).0, vec!["y < 2".to_string()]);
+        assert_eq!(watch_of(&g, &probes, None, (0.0, 0.0), 0.3, (1280.0, 800.0)), (vec![], vec![]));   // 太小不画底栏
+    }
+
+    #[test]
+    fn 实时数值落到节点上并留一段小图() {
+        let p = |e: Option<&str>, f: Option<&str>| Probe { expr: e.map(str::to_string), feature: f.map(str::to_string) };
+        let probes: HashMap<String, Probe> = [("a", p(Some("z > 1"), None)), ("b", p(None, Some("obi"))), ("c", p(Some("w"), None))]
+            .into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        let mut vals = HashMap::new();
+        apply_values(&mut vals, &probes, &serde_json::json!({"ts": 5, "seq": 1, "e": {"z > 1": true}, "f": {"obi": 0.25}}));
+        apply_values(&mut vals, &probes, &serde_json::json!({"ts": 6, "seq": 2, "e": {"z > 1": false}, "f": {"obi": null}}));
+        assert_eq!(vals["a"].v, Val::Flag(false));
+        assert_eq!(vals["a"].hist.iter().copied().collect::<Vec<_>>(), vec![1.0, 0.0]);
+        assert_eq!((vals["b"].v, vals["b"].ts), (Val::Missing, 6));
+        assert!(vals["b"].hist[1].is_nan());
+        assert!(!vals.contains_key("c"));                 // 这一份里没有它（不在屏幕上）：不动
+        for i in 0..(VALUE_HIST + 5) {
+            apply_values(&mut vals, &probes, &serde_json::json!({"ts": i, "e": {"z > 1": true}}));
+        }
+        assert_eq!(vals["a"].hist.len(), VALUE_HIST);
     }
 }

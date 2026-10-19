@@ -139,6 +139,8 @@ struct Geom {
     tag: String,
     bad: usize,
     live: Option<NodeLive>,
+    /// 运行时这个节点的实时数值（docs/49 M2；数值节点、特征节点才有）
+    value: Option<sf::NodeValue>,
 }
 
 impl Geom {
@@ -179,6 +181,7 @@ impl Geom {
             tag: node_tag(n),
             bad: 0,
             live: None,
+            value: None,
         }
     }
 
@@ -294,6 +297,7 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
         let mut ge = Geom::of(n, defs.get(n.module.as_str()).copied());
         ge.bad = bad.get(n.id.as_str()).copied().unwrap_or(0);
         ge.live = v.live.get(&n.id).cloned();
+        ge.value = v.values.get(&n.id).cloned();
         where_.insert(n.id.as_str(), sc.geoms.len());
         sc.geoms.push(ge);
     }
@@ -366,6 +370,7 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
                 tag: String::new(),
                 bad: members.iter().map(|m| bad.get(m.id.as_str()).copied().unwrap_or(0)).sum(),
                 live,
+                value: None,
             });
         }
         // 2. 展开着的子图：一个框
@@ -426,6 +431,30 @@ fn build_scene(v: &View, pal_: &Palette) -> Scene {
         }
     }
     sc
+}
+
+/// 节点实时数值的文字与颜色：条件写「成立 / 不成立」，数写有效数字，没算好写「—」。
+fn value_label(v: sf::Val) -> (String, Color) {
+    match v {
+        sf::Val::Flag(true) => ("= 成立".into(), pal::ok()),
+        sf::Val::Flag(false) => ("= 不成立".into(), pal::dim()),
+        sf::Val::Num(x) => (format!("= {}", num_text(x)), pal::txt()),
+        sf::Val::Missing => ("= —（未就绪）".into(), pal::dim()),
+    }
+}
+
+/// 一个数的简短写法：大数不带小数，小数保留 4 位有效数字。
+fn num_text(x: f64) -> String {
+    let a = x.abs();
+    if a >= 1e5 {
+        format!("{x:.0}")
+    } else if a >= 100.0 {
+        format!("{x:.2}")
+    } else if a >= 0.01 || a == 0.0 {
+        format!("{x:.4}")
+    } else {
+        format!("{x:.3e}")
+    }
 }
 
 // ── 画布 ────────────────────────────────────────────────────────────────
@@ -662,6 +691,10 @@ impl FlowCanvas {
             self.label(frame, format!("{ms:.1} ms · {calls} 次"), Point::new(g.x + 8.0, foot_y), if k > 0.5 { pal::warn() } else { pal::dim() }, small);
             return;
         }
+        if let Some(val) = &g.value {
+            self.draw_value(frame, g, val, foot_y, small);
+            return;
+        }
         match &g.live {
             Some(l) => {
                 let c = glow.map(|(_, c)| c).unwrap_or_else(pal::dim);
@@ -679,6 +712,38 @@ impl FlowCanvas {
                 self.label(frame, s, Point::new(g.x + 8.0, foot_y), if g.bad > 0 { pal::bad() } else { pal::dim() }, small);
             }
         }
+    }
+
+    /// 节点实时数值（docs/49 M2）：底栏左边写当前值，右边一条小图（最近约半分钟墙上时间推来的值）。
+    fn draw_value(&self, frame: &mut Frame, g: &Geom, val: &sf::NodeValue, foot_y: f32, small: f32) {
+        let (s, c) = value_label(val.v);
+        self.label(frame, s, Point::new(g.x + 8.0, foot_y), c, small);
+        let pts: Vec<(usize, f32)> = val.hist.iter().copied().enumerate().filter(|(_, x)| x.is_finite()).collect();
+        if pts.len() < 2 {
+            return;
+        }
+        let (lo, hi) = pts.iter().fold((f32::MAX, f32::MIN), |(a, b), (_, x)| (a.min(*x), b.max(*x)));
+        let span = if hi - lo > 1e-12 { hi - lo } else { 1.0 };
+        // 小图占底栏右半边，留出上下 3 像素
+        let (x0, w) = (g.x + NODE_W * 0.5, NODE_W * 0.5 - 8.0);
+        let (y0, h) = (g.y + g.h - FOOT_H + 3.0, FOOT_H - 6.0);
+        let n = (sf::VALUE_HIST - 1) as f32;
+        let at = |i: usize, x: f32| self.to_screen(Point::new(x0 + w * (i as f32 + (sf::VALUE_HIST - val.hist.len()) as f32) / n, y0 + h * (1.0 - (x - lo) / span)));
+        let line = Path::new(|p| {
+            let mut first = true;
+            let mut prev = 0usize;
+            for &(i, x) in &pts {
+                // 中间断了（没算好的那几步）就断开，不硬连
+                if first || i != prev + 1 {
+                    p.move_to(at(i, x));
+                } else {
+                    p.line_to(at(i, x));
+                }
+                first = false;
+                prev = i;
+            }
+        });
+        frame.stroke(&line, Stroke::default().with_width(1.0).with_color(pal::alpha(c, 0.9)));
     }
 
     /// 小地图的换算：世界坐标的包围盒 → 小地图里的位置与比例。
