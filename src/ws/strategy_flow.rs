@@ -585,6 +585,7 @@ impl Needs {
             "price" => "价格（买一 / 卖一）",
             "book" => "盘口增量",
             "trades" => "逐笔成交",
+            "l3" => "逐单（L3）",
             other => other,
         }
     }
