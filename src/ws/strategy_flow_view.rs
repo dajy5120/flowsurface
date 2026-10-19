@@ -1218,6 +1218,7 @@ fn param_field<'a>(v: &View, n: &Node, pd: &ParamDef) -> Element<'a, FlMsg> {
             }
             c.push(w::btn("＋ 加一行", Kind::Ghost, Some(FlMsg::TableAdd(id, name)))).into()
         }
+        Control::Catalog => catalog_control(v, n, pd),
         Control::List | Control::Text => {
             let shown = v.form.get(&form_key(&n.id, &pd.name)).cloned().unwrap_or_else(|| set.map(value_text).unwrap_or_default());
             let hint = if pd.required {
@@ -1255,6 +1256,126 @@ fn param_field<'a>(v: &View, n: &Node, pd: &ParamDef) -> Element<'a, FlMsg> {
         return labelled(label, control.into(), note);
     }
     labelled(label, control, note)
+}
+
+/// 选择器能列几条：再多就让人输关键字缩小。
+const CATALOG_SHOW: usize = 60;
+
+/// 从目录里选（docs/49 M5）：扩展层特征（按关键字与 OFMS 层筛，数据源满足不了的置灰写原因）、
+/// 它的窗口、OFMS 事件、OFMS 状态标签。目录没导出来（字典程序没编）时退回文本框。
+fn catalog_control<'a>(v: &View, n: &Node, pd: &ParamDef) -> Element<'a, FlMsg> {
+    let empty = sf::Catalogs::default();
+    let cat = v.palette.as_ref().map_or(&empty, |p| &p.catalogs);
+    let (id, name) = (n.id.clone(), pd.name.clone());
+    let cur = n.params.get(&pd.name).or(Some(&pd.default)).map(value_text).unwrap_or_default();
+    let text_box = |id: String, name: String| -> Element<'a, FlMsg> {
+        let shown = v.form.get(&form_key(&id, &name)).cloned().unwrap_or_else(|| cur.clone());
+        text_input("必填", &shown).on_input(move |s| FlMsg::Param(id.clone(), name.clone(), s)).size(t::s_small()).into()
+    };
+    let pick = |names: Vec<String>, values: Vec<Value>, id: String, name: String, shown: Option<String>| -> Element<'a, FlMsg> {
+        pick_list(names.clone(), shown, move |s: String| FlMsg::ParamValue(id.clone(), name.clone(), names.iter().position(|x| *x == s).map(|i| values[i].clone())))
+            .text_size(t::s_small())
+            .into()
+    };
+    match pd.catalog.as_deref() {
+        Some("features") if !cat.features.is_empty() => {
+            let source = v.graph.backtest.get("source").and_then(Value::as_str).unwrap_or("dukascopy").to_string();
+            let mut c = column![].spacing(space(1));
+            match cat.features.iter().find(|f| f.key == cur) {
+                Some(f) => {
+                    let blocked = sf::feature_blocked(f, &source, &cat.sources);
+                    c = c.push(row![t::label(format!("{} · {}", f.key, f.name)), prior_badge(&f.prior)].spacing(space(1)).align_y(Alignment::Center).wrap());
+                    c = c.push(t::metadata(format!("L{} · {} · 单位 {} · 窗口 {:?}", f.layer.unwrap_or(0), f.stage, f.unit, f.windows)).color(pal::dim()));
+                    if let Some(why) = blocked {
+                        c = c.push(t::metadata(format!("用不了：{why}")).color(pal::bad()));
+                    }
+                }
+                None if cur.is_empty() => c = c.push(t::metadata("还没选：在下面搜").color(pal::dim())),
+                None => c = c.push(t::metadata(format!("字典里没有 {cur}")).color(pal::bad())),
+            }
+            c = c.push(text_input("搜 key 或中文名，如 obi、吸收、queue", &v.cat_query).on_input(FlMsg::CatQuery).size(t::s_small()));
+            // OFMS 层筛选：只列目录里出现过的层
+            let mut layers: Vec<u8> = cat.features.iter().filter_map(|f| f.layer).collect();
+            layers.sort_unstable();
+            layers.dedup();
+            let mut chips = row![w::btn("全部", if v.cat_layer.is_none() { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::CatLayer(None)))].spacing(space(1));
+            for l in layers {
+                chips = chips.push(w::btn(format!("L{l}"), if v.cat_layer == Some(l) { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::CatLayer(Some(l)))));
+            }
+            c = c.push(chips.wrap());
+            let hits = sf::feature_hits(&cat.features, &v.cat_query, v.cat_layer, &source, &cat.sources);
+            let usable = hits.iter().filter(|h| h.1.is_none()).count();
+            let mut list = column![].spacing(0);
+            for (f, blocked) in hits.iter().take(CATALOG_SHOW) {
+                let head = row![t::label(f.key.clone()), prior_badge(&f.prior), t::metadata(format!("L{} · {}", f.layer.unwrap_or(0), f.unit)).color(pal::dim())]
+                    .spacing(space(1))
+                    .align_y(Alignment::Center)
+                    .wrap();
+                let sub = match blocked {
+                    Some(why) => t::metadata(format!("{} — {why}", f.name)).color(pal::dim()),
+                    None => t::metadata(f.name.clone()).color(pal::txt()),
+                };
+                let msg = blocked.is_none().then(|| FlMsg::PickFeature(id.clone(), f.key.clone()));
+                list = list.push(button(column![head, sub].spacing(0)).width(Length::Fill).on_press_maybe(msg).style(|th, st| w::button_style(Kind::Ghost, th, st)));
+            }
+            c = c.push(crate::ui::scroll(list).height(Length::Fixed(240.0)));
+            let more = if hits.len() > CATALOG_SHOW { format!("，只列前 {CATALOG_SHOW} 条：输关键字缩小") } else { String::new() };
+            c = c.push(t::caption(format!("{} 条，其中 {usable} 条在 {source} 上能用{more}", hits.len())).color(pal::dim()));
+            c.into()
+        }
+        Some("feature_windows") => {
+            let key = n.params.get("key").and_then(Value::as_str).unwrap_or("");
+            match cat.features.iter().find(|f| f.key == key) {
+                Some(f) => {
+                    let names: Vec<String> = f.windows.iter().map(|w| if *w == 0 { "0（瞬时）".to_string() } else { format!("{w} ms") }).collect();
+                    let values: Vec<Value> = f.windows.iter().map(|w| Value::from(*w)).collect();
+                    let shown = values.iter().position(|x| value_text(x) == cur).map(|i| names[i].clone());
+                    pick(names, values, id, name, shown)
+                }
+                None => t::metadata("先选特征，这里列出它登记过的窗口").color(pal::dim()).into(),
+            }
+        }
+        Some("ofms_events") if !cat.ofms_events.is_empty() => {
+            let nature = |x: &str| match x {
+                "observed" => "观测",
+                "inferred" => "推断",
+                _ => "派生",
+            };
+            let names: Vec<String> = cat.ofms_events.iter().map(|e| format!("{} · {}（L{} · {}）", e.key, e.name, e.layer.unwrap_or(0), nature(&e.nature))).collect();
+            let values: Vec<Value> = cat.ofms_events.iter().map(|e| Value::String(e.key.clone())).collect();
+            let at = cat.ofms_events.iter().position(|e| e.key == cur);
+            let mut c = column![pick(names.clone(), values, id, name, at.map(|i| names[i].clone()))].spacing(0);
+            if let Some(e) = at.map(|i| &cat.ofms_events[i]) {
+                c = c.push(t::metadata(e.definition.clone()).color(pal::dim()));
+            }
+            c.into()
+        }
+        Some("ofms_labels") if !cat.ofms_labels.is_empty() => {
+            let field = n.params.get("field").and_then(Value::as_str).unwrap_or("response");
+            match cat.ofms_labels.get(field) {
+                Some(labels) => {
+                    let mut names = vec!["（空：给编码）".to_string()];
+                    names.extend(labels.iter().cloned());
+                    let mut values = vec![Value::String(String::new())];
+                    values.extend(labels.iter().map(|l| Value::String(l.clone())));
+                    let shown = if cur.is_empty() { Some(names[0].clone()) } else { labels.iter().find(|l| **l == cur).cloned() };
+                    pick(names, values, id, name, shown)
+                }
+                None => t::metadata(format!("{field} 是一个数，不用写")).color(pal::dim()).into(),
+            }
+        }
+        _ => text_box(id, name),
+    }
+}
+
+/// 先验徽标：毛（有毛信息）/ 证伪 / 未检验。
+fn prior_badge<'a>(p: &str) -> Element<'a, FlMsg> {
+    let tone = match p {
+        "gross" => Tone::Success,
+        "falsified" => Tone::Danger,
+        _ => Tone::Neutral,
+    };
+    w::badge(sf::prior_label(p), tone)
 }
 
 /// 「数据」一节（docs/45 §21）：共用数据选择组件（B2 已购数据 / B5 本地自有数据），选完写回 `[backtest]`。

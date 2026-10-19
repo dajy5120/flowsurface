@@ -43,11 +43,17 @@ pub struct ParamDef {
     /// 只能取这几个值（下拉）
     #[serde(rename = "enum")]
     pub choices: Option<Vec<Value>>,
+    /// 从哪份目录里选（docs/49 M5）：features / feature_windows / ofms_events / ofms_labels，见 [`Catalogs`]
+    #[serde(default)]
+    pub catalog: Option<String>,
 }
 
 impl ParamDef {
     /// 用哪种控件（docs/45 §4.3）：开关 / 下拉 / 列表 / 表 / 文本。
     pub fn control(&self) -> Control {
+        if self.catalog.is_some() {
+            return Control::Catalog;
+        }
         if self.choices.as_ref().is_some_and(|c| !c.is_empty()) {
             return Control::Choice;
         }
@@ -69,6 +75,100 @@ pub enum Control {
     List,
     /// 两层的表（按来源覆盖、路由权重）：外层键 · 内层键 = 值
     Table,
+    /// 从目录里选（扩展层特征、OFMS 事件 / 标签，docs/49 M5）
+    Catalog,
+}
+
+/// 选择器用的目录（docs/49 M5，`graph.catalogs()`；都来自特征字典 `ws-features-dict`）。
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Catalogs {
+    pub features: Vec<FeatRow>,
+    pub ofms_events: Vec<EventRow>,
+    /// `response` / `regime` → 可选标签
+    pub ofms_labels: BTreeMap<String, Vec<String>>,
+    /// 数据源 → 画布回测这条路喂得进去的数据层与适用市场（`datareq.EXT_SOURCES`）
+    pub sources: BTreeMap<String, SourceCaps>,
+}
+
+/// 字典里的一条特征（精简）。
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FeatRow {
+    pub key: String,
+    pub name: String,
+    pub stage: String,
+    pub family: String,
+    pub unit: String,
+    /// gross 毛 / falsified 证伪 / untested 未检验
+    pub prior: String,
+    pub windows: Vec<u32>,
+    pub requires: Vec<String>,
+    pub markets: Vec<String>,
+    /// OFMS 层（L0–L10）
+    pub layer: Option<u8>,
+    pub latency: String,
+}
+
+/// OFMS 登记表里的一类市场侧事件。
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EventRow {
+    pub key: String,
+    pub name: String,
+    pub layer: Option<u8>,
+    /// observed 观测 / inferred 推断 / derived 派生
+    pub nature: String,
+    pub definition: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SourceCaps {
+    pub layers: Vec<String>,
+    pub markets: Vec<String>,
+}
+
+/// 先验的中文。
+#[must_use]
+pub fn prior_label(p: &str) -> &'static str {
+    match p {
+        "gross" => "毛",
+        "falsified" => "证伪",
+        _ => "未检验",
+    }
+}
+
+/// 这条特征在这个数据源上用不了的原因（`None` = 能用）：画布回测只喂盘口、成交（Databento 另有逐单），
+/// 字典 `requires` 里别的数据层这条路没有；市场不对的也不行。
+#[must_use]
+pub fn feature_blocked(f: &FeatRow, source: &str, caps: &BTreeMap<String, SourceCaps>) -> Option<String> {
+    let Some(c) = caps.get(source) else {
+        return Some(format!("数据源 {source} 不喂盘口与成交，用不了订单流特征：换 tardis / databento"));
+    };
+    let missing: Vec<&str> = f.requires.iter().filter(|r| !c.layers.contains(r)).map(String::as_str).collect();
+    if !missing.is_empty() {
+        let l3 = if missing == ["L3_Mbo"] { "（逐单只有 Databento 有）" } else { "（画布回测只喂盘口、成交与 Databento 逐单）" };
+        return Some(format!("{source} 没有 {}{l3}", missing.join("、")));
+    }
+    if !f.markets.is_empty() && !f.markets.iter().any(|m| c.markets.contains(m)) {
+        return Some(format!("只适用于 {}，{source} 是 {}", f.markets.join("、"), c.markets.join("、")));
+    }
+    None
+}
+
+/// 选择器里的候选：按关键字（key 或中文名，不分大小写）与 OFMS 层筛；能用的在前，同组内按层、再按 key 排。
+#[must_use]
+pub fn feature_hits<'a>(rows: &'a [FeatRow], query: &str, layer: Option<u8>, source: &str, caps: &BTreeMap<String, SourceCaps>) -> Vec<(&'a FeatRow, Option<String>)> {
+    let q = query.trim().to_lowercase();
+    let mut out: Vec<(&FeatRow, Option<String>)> = rows
+        .iter()
+        .filter(|f| layer.is_none() || f.layer == layer)
+        .filter(|f| q.is_empty() || f.key.to_lowercase().contains(&q) || f.name.to_lowercase().contains(&q))
+        .map(|f| (f, feature_blocked(f, source, caps)))
+        .collect();
+    out.sort_by(|a, b| (a.1.is_some(), a.0.layer, &a.0.key).cmp(&(b.1.is_some(), b.0.layer, &b.0.key)));
+    out
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -127,6 +227,9 @@ pub struct Palette {
     pub data_kinds: BTreeMap<String, String>,
     /// 数据商 → 类型 → 满足的抽象数据（`datareq.VENDOR_TYPES`）
     pub vendor_types: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    /// 选择器用的目录（docs/49 M5）
+    #[serde(default)]
+    pub catalogs: Catalogs,
 }
 
 /// 一份模板：只是起点，新建出来的图与它不保持关联。
@@ -837,6 +940,10 @@ pub enum FlMsg {
     Pan(f32, f32),
     Zoom(f32),
     ResetView,
+    /// 特征选择器（docs/49 M5）：关键字、OFMS 层筛选、选中一条（节点, key）
+    CatQuery(String),
+    CatLayer(Option<u8>),
+    PickFeature(String, String),
 }
 
 // ── 状态 ────────────────────────────────────────────────────────────────
@@ -896,6 +1003,9 @@ struct St {
     values: HashMap<String, NodeValue>,
     /// 这次运行的成本线（docs/49 M4，宿主结束时推的 `costs`）
     costs: Option<Map<String, Value>>,
+    /// 特征选择器（docs/49 M5）：关键字与 OFMS 层筛选
+    cat_query: String,
+    cat_layer: Option<u8>,
     /// 这次运行里强制风控层最近一次出手：(拒绝 / 缩量 / 停手, 原因, 共几次)
     envelope_hit: Option<(String, String, u32)>,
     /// 这次运行收到的决策轨迹（调试面板用；最多留 5 万条）
@@ -974,6 +1084,8 @@ impl Default for St {
             probes: HashMap::new(),
             values: HashMap::new(),
             costs: None,
+            cat_query: String::new(),
+            cat_layer: None,
             envelope_hit: None,
             events: Vec::new(),
             trade_idx: Vec::new(),
@@ -1049,6 +1161,9 @@ pub struct View {
     pub values: HashMap<String, NodeValue>,
     /// 成本线（docs/49 M4）
     pub costs: Option<Map<String, Value>>,
+    /// 特征选择器的筛选（docs/49 M5）
+    pub cat_query: String,
+    pub cat_layer: Option<u8>,
     pub live_n: usize,
     pub envelope_hit: Option<(String, String, u32)>,
     /// 这次运行的成交（一笔结束）：(事件序号, 事件)
@@ -1112,6 +1227,8 @@ pub fn view() -> View {
         live: g.live.clone(),
         values: g.values.clone(),
         costs: g.costs.clone(),
+        cat_query: g.cat_query.clone(),
+        cat_layer: g.cat_layer,
         live_n: g.live_n,
         envelope_hit: g.envelope_hit.clone(),
         trades: if g.debug_open { g.trade_idx.iter().filter_map(|&i| g.events.get(i).map(|e| (i, e.clone()))).collect() } else { Vec::new() },
@@ -2824,6 +2941,30 @@ pub fn handle(m: FlMsg) {
                 }
             });
         }
+        FlMsg::CatQuery(q) => {
+            with(|g| g.cat_query = q);
+        }
+        FlMsg::CatLayer(l) => {
+            with(|g| g.cat_layer = l);
+        }
+        FlMsg::PickFeature(id, key) => {
+            // 选中一条特征：key 换掉；窗口不是它登记过的就换成它的第一个窗口（docs/49 M5）
+            with(|g| {
+                let windows = g.palette.as_ref().and_then(|p| p.catalogs.features.iter().find(|f| f.key == key)).map(|f| f.windows.clone()).unwrap_or_default();
+                edit(g, "");
+                g.form.remove(&form_key(&id, "key"));
+                g.form.remove(&form_key(&id, "window_ms"));
+                if let Some(n) = g.graph.node_mut(&id) {
+                    let cur = n.params.get("window_ms").and_then(Value::as_u64).map(|w| w as u32);
+                    n.params.insert("key".into(), Value::String(key));
+                    if let Some(&w0) = windows.first() {
+                        if !cur.is_some_and(|w| windows.contains(&w)) {
+                            n.params.insert("window_ms".into(), Value::from(w0));
+                        }
+                    }
+                }
+            });
+        }
         FlMsg::TableEdit(id, name, row, col, text) => {
             with(|g| {
                 let key = form_key(&id, &name);
@@ -3792,5 +3933,35 @@ mod tests {
         assert_eq!(cost_line(&c), "成本线：75 笔，平均毛 -0.24 bp − 手续费 6.44 bp = 净 -6.69 bp（按开仓名义额）；被动成交 开仓 100% · 平仓 0%");
         let empty = Map::new();
         assert!(cost_line(&empty).contains("平均毛 — bp"));
+    }
+
+    #[test]
+    fn 特征选择器按数据源置灰并把能用的排前面() {
+        let f = |key: &str, layer: u8, requires: &[&str], markets: &[&str]| FeatRow {
+            key: key.into(), name: format!("{key} 中文"), layer: Some(layer), windows: vec![0],
+            requires: requires.iter().map(|s| s.to_string()).collect(), markets: markets.iter().map(|s| s.to_string()).collect(),
+            ..FeatRow::default()
+        };
+        let rows = vec![
+            f("l3_queue", 2, &["L3_Mbo"], &["futures", "equity"]),
+            f("obi_l5", 2, &["L2_Incremental"], &["crypto_perp", "futures"]),
+            f("funding_z", 1, &["Derivative_Stream"], &["crypto_perp"]),
+            f("perp_basis", 1, &["L1_Bbo"], &["crypto_perp"]),
+        ];
+        let base = ["L1_Bbo", "L2_Incremental", "Trade_Stream"].map(String::from).to_vec();
+        let caps: BTreeMap<String, SourceCaps> = [
+            ("tardis".to_string(), SourceCaps { layers: base.clone(), markets: vec!["crypto_perp".into()] }),
+            ("databento".to_string(), SourceCaps { layers: [base.clone(), vec!["L3_Mbo".into()]].concat(), markets: vec!["futures".into(), "equity".into()] }),
+        ].into_iter().collect();
+        assert!(feature_blocked(&rows[0], "tardis", &caps).unwrap().contains("逐单只有 Databento"));
+        assert_eq!(feature_blocked(&rows[0], "databento", &caps), None);
+        assert!(feature_blocked(&rows[2], "tardis", &caps).unwrap().contains("Derivative_Stream"));
+        assert!(feature_blocked(&rows[3], "databento", &caps).unwrap().contains("只适用于"));
+        assert!(feature_blocked(&rows[1], "dukascopy", &caps).unwrap().contains("用不了订单流特征"));
+        let hits = feature_hits(&rows, "", None, "tardis", &caps);
+        let order: Vec<&str> = hits.iter().map(|h| h.0.key.as_str()).collect();
+        assert_eq!(order, ["perp_basis", "obi_l5", "funding_z", "l3_queue"]);   // 能用的在前，各自按层、key 排
+        assert_eq!(feature_hits(&rows, "OBI", None, "tardis", &caps).len(), 1);       // 不分大小写
+        assert_eq!(feature_hits(&rows, "中文", Some(1), "tardis", &caps).len(), 2);  // 中文名 + 层
     }
 }
