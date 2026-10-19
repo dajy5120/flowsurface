@@ -1720,9 +1720,9 @@ fn run_async() {
                     g.running = true;
                     g.run_id = run_id.clone();
                     g.live.clear();
-                    g.live_n = 0;
-                    g.values.clear();
+                    g.values.clear(); // 节点实时数值按节点 id 存：换了图（或重跑）就清，别显示到别的图的同名节点上
                     g.costs = None;
+                    g.live_n = 0;
                     g.envelope_hit = None;
                     g.events.clear();
                     g.trade_idx.clear();
@@ -1837,7 +1837,8 @@ fn follow_trace(run_id: String, generation: u64) {
             let state: Option<String> = conn.get(format!("ws:swe:{run_id}:state")).ok().flatten();
             let paused = state.and_then(|s| serde_json::from_str::<Value>(&s).ok());
             with(|g| {
-                if g.generation == generation {
+                // 停止之后进程没了，Redis 里那条「停在哪」不会再被删：只在运行中才认它
+                if g.generation == generation && g.running {
                     g.paused = paused;
                 }
             });
@@ -1977,6 +1978,8 @@ fn open(item: FileItem) {
                     g.whence.clear();
                     g.checked = None;
                     g.live.clear();
+                    g.values.clear(); // 节点实时数值按节点 id 存：换了图（或重跑）就清，别显示到别的图的同名节点上
+                    g.costs = None;
                     g.live_n = 0;
                 }
                 Err(e) => g.msg = e,
@@ -2362,6 +2365,8 @@ pub fn handle(m: FlMsg) {
                 g.whence.clear();
                 g.checked = None;
                 g.live.clear();
+                g.values.clear(); // 节点实时数值按节点 id 存：换了图（或重跑）就清，别显示到别的图的同名节点上
+                g.costs = None;
                 g.live_n = 0;
                 g.msg = "新画布：从左边的模块库点模块加节点，拖端口连线".to_string();
             });
@@ -3061,6 +3066,8 @@ fn open_template(t: Template) {
                     g.whence.clear();
                     g.checked = None;
                     g.live.clear();
+                    g.values.clear(); // 节点实时数值按节点 id 存：换了图（或重跑）就清，别显示到别的图的同名节点上
+                    g.costs = None;
                     g.live_n = 0;
                     g.msg = format!("从模板「{}」新建（只是起点，与模板不保持关联；改个 id 再保存）", t.title);
                     touch(g);
