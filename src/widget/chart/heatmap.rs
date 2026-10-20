@@ -101,6 +101,10 @@ pub struct HeatmapShader {
     depth_grid: GridRing,
     depth_norm: view::DepthNormCache,
     data_gen: u64,
+    /// 已经按特征回放的请求重画过的那一代（[`crate::ws::replay_clock::rebuild_req`]）
+    replay_gen: u64,
+    /// 见过的视野同步版本（[`crate::ws::replay_clock::view_sync`]）
+    view_seen: u64,
     qty_scale: f32,
     rebuild_policy: view::RebuildPolicy,
     indicators: Vec<HeatmapIndicator>,
@@ -129,6 +133,8 @@ impl HeatmapShader {
 
         Self {
             last_tick: None,
+            replay_gen: 0,
+            view_seen: 0,
             scene: Scene::new(),
             viewport: None,
             palette: None,
@@ -177,6 +183,7 @@ impl HeatmapShader {
                     viewport_w,
                 );
                 self.canvas_invalidation.mark_axis_x_motion();
+                self.publish_view_sync();
 
                 let resumed = self.try_resume_if_x0_visible();
                 self.try_rebuild_instances();
@@ -193,6 +200,7 @@ impl HeatmapShader {
                 self.scene.camera.offset[0] -= dx_world;
                 self.scene.camera.offset[1] -= dy_world;
                 self.canvas_invalidation.mark_axes_motion();
+                self.publish_view_sync();
 
                 let resumed = self.try_resume_if_x0_visible();
                 self.try_rebuild_instances();
@@ -223,6 +231,7 @@ impl HeatmapShader {
                     size.height,
                 );
                 self.canvas_invalidation.mark_axes_motion();
+                self.publish_view_sync();
 
                 let resumed = self.try_resume_if_x0_visible();
                 self.try_rebuild_instances();
@@ -253,6 +262,7 @@ impl HeatmapShader {
                 self.scene
                     .zoom_column_world_at(factor, cursor_x, viewport_w);
                 self.canvas_invalidation.mark_axis_x_motion();
+                self.publish_view_sync();
 
                 let resumed = self.try_resume_if_x0_visible();
                 self.try_rebuild_instances();
@@ -276,6 +286,7 @@ impl HeatmapShader {
                         .reset_to_live_edge(size.width, false, false);
                     self.scene.set_default_column_width();
                     self.canvas_invalidation.mark_axis_x_motion();
+                    crate::ws::replay_clock::publish_view(self.sync_id(), crate::ws::replay_clock::ViewSync::Live);
 
                     let resumed = self.try_resume_if_x0_visible();
                     self.try_rebuild_instances();
@@ -288,6 +299,7 @@ impl HeatmapShader {
                 if let Some(size) = self.viewport_size_px() {
                     self.scene.camera.reset_to_live_edge(size.width, true, true);
                     self.canvas_invalidation.mark_axis_x_motion();
+                    crate::ws::replay_clock::publish_view(self.sync_id(), crate::ws::replay_clock::ViewSync::Live);
 
                     let resumed = self.try_resume_if_x0_visible();
 
@@ -372,10 +384,13 @@ impl HeatmapShader {
             volume_strip_max_qty: self.instances.volume_strip_scale_max_qty,
             depth_profile_max_qty: self.instances.depth_profile_scale_max_qty,
             volume_profile_max_qty: self.instances.volume_profile_scale_max_qty,
+            marks: self.replay_marks(),
+            bookmarks: self.replay_bookmarks(),
         };
 
         let chart = HeatmapShaderWidget::new(&self.scene, x_axis, y_axis, overlay)
-            .with_y_axis_gutter(self.y_axis_gutter);
+            .with_y_axis_gutter(self.y_axis_gutter)
+            .with_needs_bounds(self.viewport.is_none());
 
         iced::widget::container(chart).padding(crate::ui::metrics::space(0)).into()
     }
@@ -385,6 +400,22 @@ impl HeatmapShader {
         self.palette = Some(palette);
 
         self.scene.sync_palette(self.palette.as_ref());
+        self.canvas_invalidation.mark_all();
+    }
+
+    /// 视图（相机、列宽行高、视口）：特征回放往回跳、换了一个新的图对象时带过去，缩放不丢（docs/51 P3）。
+    #[must_use]
+    pub fn view_keep(&self) -> (scene::camera::Camera, scene::cell::Cell, Option<iced::Rectangle>) {
+        (self.scene.camera, self.scene.cell, self.viewport)
+    }
+
+    pub fn restore_view(&mut self, (camera, cell, viewport): (scene::camera::Camera, scene::cell::Cell, Option<iced::Rectangle>)) {
+        self.scene.camera = camera;
+        self.scene.cell = cell;
+        self.scene.sync_cell_world_uniform();
+        if self.viewport.is_none() {
+            self.viewport = viewport;
+        }
         self.canvas_invalidation.mark_all();
     }
 
@@ -403,7 +434,23 @@ impl HeatmapShader {
         }
         let viewport_size = self.viewport_size_px()?;
 
-        if let Some(exchange_now_ms) = self.clock.estimate_now_ms(now_i) {
+        // 特征回放（docs/51）：往回跳之后一口气重灌了几分钟，逐列上传只留下最新那一段——灌到播放头以后从历史整体重画一次
+        if let Some((req, upto_ms)) = crate::ws::replay_clock::rebuild_req()
+            && req != self.replay_gen
+            && self.latest_time.is_some_and(|t| t + 300 >= upto_ms)
+        {
+            self.replay_gen = req;
+            self.rebuild_policy = self.rebuild_policy.request_rebuild_from_historical().promote_to_immediate();
+            self.rebuild_all(None);
+            self.rebuild_policy = view::RebuildPolicy::Idle;
+            self.canvas_invalidation.mark_all();
+        }
+        self.apply_view_sync();
+
+        // 特征回放（docs/51）：「现在」= 统一播放头，不按墙钟外推——否则暂停时图还在往前漂，
+        // 往回跳之后一口气重灌几分钟数据，外推出来的「现在」也不对
+        let replay_now = crate::ws::replay_clock::chart_now_ms().filter(|_| self.clock.estimate_now_ms(now_i).is_some());
+        if let Some(exchange_now_ms) = replay_now.or_else(|| self.clock.estimate_now_ms(now_i)) {
             let aggr_time = self.depth_history.aggr_time_ms();
             let x0_visible = self.scene.profile_start_visible_x0(viewport_size);
 
@@ -459,7 +506,8 @@ impl HeatmapShader {
         self.depth_grid.ensure_layout(aggr_time);
         self.depth_history.insert_latest_depth(depth, rounded_t);
 
-        if !paused {
+        // 特征回放往回跳之后的一口气重灌：只记历史，灌完从历史整体重画（docs/51 P3）
+        if !paused && !crate::ws::replay_clock::bulk() {
             self.update_live_ring_and_scene(depth, rounded_t_ms, is_interacting);
         }
 
@@ -845,6 +893,92 @@ impl HeatmapShader {
         if w.steps_per_y_bin != cur_steps_per_y_bin {
             self.rebuild_policy = self.rebuild_policy.promote_to_immediate();
             self.rebuild_all(Some(w));
+        }
+    }
+
+    /// 世界坐标 x = 0 那一列的时刻（毫秒）：与 `ViewWindow::compute` 同一个口径（渲染时刻与数据时刻取大）。
+    fn world_zero_ms(&self) -> Option<u64> {
+        let latest = self.latest_time?;
+        Some(self.anchor.effective_render_latest_time(latest).max(latest))
+    }
+
+    /// 特征回放（docs/51 P3）：用户拖动 / 缩放了热图 → 视野中心的时刻告诉同页别的时间轴图。
+    fn publish_view_sync(&self) {
+        let (Some(size), Some(zero)) = (self.viewport_size_px(), self.world_zero_ms()) else { return };
+        let (l, r) = self.scene.camera.x_world_bounds(size.width);
+        let col = self.scene.cell.width_world();
+        let aggr = self.depth_history.aggr_time_ms() as f64;
+        if col <= 0.0 {
+            return;
+        }
+        let t = zero as f64 + f64::from((l + r) * 0.5 / col) * aggr;
+        crate::ws::replay_clock::publish_view(self.sync_id(), crate::ws::replay_clock::ViewSync::Center(t.max(0.0) as u64));
+    }
+
+    /// 特征回放的事件标记（docs/51 P4）：可见范围里勾了的类，换成屏幕 x。
+    fn replay_marks(&self) -> Vec<(f32, i8, bool)> {
+        let (Some(size), Some(zero)) = (self.viewport_size_px(), self.world_zero_ms()) else { return Vec::new() };
+        let col = f64::from(self.scene.cell.width_world());
+        let aggr = self.depth_history.aggr_time_ms() as f64;
+        if col <= 0.0 || aggr <= 0.0 {
+            return Vec::new();
+        }
+        let (l, r) = self.scene.camera.x_world_bounds(size.width);
+        let t_of = |wx: f32| (zero as f64 + f64::from(wx) / col * aggr).max(0.0) as u64;
+        crate::ws::replay_clock::marks(t_of(l), t_of(r), 400)
+            .into_iter()
+            .map(|(t, dir, f)| {
+                let wx = ((t as f64 - zero as f64) / aggr * col) as f32;
+                (self.scene.camera.world_to_screen_x(wx, size.width), dir, f)
+            })
+            .collect()
+    }
+
+    /// 书签（docs/51 P5）：可见范围里的，换成屏幕 x。
+    fn replay_bookmarks(&self) -> Vec<f32> {
+        let (Some(size), Some(zero)) = (self.viewport_size_px(), self.world_zero_ms()) else { return Vec::new() };
+        let col = f64::from(self.scene.cell.width_world());
+        let aggr = self.depth_history.aggr_time_ms() as f64;
+        if col <= 0.0 || aggr <= 0.0 {
+            return Vec::new();
+        }
+        let (l, r) = self.scene.camera.x_world_bounds(size.width);
+        let t_of = |wx: f32| (zero as f64 + f64::from(wx) / col * aggr).max(0.0) as u64;
+        crate::ws::replay_clock::bookmark_marks(t_of(l), t_of(r))
+            .into_iter()
+            .map(|t| self.scene.camera.world_to_screen_x(((t as f64 - zero as f64) / aggr * col) as f32, size.width))
+            .collect()
+    }
+
+    fn sync_id(&self) -> u64 {
+        std::ptr::from_ref(self) as usize as u64
+    }
+
+    /// 别的时间轴图被拖动 / 缩放了：视野中心移到同一时刻（保留缩放）；`Live` = 回到跟随最新。
+    fn apply_view_sync(&mut self) {
+        let Some((ver, src, v)) = crate::ws::replay_clock::view_sync(self.view_seen) else { return };
+        self.view_seen = ver;
+        if src == self.sync_id() {
+            return;
+        }
+        let Some(size) = self.viewport_size_px() else { return };
+        match v {
+            crate::ws::replay_clock::ViewSync::Center(t) => {
+                let (Some(zero), col) = (self.world_zero_ms(), self.scene.cell.width_world()) else { return };
+                let aggr = self.depth_history.aggr_time_ms() as f64;
+                let wx = (t as f64 - zero as f64) / aggr * f64::from(col);
+                self.scene.camera.center_x_on(wx as f32, size.width);
+            }
+            crate::ws::replay_clock::ViewSync::Live => self.scene.camera.reset_to_live_edge(size.width, false, false),
+        }
+        self.canvas_invalidation.mark_axes_motion();
+        let resumed = self.try_resume_if_x0_visible();
+        if !resumed {
+            // 视野挪到了历史里：从历史重画（逐列上传只管最新那一段）
+            self.rebuild_policy = self.rebuild_policy.request_rebuild_from_historical().promote_to_immediate();
+            self.rebuild_all(None);
+            self.rebuild_policy = view::RebuildPolicy::Idle;
+            self.canvas_invalidation.mark_all();
         }
     }
 

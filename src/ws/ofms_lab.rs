@@ -309,6 +309,8 @@ struct PaneView {
     dict_search: String,
     resp_kind: String,
     resp_informative: bool,
+    /// 跟过的特征回放聚焦事件的版本（docs/51 P4）
+    follow_ver: u64,
 }
 
 impl Default for PaneView {
@@ -328,6 +330,7 @@ impl Default for PaneView {
             dict_search: String::new(),
             resp_kind: "event".into(),
             resp_informative: false,
+            follow_ver: 0,
         }
     }
 }
@@ -392,6 +395,8 @@ pub struct View {
     pub overlay_running: bool,
     pub live: bool,
     pub live_minutes: u32,
+    /// 特征回放的统一播放头（毫秒；没在回放 = `None`）
+    pub playhead: Option<f64>,
 }
 
 /// 页签状态角标（docs/41 §3.4）：在生成窗口 / 叠加评估 / 实时 tail。
@@ -412,8 +417,29 @@ pub fn lock_tab(pane: uuid::Uuid, label: &str) {
 /// 面板在显示（docs/41 E 期：实时模式的 tail 线程没人看时挂起，回来时从断点接着读）。
 static DEMAND: super::svcctl::Demand = super::svcctl::Demand::new();
 
+/// 特征回放跳到了一个事件（⏮ ⏭）：在这份数据里找同一个事件（类型相同、事件时刻差不过 1 毫秒）选中它。
+/// 回放与这里的数据都是同一个检测器跑出来的，事件自己的时刻对得上；找不到（数据不是同一段）就不动。
+fn follow_replay(pane: uuid::Uuid) {
+    let Some((f, ver)) = super::replay_clock::focus() else { return };
+    if with_view(pane, |v| v.follow_ver == ver).unwrap_or(true) {
+        return;
+    }
+    let t = f.ts / 1_000_000;
+    // 数据还没读进来（打开面板时在后台读上一次生成的窗口）：先不记「跟过了」，读进来以后再找
+    let Some(id) = with(|g| g.data.as_ref().map(|d| d.events.iter().find(|e| e.key == f.kind && (e.t - t).abs() <= 1).map(|e| e.id))).flatten() else {
+        return;
+    };
+    with_view(pane, |v| {
+        v.follow_ver = ver;
+        if id.is_some() {
+            v.selected = id;
+        }
+    });
+}
+
 pub fn view(pane: uuid::Uuid) -> View {
     DEMAND.touch();
+    follow_replay(pane);
     let pv = with_view(pane, |v| v.clone()).unwrap_or_default();
     let need_dict = with(|g| {
         let go = g.dict.is_none() && !g.dict_loading && g.dict_err.is_empty();
@@ -481,6 +507,7 @@ pub fn view(pane: uuid::Uuid) -> View {
             overlay_running: g.overlay_running,
             live: g.live,
             live_minutes: if g.live_minutes == 0 { 30 } else { g.live_minutes },
+            playhead: super::replay_clock::target().map(|(_, h, _)| (h / 1_000_000) as f64),
         }
     })
     .unwrap_or_default()

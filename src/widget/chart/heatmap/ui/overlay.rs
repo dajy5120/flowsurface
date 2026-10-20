@@ -156,6 +156,11 @@ pub struct OverlayCanvas<'a> {
     pub volume_profile_max_qty: Option<Qty>,
 
     pub is_paused: bool,
+
+    /// 特征回放的事件标记（docs/51 P4）：`(屏幕 x, 方向, 是不是聚焦的那个)`
+    pub marks: Vec<(f32, i8, bool)>,
+    /// 书签（docs/51 P5）：屏幕 x
+    pub bookmarks: Vec<f32>,
 }
 
 impl<'a> canvas::Program<Message> for OverlayCanvas<'a> {
@@ -314,12 +319,60 @@ impl<'a> canvas::Program<Message> for OverlayCanvas<'a> {
                 }
             });
 
+        // 事件标记不进缓存（每帧几条线）
+        let marks = (!self.marks.is_empty() || !self.bookmarks.is_empty()).then(|| {
+            let mut f = canvas::Frame::new(renderer, bounds.size());
+            let pal = theme.extended_palette();
+            for &(x, dir, focused) in &self.marks {
+                let color = match dir {
+                    1 => pal.success.base.color,
+                    -1 => pal.danger.base.color,
+                    _ => pal.background.strong.color,
+                };
+                if focused {
+                    f.stroke(
+                        &canvas::Path::line(iced::Point::new(x, 0.0), iced::Point::new(x, bounds.height)),
+                        canvas::Stroke {
+                            width: 1.5,
+                            line_dash: canvas::LineDash { segments: &[6.0, 4.0], offset: 0 },
+                            ..Default::default()
+                        }
+                        .with_color(pal.primary.strong.color),
+                    );
+                }
+                let r = if focused { 6.0 } else { 4.0 };
+                let tri = canvas::Path::new(|b| {
+                    b.move_to(iced::Point::new(x, r * 1.6));
+                    b.line_to(iced::Point::new(x - r, 0.0));
+                    b.line_to(iced::Point::new(x + r, 0.0));
+                    b.close();
+                });
+                f.fill(&tri, color);
+            }
+            for &x in &self.bookmarks {
+                let y = bounds.height - 7.0;
+                let dia = canvas::Path::new(|b| {
+                    b.move_to(iced::Point::new(x, y - 6.0));
+                    b.line_to(iced::Point::new(x + 5.0, y));
+                    b.line_to(iced::Point::new(x, y + 6.0));
+                    b.line_to(iced::Point::new(x - 5.0, y));
+                    b.close();
+                });
+                f.fill(&dia, pal.primary.strong.color);
+            }
+            f.into_geometry()
+        });
+        let with_marks = |mut v: Vec<canvas::Geometry>| {
+            v.extend(marks);
+            v
+        };
+
         let Some(pos) = cursor.position_over(bounds) else {
-            return vec![scale_labels];
+            return with_marks(vec![scale_labels]);
         };
 
         if self.is_paused && self.paused_control_contains(bounds, pos) {
-            return vec![scale_labels];
+            return with_marks(vec![scale_labels]);
         }
 
         let tooltip = self.tooltip_cache.draw(renderer, bounds.size(), |frame| {
@@ -480,7 +533,7 @@ impl<'a> canvas::Program<Message> for OverlayCanvas<'a> {
             }
         });
 
-        vec![tooltip, scale_labels]
+        with_marks(vec![tooltip, scale_labels])
     }
 
     fn mouse_interaction(

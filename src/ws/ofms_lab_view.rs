@@ -101,7 +101,7 @@ fn timeline_tab<'a>(v: &View, hosted: bool) -> Element<'a, OfMsg> {
             .spacing(space(2))
             .into();
     };
-    let chart = iced::widget::Canvas::new(Tomo { d: d.clone(), hidden: v.hidden.clone(), selected: v.selected, overlay: v.overlay.clone() })
+    let chart = iced::widget::Canvas::new(Tomo { d: d.clone(), hidden: v.hidden.clone(), selected: v.selected, overlay: v.overlay.clone(), playhead: v.playhead })
         .width(Length::FillPortion(3))
         .height(Length::Fill);
     let side = crate::ui::scroll(side_panel(d, v.dict.as_deref(), v.selected)).width(Length::FillPortion(1)).height(Length::Fill);
@@ -219,6 +219,8 @@ pub struct Tomo {
     pub selected: Option<u64>,
     /// 描述语言策略在本窗口上的逐笔（入场形态矩阵里点「叠加到时间轴」）
     pub overlay: Option<Arc<ol::Overlay>>,
+    /// 特征回放的统一播放头（毫秒，docs/51 P4）：画一条竖线，跑出视野时视野跟过去
+    pub playhead: Option<f64>,
 }
 
 #[derive(Default)]
@@ -229,6 +231,20 @@ pub struct TomoState {
 }
 
 impl TomoState {
+    /// 实际画的范围：播放头跑出视野（且在这份数据里）时，视野平移到播放头落在 80% 处（宽度不变）。
+    fn eff(&self, d: &OfData, playhead: Option<f64>) -> (f64, f64) {
+        let (lo, hi) = self.range(d);
+        let full = TomoState::default().range(d);
+        match playhead {
+            Some(p) if (p < lo || p > hi) && p >= full.0 && p <= full.1 => {
+                let w = hi - lo;
+                let a = (p - 0.8 * w).clamp(full.0, (full.1 - w).max(full.0));
+                (a, a + w)
+            }
+            _ => (lo, hi),
+        }
+    }
+
     fn range(&self, d: &OfData) -> (f64, f64) {
         if self.hi > self.lo {
             return (self.lo, self.hi);
@@ -404,7 +420,7 @@ impl canvas::Program<OfMsg> for Tomo {
     type State = TomoState;
 
     fn update(&self, st: &mut TomoState, event: &canvas::Event, b: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<OfMsg>> {
-        let (lo, hi) = st.range(&self.d);
+        let (lo, hi) = st.eff(&self.d, self.playhead);
         let pw = (b.width - ML - MR).max(1.0);
         match event {
             canvas::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
@@ -474,7 +490,7 @@ impl canvas::Program<OfMsg> for Tomo {
         let mut f = Frame::new(r, b.size());
         let d = &self.d;
         let s = &d.states;
-        let (lo, hi) = st.range(d);
+        let (lo, hi) = st.eff(d, self.playhead);
         let pw = (b.width - ML - MR).max(1.0);
         let x_of = |t: f64| self.sx(b, lo, hi, t);
         let i0 = s.t.partition_point(|x| (*x as f64) < lo);
@@ -679,6 +695,14 @@ impl canvas::Program<OfMsg> for Tomo {
             let x = x_of(tm);
             let lbl = fmt_t(tm as i64);
             f.fill_text(Text { content: lbl.clone(), position: Point::new((x - lbl.len() as f32 * 2.5).clamp(ML, ML + pw - 70.0), b.height - AXIS_H + 3.0), color: pal::axis(), size: iced::Pixels(9.0), ..Default::default() });
+        }
+        // 特征回放的播放头（docs/51 P4）
+        if let Some(ph) = self.playhead
+            && ph >= lo
+            && ph <= hi
+        {
+            let x = x_of(ph);
+            f.stroke(&Path::line(Point::new(x, 0.0), Point::new(x, b.height - AXIS_H)), Stroke::default().with_width(1.5).with_color(pal::accent()));
         }
         let mut out = vec![f.into_geometry()];
         // 十字线：竖线贯穿 + 这一秒的读数

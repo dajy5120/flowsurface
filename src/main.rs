@@ -157,6 +157,13 @@ fn shortcut(
     if captured {
         return None;
     }
+    // 特征回放（docs/51）：空格 / ← → / Shift ← →，只在回放开着、看的是「订单流特征」时
+    if !modifiers.control()
+        && !modifiers.alt()
+        && let Some(c) = ws::replay_clock::key_cmd(&key, modifiers.shift())
+    {
+        return Some(Message::Replay(c));
+    }
     let (ctrl, shift, alt) = (modifiers.control(), modifiers.shift(), modifiers.alt());
     let cmd = match key.as_ref() {
         // 页面（docs/41 §3.4）：Ctrl PgUp / PgDn 前后页；Alt 1–9 第 n 页（Ctrl 1–9 已是「聚焦第 n 个面板」）
@@ -268,6 +275,8 @@ enum Message {
     Page(ws::pages::PageMsg),
     /// 图表绘图（docs/46 G1）：工具栏「绘图」组与它的菜单
     Draw(ws::drawing::DrawMsg),
+    /// 统一回放时钟（docs/51 P2）：播放控件与快捷键
+    Replay(ws::replay_clock::Cmd),
     /// 数据目录提醒与设置（docs/47）
     DataDirs(ws::data_dirs::DataDirsMsg),
     Sidebar(dashboard::sidebar::Message),
@@ -657,6 +666,32 @@ impl Flowsurface {
                 let main_window_id = self.main_window.id;
                 let handles = self.handles.clone();
 
+                // 统一回放时钟（docs/51）：推进播放头；往回走了就清图（之后图表订阅换成新的 epoch、从头灌到播放头）
+                ws::feature_source::tick();
+                ws::replay_clock::tick(now);
+                if ws::replay_clock::take_reset() {
+                    for l in self
+                        .layout_manager
+                        .layouts
+                        .iter_mut()
+                        .filter(|l| ws::workspace::workspace_of(&l.id.name) == ws::workspace::WS_FEATURES)
+                    {
+                        let _ = l.dashboard.reset_feature_charts_keep_view(main_window_id);
+                    }
+                    // 从起点到播放头直接灌给图（不走订阅消息：逐条走要过 update 与订阅重算，慢一个数量级）；
+                    // 随后这一代订阅从灌到的地方接着往前
+                    if ws::replay_clock::charts_on()
+                        && let Some((dir, head, epoch)) = ws::replay_clock::target()
+                    {
+                        let kinds = self.active_dashboard().ws_feature_kinds();
+                        let evs = ws::feature_feed::bulk_fill(&dir, epoch, head, &kinds);
+                        ws::replay_clock::set_bulk(true);
+                        for e in evs {
+                            let _ = self.update(Message::MarketWsEvent(e));
+                        }
+                        ws::replay_clock::set_bulk(false);
+                    }
+                }
                 // 特征数据源换了标的（回放写出了图表流的 meta 行 / 切回实时）：
                 // 按它重建「订单流特征」工作区的图（外壳 = 标的 + 最小刻度 + 最小量）
                 if let Some(s) = ws::feature_source::take_shell() {
@@ -756,6 +791,7 @@ impl Flowsurface {
             }
             Message::Page(m) => return self.page_action(m),
             Message::Draw(m) => ws::drawing::handle(m),
+            Message::Replay(m) => ws::replay_clock::handle(m),
             Message::DataDirs(m) => ws::data_dirs::handle(m),
             Message::SpecimenShot(shot) => {
                 // 焦点顺序表（docs/35 §13.3「每个工作区一份焦点顺序表」）：F6 / Ctrl 1–9 走的面板次序
@@ -1360,6 +1396,17 @@ impl Flowsurface {
                 } else {
                     dashboard_view
                 };
+                // 事件筛选（docs/51 P4）：点工具栏「事件 ▾」后盖在内容上方
+                let dashboard_view: Element<'_, Message> = if ws::replay_clock::event_menu_open() {
+                    let card = container(ws::replay_clock::event_menu().map(Message::Replay)).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
+                        background: Some(iced::Background::Color(t.extended_palette().background.weak.color)),
+                        border: iced::Border { color: ui::pal::accent(), width: 1.0, radius: 4.0.into() },
+                        ..Default::default()
+                    });
+                    iced::widget::stack![dashboard_view, column![card]].into()
+                } else {
+                    dashboard_view
+                };
                 let body: Element<'_, Message> = if self.page_menu {
                     // 页面菜单：盖在内容上方的下拉卡片（不透明），点「⋯ 页面」收起
                     let card = container(self.page_toolbar()).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
@@ -1674,9 +1721,13 @@ impl Flowsurface {
         // 两条同时开的话，图上会混进交易所实时的簿与成交，而它们与引擎算特征
         // 用的那条流不是同一条——那个差异正好是这个工作区要消除的东西。
         let ws_feature_feed = if is_features {
-            let path = crate::ws::feature_feed::feed_path().to_string_lossy().into_owned();
+            // 回放（docs/51）：按统一播放头灌时间线；实时：tail 常驻引擎的图表流
+            let feed = match crate::ws::replay_clock::target() {
+                Some((dir, _, epoch)) => crate::ws::feature_feed::FeedSpec::Timeline(dir, epoch),
+                None => crate::ws::feature_feed::FeedSpec::Jsonl(crate::ws::feature_feed::feed_path().to_string_lossy().into_owned()),
+            };
             self.active_dashboard()
-                .ws_feature_feed_subscriptions(path)
+                .ws_feature_feed_subscriptions(feed)
                 .map(Message::MarketWsEvent)
         } else {
             Subscription::none()
@@ -1910,6 +1961,12 @@ impl Flowsurface {
                     }
                 }
             }
+        }
+        // 特征回放的播放控件（docs/51）：只在「订单流特征」里
+        if ws::workspace::workspace_of(&self.active_name()) == ws::workspace::WS_FEATURES
+            && let Some(t) = ws::replay_clock::toolbar()
+        {
+            r = r.push(ui::text::metadata("│").color(ui::pal::dim())).push(t.map(Message::Replay));
         }
         let linked = d.page_linked(main);
         r = r.push(tool_pick(

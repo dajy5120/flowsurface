@@ -761,13 +761,20 @@ pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoar
     let playing_head = (ph_matches && ph.state != "done").then_some(ph.data_ts);
     // 播放头：回放中跟 feeder；静止时若拖过进度条则停在拖到的位置（否则显示整窗）。
     let span = ro::panel_time_span(&p);
-    let head = playing_head.or_else(|| match (app.seek_pct, span) {
+    // 特征回放的统一播放头（docs/51 P4）：同一个标的、播放头落在这张面板的时段里就跟它（竖线 + 画到它为止）
+    let unified = super::replay_clock::target().map(|(_, h, _)| (h / 1_000_000) as f64).filter(|h| {
+        span.is_some_and(|(t0, t1)| *h >= t0 && *h <= t1)
+            && super::replay_clock::symbol().is_some_and(|s| p.symbol.split(['|', ',', ' ']).any(|x| x.eq_ignore_ascii_case(&s)))
+    });
+    let head = playing_head.or(unified).or_else(|| match (app.seek_pct, span) {
         (Some(f), Some((t0, t1))) => Some(t0 + (t1 - t0) * (f as f64) / 100.0),
         _ => None,
     });
     // 进度条位置：回放中用 feeder 的 pct，否则用拖动值。
     let bar_pct = if playing_head.is_some() {
         ph.pct as f32
+    } else if let (Some(h), Some((t0, t1))) = (unified, span) {
+        (((h - t0) / (t1 - t0).max(1.0)) * 100.0) as f32
     } else {
         app.seek_pct.unwrap_or(0.0)
     };

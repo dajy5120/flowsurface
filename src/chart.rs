@@ -111,7 +111,19 @@ fn canvas_interaction<T: Chart>(
 
     if let Event::Mouse(mouse::Event::ButtonReleased(_)) = event {
         match interaction {
-            Interaction::Panning { .. } | Interaction::Zoomin { .. } => {
+            Interaction::Panning { start, .. } => {
+                // 特征回放（docs/51 P3）：按下松开、中间没拖动 = 单击 → 播放头跳到这一刻
+                let clicked = cursor_position.is_some_and(|p| p.distance(*start) < 3.0);
+                *interaction = Interaction::None;
+                if clicked
+                    && crate::ws::replay_clock::charts_on()
+                    && let Some(t) = local.and_then(|p| chart.state().time_at_x(p.x, bounds.size()))
+                {
+                    crate::ws::replay_clock::seek_to_ms(t);
+                    return Some(canvas::Action::request_redraw());
+                }
+            }
+            Interaction::Zoomin { .. } => {
                 *interaction = Interaction::None;
             }
             Interaction::DrawDrag => {
@@ -371,6 +383,8 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
                 AxisScaleClicked::X => {
                     state.cell_width = default_chart_width;
                     state.translation = autoscaled_coords;
+                    // 双击时间轴回到最新：联动的图一起回去（特征回放，docs/51 P3）
+                    crate::ws::replay_clock::publish_view(state.linked_id(), crate::ws::replay_clock::ViewSync::Live);
                 }
                 AxisScaleClicked::Y => {
                     if supports_fit_autoscaling {
@@ -391,6 +405,7 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
                 state.translation = *translation;
                 state.layout.autoscale = None;
             }
+            state.publish_view_sync();
         }
         Message::Scaled(scaling, translation) => {
             let state = chart.mut_state();
@@ -398,6 +413,7 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
             state.translation = *translation;
 
             state.layout.autoscale = None;
+            state.publish_view_sync();
         }
         Message::AutoscaleToggled => {
             let supports_fit_autoscaling = chart.supports_fit_autoscaling();
@@ -782,6 +798,10 @@ pub struct ViewState {
     y_labels_max: std::sync::atomic::AtomicU32,
     /// 见过的「在图上看」请求版本（[`goto_time`]）。
     goto_seen: u64,
+    /// 见过的视野同步版本（特征回放，docs/51 P3）
+    view_seen: u64,
+    /// 上次画十字线层时的播放头（毫秒）：变了就重画（播放头竖线在那一层）
+    playhead_seen: std::sync::atomic::AtomicU64,
 }
 
 /// 「在图上看」（docs/43 §8 第 1 条）：日历请求跳到某个时刻，**当前页**按时间的 K 线图把视野中心移过去。
@@ -893,15 +913,134 @@ pub mod linked_cursor {
 }
 
 impl ViewState {
-    fn linked_id(&self) -> u64 {
+    pub(crate) fn linked_id(&self) -> u64 {
         std::ptr::from_ref(self) as usize as u64
     }
 
     /// 联动时间变了（别的图在动光标）→ 清掉自己的十字线缓存（在 `draw` 开头调；缓存清理只要 `&self`）。
+    /// 播放头动了也一样（播放头竖线画在十字线那一层）。
     pub fn sync_linked_cursor(&self) {
         let v = linked_cursor::version();
         if self.linked_seen.swap(v, std::sync::atomic::Ordering::Relaxed) != v {
             self.cache.clear_crosshair();
+        }
+        // 播放头与事件标记（聚焦 / 筛选）任一变了就重画
+        let h = crate::ws::replay_clock::chart_now_ms()
+            .unwrap_or(0)
+            .wrapping_mul(1_000_003)
+            .wrapping_add(crate::ws::replay_clock::marks_ver());
+        if self.playhead_seen.swap(h, std::sync::atomic::Ordering::Relaxed) != h {
+            self.cache.clear_crosshair();
+        }
+    }
+
+    /// 可见范围内画布横坐标 `x`（0 = 左边）对应的时刻（毫秒）；与 [`Self::draw_linked_cursor`] 同一个换算。
+    fn time_at_x(&self, x: f32, bounds: Size) -> Option<u64> {
+        let Basis::Time(_) = self.basis else { return None };
+        let region = self.visible_region(bounds);
+        let earliest = self.x_to_interval(region.x) as f64;
+        let latest = self.x_to_interval(region.x + region.width) as f64;
+        (latest > earliest && bounds.width > 0.0).then(|| (earliest + f64::from(x / bounds.width) * (latest - earliest)) as u64)
+    }
+
+    /// 视野中心的时刻（毫秒；`goto_time` 把某一刻放到中心用的是 `translation.x = -interval_to_x(t)`，这里是它的反函数）。
+    fn center_time(&self) -> Option<u64> {
+        matches!(self.basis, Basis::Time(_)).then(|| self.x_to_interval(-self.translation.x))
+    }
+
+    /// 特征回放（docs/51 P3）：用户拖动 / 缩放了这张图 → 告诉同页别的时间轴图。
+    pub fn publish_view_sync(&self) {
+        if let Some(t) = self.center_time() {
+            crate::ws::replay_clock::publish_view(self.linked_id(), crate::ws::replay_clock::ViewSync::Center(t));
+        }
+    }
+
+    /// 别的图拖动 / 缩放了：把视野中心移到同一时刻（保留自己的缩放）；`Live` = 回到跟随最新。`fit` = 这张图能「适配可见」。
+    pub fn apply_view_sync(&mut self, fit: bool) {
+        let Some((ver, src, v)) = crate::ws::replay_clock::view_sync(self.view_seen) else { return };
+        self.view_seen = ver;
+        if src == self.linked_id() || !matches!(self.basis, Basis::Time(_)) {
+            return;
+        }
+        match v {
+            crate::ws::replay_clock::ViewSync::Center(t) => {
+                self.translation.x = -self.interval_to_x(t);
+                if self.layout.autoscale == Some(Autoscale::CenterLatest) {
+                    self.layout.autoscale = fit.then_some(Autoscale::FitToVisible);
+                }
+            }
+            crate::ws::replay_clock::ViewSync::Live => self.layout.autoscale = Some(Autoscale::CenterLatest),
+        }
+    }
+
+    /// 特征回放的播放头竖线（实线、强调色）。
+    pub fn draw_playhead(&self, frame: &mut canvas::Frame, theme: &Theme, bounds: Size) {
+        let Basis::Time(_) = self.basis else { return };
+        let Some(ts) = crate::ws::replay_clock::chart_now_ms() else { return };
+        let region = self.visible_region(bounds);
+        let earliest = self.x_to_interval(region.x) as f64;
+        let latest = self.x_to_interval(region.x + region.width) as f64;
+        if latest <= earliest || (ts as f64) < earliest || (ts as f64) > latest {
+            return;
+        }
+        let x = ((ts as f64 - earliest) / (latest - earliest)) as f32 * bounds.width;
+        frame.stroke(
+            &Path::line(Point::new(x, 0.0), Point::new(x, bounds.height)),
+            canvas::Stroke::default().with_color(theme.extended_palette().primary.base.color).with_width(1.5),
+        );
+    }
+
+    /// 特征回放的事件标记（docs/51 P4）：勾了的类在顶边画一个小三角（向上涨色、向下跌色、无方向灰）；
+    /// 聚焦的那个（⏮ ⏭ 跳到的）画一条贯穿的虚线。
+    pub fn draw_event_marks(&self, frame: &mut canvas::Frame, theme: &Theme, bounds: Size) {
+        let Basis::Time(_) = self.basis else { return };
+        let region = self.visible_region(bounds);
+        let earliest = self.x_to_interval(region.x);
+        let latest = self.x_to_interval(region.x + region.width);
+        if latest <= earliest {
+            return;
+        }
+        let span = (latest - earliest) as f64;
+        let pal = theme.extended_palette();
+        for (t, dir, focused) in crate::ws::replay_clock::marks(earliest, latest, 400) {
+            let x = ((t - earliest) as f64 / span) as f32 * bounds.width;
+            let color = match dir {
+                1 => pal.success.base.color,
+                -1 => pal.danger.base.color,
+                _ => pal.background.strong.color,
+            };
+            if focused {
+                frame.stroke(
+                    &Path::line(Point::new(x, 0.0), Point::new(x, bounds.height)),
+                    canvas::Stroke {
+                        width: 1.5,
+                        line_dash: canvas::LineDash { segments: &[6.0, 4.0], offset: 0 },
+                        ..Default::default()
+                    }
+                    .with_color(pal.primary.strong.color),
+                );
+            }
+            let r = if focused { 6.0 } else { 4.0 };
+            let tri = Path::new(|b| {
+                b.move_to(Point::new(x, r * 1.6));
+                b.line_to(Point::new(x - r, 0.0));
+                b.line_to(Point::new(x + r, 0.0));
+                b.close();
+            });
+            frame.fill(&tri, color);
+        }
+        // 书签（docs/51 P5）：底边一个小菱形
+        for t in crate::ws::replay_clock::bookmark_marks(earliest, latest) {
+            let x = ((t - earliest) as f64 / span) as f32 * bounds.width;
+            let y = bounds.height - 7.0;
+            let dia = Path::new(|b| {
+                b.move_to(Point::new(x, y - 6.0));
+                b.line_to(Point::new(x + 5.0, y));
+                b.line_to(Point::new(x, y + 6.0));
+                b.line_to(Point::new(x - 5.0, y));
+                b.close();
+            });
+            frame.fill(&dia, pal.primary.strong.color);
         }
     }
 
@@ -970,6 +1109,8 @@ impl ViewState {
             drawings_seen: std::sync::atomic::AtomicU64::new(0),
             y_labels_max: std::sync::atomic::AtomicU32::new(0),
             goto_seen: 0,
+            view_seen: 0,
+            playhead_seen: std::sync::atomic::AtomicU64::new(0),
         }
     }
 

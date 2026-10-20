@@ -113,6 +113,12 @@ impl Camera {
         self.offset[0] + self.right_pad_world(viewport_w)
     }
 
+    /// 把视野中心横向移到世界坐标 `world_x`（保留缩放）。
+    pub fn center_x_on(&mut self, world_x: f32, viewport_w: f32) {
+        let [cx, _] = self.center(viewport_w);
+        self.offset[0] += world_x - cx;
+    }
+
     #[inline]
     pub fn x_world_bounds(&self, viewport_w: f32) -> (f32, f32) {
         let right = self.right_edge(viewport_w);

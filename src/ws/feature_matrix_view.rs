@@ -1528,14 +1528,15 @@ fn source_bar<'a>(s: &super::feature_source::View, inspector: bool) -> Element<'
     if !inspector {
         head = head.push(chip(if s.open { "▴ 收起".into() } else { "▾ 选择数据".into() }, s.open, Msg::Source(SourceMsg::Toggle)));
     }
+    if s.replay_on {
+        head = head.push(chip(
+            if s.paused { "▶ 继续".into() } else { "⏸ 暂停".into() },
+            s.paused,
+            Msg::Source(SourceMsg::Pause),
+        ));
+    }
     if s.running {
-        head = head
-            .push(chip(
-                if s.paused { "▶ 继续".into() } else { "⏸ 暂停".into() },
-                s.paused,
-                Msg::Source(SourceMsg::Pause),
-            ))
-            .push(chip("■ 停止回放".into(), false, Msg::Source(SourceMsg::Stop)));
+        head = head.push(chip("■ 停止计算".into(), false, Msg::Source(SourceMsg::Stop)));
     }
     let mut b = column![head.wrap()].spacing(5);
     if !s.status.is_empty() {
@@ -1561,7 +1562,7 @@ fn source_bar<'a>(s: &super::feature_source::View, inspector: bool) -> Element<'
                 Msg::Source(SourceMsg::Start),
             ));
             // 暂停 / 继续：只在有回放在跑时可点
-            pr = pr.push(if s.running {
+            pr = pr.push(if s.replay_on {
                 chip(
                     if s.paused { "▶ 继续回放".into() } else { "⏸ 暂停回放".into() },
                     s.paused,
@@ -1573,7 +1574,8 @@ fn source_bar<'a>(s: &super::feature_source::View, inspector: bool) -> Element<'
             b = b.push(pr.wrap()).push(
                 text(
                     "回放由特征引擎直接读数据商接口（不转格式），启用集与时间窗口用本面板的配置；\
-                     写自己的一组文件，常驻引擎照常运行。选回 B1 即切回实时。",
+                     先全速算出一份回放时间线、边算边播：暂停、逐秒前后（← →，Shift 10 秒）、拖时间轴在顶部工具栏，\
+                     空格暂停 / 继续。常驻引擎照常运行，选回 B1 即切回实时。",
                 )
                 .size(crate::ui::text::s_meta())
                 .color(crate::ui::pal::dim()),

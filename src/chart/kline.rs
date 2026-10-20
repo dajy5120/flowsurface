@@ -642,6 +642,18 @@ impl KlineChart {
         self.set_basis(self.chart.basis)
     }
 
+    /// 清空数据但保留视图（缩放、列宽、自动缩放方式、平移）：特征回放往回跳之后重灌用（docs/51 P3）。
+    /// 与 [`Self::clear_data`] 不同，它不把视野复位——人调好的缩放往回跳一步就丢，没法看。
+    /// 「最新位置」照样复位（新数据比旧的早，不复位的话视窗不动、蜡烛在屏幕外）。
+    pub fn clear_data_keep_view(&mut self) -> Option<Action> {
+        let c = &self.chart;
+        let keep = (c.scaling, c.cell_width, c.cell_height, c.layout.autoscale, c.translation);
+        let r = self.clear_data();
+        let c = &mut self.chart;
+        (c.scaling, c.cell_width, c.cell_height, c.layout.autoscale, c.translation) = keep;
+        r
+    }
+
     pub fn studies(&self) -> Option<Vec<FootprintStudy>> {
         match &self.kind {
             KlineChartKind::Footprint { studies, .. } => Some(studies.clone()),
@@ -826,6 +838,9 @@ impl KlineChart {
             }
             super::goto_time::ack(v);
         }
+        // 特征回放（docs/51 P3）：别的时间轴图被拖动 / 缩放了，视野中心跟过去
+        let fit = self.supports_fit_autoscaling();
+        self.chart.apply_view_sync(fit);
         // 画线到价提醒（docs/46 G5）：每次有新数据，拿最新一根的收盘价查一遍（时间用那根 K 线的，回放时也对）
         let last = match &self.data_source {
             PlotData::TimeBased(ts) => ts.datapoints.values().next_back().map(|d| d.kline),
@@ -1185,6 +1200,9 @@ impl canvas::Program<Message> for KlineChart {
             }
             let visible_region = chart.visible_region(bounds_size);
             let visible_range = chart.interval_range(&visible_region);
+            // 特征回放的播放头（docs/51 P3）
+            chart.draw_playhead(frame, theme, bounds_size);
+            chart.draw_event_marks(frame, theme, bounds_size);
 
             if let Some(cursor_position) = cursor.position_in(bounds) {
                 let (_, rounded_aggregation) =

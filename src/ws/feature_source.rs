@@ -13,6 +13,12 @@
 //! 每次开始回放 / 切回实时，四张图清空重画（`Effect::ResetFeatureCharts`），不把两段数据画进同一张图。
 //!
 //! 管线 A 不可选：它只喂图表（docs/28 §1.2），特征要的是管线 B 的规范事件。
+//!
+//! ## 回放 = 先算后播（docs/51 P2）
+//!
+//! 回放进程（`replay_source --timeline-only`）全速算、边算边写一份**回放时间线**（`run_<时刻>/tl_*`），
+//! 统一播放头（[`super::replay_clock`]）按倍速推进，四张图、特征矩阵、图表参数都按播放头取「这一刻」。
+//! 暂停、步进、拖时间轴只改播放头；停止只停计算，已经算出来的那段照样能前后看。
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -35,38 +41,7 @@ pub fn pick_opts() -> PickOpts {
     }
 }
 
-/// 回放速度（按事件时间的倍数）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pace {
-    X1,
-    X10,
-    X60,
-    Max,
-}
-
-impl Pace {
-    pub const ALL: [Self; 4] = [Self::X1, Self::X10, Self::X60, Self::Max];
-
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::X1 => "1×（实时）",
-            Self::X10 => "10×",
-            Self::X60 => "60×",
-            Self::Max => "最快",
-        }
-    }
-
-    /// `--pace` 的值；`None` = 不限速。
-    const fn arg(self) -> Option<u32> {
-        match self {
-            Self::X1 => Some(1),
-            Self::X10 => Some(10),
-            Self::X60 => Some(60),
-            Self::Max => None,
-        }
-    }
-}
+pub use super::replay_clock::Pace;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceMsg {
@@ -75,8 +50,9 @@ pub enum SourceMsg {
     /// 展开 / 收起选择器。
     Toggle,
     Start,
-    /// 暂停 / 继续（切换）。
+    /// 暂停 / 继续（切换）：只改播放头，计算照跑。
     Pause,
+    /// 停止计算（已经算出来的那段照样能看）。
     Stop,
 }
 
@@ -86,38 +62,12 @@ struct Run {
     desc: String,
     log: PathBuf,
     started: Instant,
-    /// 事件时间的总时长（秒）与速度，估进度用。
-    span_s: u64,
-    pace: Pace,
-    /// 结束后的一行结论（`None` = 还在跑）。
+    /// 结束后的一行结论（`None` = 还在算）。
     done: Option<String>,
-    /// 暂停的时刻（`Some` = 正暂停着：进程收了 SIGSTOP）。
-    paused_at: Option<Instant>,
-    /// 累计暂停时长（算「已回放多久」时扣掉）。
-    paused_total: std::time::Duration,
     /// 这次回放选的数据（链路徽标逐跳显示用）。
     sel: Selection,
     /// 日志首行（引擎配置：启用集 / 窗口），读到一次就缓存。
     engine_line: Option<String>,
-}
-
-impl Run {
-    /// 实际在跑的墙钟时长（扣掉暂停）。
-    fn active_secs(&self) -> u64 {
-        let paused = self.paused_total + self.paused_at.map_or_else(Default::default, |t| t.elapsed());
-        self.started.elapsed().saturating_sub(paused).as_secs()
-    }
-}
-
-/// 给回放进程发信号（`STOP` 暂停 / `CONT` 继续）。
-fn signal(child: &Child, sig: &str) -> bool {
-    Command::new("kill")
-        .args([format!("-{sig}"), child.id().to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 struct St {
@@ -125,7 +75,7 @@ struct St {
     pace: Pace,
     open: bool,
     run: Option<Run>,
-    /// 面板正在读的回放文件：`(旁路快照, 图表流, 说明)`；`None` = 常驻引擎那两份。
+    /// 面板正在读的回放：`(时间线目录, 链路徽标盯的输出文件, 说明)`；`None` = 常驻引擎那两份。
     reading: Option<(PathBuf, PathBuf, String)>,
     note: String,
 }
@@ -164,13 +114,13 @@ pub fn replay_bin() -> PathBuf {
     )
 }
 
-/// 面板该读的旁路快照：回放中 / 回放过 → 回放那份，否则 `None`（用缺省路径）。
+/// 回放的时间线目录（回放中 / 回放过；B1 = `None`）。
 #[must_use]
 pub fn matrix_override() -> Option<PathBuf> {
     cell().lock().ok()?.reading.as_ref().map(|r| r.0.clone())
 }
 
-/// 四张图该读的图表流（同上）。
+/// 链路徽标盯的回放输出（时间线的成交文件；同上）。非 `None` = 正在看回放。
 #[must_use]
 pub fn chart_override() -> Option<PathBuf> {
     cell().lock().ok()?.reading.as_ref().map(|r| r.1.clone())
@@ -188,7 +138,9 @@ pub struct View {
     /// 回放状态一行（没有回放 = 空）。
     pub status: String,
     pub running: bool,
-    /// 回放正暂停着。
+    /// 有回放可看（在算或已算完 / 已停）。
+    pub replay_on: bool,
+    /// 播放头停着。
     pub paused: bool,
     pub note: String,
 }
@@ -205,6 +157,7 @@ pub fn view() -> View {
             is_replay: false,
             status: String::new(),
             running: false,
+            replay_on: false,
             paused: false,
             note: String::new(),
         };
@@ -222,12 +175,13 @@ pub fn view() -> View {
         is_replay: g.reading.is_some(),
         status,
         running: g.run.as_ref().is_some_and(|r| r.done.is_none()),
-        paused: g.run.as_ref().is_some_and(|r| r.done.is_none() && r.paused_at.is_some()),
+        replay_on: g.reading.is_some() && super::replay_clock::active(),
+        paused: super::replay_clock::view().is_some_and(|v| !v.playing),
         note: g.note.clone(),
     }
 }
 
-/// 回放进程状态一行（结束时从日志里取结论）。
+/// 回放状态一行：计算进程（结束时从日志里取结论）+ 播放头。
 fn poll_run(r: &mut Run) -> String {
     if r.done.is_none()
         && let Ok(Some(st)) = r.child.try_wait()
@@ -235,28 +189,17 @@ fn poll_run(r: &mut Run) -> String {
         let log = std::fs::read_to_string(&r.log).unwrap_or_default();
         r.done = Some(if st.success() {
             let n = log.lines().find_map(|l| l.strip_prefix("重放 ")).unwrap_or("").trim();
-            format!("✔ 回放完成：{n}（用时 {}）", fmt_s(r.active_secs()))
+            format!("✔ 计算完成：{n}（用时 {}）", fmt_s(r.started.elapsed().as_secs()))
         } else {
             let last = log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("（无输出）");
             format!("✗ 回放失败：{last}")
         });
     }
-    if let Some(d) = &r.done {
-        return format!("{d} · {}", r.desc);
-    }
-    let el = r.active_secs();
-    if r.paused_at.is_some() {
-        return format!("⏸ 已暂停（已回放 {}）· {}", fmt_s(el), r.desc);
-    }
-    match r.pace.arg() {
-        Some(x) => format!(
-            "▶ 回放中 {} / 约 {}（{}）· {}",
-            fmt_s(el),
-            fmt_s(r.span_s / u64::from(x)),
-            r.pace.label(),
-            r.desc
-        ),
-        None => format!("▶ 回放中 {}（最快）· {}", fmt_s(el), r.desc),
+    let clock = super::replay_clock::view().map(|v| v.status()).unwrap_or_default();
+    match &r.done {
+        Some(d) if d.starts_with('✗') => format!("{d} · {}", r.desc),
+        Some(d) => format!("{clock} · {d} · {}", r.desc),
+        None => format!("{clock} · 计算中 {} · {}", fmt_s(r.started.elapsed().as_secs()), r.desc),
     }
 }
 
@@ -318,25 +261,21 @@ fn shell_symbol(s: &str) -> Option<String> {
     (!t.is_empty() && t.len() <= 28).then_some(t)
 }
 
-/// 等回放写出图表流的 `meta` 行（最多 2 分钟：Databento 逐单窗口起点要先建簿）。
-fn watch_meta(chart: PathBuf) {
+/// 等回放写出时间线的抬头（`tl_meta.json`：标的、刻度、最小量；最多 2 分钟：Databento 逐单窗口起点要先建簿）。
+fn watch_meta(dir: PathBuf) {
     super::spawn_named("ws-featuresourc", move || {
         for _ in 0..600 {
             // 期间又换了一次回放 / 切回实时：这一份作废
-            if chart_override().as_ref() != Some(&chart) {
+            if matrix_override().as_ref() != Some(&dir) {
                 return;
             }
-            if let Ok(t) = std::fs::read_to_string(&chart)
-                && let Some(line) = t.lines().next()
-                && let Some(super::feature_feed::Row::Meta(m)) = super::feature_feed::parse_row(line)
-                && let Some(symbol) = shell_symbol(&m.symbol)
-                && m.tick_size > 0.0
+            if let Ok(t) = std::fs::read_to_string(dir.join("tl_meta.json"))
+                && let Ok(v) = serde_json::from_str::<serde_json::Value>(&t)
+                && let Some(symbol) = v["symbol"].as_str().and_then(shell_symbol)
+                && let Some(tick) = v["tick"].as_f64().filter(|x| *x > 0.0)
             {
-                set_pending_shell(Shell {
-                    symbol,
-                    tick: m.tick_size as f32,
-                    min_qty: if m.min_qty > 0.0 { m.min_qty as f32 } else { 1.0 },
-                });
+                let lot = v["lot"].as_f64().unwrap_or(0.0);
+                set_pending_shell(Shell { symbol, tick: tick as f32, min_qty: if lot > 0.0 { lot as f32 } else { 1.0 } });
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -365,13 +304,17 @@ pub fn handle(m: SourceMsg) -> bool {
     g.note.clear();
     match m {
         SourceMsg::Toggle => g.open = !g.open,
-        SourceMsg::Pace(p) => g.pace = p,
+        SourceMsg::Pace(p) => {
+            g.pace = p;
+            super::replay_clock::set_pace(p);
+        }
         SourceMsg::Data(d) => {
             g.pick.update(d);
             // 选回 B1 = 回到常驻引擎那两份（正在跑的回放停掉）
             if g.pick.source == Some(BSource::Live) && g.reading.is_some() {
                 stop(&mut g);
                 g.reading = None;
+                super::replay_clock::end();
                 // 图的外壳换回常驻引擎的那一个
                 set_pending_shell(Shell::live());
                 return true;
@@ -379,31 +322,15 @@ pub fn handle(m: SourceMsg) -> bool {
         }
         SourceMsg::Stop => {
             stop(&mut g);
-            g.note = "已停止；表与图停在停止那一刻".into();
+            g.note = "已停止计算；已经算出来的那段照样能前后看".into();
         }
         SourceMsg::Start => return start(&mut g),
         SourceMsg::Pause => {
-            let Some(r) = g.run.as_mut().filter(|r| r.done.is_none()) else {
-                g.note = "没有正在跑的回放".into();
+            if !super::replay_clock::active() {
+                g.note = "没有回放".into();
                 return false;
-            };
-            match r.paused_at {
-                None => {
-                    if signal(&r.child, "STOP") {
-                        r.paused_at = Some(Instant::now());
-                    } else {
-                        g.note = "暂停失败（发 SIGSTOP 没成功）".into();
-                    }
-                }
-                Some(t) => {
-                    if signal(&r.child, "CONT") {
-                        r.paused_total += t.elapsed();
-                        r.paused_at = None;
-                    } else {
-                        g.note = "继续失败（发 SIGCONT 没成功）".into();
-                    }
-                }
             }
+            super::replay_clock::handle(super::replay_clock::Cmd::TogglePlay);
         }
     }
     false
@@ -424,6 +351,43 @@ fn start(g: &mut St) -> bool {
         g.note = "还没选完：本地数据要选到 标的 + 日期（并至少留一类数据）".into();
         return false;
     };
+    launch(g, sel)
+}
+
+/// 样张 / 验收用：`WS_FEATURE_REPLAY=数据商|根目录|市场|标的|日期|HH:MM|分钟` 启动时直接开一次回放
+/// （与画布的 `WS_FLOW_OPEN` 同一类钩子；不走选择器）。
+fn auto_start(g: &mut St) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Ok(spec) = std::env::var("WS_FEATURE_REPLAY") else { return };
+        let p: Vec<&str> = spec.split('|').collect();
+        let [source, root, market, symbol, date, hhmm, minutes] = p.as_slice() else {
+            g.note = format!("WS_FEATURE_REPLAY 要写成 数据商|根目录|市场|标的|日期|HH:MM|分钟：{spec}");
+            return;
+        };
+        let sel = Selection::Local {
+            source: (*source).into(),
+            root: (*root).into(),
+            market: (*market).into(),
+            symbol: (*symbol).into(),
+            date: (*date).into(),
+            window: Some(((*hhmm).into(), minutes.parse().unwrap_or(10))),
+            types: Vec::new(),
+            end: (*date).into(),
+            channel: String::new(),
+        };
+        launch(g, sel);
+    });
+}
+
+/// 主循环每帧调：处理 `WS_FEATURE_REPLAY`（只第一次有事）。
+pub fn tick() {
+    if let Ok(mut g) = cell().lock() {
+        auto_start(&mut g);
+    }
+}
+
+fn launch(g: &mut St, sel: Selection) -> bool {
     let Selection::Local { source, root, symbol, date, window, types, .. } = &sel else {
         g.note = "实时数据不用回放：选 B1 就是常驻引擎在算的那一份".into();
         return false;
@@ -448,18 +412,23 @@ fn start(g: &mut St) -> bool {
         g.note = format!("建 {} 失败：{e}", dir.display());
         return false;
     }
-    // 每次回放一组新文件名：图表订阅按路径建，换了路径图才会从头读（旧的那组删掉）
+    // 每次回放一个新目录（时间线订阅按目录建）；旧的回放目录与旧版的那组文件删掉
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if n.starts_with("feature_chart_") || n.starts_with("feature_matrix_") {
+            if n.starts_with("run_") {
+                let _ = std::fs::remove_dir_all(e.path());
+            } else if n.starts_with("feature_chart_") || n.starts_with("feature_matrix_") {
                 let _ = std::fs::remove_file(e.path());
             }
         }
     }
     let tag = chrono::Local::now().format("%H%M%S").to_string();
-    let matrix = dir.join(format!("feature_matrix_{tag}.json"));
-    let chart = dir.join(format!("feature_chart_{tag}.jsonl"));
+    let run_dir = dir.join(format!("run_{tag}"));
+    if let Err(e) = std::fs::create_dir_all(&run_dir) {
+        g.note = format!("建 {} 失败：{e}", run_dir.display());
+        return false;
+    }
     let log = dir.join("replay.log");
     let Ok(logf) = std::fs::File::create(&log) else {
         g.note = format!("建 {} 失败", log.display());
@@ -467,12 +436,10 @@ fn start(g: &mut St) -> bool {
     };
 
     let mut cmd = Command::new(&bin);
+    // 全速算、只落时间线（docs/51）：倍速、暂停都在播放头那边
     cmd.args([symbol.as_str(), date.as_str(), hhmm.as_str(), &minutes.to_string()])
-        .arg(&dir)
-        .args(["--source", source.as_str(), "--config"]);
-    if let Some(x) = g.pace.arg() {
-        cmd.args(["--pace", &x.to_string()]);
-    }
+        .arg(&run_dir)
+        .args(["--source", source.as_str(), "--config", "--timeline-only"]);
     // Databento 去掉 mbo = 不喂逐单（L3 特征如实标「不可用」）
     if source == "databento" && !types.iter().any(|t| t == "mbo") {
         cmd.arg("--no-l3");
@@ -482,9 +449,12 @@ fn start(g: &mut St) -> bool {
         "databento" => "WS_DATABENTO_ROOT",
         _ => "WS_DATA_DIR",
     };
+    // 引擎原有的旁路快照 / 图表流写进它自己的临时目录（结束删掉）——**不能**继承 Cockpit 的环境变量，
+    // 那会写进常驻引擎的那两份
+    let scratch = run_dir.join("_engine");
     cmd.env(root_env, root)
-        .env("WS_FEATURE_MATRIX", &matrix)
-        .env("WS_FEATURE_CHART", &chart)
+        .env("WS_FEATURE_MATRIX", scratch.join("feature_matrix.json"))
+        .env("WS_FEATURE_CHART", scratch.join("feature_chart.jsonl"))
         // 启用集与窗口跟面板走（数据根换了也读同一份配置）
         .env("WS_FEATURE_CONFIG", super::feature_matrix::config_path())
         .stdin(Stdio::null())
@@ -493,21 +463,11 @@ fn start(g: &mut St) -> bool {
     match cmd.spawn() {
         Ok(child) => {
             let desc = sel.describe();
-            g.run = Some(Run {
-                child,
-                desc: desc.clone(),
-                log,
-                started: Instant::now(),
-                span_s: u64::from(minutes) * 60,
-                pace: g.pace,
-                done: None,
-                paused_at: None,
-                paused_total: std::time::Duration::ZERO,
-                sel: sel.clone(),
-                engine_line: None,
-            });
-            g.reading = Some((matrix, chart.clone(), desc));
-            watch_meta(chart);
+            g.run = Some(Run { child, desc: desc.clone(), log, started: Instant::now(), done: None, sel: sel.clone(), engine_line: None });
+            g.reading = Some((run_dir.clone(), run_dir.join("tl_trades.bin"), desc));
+            let (t0, t1) = window_ns(date, &hhmm, minutes);
+            super::replay_clock::begin(run_dir.clone(), t0, t1, g.pace);
+            watch_meta(run_dir);
             true
         }
         Err(e) => {
@@ -515,6 +475,13 @@ fn start(g: &mut St) -> bool {
             false
         }
     }
+}
+
+/// 选择器给的时段（UTC）→ 纳秒；时间线的抬头读出来之后以它为准。
+fn window_ns(date: &str, hhmm: &str, minutes: u32) -> (i64, i64) {
+    let t0 = chrono::NaiveDateTime::parse_from_str(&format!("{date} {hhmm}"), "%Y-%m-%d %H:%M")
+        .map_or(0, |d| d.and_utc().timestamp_nanos_opt().unwrap_or(0));
+    (t0, t0 + i64::from(minutes) * 60_000_000_000)
 }
 
 fn valid_hhmm(s: &str) -> bool {
@@ -543,6 +510,7 @@ mod tests {
         assert!(!valid_hhmm("24:00"));
         assert!(!valid_hhmm("9:5"));
         assert!(!valid_hhmm("abc"));
+        assert_eq!(window_ns("2026-06-01", "00:00", 10), (1_780_272_000_000_000_000, 1_780_272_600_000_000_000));
     }
 
     #[test]
@@ -674,7 +642,8 @@ pub fn link_info() -> LinkInfo {
     }
     // ── B2 / B3：回放 ──
     let (_, chart, _) = g.reading.clone().unwrap_or_default();
-    let pace_label = g.run.as_ref().map_or("", |r| r.pace.label());
+    let clock = super::replay_clock::view();
+    let pace_label = clock.as_ref().map_or("", |v| v.pace.label());
     let Some(r) = g.run.as_mut() else {
         return LinkInfo { code: "B?", vendor: String::new(), symbol: String::new(), state: LinkState::Done, hops: vec![], problem: None };
     };
@@ -691,7 +660,7 @@ pub fn link_info() -> LinkInfo {
         LinkState::Failed
     } else if r.done.is_some() {
         LinkState::Done
-    } else if r.paused_at.is_some() {
+    } else if clock.as_ref().is_some_and(|v| !v.playing) {
         LinkState::Paused
     } else if !exists {
         LinkState::WaitingFile
@@ -726,7 +695,8 @@ pub fn link_info() -> LinkInfo {
         (true, "选择", format!("管线 B · {code} · {} · {symbol} · {date} {w_hm} 起 {w_min} 分钟", vendor_label(&source))),
         (true, "数据", format!("{root}（{} 类：{}）", types.len(), types.join(" · "))),
         (true, "接入", adapter.to_string()),
-        (!failed, "计算", format!("特征引擎 replay_source · {engine} · {pace_label}{engine_t}")),
+        (!failed, "计算", format!("特征引擎 replay_source（全速，只落时间线）· {engine}{engine_t}")),
+        (true, "播放", clock.as_ref().map_or_else(|| "—".into(), |v| format!("统一播放头 · {pace_label} · {}", v.status()))),
         (exists, "输出", format!("{} · {}", chart.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()), file_size(&chart).map_or("还没建出来".into(), fmt_bytes))),
         chop,
         (!failed, "状态", status),

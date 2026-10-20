@@ -266,6 +266,10 @@ pub fn board_path() -> PathBuf {
 }
 
 pub fn snapshot() -> std::sync::Arc<Matrix> {
+    // 回放（docs/51）：按统一播放头从时间线取「这一刻」
+    if let Some((dir, head, _)) = super::replay_clock::target() {
+        return timeline_snapshot(&dir, head);
+    }
     let lock = CACHE.get_or_init(|| Mutex::new((None, std::sync::Arc::default())));
     let Ok(mut g) = lock.lock() else { return std::sync::Arc::default() };
     let p = board_path();
@@ -282,6 +286,108 @@ pub fn snapshot() -> std::sync::Arc<Matrix> {
     let v = std::sync::Arc::new(v);
     *g = (mt, v.clone());
     v
+}
+
+// ── 回放时间线（docs/51 P2）──────────────────────────────────────────────────────
+//
+// 矩阵的「这一刻」由三份拼成，都是引擎写的、面板一个数都不算：
+// - 行的静态部分（中文名、阶段、单位、先验……）与图表参数卡片：`tl_snapshot.json`（完整旁路快照）；
+// - 健康栏与图表参数的值：`tl_status.jsonl` 里播放头之前最近的那一行（每秒一行）；
+// - 每格的值、z、分位、质量、原因：`tl_grid.bin` 里播放头所在的那一行（100ms 一行）。
+// 时间线里没有的格（没启用的特征）照快照里的写（`disabled`）。
+
+struct TlCache {
+    dir: std::path::PathBuf,
+    tl: Option<super::timeline::Timeline>,
+    /// 快照模板：`(修改时间, 去掉 slots 的 JSON, 带全部行的矩阵, 行 → 栅格列)`
+    tmpl: Option<(SystemTime, serde_json::Value, Matrix, Vec<Option<usize>>)>,
+    /// 上一次拼出来的：`(栅格行 ti, 状态行 ti, 结果)`
+    last: Option<(i64, i64, std::sync::Arc<Matrix>)>,
+}
+
+static TL: Mutex<Option<TlCache>> = Mutex::new(None);
+
+fn timeline_snapshot(dir: &std::path::Path, head: i64) -> std::sync::Arc<Matrix> {
+    let Ok(mut g) = TL.lock() else { return std::sync::Arc::default() };
+    if g.as_ref().is_none_or(|c| c.dir != dir) {
+        *g = Some(TlCache { dir: dir.to_path_buf(), tl: None, tmpl: None, last: None });
+    }
+    let Some(c) = g.as_mut() else { return std::sync::Arc::default() };
+    if c.tl.is_none() {
+        c.tl = super::timeline::Timeline::open(dir).ok();
+    }
+    let Some(tl) = c.tl.as_mut() else { return std::sync::Arc::default() };
+    tl.refresh_done();
+    // 模板：按修改时间重读（结束时会重写一份）
+    let sp = dir.join("tl_snapshot.json");
+    let mt = std::fs::metadata(&sp).ok().and_then(|m| m.modified().ok());
+    if mt.is_some() && c.tmpl.as_ref().map(|t| Some(t.0)) != Some(mt) {
+        let parsed = std::fs::read_to_string(&sp).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        if let (Some(mut v), Some(mt)) = (parsed, mt) {
+            let full = parse_value(&v);
+            let col: std::collections::HashMap<&str, usize> =
+                tl.meta.columns.iter().enumerate().map(|(i, c)| (c.as_str(), i)).collect();
+            let map = full.slots.iter().map(|s| col.get(format!("{}@{}", s.key, s.window_ms).as_str()).copied()).collect();
+            v["slots"] = serde_json::Value::Array(Vec::new());
+            c.tmpl = Some((mt, v, full, map));
+            c.last = None;
+        }
+    }
+    let Some((_, bare, full, map)) = c.tmpl.as_ref() else { return std::sync::Arc::default() };
+    let row = tl.row_at(head);
+    let status = tl.status_at(head);
+    let key = (row.as_ref().map_or(i64::MIN, |r| r.ti), status.as_ref().map_or(i64::MIN, |s| s.0));
+    if let Some((a, b, m)) = &c.last
+        && (*a, *b) == key
+    {
+        return m.clone();
+    }
+    // 健康栏与图表参数：模板（去掉 slots）盖上这一秒的状态
+    let mut v = bare.clone();
+    if let Some((_, st)) = &status
+        && let Some(o) = st.as_object()
+    {
+        for (k, x) in o {
+            match k.as_str() {
+                "ti" => {}
+                "chart_values" => v["chart"]["values"] = x.clone(),
+                _ => v[k.as_str()] = x.clone(),
+            }
+        }
+    }
+    let mut m = parse_value(&v);
+    m.slots = full.slots.clone();
+    if let Some(r) = &row {
+        let q = |i: usize| tl.meta.quality_codes.get(usize::from(r.q[i])).cloned().unwrap_or_default();
+        let reason = |i: usize| match r.reason[i] {
+            0 => String::new(),
+            k => tl.meta.reason_codes.get(usize::from(k) - 1).cloned().unwrap_or_default(),
+        };
+        let some = |x: f64| x.is_finite().then_some(x);
+        for (s, j) in m.slots.iter_mut().zip(map) {
+            let Some(j) = *j else { continue };
+            s.value = some(r.val[j]);
+            s.z = some(f64::from(r.z[j]));
+            s.percentile = some(f64::from(r.pct[j]));
+            s.quality = q(j);
+            s.reason = reason(j);
+        }
+        m.as_of = r.te.max(0) as u64;
+        m.event_count = r.seq;
+    } else {
+        // 播放头之前还没有任何一行：值一律空着，不显示模板里的
+        for s in &mut m.slots {
+            s.value = None;
+            s.z = None;
+            s.percentile = None;
+        }
+        m.as_of = 0;
+    }
+    m.refreshed = super::replay_clock::fmt_t(head);
+    record(&m);
+    let m = std::sync::Arc::new(m);
+    c.last = Some((key.0, key.1, m.clone()));
+    m
 }
 
 // ── 快照历史（涨跌箭头用）──────────────────────────────────────────────────
@@ -458,6 +564,11 @@ pub fn parse(text: &str) -> Matrix {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
         return Matrix::default();
     };
+    parse_value(&v)
+}
+
+/// 同 [`parse`]，从已经解析好的 JSON。
+pub fn parse_value(v: &serde_json::Value) -> Matrix {
     // 没有 `slots` 的 JSON 不是这个面板的快照（很可能指错了文件）。
     // 当成「暂无」而不是「一个空矩阵」——后者会显示成「0 个特征全部健康」。
     if !v["slots"].is_array() {

@@ -22,6 +22,10 @@ pub struct HeatmapShaderWidget<'a> {
     overlay: OverlayCanvas<'a>,
     y_axis_gutter: Length,
     x_axis_height: Length,
+    /// 图还不知道自己的视口（刚换了一个新的图对象）：不管尺寸变没变都报一次。
+    /// 控件状态（`last_plot_size`）在图被换掉之后会被沿用，只按「尺寸变了」报的话新图永远拿不到视口、一帧都不画
+    /// （特征回放往回跳、清图重建时实测到，docs/51）。
+    needs_bounds: bool,
 }
 
 impl<'a> HeatmapShaderWidget<'a> {
@@ -38,7 +42,13 @@ impl<'a> HeatmapShaderWidget<'a> {
             overlay,
             y_axis_gutter: DEFAULT_Y_AXIS_GUTTER,
             x_axis_height: DEFAULT_X_AXIS_HEIGHT,
+            needs_bounds: false,
         }
+    }
+
+    pub fn with_needs_bounds(mut self, needs: bool) -> Self {
+        self.needs_bounds = needs;
+        self
     }
 
     pub fn with_y_axis_gutter(mut self, width: impl Into<Length>) -> Self {
@@ -188,7 +198,7 @@ impl<'a> Widget<Message, Theme, Renderer> for HeatmapShaderWidget<'a> {
 
         // Ensure HeatmapShader gets bounds updates even when interacting with axes
         let plot_size = [plot_bounds.width, plot_bounds.height];
-        if plot_size != state.last_plot_size && plot_bounds.width > 0.0 && plot_bounds.height > 0.0
+        if (plot_size != state.last_plot_size || self.needs_bounds) && plot_bounds.width > 0.0 && plot_bounds.height > 0.0
         {
             state.last_plot_size = plot_size;
             shell.publish(Message::BoundsChanged(plot_bounds));

@@ -174,7 +174,7 @@ impl Scene {
         self.sync_cell_world_uniform();
     }
 
-    fn sync_cell_world_uniform(&mut self) {
+    pub(crate) fn sync_cell_world_uniform(&mut self) {
         self.params
             .set_cell_world(self.cell.width_world(), self.cell.height_world());
     }

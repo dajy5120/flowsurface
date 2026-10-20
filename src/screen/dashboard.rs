@@ -1728,7 +1728,22 @@ impl Dashboard {
     /// 也因此这里不能用 `tickers_of`：它只看 `trade` 与 `kline` 两类，
     /// 而热图与 Ladder 声明的是 **depth**（前两次「一条订阅都建不起来」
     /// 的同一类错，只是漏的是第三类）。
-    pub fn ws_feature_feed_subscriptions(&self, path: String) -> Subscription<exchange::Event> {
+    pub fn ws_feature_feed_subscriptions(&self, feed: crate::ws::feature_feed::FeedSpec) -> Subscription<exchange::Event> {
+        let kinds = self.ws_feature_kinds();
+        if kinds.is_empty() {
+            // 一个图都没开：订阅建起来也无事可做，而空订阅会让读盘线程白转。
+            return Subscription::none();
+        }
+        match feed {
+            crate::ws::feature_feed::FeedSpec::Jsonl(path) => crate::ws::feature_feed::subscription(path, kinds),
+            crate::ws::feature_feed::FeedSpec::Timeline(dir, epoch) => {
+                crate::ws::feature_feed::timeline_subscription(dir, epoch, kinds)
+            }
+        }
+    }
+
+    /// 特征图表流要服务的那组流（深度 / 成交 / K 线），订阅与往回跳后的重灌（docs/51 P3）用同一份。
+    pub fn ws_feature_kinds(&self) -> Vec<exchange::adapter::StreamKind> {
         let mut kinds: Vec<exchange::adapter::StreamKind> = Vec::new();
         for (ticker_info, depth_aggr, push_freq) in self.streams.depth_streams(None) {
             kinds.push(exchange::adapter::StreamKind::Depth {
@@ -1746,11 +1761,7 @@ impl Dashboard {
                 timeframe,
             });
         }
-        if kinds.is_empty() {
-            // 一个图都没开：订阅建起来也无事可做，而空订阅会让读盘线程白转。
-            return Subscription::none();
-        }
-        crate::ws::feature_feed::subscription(path, kinds)
+        kinds
     }
 
     /// 自有数据回测入图：与 replay 对称，源自 result.json（self-data 桥）。
@@ -1833,6 +1844,31 @@ impl Dashboard {
             );
             if is_chart && let Some(tk) = shell.or_else(|| state.stream_pair()) {
                 state.set_content_and_streams(vec![tk], kind);
+            }
+        }
+        self.refresh_streams(main_window)
+    }
+
+    /// 特征回放往回跳（docs/51 P3）：清图但保留视图——K 线 / Footprint 只清数据（缩放、平移照旧）；
+    /// 热图换一个新对象，把相机、列宽、视口带过去；Ladder / Tape 换新对象（它们没有视图可留）。
+    pub fn reset_feature_charts_keep_view(&mut self, main_window: window::Id) -> Task<Message> {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            if let pane::Content::Kline { chart: Some(c), .. } = &mut state.content {
+                let _ = c.clear_data_keep_view();
+                continue;
+            }
+            let kind = state.content.kind();
+            if !matches!(kind, ContentKind::HeatmapChart | ContentKind::ShaderHeatmap | ContentKind::TimeAndSales | ContentKind::Ladder) {
+                continue;
+            }
+            let Some(tk) = state.stream_pair() else { continue };
+            let keep = match &state.content {
+                pane::Content::ShaderHeatmap { chart: Some(h), .. } => Some(h.view_keep()),
+                _ => None,
+            };
+            state.set_content_and_streams(vec![tk], kind);
+            if let (Some(k), pane::Content::ShaderHeatmap { chart: Some(h), .. }) = (keep, &mut state.content) {
+                h.restore_view(k);
             }
         }
         self.refresh_streams(main_window)

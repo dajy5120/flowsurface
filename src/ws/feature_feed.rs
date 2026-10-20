@@ -40,8 +40,8 @@ use iced::futures::SinkExt;
 
 use super::orders::{self, Fill};
 
-/// M1 桶大小（毫秒）。与 `replay.rs` 同：逐笔聚合成 M1 K 线发 `KlineReceived`，
-/// 让时间基的蜡烛/足迹能建桶、图上标记能对齐 x 轴。
+/// 缺省的 K 线桶（毫秒）：流的周期不是时间周期时用它。与 `replay.rs` 同：逐笔聚合成 K 线发 `KlineReceived`，
+/// 让时间基的蜡烛/足迹能建桶、图上标记能对齐 x 轴。时间周期的 K 线按各自的周期聚（[`kline_tfs`]）。
 const TF_MS: u64 = 60_000;
 
 /// 一次读多少行就交给渲染端。太小则来回切换开销大，太大则首屏迟迟不出。
@@ -114,6 +114,8 @@ pub enum Row {
         qty: f64,
         sell: bool,
     },
+    /// 把攒着的成交发出去（时间线订阅在每个 100ms 格边界插一个，见 [`timeline_subscription`]；JSONL 里没有）。
+    Mark { ts_ns: u64 },
 }
 
 /// 解析一行 JSONL。认不出的行返回 `None` 而不是 panic——
@@ -279,6 +281,7 @@ fn to_depth(bids: &[(f64, f64)], asks: &[(f64, f64)]) -> Depth {
 }
 
 /// 逐笔聚合成 M1 K 线（与 `replay.rs` 同一形状）。
+#[derive(Clone)]
 struct KlineAgg {
     bucket: u64,
     open: f32,
@@ -326,6 +329,176 @@ pub fn detections_to_fills(dets: &[(u64, String, f64, f64, bool)]) -> Vec<Fill> 
             seq: i as u64 + 1,
         })
         .collect()
+}
+
+/// K 线流的周期（毫秒）；周期不是时间的（逐笔）按 1 分钟聚。
+fn kline_tf_ms(tf: exchange::Timeframe) -> u64 {
+    match tf.to_milliseconds() {
+        0 => TF_MS,
+        ms => ms,
+    }
+}
+
+/// 这组流里出现的 K 线周期（去重、升序）。
+fn kline_tfs(kinds: &[StreamKind]) -> Vec<u64> {
+    let mut v: Vec<u64> = kinds
+        .iter()
+        .filter_map(|k| match k {
+            StreamKind::Kline { timeframe, .. } => Some(kline_tf_ms(*timeframe)),
+            _ => None,
+        })
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// 把一批行交给图（JSONL 与时间线两种订阅共用）：K 线聚合、成交批、深度、检出标记。
+///
+/// 状态（进行中的 K 线桶、检出）跨批保留；时间线订阅换新实例时从 [`FEED`] 接着用（切走工作区再回来不重灌）。
+#[derive(Clone, Default)]
+struct Deliver {
+    /// 进行中的 K 线桶：按周期（毫秒）各一个——K 线图改成 5 分钟、Footprint 还是 1 分钟，各聚各的
+    agg: std::collections::BTreeMap<u64, KlineAgg>,
+    dets: Vec<(u64, String, f64, f64, bool)>,
+    /// 时间线订阅：这一代的 `(目录, epoch)`——往回跳了就不再投递（JSONL 订阅为 `None`）
+    owner: Option<(PathBuf, u64)>,
+}
+
+type Out = iced::futures::channel::mpsc::Sender<Event>;
+
+impl Deliver {
+    /// 还该不该投递（每发一个事件前看一眼）。
+    fn alive(&self) -> bool {
+        self.owner.as_ref().is_none_or(|(d, e)| super::replay_clock::feed_alive(d, *e))
+    }
+
+    /// 一个周期的 K 线桶（`tf = None`：全部周期）→ 这个周期的流。
+    fn klines_of(&self, ev: &mut Vec<Event>, kinds: &[StreamKind], tf: Option<u64>) {
+        for k in kinds {
+            if let StreamKind::Kline { timeframe, .. } = k {
+                let ms = kline_tf_ms(*timeframe);
+                if tf.is_some_and(|t| t != ms) {
+                    continue;
+                }
+                if let Some(a) = self.agg.get(&ms) {
+                    ev.push(Event::KlineReceived(*k, a.to_kline()));
+                }
+            }
+        }
+    }
+
+    /// 攒着的成交发出去（先发进行中的 K 线桶）：按时间聚合的 Footprint 只把成交记进**已经存在**的桶
+    /// （`insert_trades_existing_buckets`），桶的 K 线后到的话这批成交在足迹里直接丢掉（最快回放时几乎每一格都丢）。
+    fn flush_trades(&self, ev: &mut Vec<Event>, kinds: &[StreamKind], trades: &mut Vec<Trade>, at_ns: u64) {
+        if trades.is_empty() {
+            return;
+        }
+        self.klines_of(ev, kinds, None);
+        let batch: Box<[Trade]> = std::mem::take(trades).into();
+        let at = batch.last().map_or(at_ns, |t| t.time.as_u64() * 1_000_000);
+        for k in kinds {
+            if let StreamKind::Trades { .. } = k {
+                ev.push(Event::TradesReceived(*k, UnixMs(at / 1_000_000), batch.clone()));
+            }
+        }
+    }
+
+    /// 一批行 → 交给图的事件（K 线聚合、成交批、深度；检出攒在 `dets`）。纯计算，状态在 `self`：
+    /// 订阅一个个发出去，往回跳之后的一口气重灌在主循环里直接交给图（[`bulk_fill`]），两边是同一串事件。
+    fn events(&mut self, kinds: &[StreamKind], rows: Vec<Row>) -> Vec<Event> {
+        let mut ev = Vec::with_capacity(rows.len() / 4 + 8);
+        let mut trades: Vec<Trade> = Vec::new();
+        let tfs = kline_tfs(kinds);
+        for row in rows {
+            match row {
+                Row::Meta(_) => {}
+                Row::Trade { ts_ns, px, qty, sell } => {
+                    let t = to_trade(ts_ns, px, qty, sell);
+                    // K 线聚合（让时间基的图能建桶）：每个 K 线周期各聚一份
+                    let p = t.price.to_f32();
+                    let q = f32::from(t.qty);
+                    let (buy, sl) = if t.is_sell { (0.0, q) } else { (q, 0.0) };
+                    for &tf in &tfs {
+                        let b = (t.time.as_u64() / tf) * tf;
+                        match self.agg.get_mut(&tf) {
+                            Some(a) if a.bucket == b => {
+                                a.high = a.high.max(p);
+                                a.low = a.low.min(p);
+                                a.close = p;
+                                a.buy += buy;
+                                a.sell += sl;
+                            }
+                            _ => {
+                                self.klines_of(&mut ev, kinds, Some(tf));
+                                self.agg.insert(tf, KlineAgg { bucket: b, open: p, high: p, low: p, close: p, buy, sell: sl });
+                            }
+                        }
+                    }
+                    trades.push(t);
+                }
+                Row::Depth { ts_ns, bids, asks } => {
+                    // 先把攒着的成交发出去，**再发深度**：
+                    // 顺序反了的话足迹里这一格的成交会落在下一个簿状态上。
+                    self.flush_trades(&mut ev, kinds, &mut trades, ts_ns);
+                    let depth = std::sync::Arc::new(to_depth(&bids, &asks));
+                    for k in kinds {
+                        // 时间用**事件时钟**：热图的时间轴靠它，
+                        // 传到达时刻会把 30 分钟压成灌数据的那两秒。
+                        if let StreamKind::Depth { .. } = k {
+                            ev.push(Event::DepthReceived(*k, UnixMs(ts_ns / 1_000_000), depth.clone()));
+                        }
+                    }
+                }
+                Row::Mark { ts_ns } => self.flush_trades(&mut ev, kinds, &mut trades, ts_ns),
+                Row::Det { ts_ns, kind, px, qty, sell } => {
+                    self.dets.push((ts_ns, kind, px, qty, sell));
+                    // 常驻会一直收到检出：不设上限的话这个 Vec 会无界增长，
+                    // 且每帧 clone 的成本跟着涨。留最新的 MAX_MARKS 个。
+                    if self.dets.len() > MAX_MARKS * 2 {
+                        self.dets.drain(..self.dets.len() - MAX_MARKS);
+                    }
+                }
+            }
+        }
+        self.flush_trades(&mut ev, kinds, &mut trades, 0);
+        // 进行中的 K 线桶也发出（latest）。
+        self.klines_of(&mut ev, kinds, None);
+        ev
+    }
+
+    /// 图上的检出标记（最新的 `MAX_MARKS` 个）。
+    fn publish_marks(&self) {
+        if !self.dets.is_empty() {
+            let from = self.dets.len().saturating_sub(MAX_MARKS);
+            orders::publish_chart_fills(&detections_to_fills(&self.dets[from..]));
+        }
+    }
+
+    /// 一批行交给图。返回 `false` = 对端没了（订阅被丢弃）或这一代已经过期。
+    async fn rows(&mut self, out: &mut Out, kinds: &[StreamKind], rows: Vec<Row>, rx_path: &str) -> bool {
+        // 这批里最新的事件时间：交完之后记下（链路徽标的「图表」一跳）
+        let newest = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Trade { ts_ns, .. } | Row::Depth { ts_ns, .. } => Some(*ts_ns),
+                _ => None,
+            })
+            .max();
+        for e in self.events(kinds, rows) {
+            if !self.alive() || out.send(e).await.is_err() {
+                return false;
+            }
+        }
+        if let Some(ts) = newest {
+            mark_received(rx_path, ts);
+        }
+        if !self.alive() {
+            return false;
+        }
+        self.publish_marks();
+        true
+    }
 }
 
 /// 建一条特征图表流订阅。
@@ -376,167 +549,192 @@ pub fn subscription(path: String, kinds: Vec<StreamKind>) -> Subscription<Event>
                     }
                 });
 
-                let mut agg: Option<KlineAgg> = None;
-                let mut dets: Vec<(u64, String, f64, f64, bool)> = Vec::new();
+                let mut d = Deliver::default();
                 while let Some(rows) = rx.recv().await {
-                    // 这批里最新的事件时间：交完之后记下（链路徽标的「图表」一跳）
-                    let newest = rows
-                        .iter()
-                        .filter_map(|r| match r {
-                            Row::Trade { ts_ns, .. } | Row::Depth { ts_ns, .. } => Some(*ts_ns),
-                            _ => None,
-                        })
-                        .max();
-                    let mut trades: Vec<Trade> = Vec::new();
-                    for row in rows {
-                        match row {
-                            Row::Meta(_) => {}
-                            Row::Trade { ts_ns, px, qty, sell } => {
-                                let t = to_trade(ts_ns, px, qty, sell);
-                                // K 线聚合（让时间基的图能建桶）。
-                                let b = (t.time.as_u64() / TF_MS) * TF_MS;
-                                let p = t.price.to_f32();
-                                let q = f32::from(t.qty);
-                                let (buy, sl) = if t.is_sell { (0.0, q) } else { (q, 0.0) };
-                                match agg.as_mut() {
-                                    Some(a) if a.bucket == b => {
-                                        a.high = a.high.max(p);
-                                        a.low = a.low.min(p);
-                                        a.close = p;
-                                        a.buy += buy;
-                                        a.sell += sl;
-                                    }
-                                    _ => {
-                                        if let Some(a) = agg.as_ref() {
-                                            for k in &kinds {
-                                                if let StreamKind::Kline { .. } = k
-                                                    && output
-                                                        .send(Event::KlineReceived(*k, a.to_kline()))
-                                                        .await
-                                                        .is_err()
-                                                {
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                        agg = Some(KlineAgg {
-                                            bucket: b,
-                                            open: p,
-                                            high: p,
-                                            low: p,
-                                            close: p,
-                                            buy,
-                                            sell: sl,
-                                        });
-                                    }
-                                }
-                                trades.push(t);
-                            }
-                            Row::Depth { ts_ns, bids, asks } => {
-                                // 先把攒着的成交发出去，**再发深度**：
-                                // 顺序反了的话足迹里这一格的成交会落在下一个簿状态上。
-                                if !trades.is_empty() {
-                                    // 先发进行中的 K 线桶，再发成交：按时间聚合的 Footprint 只把成交记进
-                                    // **已经存在**的桶（`insert_trades_existing_buckets`），桶的 K 线后到的话
-                                    // 这批成交在足迹里直接丢掉（最快回放时几乎每一格都丢）。
-                                    if let Some(a) = agg.as_ref() {
-                                        for k in &kinds {
-                                            if let StreamKind::Kline { .. } = k
-                                                && output.send(Event::KlineReceived(*k, a.to_kline())).await.is_err()
-                                            {
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    let batch: Box<[Trade]> = std::mem::take(&mut trades).into();
-                                    let at = batch.last().map_or(ts_ns, |t| t.time.as_u64() * 1_000_000);
-                                    for k in &kinds {
-                                        if let StreamKind::Trades { .. } = k
-                                            && output
-                                                .send(Event::TradesReceived(
-                                                    *k,
-                                                    UnixMs(at / 1_000_000),
-                                                    batch.clone(),
-                                                ))
-                                                .await
-                                                .is_err()
-                                        {
-                                            return;
-                                        }
-                                    }
-                                }
-                                let depth = std::sync::Arc::new(to_depth(&bids, &asks));
-                                for k in &kinds {
-                                    // 时间用**事件时钟**：热图的时间轴靠它，
-                                    // 传到达时刻会把 30 分钟压成灌数据的那两秒。
-                                    if let StreamKind::Depth { .. } = k
-                                        && output
-                                            .send(Event::DepthReceived(
-                                                *k,
-                                                UnixMs(ts_ns / 1_000_000),
-                                                depth.clone(),
-                                            ))
-                                            .await
-                                            .is_err()
-                                    {
-                                        return;
-                                    }
-                                }
-                            }
-                            Row::Det { ts_ns, kind, px, qty, sell } => {
-                                dets.push((ts_ns, kind, px, qty, sell));
-                                // 常驻会一直收到检出：不设上限的话这个 Vec 会无界增长，
-                                // 且每帧 clone 的成本跟着涨。留最新的 MAX_MARKS 个。
-                                if dets.len() > MAX_MARKS * 2 {
-                                    dets.drain(..dets.len() - MAX_MARKS);
-                                }
-                            }
-                        }
-                    }
-                    if !trades.is_empty() {
-                        // 同上：桶先于成交
-                        if let Some(a) = agg.as_ref() {
-                            for k in &kinds {
-                                if let StreamKind::Kline { .. } = k
-                                    && output.send(Event::KlineReceived(*k, a.to_kline())).await.is_err()
-                                {
-                                    return;
-                                }
-                            }
-                        }
-                        let batch: Box<[Trade]> = trades.into();
-                        let at = batch.last().map_or(0, |t| t.time.as_u64());
-                        for k in &kinds {
-                            if let StreamKind::Trades { .. } = k
-                                && output
-                                    .send(Event::TradesReceived(*k, UnixMs(at), batch.clone()))
-                                    .await
-                                    .is_err()
-                            {
-                                return;
-                            }
-                        }
-                    }
-                    // 进行中的 K 线桶也发出（latest）。
-                    if let Some(a) = agg.as_ref() {
-                        for k in &kinds {
-                            if let StreamKind::Kline { .. } = k
-                                && output.send(Event::KlineReceived(*k, a.to_kline())).await.is_err()
-                            {
-                                return;
-                            }
-                        }
-                    }
-                    if let Some(ts) = newest {
-                        mark_received(&rx_path, ts);
-                    }
-                    if !dets.is_empty() {
-                        let from = dets.len().saturating_sub(MAX_MARKS);
-                        orders::publish_chart_fills(&detections_to_fills(&dets[from..]));
+                    if !d.rows(&mut output, &kinds, rows, &rx_path).await {
+                        return;
                     }
                 }
             },
         )
+    })
+}
+
+// ── 回放时间线（docs/51 P2）──────────────────────────────────────────────────────
+//
+// 统一播放头（[`super::replay_clock`]）决定灌到哪一刻：读盘线程每 30ms 看一眼播放头，把 `[已灌到, 播放头)` 的
+// 成交、深度、检出按 `ti` 排好交给图。往回走由时钟请求清图、换一个 epoch，这条订阅随之被换掉、从头灌。
+//
+// **批的切法与播放节奏无关**：只灌到 100ms 格上（播放头本来就对齐在格上），并且每过一个 100ms 格边界插一个
+// [`Row::Mark`] 把攒着的成交发出去——一路播过来与后退之后一口气重灌，图收到的成交批完全相同，画出来逐位一样。
+
+/// 四张图读哪一种：常驻引擎 / 旧回放的 JSONL 图表流，或回放时间线（目录 + epoch）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum FeedSpec {
+    Jsonl(String),
+    Timeline(PathBuf, u64),
+}
+
+/// 时间线订阅身份：目录、epoch、流组。
+#[derive(Clone)]
+pub struct TimelineId {
+    pub dir: PathBuf,
+    pub epoch: u64,
+    pub kinds: Vec<StreamKind>,
+}
+
+impl std::hash::Hash for TimelineId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        "ws-timeline-feed".hash(state);
+        self.dir.hash(state);
+        self.epoch.hash(state);
+        for k in &self.kinds {
+            k.hash(state);
+        }
+    }
+}
+
+/// 上一条时间线订阅灌到哪了：`(目录, epoch, 已灌到 ti, 投递状态)`。换了订阅实例（切走工作区再回来）同一 epoch 接着灌。
+static FEED: std::sync::Mutex<Option<(PathBuf, u64, i64, Deliver)>> = std::sync::Mutex::new(None);
+
+const GRID_NS: i64 = 100_000_000;
+
+/// 往回跳之后重灌时，深度快照只灌播放头之前这么久（见 [`bulk_fill`]）。
+const BULK_DEPTH_KEEP_NS: i64 = 15 * 60 * 1_000_000_000;
+
+/// `[lo, hi)` 的行（成交、深度、检出按 `ti` 排；同一刻深度在前——深度 `d` 是「`ti < d` 的事件之后」的簿），
+/// 每个 100ms 格边界插一个 [`Row::Mark`]。成交至多 `CHUNK` 条，多了就截在某个格边界，返回实际灌到哪。
+fn timeline_rows(tl: &super::timeline::Timeline, lo: i64, hi: i64) -> (Vec<Row>, i64) {
+    let mut trades = tl.trades(lo, hi, CHUNK);
+    let mut hi = hi;
+    if trades.len() >= CHUNK {
+        // 截在最后一笔所在格的起点（那一格下次整格再灌）；一格里就超过 CHUNK 笔时整格照灌
+        let cut = (trades[trades.len() - 1].ti / GRID_NS) * GRID_NS;
+        if cut > lo {
+            hi = cut;
+            trades.retain(|t| t.ti < hi);
+        } else {
+            hi = (cut + GRID_NS).min(hi);
+            trades = tl.trades(lo, hi, usize::MAX);
+        }
+    }
+    let mut rows: Vec<(i64, u8, Row)> = Vec::with_capacity(trades.len() + 16);
+    for d in tl.depths(lo, hi) {
+        rows.push((d.ti, 0, Row::Depth { ts_ns: d.ti as u64, bids: d.bids, asks: d.asks }));
+    }
+    for t in trades {
+        let sell = match t.side {
+            1 => Some(false),
+            -1 => Some(true),
+            _ => None,
+        };
+        rows.push((t.ti, 2, Row::Trade { ts_ns: t.ti as u64, px: t.px, qty: t.qty, sell }));
+    }
+    for e in tl.events(lo, hi, &["det:sweep", "det:iceberg"]) {
+        let kind = e.kind.trim_start_matches("det:").to_string();
+        rows.push((e.ti, 3, Row::Det { ts_ns: e.ti as u64, kind, px: e.px.unwrap_or(0.0), qty: e.size.unwrap_or(0.0), sell: e.dir < 0 }));
+    }
+    let mut g = (lo / GRID_NS + 1) * GRID_NS;
+    while g <= hi {
+        rows.push((g, 1, Row::Mark { ts_ns: g as u64 }));
+        g += GRID_NS;
+    }
+    rows.sort_by_key(|(t, k, _)| (*t, *k));
+    (rows.into_iter().map(|(_, _, r)| r).collect(), hi)
+}
+
+/// 往回跳之后的一口气重灌（docs/51 P3）：在主循环里把 `[起点, 播放头)` 直接变成交给图的事件，不走订阅消息——
+/// 逐条走消息管道时每条都要过一遍 update 与订阅重算，14 分钟的数据实测 8.5 秒。
+/// 灌完把「灌到哪」与投递状态记进 [`FEED`]，随后建起来的这一代订阅从那里接着往前灌。
+#[must_use]
+pub fn bulk_fill(dir: &std::path::Path, epoch: u64, head: i64, kinds: &[StreamKind]) -> Vec<Event> {
+    let Ok(tl) = super::timeline::Timeline::open(dir) else { return Vec::new() };
+    let hi = (head / GRID_NS) * GRID_NS;
+    let mut d = Deliver { owner: Some((dir.to_path_buf(), epoch)), ..Deliver::default() };
+    let mut fed = tl.meta.t0;
+    let mut out = Vec::new();
+    // 比播放头早 BULK_DEPTH_KEEP 以上的深度快照不灌：热图自己只留约 13.6 分钟（8192 个 100ms 桶）的深度，
+    // Ladder 只看最后一张——灌进去也会被丢掉，却是重灌里最贵的一项
+    let depth_from = hi - BULK_DEPTH_KEEP_NS;
+    while fed < hi {
+        let (mut rows, upto) = timeline_rows(&tl, fed, hi);
+        if upto <= fed {
+            break;
+        }
+        if fed < depth_from {
+            rows.retain(|r| !matches!(r, Row::Depth { ts_ns, .. } if (*ts_ns as i64) < depth_from));
+        }
+        out.extend(d.events(kinds, rows));
+        fed = upto;
+    }
+    d.publish_marks();
+    if let Ok(mut g) = FEED.lock() {
+        *g = Some((dir.to_path_buf(), epoch, fed, d));
+    }
+    super::replay_clock::request_rebuild((fed.max(0) / 1_000_000) as u64);
+    out
+}
+
+/// 建一条时间线订阅。
+pub fn timeline_subscription(dir: PathBuf, epoch: u64, kinds: Vec<StreamKind>) -> Subscription<Event> {
+    Subscription::run_with(TimelineId { dir, epoch, kinds }, |id: &TimelineId| {
+        let (dir, epoch, kinds) = (id.dir.clone(), id.epoch, id.kinds.clone());
+        iced::stream::channel(256, move |mut output: Out| async move {
+            // (行, 灌到哪, 这一批之后追上了播放头)
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<Row>, i64, bool)>(4);
+            // 同一 epoch 接着灌；否则从头
+            let resume = FEED.lock().ok().and_then(|g| g.clone()).filter(|(d, e, _, _)| *d == dir && *e == epoch);
+            let (from, mut d) = resume.map_or((i64::MIN, Deliver::default()), |(_, _, f, d)| (f, d));
+            d.owner = Some((dir.clone(), epoch));
+            let rx_path = dir.join("tl_trades.bin").to_string_lossy().into_owned();
+            let tdir = dir.clone();
+            super::spawn_named("ws-timelinefeed", move || {
+                let tl = loop {
+                    if tx.is_closed() {
+                        return;
+                    }
+                    match super::timeline::Timeline::open(&tdir) {
+                        Ok(t) => break t,
+                        Err(_) => std::thread::sleep(Duration::from_millis(200)),
+                    }
+                };
+                let mut fed = if from == i64::MIN { tl.meta.t0 } else { from };
+                loop {
+                    if tx.is_closed() {
+                        break;
+                    }
+                    // 时钟换了目录 / epoch：这条订阅作废（上层马上换新的）
+                    if !super::replay_clock::feed_alive(&tdir, epoch) {
+                        break;
+                    }
+                    let Some((_, head, _)) = super::replay_clock::target() else { break };
+                    let hi = (head / GRID_NS) * GRID_NS;
+                    if hi > fed {
+                        let (rows, upto) = timeline_rows(&tl, fed, hi);
+                        if tx.blocking_send((rows, upto, upto >= hi)).is_err() {
+                            break;
+                        }
+                        fed = upto;
+                    } else {
+                        std::thread::sleep(Duration::from_millis(30));
+                    }
+                }
+            });
+            // 从头灌的（开回放 / 往回跳之后）：第一次追上播放头时请热图从历史整体重画
+            let mut want_rebuild = from == i64::MIN;
+            while let Some((rows, upto, caught_up)) = rx.recv().await {
+                if !d.rows(&mut output, &kinds, rows, &rx_path).await {
+                    return;
+                }
+                if want_rebuild && caught_up {
+                    want_rebuild = false;
+                    super::replay_clock::request_rebuild((upto.max(0) / 1_000_000) as u64);
+                }
+                if let Ok(mut g) = FEED.lock() {
+                    *g = Some((dir.clone(), epoch, upto, d.clone()));
+                }
+            }
+        })
     })
 }
 
