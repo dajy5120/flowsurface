@@ -251,6 +251,8 @@ struct Flowsurface {
     ws_signals: Option<ws::signals::Signals>,     // WealthSpring 引擎信号：吸收/撤补/冰山（F4b–d 精确版）
     specimen: Option<ws::specimen::Specimen>,     // 界面样张模式（docs/35）：轮换工作区自截图
     shell: ui::shell::Shell,                      // 外壳（docs/35 批 3）：命令面板 / 底部面板 / 检查器
+    /// 「分析 ▾」卡片里当前分析的结论笔记编辑器：(品种键, 分析 id, 内容)（docs/52 A3；多行编辑器要借用它，所以放这里）
+    ana_note: Option<(String, String, iced::widget::text_editor::Content)>,
     commands: Vec<ui::command::Entry>,            // 命令注册表（UPDS V2 §12）
     /// 设置窗口的搜索词
     settings_query: String,
@@ -319,6 +321,8 @@ enum Message {
     /// 样张模式（docs/35）：每 500ms 一拍。
     SpecimenStep(std::time::Instant),
     SpecimenShot(iced::window::Screenshot),
+    /// 画线分析的缩略图截好了：(品种键, 分析 id, 截图)（docs/52 A3）
+    AnaThumbShot(String, String, iced::window::Screenshot),
     /// 外壳事件（命令面板输入、上下移动……）
     Shell(ui::shell::ShellEvent),
     /// 执行一条命令（命令面板、快捷键、外壳按钮都走这里，UPDS V2 §12）
@@ -388,6 +392,7 @@ impl Flowsurface {
             ws_signals: None,
             specimen: ws::specimen::Specimen::from_env(),
             shell: ui::shell::Shell::default(),
+            ana_note: None,
             commands: ui::command::registry(&ws::workspace::WORKSPACES),
             palette_entries: ui::command::registry(&ws::workspace::WORKSPACES),
             main_width: f32::MAX,
@@ -669,6 +674,21 @@ impl Flowsurface {
                 // 统一回放时钟（docs/51）：推进播放头；往回走了就清图（之后图表订阅换成新的 epoch、从头灌到播放头）
                 ws::feature_source::tick();
                 ws::replay_clock::tick(now);
+                ws::analysis_state::tick();
+                // 结论笔记编辑器跟着卡片里的当前分析（换了分析就换内容）
+                let want = ws::drawing::ana_menu().and_then(|s| ws::drawing::active_analysis(&s).map(|id| (s, id)));
+                // 回退到一个版本（A4）换了结论：也重读
+                let reload = ws::drawing::take_note_reload();
+                if reload || want.as_ref().map(|(s, i)| (s.as_str(), i.as_str())) != self.ana_note.as_ref().map(|(s, i, _)| (s.as_str(), i.as_str())) {
+                    self.ana_note = want.map(|(s, id)| {
+                        let note = ws::drawing::analysis(&s, &id).map(|a| a.note).unwrap_or_default();
+                        (s, id, iced::widget::text_editor::Content::with_text(&note))
+                    });
+                }
+                // 缩略图：当前分析在回放时每分钟一张（docs/52 A3）
+                let thumb = ws::analysis_state::thumb_due().map(|(k, id)| {
+                    iced::window::screenshot(self.main_window.id).map(move |shot| Message::AnaThumbShot(k.clone(), id.clone(), shot))
+                });
                 if ws::replay_clock::take_reset() {
                     for l in self
                         .layout_manager
@@ -723,13 +743,17 @@ impl Flowsurface {
                     ws::chart_params::publish_pane_charts(l.dashboard.pane_charts(main_window_id));
                 }
 
-                return self
+                let t = self
                     .active_dashboard_mut()
                     .tick(&handles, now, main_window_id)
                     .map(move |msg| Message::Dashboard {
                         layout_id: None,
                         event: msg,
                     });
+                return match thumb {
+                    Some(shot) => Task::batch([t, shot]),
+                    None => t,
+                };
             }
             Message::WindowEvent(event) => match event {
                 window::Event::CloseRequested(window) => {
@@ -790,7 +814,27 @@ impl Flowsurface {
                 }
             }
             Message::Page(m) => return self.page_action(m),
-            Message::Draw(m) => ws::drawing::handle(m),
+            // 画线分析切换时连带回放状态（docs/52 A2）；缩略图、结论笔记、从列表打开（A3）
+            Message::Draw(m) => match m {
+                ws::drawing::DrawMsg::AnaThumb(sym) => {
+                    // 先收起卡片再截：不然缩略图里是这张卡片，不是图
+                    ws::drawing::handle(ws::drawing::DrawMsg::AnaClose);
+                    if let Some((k, id)) = ws::analysis_state::thumb_target(&sym) {
+                        return iced::window::screenshot(self.main_window.id).map(move |shot| Message::AnaThumbShot(k.clone(), id.clone(), shot));
+                    }
+                }
+                ws::drawing::DrawMsg::AnaNoteEdit(action) => {
+                    if let Some((sym, id, content)) = self.ana_note.as_mut() {
+                        content.perform(action);
+                        ws::drawing::set_analysis_note(sym, id, content.text());
+                    }
+                }
+                ws::drawing::DrawMsg::AnaOpenFromList(sym, id) => {
+                    ws::analysis_state::open_from_list(&sym, &id);
+                }
+                m => ws::analysis_state::on_draw(m),
+            },
+            Message::AnaThumbShot(k, id, shot) => ws::analysis_state::store_thumb(k, id, &shot),
             Message::Replay(m) => ws::replay_clock::handle(m),
             Message::DataDirs(m) => ws::data_dirs::handle(m),
             Message::SpecimenShot(shot) => {
@@ -1396,6 +1440,18 @@ impl Flowsurface {
                 } else {
                     dashboard_view
                 };
+                // 分析（docs/52）：点工具栏「分析 ▾」后盖在内容上方
+                let dashboard_view: Element<'_, Message> = if let Some(sym) = ws::drawing::ana_menu() {
+                    let note = self.ana_note.as_ref().filter(|(s, _, _)| *s == sym).map(|(_, i, c)| (i.as_str(), c));
+                    let card = container(ws::drawing_view::analysis_menu(&sym, note).map(Message::Draw)).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
+                        background: Some(iced::Background::Color(t.extended_palette().background.weak.color)),
+                        border: iced::Border { color: ui::pal::accent(), width: 1.0, radius: 4.0.into() },
+                        ..Default::default()
+                    });
+                    iced::widget::stack![dashboard_view, column![card]].into()
+                } else {
+                    dashboard_view
+                };
                 // 事件筛选（docs/51 P4）：点工具栏「事件 ▾」后盖在内容上方
                 let dashboard_view: Element<'_, Message> = if ws::replay_clock::event_menu_open() {
                     let card = container(ws::replay_clock::event_menu().map(Message::Replay)).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
@@ -1938,6 +1994,10 @@ impl Flowsurface {
                 // 画线（docs/46 G1）：当前工具（点开菜单）+ 收藏的工具
                 if ws::inspector_props::supports_drawing(&st.content) {
                     r = r.push(ws::drawing_view::toolbar().map(Message::Draw));
+                    // 分析（docs/52）：这张图的品种上的分析
+                    if let Some(ti) = st.stream_pair() {
+                        r = r.push(ws::drawing_view::analysis_toolbar(&ws::drawing::symbol_key(&ti.ticker)).map(Message::Draw));
+                    }
                 }
                 for (label, on, e) in spec.actions {
                     r = r.push(ui::widgets::btn(label, if on { ui::widgets::Kind::Standard } else { ui::widgets::Kind::Primary }, Some(ev(e))));

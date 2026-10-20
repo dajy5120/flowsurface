@@ -143,6 +143,313 @@ pub fn toolbar<'a>() -> Element<'a, DrawMsg> {
     r.into()
 }
 
+/// 工具栏上的「分析：<当前分析> ▾」（docs/52）。
+pub fn analysis_toolbar<'a>(symbol: &str) -> Element<'a, DrawMsg> {
+    let (cur, overlay) = dw::ana_summary(symbol);
+    let open = dw::ana_menu().as_deref() == Some(symbol);
+    let mut v = cur;
+    if overlay > 0 {
+        v.push_str(&format!(" · 叠 {overlay}"));
+    }
+    v.push_str(if open { " ▴" } else { " ▾" });
+    crate::ui::shell::tool_pick("分析", v, Some(DrawMsg::AnaMenu(symbol.to_string())), open || overlay > 0)
+}
+
+/// 「分析 ▾」卡片（盖在内容上方）：这个品种的每份分析一行——设为当前、叠加显示、改名、对象数、修改时间、删除；
+/// 下面新建 / 另存为。
+pub fn analysis_menu<'a>(symbol: &str, note: Option<(&str, &'a iced::widget::text_editor::Content)>) -> Element<'a, DrawMsg> {
+    let sym = symbol.to_string();
+    let code = symbol.rsplit(':').next().unwrap_or(symbol).to_string();
+    let mut col = column![
+        row![
+            t::label(format!("分析 · {code}")),
+            t::metadata("● 当前：新画的线归它、能改；☑ 叠加：一起显示（淡色、只读）。画线随改随存；回放时自动记下数据段、播放头、筛选、条件与视野，设为当前就回到那里").color(pal::dim()),
+            Space::new().width(Length::Fill),
+            w::btn("收起", Btn::Ghost, Some(DrawMsg::AnaClose)),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center)
+    ]
+    .spacing(space(1));
+    for r in dw::ana_rows(symbol) {
+        let id = r.id.clone();
+        let name: Element<'a, DrawMsg> = match &id {
+            None => t::label(r.name.clone()).into(),
+            Some(aid) => {
+                let key = dw::ana_name_key(aid);
+                let (k, s2, a2) = (key.clone(), sym.clone(), aid.clone());
+                text_input("名字", &dw::edit_text(&key, r.name.clone()))
+                    .size(t::s_small())
+                    .width(Length::Fixed(260.0))
+                    .on_input(move |v| DrawMsg::Edit(k.clone(), v))
+                    .on_submit(DrawMsg::AnaRename(s2, a2))
+                    .into()
+            }
+        };
+        let when = if r.updated_ms > 0 {
+            chrono::DateTime::from_timestamp_millis(r.updated_ms)
+                .map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let mut line = row![
+            w::btn(if r.active { "● 当前" } else { "○ 设为当前" }, if r.active { Btn::Standard } else { Btn::Ghost }, (!r.active).then(|| DrawMsg::AnaOpen(sym.clone(), id.clone()))),
+            checkbox(r.shown || r.active)
+                .label("叠加")
+                .size(t::s_small())
+                .on_toggle_maybe((!r.active).then(|| {
+                    let (s2, i2) = (sym.clone(), id.clone());
+                    move |v| DrawMsg::AnaShow(s2.clone(), i2.clone(), v)
+                })),
+            name,
+            t::metadata(format!("{} 个对象", r.objects)).color(pal::dim()),
+            t::metadata(when).color(pal::dim()),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center);
+        // 记下的数据段与播放头（docs/52 A2）；当前那份给「记下现在的状态」
+        match super::analysis_state::describe(r.state.as_ref()) {
+            Some((d, here)) => {
+                line = line.push(t::metadata(if here || !r.active { d } else { format!("{d}（现在看的不是这一段：不自动记）") }).color(if here { pal::ok() } else { pal::dim() }));
+            }
+            None if id.is_some() => line = line.push(t::metadata("还没记下数据段（回放这个品种时自动记）").color(pal::dim())),
+            None => {}
+        }
+        if r.active && id.is_some() {
+            line = line.push(w::btn("记下现在的状态", Btn::Ghost, Some(DrawMsg::AnaRecord(sym.clone()))));
+            line = line.push(w::btn("更新缩略图", Btn::Ghost, Some(DrawMsg::AnaThumb(sym.clone()))));
+        }
+        if !r.active && r.objects > 0 {
+            line = line.push(w::btn("复制画线到当前", Btn::Ghost, Some(DrawMsg::AnaCopyFrom(sym.clone(), id.clone()))));
+        }
+        if let Some(aid) = &id {
+            line = line.push(w::btn("导出", Btn::Ghost, Some(DrawMsg::AnaExport(sym.clone(), aid.clone()))));
+        }
+        if let Some(aid) = &id {
+            line = line.push(w::btn(
+                if r.confirm_delete { "确认删除（连同画线）" } else { "删除" },
+                if r.confirm_delete { Btn::Destructive } else { Btn::Ghost },
+                Some(DrawMsg::AnaDelete(sym.clone(), aid.clone())),
+            ));
+        }
+        col = col.push(line);
+        // 当前分析：结论笔记（多行，随改随存）与缩略图（docs/52 A3）
+        if r.active
+            && let (Some(aid), Some((nid, content))) = (&id, note)
+            && aid == nid
+        {
+            let mut detail = row![].spacing(space(3));
+            if let Some(h) = thumb_handle(aid, r.updated_ms, dw::analysis(symbol, aid).and_then(|a| a.extra.get("thumb").cloned()).as_ref()) {
+                detail = detail.push(iced::widget::image(h).width(Length::Fixed(dw_thumb_w())));
+            }
+            detail = detail.push(
+                column![
+                    t::metadata("结论笔记").color(pal::dim()),
+                    iced::widget::text_editor(content)
+                        .placeholder("这份分析看到了什么、结论、下一步……")
+                        .on_action(DrawMsg::AnaNoteEdit)
+                        .size(t::s_small())
+                        .height(Length::Fixed(dw_note_h())),
+                ]
+                .spacing(space(1))
+                .width(Length::Fill),
+            );
+            col = col.push(detail);
+        }
+        if r.active {
+            col = col.push(versions(symbol));
+        }
+    }
+    let key = dw::ANA_NEW_KEY.to_string();
+    col = col.push(
+        row![
+            text_input("新分析的名字（例如 BTC 6/1 早盘吸收）", &dw::edit_text(&key, String::new()))
+                .size(t::s_small())
+                .width(Length::Fixed(320.0))
+                .on_input(move |v| DrawMsg::Edit(key.clone(), v))
+                .on_submit(DrawMsg::AnaNew(sym.clone())),
+            w::btn("＋ 新建（空白）", Btn::Standard, Some(DrawMsg::AnaNew(sym.clone()))),
+            w::btn("另存为（复制当前的画线）", Btn::Ghost, Some(DrawMsg::AnaSaveAs(sym.clone()))),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center),
+    );
+    let n_all = dw::all_analyses().len();
+    let open = dw::ana_list_open();
+    col = col.push(
+        row![
+            w::btn(format!("全部分析（{n_all}）{}", if open { " ▴" } else { " ▾" }), if open { Btn::Standard } else { Btn::Ghost }, Some(DrawMsg::AnaList)),
+            t::metadata(format!("导出目录：{}", dw::export_dir().display())).color(pal::dim()),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center),
+    );
+    if open {
+        col = col.push(all_list());
+    }
+    let note_text = dw::note();
+    if !note_text.is_empty() {
+        col = col.push(t::caption(note_text).color(pal::warn()));
+    }
+    container(col).padding(space(3)).into()
+}
+
+/// 当前分析的版本（docs/52 A4）：存一个版本（填说明）；历史（新的在前）每个可回退 / 删除（都点两下确认）。
+fn versions<'a>(symbol: &str) -> Element<'a, DrawMsg> {
+    let sym = symbol.to_string();
+    let key = dw::ANA_VER_KEY.to_string();
+    let rows = dw::ver_rows(symbol);
+    let mut col = column![
+        row![
+            t::metadata("版本").color(pal::dim()),
+            text_input("这个版本的说明（例如 收盘前定稿）", &dw::edit_text(&key, String::new()))
+                .size(t::s_small())
+                .width(Length::Fixed(280.0))
+                .on_input(move |v| DrawMsg::Edit(key.clone(), v))
+                .on_submit(DrawMsg::AnaVerSave(sym.clone())),
+            w::btn("存一个版本", Btn::Standard, Some(DrawMsg::AnaVerSave(sym.clone()))),
+            t::metadata(if rows.is_empty() { "还没存过版本：存的是这份分析现在的全部画线与结论".to_string() } else { format!("{} 个版本；回退前与现在不同会先自动存一个", rows.len()) }).color(pal::dim()),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center)
+        .wrap()
+    ]
+    .spacing(space(1));
+    const SHOW: usize = 12;
+    for v in rows.iter().take(SHOW) {
+        let when = chrono::DateTime::from_timestamp_millis(v.created_ms)
+            .map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M:%S").to_string())
+            .unwrap_or_default();
+        let mut line = row![
+            t::metadata(when).color(pal::dim()),
+            t::label(v.label.clone()),
+            t::metadata(format!("{} 个对象", v.objects)).color(pal::dim()),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center);
+        if v.same_as_now {
+            line = line.push(t::metadata("= 现在").color(pal::ok()));
+        }
+        line = line
+            .push(w::btn(
+                if v.confirm_revert { "确认回退" } else { "回退到这个版本" },
+                if v.confirm_revert { Btn::Destructive } else { Btn::Ghost },
+                (!v.same_as_now).then(|| DrawMsg::AnaVerRevert(sym.clone(), v.id.clone())),
+            ))
+            .push(w::btn(
+                if v.confirm_delete { "确认删除" } else { "删除" },
+                if v.confirm_delete { Btn::Destructive } else { Btn::Ghost },
+                Some(DrawMsg::AnaVerDelete(sym.clone(), v.id.clone())),
+            ));
+        col = col.push(line);
+    }
+    if rows.len() > SHOW {
+        col = col.push(t::metadata(format!("还有 {} 个更早的版本", rows.len() - SHOW)).color(pal::dim()));
+    }
+    container(col).padding(iced::Padding::ZERO.left(space(4))).into()
+}
+
+/// 缩略图显示宽、笔记框高（逻辑像素）。
+fn dw_thumb_w() -> f32 {
+    space(3) * 30.0
+}
+
+fn dw_note_h() -> f32 {
+    space(3) * 12.0
+}
+
+/// 缩略图的显示句柄（解一次 PNG 就缓存，分析改了才重解）。
+fn thumb_handle(id: &str, ver: i64, thumb: Option<&serde_json::Value>) -> Option<iced::widget::image::Handle> {
+    static CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, (i64, iced::widget::image::Handle)>>> = std::sync::Mutex::new(None);
+    let thumb = thumb?;
+    let mut g = CACHE.lock().ok()?;
+    let m = g.get_or_insert_with(Default::default);
+    if let Some((v, h)) = m.get(id)
+        && *v == ver
+    {
+        return Some(h.clone());
+    }
+    let (w, h, px) = super::analysis_state::decode_thumb(thumb)?;
+    let handle = iced::widget::image::Handle::from_rgba(w, h, px);
+    m.insert(id.to_string(), (ver, handle.clone()));
+    Some(handle)
+}
+
+/// 「全部分析」：全部品种的分析（新改的在前），搜索名字 / 结论 / 品种 / 日期；每份一张卡片（缩略图、名字、品种、数据段、
+/// 修改时间、结论第一行；打开、导出）。下面是导入：导出目录里的文件，或输入路径。
+fn all_list<'a>() -> Element<'a, DrawMsg> {
+    let key = dw::ANA_SEARCH_KEY.to_string();
+    let q = dw::edit_text(&key, String::new());
+    let ql = q.to_lowercase();
+    let mut col = column![
+        text_input("搜索名字、结论、品种、日期…", &q).size(t::s_small()).width(Length::Fixed(dw_thumb_w() * 1.5)).on_input(move |v| DrawMsg::Edit(key.clone(), v))
+    ]
+    .spacing(space(2));
+    let mut cards = row![].spacing(space(3));
+    let mut shown = 0;
+    for a in dw::all_analyses() {
+        let seg = super::analysis_state::describe(a.extra.get("state"));
+        let hay = format!("{} {} {} {}", a.name, a.note, a.symbol, seg.as_ref().map(|s| s.0.as_str()).unwrap_or_default()).to_lowercase();
+        if !ql.is_empty() && !hay.contains(&ql) {
+            continue;
+        }
+        shown += 1;
+        let code = a.symbol.rsplit(':').next().unwrap_or(&a.symbol).to_string();
+        let when = chrono::DateTime::from_timestamp_millis(a.updated_ms)
+            .map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        let mut card = column![].spacing(space(1)).width(Length::Fixed(dw_thumb_w()));
+        match thumb_handle(&a.id, a.updated_ms, a.extra.get("thumb")) {
+            Some(h) => card = card.push(iced::widget::image(h).width(Length::Fixed(dw_thumb_w()))),
+            None => card = card.push(container(t::metadata("（没有缩略图）").color(pal::dim())).height(Length::Fixed(dw_thumb_w() * 0.5)).center_y(Length::Fixed(dw_thumb_w() * 0.5))),
+        }
+        card = card
+            .push(t::label(a.name.clone()))
+            .push(t::metadata(format!("{code} · {when}")).color(pal::dim()))
+            .push(t::metadata(seg.map_or_else(|| "没有记下数据段".to_string(), |s| s.0)).color(pal::dim()));
+        if let Some(first) = a.note.lines().find(|l| !l.trim().is_empty()) {
+            card = card.push(t::caption(first.to_string()));
+        }
+        card = card.push(
+            row![
+                w::btn("打开", Btn::Standard, Some(DrawMsg::AnaOpenFromList(a.symbol.clone(), a.id.clone()))),
+                w::btn("导出", Btn::Ghost, Some(DrawMsg::AnaExport(a.symbol.clone(), a.id.clone()))),
+            ]
+            .spacing(space(1)),
+        );
+        cards = cards.push(container(card).padding(space(2)).style(|_| iced::widget::container::Style { border: crate::ui::metrics::hairline(crate::ui::metrics::radius::SM), ..Default::default() }));
+    }
+    if shown == 0 {
+        col = col.push(t::metadata(if q.is_empty() { "还没有分析" } else { "没有匹配的" }).color(pal::dim()));
+    }
+    col = col.push(cards.wrap());
+    // 导入
+    let ikey = dw::ANA_IMPORT_KEY.to_string();
+    col = col.push(
+        row![
+            t::label("导入"),
+            text_input("导出文件的路径（.json）", &dw::edit_text(&ikey, String::new()))
+                .size(t::s_small())
+                .width(Length::Fixed(dw_thumb_w() * 2.0))
+                .on_input(move |v| DrawMsg::Edit(ikey.clone(), v))
+                .on_submit(DrawMsg::AnaImport(String::new())),
+            w::btn("导入", Btn::Ghost, Some(DrawMsg::AnaImport(String::new()))),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center),
+    );
+    for f in dw::export_files().into_iter().take(8) {
+        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        col = col.push(
+            row![t::metadata(name).color(pal::dim()), w::btn("导入这个", Btn::Ghost, Some(DrawMsg::AnaImport(f.to_string_lossy().into_owned())))]
+                .spacing(space(2))
+                .align_y(Alignment::Center),
+        );
+    }
+    col.into()
+}
+
 /// 工具的图标（§13）：内置的在这里配，登记的工具用它自己声明的（缺省铅笔）。
 #[must_use]
 pub fn glyph(k: Kind) -> char {
@@ -381,7 +688,21 @@ pub fn inspector<'a>(symbol: &str, decimals: usize, multiplier: f64) -> Element<
         col = col.push(t::caption(format!("◆ {title}：{body}")).color(pal::warn()));
     }
     match dw::selected_drawing(symbol) {
-        Some(d) => col = col.push(selected_props(&sym, &d, decimals, multiplier)),
+        Some(d) => {
+            // 叠加显示的别的分析的线：只读，写明是哪份、给个「设为当前」（docs/52）
+            let (ana, active) = dw::ana_of(symbol, &d);
+            if !active {
+                col = col.push(
+                    row![
+                        t::caption(format!("属于分析「{ana}」（叠加显示，只读）")).color(pal::warn()),
+                        w::btn("设为当前", Btn::Ghost, Some(DrawMsg::AnaOpen(sym.clone(), d.sheet.clone()))),
+                    ]
+                    .spacing(space(2))
+                    .align_y(Alignment::Center),
+                );
+            }
+            col = col.push(selected_props(&sym, &d, decimals, multiplier));
+        }
         None => {
             col = col.push(t::metadata("点图上的线选中它，这里改颜色、线型、精确价格与时间。画线：顶部工具栏「绘图」，或光标在图上按 Alt+T / H / V / R、Alt+Shift+R").color(pal::dim()));
         }

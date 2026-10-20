@@ -81,6 +81,32 @@ impl Book {
         }
     }
 
+    /// 不记撤销地加一个对象（另存为分析时复制画线：那是一次整体操作，不该被 Ctrl+Z 一条条撤掉；docs/52）。
+    pub fn insert_silently(&mut self, d: Drawing) -> Vec<Effect> {
+        if self.get(&d.id).is_some() {
+            return Vec::new();
+        }
+        self.items.push(d.clone());
+        vec![Effect::Upsert(d)]
+    }
+
+    /// 不记撤销地把一份分析的手工对象整套换掉（回退到一个版本；docs/52 A4）：先删光它现在的，再按版本里的先后放回。
+    /// 撤销 / 重做栈一并清掉——栈里的命令指的是换掉之前的对象，留着会撤出东西来。
+    pub fn replace_sheet(&mut self, sheet: &Option<String>, items: Vec<Drawing>) -> Vec<Effect> {
+        let mine = |d: &Drawing| d.sheet == *sheet && d.source == super::model::Source::Manual;
+        let mut fx: Vec<Effect> = self.items.iter().filter(|d| mine(d)).map(|d| Effect::Remove(d.id.clone())).collect();
+        self.items.retain(|d| !mine(d));
+        for mut d in items {
+            d.sheet.clone_from(sheet);
+            self.items.retain(|x| x.id != d.id);
+            fx.push(Effect::Upsert(d.clone()));
+            self.items.push(d);
+        }
+        self.undo.clear();
+        self.redo.clear();
+        fx
+    }
+
     /// 执行一条新命令（清掉重做栈）。
     pub fn exec(&mut self, cmd: Cmd) -> Vec<Effect> {
         let fx = self.apply(&cmd);
@@ -145,6 +171,61 @@ pub const MIGRATIONS: &[fn(&mut serde_json::Value)] = &[v1_to_v2];
 /// 1 → 2：加了到价提醒 `alert`（可选），旧对象原样。
 fn v1_to_v2(_d: &mut serde_json::Value) {}
 
+/// 一份分析（docs/52）：一个品种上的一套画线，有名字，能另存、打开、叠加显示。
+/// 画线对象用 `sheet` 记它属于哪份分析；没有 `sheet` 的对象属于默认画板（id 为空串，不进这张表）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Analysis {
+    pub id: String,
+    pub symbol: String,
+    pub name: String,
+    /// 说明 / 结论（A3）
+    #[serde(default)]
+    pub note: String,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+    /// 认不得的字段（A2 起的数据段、视图、回放状态等）原样保留
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// 一个品种的画板：当前分析（新画的线归它，`None` = 默认画板）与叠加显示的分析（淡色、只读）。
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Board {
+    #[serde(default)]
+    pub active: Option<String>,
+    /// 叠加显示的分析（`None` = 默认画板）
+    #[serde(default)]
+    pub shown: Vec<Option<String>>,
+}
+
+impl Board {
+    /// 这份分析的线画不画：当前的、叠加的。
+    #[must_use]
+    pub fn visible(&self, sheet: &Option<String>) -> bool {
+        self.active == *sheet || self.shown.contains(sheet)
+    }
+}
+
+/// 一份分析的一个版本（docs/52 A4）：手动「存一个版本」时它的全部手工画线与结论。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Version {
+    pub id: String,
+    pub symbol: String,
+    /// 分析 id（默认画板 = 空串）
+    pub owner: String,
+    pub label: String,
+    pub created_ms: i64,
+    #[serde(default)]
+    pub note: String,
+    pub drawings: Vec<Drawing>,
+}
+
+/// 现在的毫秒（分析的创建 / 修改时间）。
+#[must_use]
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
 /// 存盘：Cockpit 数据目录下的 `drawings.sqlite`（与 `saved-state.json` 同处）。
 pub struct Db {
     path: PathBuf,
@@ -169,7 +250,10 @@ impl Db {
         c.execute_batch(
             "CREATE TABLE IF NOT EXISTS drawings (symbol TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL,
                  updated_ms INTEGER NOT NULL, PRIMARY KEY (symbol, id));
-             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS analyses (id TEXT PRIMARY KEY, symbol TEXT NOT NULL, body TEXT NOT NULL, updated_ms INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, symbol TEXT NOT NULL, owner TEXT NOT NULL, body TEXT NOT NULL,
+                 created_ms INTEGER NOT NULL);",
         )?;
         c.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('format', ?1)", [FORMAT.to_string()])?;
         let stored: u32 = c
@@ -248,6 +332,84 @@ impl Db {
             .map_err(|e| e.to_string())
     }
 
+    /// 这个品种的分析（按创建先后）。读不了的那条跳过。
+    #[must_use]
+    pub fn analyses(&self, symbol: &str) -> Vec<Analysis> {
+        let Ok(c) = self.open() else { return Vec::new() };
+        let Ok(mut st) = c.prepare("SELECT body FROM analyses WHERE symbol = ?1") else { return Vec::new() };
+        let rows: Vec<String> = st.query_map([symbol], |r| r.get::<_, String>(0)).map(|it| it.flatten().collect()).unwrap_or_default();
+        let mut v: Vec<Analysis> = rows.iter().filter_map(|b| serde_json::from_str(b).ok()).collect();
+        v.sort_by_key(|a| a.created_ms);
+        v
+    }
+
+    /// 全部品种的分析（按修改时间新的在前）。
+    #[must_use]
+    pub fn all_analyses(&self) -> Vec<Analysis> {
+        let Ok(c) = self.open() else { return Vec::new() };
+        let Ok(mut st) = c.prepare("SELECT body FROM analyses ORDER BY updated_ms DESC") else { return Vec::new() };
+        let rows: Vec<String> = st.query_map([], |r| r.get::<_, String>(0)).map(|it| it.flatten().collect()).unwrap_or_default();
+        rows.iter().filter_map(|b| serde_json::from_str(b).ok()).collect()
+    }
+
+    pub fn put_analysis(&self, a: &Analysis) -> Result<(), String> {
+        let c = self.open().map_err(|e| e.to_string())?;
+        c.execute(
+            "INSERT INTO analyses (id, symbol, body, updated_ms) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (id) DO UPDATE SET body = excluded.body, updated_ms = excluded.updated_ms",
+            rusqlite::params![a.id, a.symbol, serde_json::to_string(a).unwrap_or_default(), a.updated_ms],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn delete_analysis(&self, id: &str) -> Result<(), String> {
+        let c = self.open().map_err(|e| e.to_string())?;
+        c.execute("DELETE FROM analyses WHERE id = ?1", [id]).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// 画板状态（`meta` 表键 `board:<品种>`）。
+    #[must_use]
+    pub fn board(&self, symbol: &str) -> Board {
+        self.get_meta(&format!("board:{symbol}")).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default()
+    }
+
+    pub fn set_board(&self, symbol: &str, b: &Board) -> Result<(), String> {
+        self.set_meta(&format!("board:{symbol}"), &serde_json::to_string(b).unwrap_or_default())
+    }
+
+    /// 一份分析的版本（新的在前）。`owner` 空串 = 这个品种的默认画板。
+    #[must_use]
+    pub fn versions(&self, symbol: &str, owner: &str) -> Vec<Version> {
+        let Ok(c) = self.open() else { return Vec::new() };
+        let Ok(mut st) = c.prepare("SELECT body FROM versions WHERE symbol = ?1 AND owner = ?2 ORDER BY created_ms DESC, rowid DESC") else {
+            return Vec::new();
+        };
+        let rows: Vec<String> = st.query_map([symbol, owner], |r| r.get::<_, String>(0)).map(|it| it.flatten().collect()).unwrap_or_default();
+        rows.iter().filter_map(|b| serde_json::from_str(b).ok()).collect()
+    }
+
+    pub fn put_version(&self, v: &Version) -> Result<(), String> {
+        let c = self.open().map_err(|e| e.to_string())?;
+        c.execute(
+            "INSERT OR REPLACE INTO versions (id, symbol, owner, body, created_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![v.id, v.symbol, v.owner, serde_json::to_string(v).unwrap_or_default(), v.created_ms],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    /// 删一个版本（`id`），或一份分析的全部版本（`owner`，删分析时）。
+    pub fn delete_versions(&self, id: Option<&str>, owner: Option<(&str, &str)>) -> Result<(), String> {
+        let c = self.open().map_err(|e| e.to_string())?;
+        let r = match (id, owner) {
+            (Some(id), _) => c.execute("DELETE FROM versions WHERE id = ?1", [id]),
+            (None, Some((sym, o))) => c.execute("DELETE FROM versions WHERE symbol = ?1 AND owner = ?2", [sym, o]),
+            (None, None) => Ok(0),
+        };
+        r.map(|_| ()).map_err(|e| e.to_string())
+    }
+
     /// 写一批变化（一个事务）。
     pub fn write(&self, symbol: &str, fx: &[Effect]) -> Result<(), String> {
         if let Some(v) = self.newer_than_me() {
@@ -303,6 +465,66 @@ mod tests {
         b.redo();
         b.exec(Cmd::Create(line(5)));
         assert!(b.redo().is_empty());
+    }
+
+    #[test]
+    fn analyses_and_boards_round_trip() {
+        let dir = std::env::temp_dir().join(format!("ws-drawings-ana-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::at(&dir.join("d.sqlite"));
+        let a = Analysis { id: "a1".into(), symbol: "S".into(), name: "吸收".into(), note: String::new(), created_ms: 2, updated_ms: 2, extra: Default::default() };
+        let mut b = a.clone();
+        b.id = "a0".into();
+        b.created_ms = 1;
+        db.put_analysis(&a).unwrap();
+        db.put_analysis(&b).unwrap();
+        assert_eq!(db.analyses("S").iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec!["a0", "a1"], "按创建先后");
+        assert!(db.analyses("T").is_empty());
+        db.delete_analysis("a0").unwrap();
+        assert_eq!(db.analyses("S").len(), 1);
+        assert_eq!(db.board("S"), Board::default());
+        let bd = Board { active: Some("a1".into()), shown: vec![None] };
+        db.set_board("S", &bd).unwrap();
+        assert_eq!(db.board("S"), bd);
+        assert!(bd.visible(&None) && bd.visible(&Some("a1".into())) && !bd.visible(&Some("x".into())));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn versions_round_trip_and_replace_sheet() {
+        let dir = std::env::temp_dir().join(format!("ws-drawings-ver-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = Db::at(&dir.join("d.sqlite"));
+        let v = |id: &str, owner: &str, t: i64| Version { id: id.into(), symbol: "S".into(), owner: owner.into(), label: id.into(), created_ms: t, note: String::new(), drawings: vec![line(t)] };
+        let v1 = v("v1", "a", 1);
+        db.put_version(&v1).unwrap();
+        db.put_version(&v("v2", "a", 2)).unwrap();
+        db.put_version(&v("d1", "", 3)).unwrap();
+        assert_eq!(db.versions("S", "a").iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec!["v2", "v1"], "新的在前");
+        assert_eq!(db.versions("S", "a")[1], v1, "逐字段读回");
+        assert_eq!(db.versions("S", "").len(), 1);
+        db.delete_versions(Some("v2"), None).unwrap();
+        assert_eq!(db.versions("S", "a").len(), 1);
+        db.delete_versions(None, Some(("S", "a"))).unwrap();
+        assert!(db.versions("S", "a").is_empty() && db.versions("S", "").len() == 1);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 换掉一份分析的画线：别的分析、系统对象不动；撤销栈清空
+        let sheet = Some("a".to_string());
+        let mut mine = line(1);
+        mine.sheet.clone_from(&sheet);
+        let other = line(2);
+        let mut b = Book::default();
+        b.exec(Cmd::Create(mine.clone()));
+        b.exec(Cmd::Create(other.clone()));
+        let fresh = line(3);
+        let fx = b.replace_sheet(&sheet, vec![fresh.clone()]);
+        let mut want = fresh.clone();
+        want.sheet.clone_from(&sheet);
+        assert_eq!(fx, vec![Effect::Remove(mine.id.clone()), Effect::Upsert(want.clone())]);
+        assert_eq!(b.items, vec![other, want]);
+        assert!(!b.can_undo() && b.undo().is_empty());
     }
 
     #[test]

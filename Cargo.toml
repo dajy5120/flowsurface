@@ -46,6 +46,7 @@ iced = { version = "0.14.0", default-features = false, features = [
     "crisp",
     "x11",
     "wayland",
+    "image-without-codecs", # 画线分析的缩略图（docs/52 A3）：只显示 RGBA，不带图片解码器
 ] }
 iced_core.workspace = true
 chrono.workspace = true
@@ -63,6 +64,8 @@ fern = "0.7.1"
 rodio = { version = "0.22.2", default-features = false, features = [ "playback", "wav" ]}
 
 bytemuck = "1.25.0"
+png = "0.18" # 画线分析的缩略图编解码（docs/52 A3）
+base64 = "0.22" # 缩略图放进分析 / 导出的 JSON
 rand = "0.10.1"
 iced_wgpu = "0.14.0"
 exchange.workspace = true

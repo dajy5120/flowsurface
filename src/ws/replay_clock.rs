@@ -181,8 +181,36 @@ fn save_bookmarks(key: &str, v: &[Bookmark]) {
     }
 }
 
+/// 一组书签（导出画线分析时带上；docs/52 A3）。键见 [`Clock`] 的书签说明：`数据商|标的[#分析 id]`。
+#[must_use]
+pub fn bookmarks_of(key: &str) -> Vec<Bookmark> {
+    load_bookmarks(key)
+}
+
+/// 导入画线分析时把它的书签并进来（同一时刻的不重复加）；回放正好在看这组就一起刷新。
+pub fn merge_bookmarks(key: &str, add: &[Bookmark]) {
+    let mut v = load_bookmarks(key);
+    for b in add {
+        if !v.iter().any(|x| x.t == b.t) {
+            v.push(b.clone());
+        }
+    }
+    v.sort_by_key(|b| b.t);
+    save_bookmarks(key, &v);
+    if let Ok(mut g) = CLOCK.lock()
+        && let Some(c) = g.as_mut()
+        && c.bm_key.as_deref() == Some(key)
+    {
+        c.bookmarks = v;
+        c.marks_ver += 1;
+    }
+}
+
 /// 条件命中在「聚焦」里的类型名（与事件共用聚焦那一套：虚线、工具栏读数、`[` `]` 从它接着找）。
 pub const COND_KIND: &str = "条件";
+
+/// 往前跳超过这么远就按往回跳处理：清图（保留视图）后在主循环里直接灌到播放头。
+const FAR_JUMP_NS: i64 = 30_000_000_000;
 
 /// 跳到事件时，播放头落在事件前多久（看清它是怎么形成的）。
 pub const EVENT_LEAD_NS: i64 = 2_000_000_000;
@@ -235,6 +263,10 @@ struct Clock {
     /// 书签：`(数据商|标的, 书签)`；时间线打开时读
     bm_key: Option<String>,
     bookmarks: Vec<Bookmark>,
+    /// 书签跟着哪份画线分析（docs/52 A2；`None` = 默认画板，键不带后缀）
+    bm_scope: Option<String>,
+    /// 打开分析时要回到的播放头：还没算到就等算到了再跳
+    pending_head: Option<i64>,
 }
 
 static CLOCK: Mutex<Option<Clock>> = Mutex::new(None);
@@ -277,6 +309,8 @@ pub fn begin(dir: PathBuf, t0: i64, t1: i64, pace: Pace) {
             cond_note: String::new(),
             bm_key: None,
             bookmarks: Vec::new(),
+            bm_scope: None,
+            pending_head: None,
         });
     }
 }
@@ -436,11 +470,8 @@ impl Clock {
             self.t0 = tl.meta.t0;
             self.t1 = tl.meta.t1;
             self.head = self.head.clamp(self.t0, self.t1);
-            let key = format!("{}|{}", tl.meta.vendor, tl.meta.symbol);
-            self.bookmarks = load_bookmarks(&key);
-            self.bm_key = Some(key);
-            self.marks_ver += 1;
             self.tl = Some(tl);
+            self.load_bm();
         }
         if let Some(tl) = self.tl.as_mut() {
             tl.refresh_done();
@@ -457,7 +488,9 @@ impl Clock {
     fn seek(&mut self, t: i64) {
         // 栅格是 100ms：播放头对齐到格上，同一刻前进与后退取到的是同一行
         let t = (t.clamp(self.t0, self.limit().max(self.t0)) / 100_000_000) * 100_000_000;
-        if t < self.head {
+        // 往回跳要清图重灌；往前一下跳很远（打开分析回到 5 分钟、拖时间轴、跳到远处的事件）也一样——
+        // 不然订阅要在一两帧里连发几千条消息，实测 K 线与 Footprint 的价格轴被压扁（只剩 0.3 美元高）
+        if t < self.head || t - self.head > FAR_JUMP_NS {
             self.epoch_req += 1;
             self.reset_since = Some(Instant::now());
         }
@@ -499,6 +532,22 @@ impl Clock {
         self.marks_ver += 1;
     }
 
+    /// 书签的键：`数据商|标的`，跟着某份画线分析时加 `#分析 id`。
+    fn load_bm(&mut self) {
+        let Some(tl) = self.tl.as_ref() else { return };
+        let mut key = format!("{}|{}", tl.meta.vendor, tl.meta.symbol);
+        if let Some(a) = &self.bm_scope {
+            key.push('#');
+            key.push_str(a);
+        }
+        if self.bm_key.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        self.bookmarks = load_bookmarks(&key);
+        self.bm_key = Some(key);
+        self.marks_ver += 1;
+    }
+
     fn save_bm(&mut self) {
         if let Some(k) = &self.bm_key {
             save_bookmarks(k, &self.bookmarks);
@@ -537,6 +586,15 @@ impl Clock {
 
     fn tick(&mut self, now: Instant) {
         self.poll(now);
+        if let Some(h) = self.pending_head
+            && self.tl.is_some()
+            && (self.done || self.limit() >= h)
+        {
+            self.pending_head = None;
+            self.playing = false;
+            self.seek(h);
+            // 跳到一个已经灌过的地方以后：往前走的话不清图，往回的 seek 自己会请求清图
+        }
         let dt = self.last_tick.map_or(0, |t| now.duration_since(t).as_nanos() as i64);
         self.last_tick = Some(now);
         if !self.playing {
@@ -729,6 +787,90 @@ pub fn event_menu_open() -> bool {
 pub fn symbol() -> Option<String> {
     let g = CLOCK.lock().ok()?;
     g.as_ref()?.tl.as_ref().map(|t| t.meta.symbol.clone())
+}
+
+/// 回放状态（画线分析记下它，docs/52 A2）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct State {
+    /// 播放头（纳秒）
+    pub head: i64,
+    pub pace: String,
+    pub step: String,
+    /// 事件筛选（`None` = 缺省那几类）
+    #[serde(default)]
+    pub kinds: Option<Vec<String>>,
+    #[serde(default)]
+    pub cond: String,
+}
+
+fn pace_key(p: Pace) -> &'static str {
+    match p {
+        Pace::X1 => "1",
+        Pace::X10 => "10",
+        Pace::X60 => "60",
+        Pace::Max => "max",
+    }
+}
+
+fn step_key(s: Step) -> &'static str {
+    match s {
+        Step::Ms100 => "100ms",
+        Step::S1 => "1s",
+        Step::Bar => "bar",
+    }
+}
+
+/// 现在的回放状态（没在回放 = `None`）。
+#[must_use]
+pub fn snapshot() -> Option<State> {
+    let g = CLOCK.lock().ok()?;
+    let c = g.as_ref()?;
+    Some(State {
+        head: c.pending_head.unwrap_or(c.head),
+        pace: pace_key(c.pace).into(),
+        step: step_key(c.step).into(),
+        kinds: c.kinds.as_ref().map(|k| k.iter().cloned().collect()),
+        cond: c.cond_text.clone(),
+    })
+}
+
+/// 回到记下的状态：播放头（还没算到就等）、倍速、步长、筛选、条件。暂停着。
+pub fn restore(st: &State) {
+    if let Ok(mut g) = CLOCK.lock()
+        && let Some(c) = g.as_mut()
+    {
+        c.pace = Pace::ALL.into_iter().find(|p| pace_key(*p) == st.pace).unwrap_or(c.pace);
+        c.step = [Step::Ms100, Step::S1, Step::Bar].into_iter().find(|s| step_key(*s) == st.step).unwrap_or(c.step);
+        c.kinds = st.kinds.as_ref().map(|k| k.iter().cloned().collect());
+        c.cond_text = st.cond.clone();
+        c.playing = false;
+        c.pending_head = Some(st.head);
+        c.focus = None;
+        c.marks_ver += 1;
+    }
+}
+
+/// 书签跟着哪份画线分析（`None` = 默认画板）；变了就换一组书签。
+pub fn set_scope(scope: Option<String>) {
+    if let Ok(mut g) = CLOCK.lock()
+        && let Some(c) = g.as_mut()
+        && c.bm_scope != scope
+    {
+        c.bm_scope = scope;
+        c.load_bm();
+    }
+}
+
+/// 回放稳住了：没有等着回去的播放头、没有等着的清图（打开分析后，图灌好了才把视野移回去）。
+#[must_use]
+pub fn settled() -> bool {
+    CLOCK.lock().is_ok_and(|g| g.as_ref().is_some_and(|c| c.pending_head.is_none() && c.epoch_live == c.epoch_req && c.tl.is_some()))
+}
+
+/// 视野同步的最后一份（画线分析记下视野中心用）。
+#[must_use]
+pub fn last_view() -> Option<ViewSync> {
+    VIEW.lock().ok().and_then(|g| g.2)
 }
 
 /// 设置当前倍速（数据源那一栏选的）。
@@ -1011,6 +1153,12 @@ mod tests {
         handle(Cmd::Step(1));
         assert_eq!(view().unwrap().head, 21 * S);
         assert!(!take_reset(), "往前不清图");
+        CLOCK.lock().unwrap().as_mut().unwrap().frontier = Some(600 * S);
+        handle(Cmd::Secs(10));
+        assert!(!take_reset(), "往前 10 秒不清图");
+        handle(Cmd::Seek(100 * S));
+        std::thread::sleep(std::time::Duration::from_millis(RESET_SETTLE_MS as u64 + 5));
+        assert!(take_reset(), "往前一下跳很远也清图重灌");
         end();
     }
 
@@ -1159,6 +1307,44 @@ mod tests {
         assert_eq!(saved["tardis|BTCUSDT"][0]["note"], "吸收之后反弹");
         handle(Cmd::BookmarkDel(0));
         assert!(bookmark_marks(0, 60_000).is_empty());
+        end();
+        super::super::workspace::set_feature_feed(false);
+        let _ = std::fs::remove_dir_all(d);
+        let _ = std::fs::remove_file(bm);
+    }
+
+    #[test]
+    fn 记下与回到回放状态_书签跟着分析() {
+        let _l = test_lock();
+        let _w = super::super::workspace::replay_mode_test_lock();
+        super::super::workspace::set_feature_feed(true);
+        let bm = std::env::temp_dir().join(format!("ws_rc_bm2_{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&bm);
+        // SAFETY: 测试串行（test_lock）
+        unsafe { std::env::set_var("WS_REPLAY_BOOKMARKS", &bm) };
+        let d = tl_with_grid("restore", &[0.0; 10]);
+        begin(d.clone(), 0, 60 * S, Pace::X10);
+        tick(Instant::now());
+        let st = State { head: 5 * S, pace: "60".into(), step: "bar".into(), kinds: Some(vec!["SWEEP".into()]), cond: "obi_l5 > 0".into() };
+        restore(&st);
+        assert_eq!(snapshot().unwrap().head, 5 * S, "还没跳过去时记下的是要回去的那一刻");
+        tick(Instant::now());
+        assert!(settled());
+        let v = view().unwrap();
+        assert_eq!((v.head, v.pace, v.step, v.playing), (5 * S, Pace::X60, Step::Bar, false));
+        assert_eq!(snapshot().unwrap(), st);
+        // 书签：默认画板一组、分析一组
+        handle(Cmd::AddBookmark);
+        assert_eq!(bookmark_marks(0, 60_000), vec![5_000]);
+        set_scope(Some("a1".into()));
+        assert!(bookmark_marks(0, 60_000).is_empty(), "换到分析：它自己的一组");
+        handle(Cmd::Secs(-2));
+        handle(Cmd::AddBookmark);
+        assert_eq!(bookmark_marks(0, 60_000), vec![3_000]);
+        set_scope(None);
+        assert_eq!(bookmark_marks(0, 60_000), vec![5_000]);
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&bm).unwrap()).unwrap();
+        assert!(saved.get("|BTCUSDT").is_none() && saved.get("tardis|BTCUSDT").is_some() && saved.get("tardis|BTCUSDT#a1").is_some());
         end();
         super::super::workspace::set_feature_feed(false);
         let _ = std::fs::remove_dir_all(d);

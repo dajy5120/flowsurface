@@ -256,7 +256,7 @@ pub fn take_shell() -> Option<Shell> {
 }
 
 /// 外壳标的的写法约束（flowsurface `Ticker`：≤ 28 字节、ASCII、不含 `|`）。
-fn shell_symbol(s: &str) -> Option<String> {
+pub(crate) fn shell_symbol(s: &str) -> Option<String> {
     let t: String = s.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
     (!t.is_empty() && t.len() <= 28).then_some(t)
 }
@@ -378,6 +378,78 @@ fn auto_start(g: &mut St) {
         };
         launch(g, sel);
     });
+}
+
+/// 一段回放数据（画线分析记下它，打开分析时重开这段；docs/52 A2）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DataSeg {
+    pub source: String,
+    pub root: String,
+    pub market: String,
+    pub symbol: String,
+    pub date: String,
+    pub hhmm: String,
+    pub minutes: u32,
+    #[serde(default)]
+    pub types: Vec<String>,
+}
+
+impl DataSeg {
+    /// 一行说明（分析卡片里）。
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!("{} {} {} {} 起 {} 分钟", vendor_label(&self.source), self.symbol, self.date, self.hhmm, self.minutes)
+    }
+
+    /// 同一段数据（根目录与类型不算：同一段换个挂载点还是同一段）。
+    #[must_use]
+    pub fn same_as(&self, o: &Self) -> bool {
+        (self.source.as_str(), self.symbol.as_str(), self.date.as_str(), self.hhmm.as_str(), self.minutes)
+            == (o.source.as_str(), o.symbol.as_str(), o.date.as_str(), o.hhmm.as_str(), o.minutes)
+    }
+}
+
+/// 正在看的回放是哪段数据（没在回放 = `None`）。
+#[must_use]
+pub fn current_seg() -> Option<DataSeg> {
+    let g = cell().lock().ok()?;
+    g.reading.as_ref()?;
+    match &g.run.as_ref()?.sel {
+        Selection::Local { source, root, market, symbol, date, window, types, .. } => {
+            let (hhmm, minutes) = window.clone().unwrap_or_else(|| ("00:00".into(), 30));
+            Some(DataSeg {
+                source: source.clone(),
+                root: root.clone(),
+                market: market.clone(),
+                symbol: symbol.clone(),
+                date: date.clone(),
+                hhmm,
+                minutes,
+                types: types.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// 开这段数据的回放（画线分析打开时；已经在看同一段就不重开）。返回是否新开了。
+pub fn open_seg(seg: &DataSeg) -> bool {
+    if current_seg().is_some_and(|c| c.same_as(seg)) {
+        return false;
+    }
+    let Ok(mut g) = cell().lock() else { return false };
+    let sel = Selection::Local {
+        source: seg.source.clone(),
+        root: seg.root.clone(),
+        market: seg.market.clone(),
+        symbol: seg.symbol.clone(),
+        date: seg.date.clone(),
+        window: Some((seg.hhmm.clone(), seg.minutes)),
+        types: seg.types.clone(),
+        end: seg.date.clone(),
+        channel: String::new(),
+    };
+    launch(&mut g, sel)
 }
 
 /// 主循环每帧调：处理 `WS_FEATURE_REPLAY`（只第一次有事）。

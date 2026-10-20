@@ -955,8 +955,9 @@ impl ViewState {
         }
     }
 
-    /// 别的图拖动 / 缩放了：把视野中心移到同一时刻（保留自己的缩放）；`Live` = 回到跟随最新。`fit` = 这张图能「适配可见」。
-    pub fn apply_view_sync(&mut self, fit: bool) {
+    /// 别的图拖动 / 缩放了：把视野中心移到同一时刻（保留自己的缩放）；`Live` = 回到跟随最新。`fit` = 这张图能「适配可见」；
+    /// `live` = 跟随最新时的平移（图自己的 `autoscaled_coords`）。
+    pub fn apply_view_sync(&mut self, fit: bool, live: Vector) {
         let Some((ver, src, v)) = crate::ws::replay_clock::view_sync(self.view_seen) else { return };
         self.view_seen = ver;
         if src == self.linked_id() || !matches!(self.basis, Basis::Time(_)) {
@@ -969,7 +970,12 @@ impl ViewState {
                     self.layout.autoscale = fit.then_some(Autoscale::FitToVisible);
                 }
             }
-            crate::ws::replay_clock::ViewSync::Live => self.layout.autoscale = Some(Autoscale::CenterLatest),
+            // 正在「适配可见」的图保留适配（纵轴靠它定格高；改成「居中最新」的话新图那份没纠正过的格高就留下了——
+            // 打开分析后价格轴只剩 0.3 美元高，实测），只把横向移到最新
+            crate::ws::replay_clock::ViewSync::Live => match self.layout.autoscale {
+                Some(Autoscale::FitToVisible) => self.translation.x = live.x,
+                _ => self.layout.autoscale = Some(Autoscale::CenterLatest),
+            },
         }
     }
 

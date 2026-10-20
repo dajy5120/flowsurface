@@ -646,6 +646,14 @@ impl KlineChart {
     /// 与 [`Self::clear_data`] 不同，它不把视野复位——人调好的缩放往回跳一步就丢，没法看。
     /// 「最新位置」照样复位（新数据比旧的早，不复位的话视窗不动、蜡烛在屏幕外）。
     pub fn clear_data_keep_view(&mut self) -> Option<Action> {
+        // 图里还没数据：视图（格高等）是新建时按空数据定的、还没被纠正过，留着只会把错的带下去
+        let empty = match &self.data_source {
+            PlotData::TimeBased(ts) => ts.datapoints.is_empty(),
+            PlotData::TickBased(ta) => ta.datapoints.is_empty(),
+        };
+        if empty {
+            return self.clear_data();
+        }
         let c = &self.chart;
         let keep = (c.scaling, c.cell_width, c.cell_height, c.layout.autoscale, c.translation);
         let r = self.clear_data();
@@ -840,7 +848,8 @@ impl KlineChart {
         }
         // 特征回放（docs/51 P3）：别的时间轴图被拖动 / 缩放了，视野中心跟过去
         let fit = self.supports_fit_autoscaling();
-        self.chart.apply_view_sync(fit);
+        let live = self.autoscaled_coords();
+        self.chart.apply_view_sync(fit, live);
         // 画线到价提醒（docs/46 G5）：每次有新数据，拿最新一根的收盘价查一遍（时间用那根 K 线的，回放时也对）
         let last = match &self.data_source {
             PlotData::TimeBased(ts) => ts.datapoints.values().next_back().map(|d| d.kline),

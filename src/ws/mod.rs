@@ -76,6 +76,7 @@ pub mod factory_readout;
 pub mod factory_view;
 pub mod feature_feed;
 pub mod replay_clock;
+pub mod analysis_state;
 pub mod replay_cond;
 pub mod timeline;
 pub mod feature_lab_readout;

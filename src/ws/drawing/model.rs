@@ -290,6 +290,9 @@ pub struct Drawing {
     /// 到价提醒（G5）：价格穿过这条线时提醒——**只提醒，不下单**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alert: Option<Alert>,
+    /// 所属的分析（docs/52）：分析的 id；没有 = 默认画板（旧对象都是）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
     /// 认不得的字段（新版本加的）原样保留
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -327,6 +330,7 @@ impl Drawing {
             va: None,
             alert: None,
             extend: false,
+            sheet: None,
             extra: Map::new(),
         }
     }
@@ -646,7 +650,7 @@ pub fn estimate(d: &Drawing, multiplier: f64) -> Option<PosEstimate> {
 }
 
 /// 对象 id：毫秒时间戳 + 进程内序号（同一毫秒里连建几个也不撞）。
-fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
