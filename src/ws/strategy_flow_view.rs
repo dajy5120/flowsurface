@@ -1437,6 +1437,43 @@ fn field<'a>(label: String, hint: &str, value: String, on: impl Fn(String) -> Fl
     labelled(label, text_input(hint, &value).on_input(on).size(t::s_small()).into(), note)
 }
 
+/// 分类（docs/37 §3.1）：策略中心「按类型 / 按结论」分组、搜索标签用的就是这些，保存时写进 `[strategy]`。
+fn classify<'a>(v: &View) -> Element<'a, FlMsg> {
+    use super::strategy_center_lib::STYLES;
+    let st = &v.graph.strategy;
+    let styles = sf::meta_list(st, "styles");
+    let mut chips = row![].spacing(space(1));
+    for (k, label) in STYLES {
+        let at = styles.iter().position(|x| x == k);
+        let text = match at {
+            Some(0) => format!("{label}（主）"),
+            _ => label.to_string(),
+        };
+        chips = chips.push(w::btn(text, if at.is_some() { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::MetaStyle(k.to_string()))));
+    }
+    let note = if styles.is_empty() {
+        "没选 = 策略中心里「未归类」。点一下选上、再点去掉；最多 3 个，先选的是主类型（按类型分组看它）".to_string()
+    } else {
+        format!("已选 {}/{}；先选的是主类型，要换主类型就先去掉再按想要的先后选", styles.len(), sf::MAX_STYLES)
+    };
+    let verdict = sf::meta_str(st, "verdict");
+    let verdict = if verdict.is_empty() { "untested".to_string() } else { verdict };
+    let mut verdicts = row![].spacing(space(1));
+    for k in ["untested", "candidate", "alive", "paper", "live", "falsified", "retired"] {
+        let on = verdict == k;
+        verdicts = verdicts.push(w::btn(super::strategy_center_view::verdict_label(k), if on { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::MetaVerdict(k.to_string()))));
+    }
+    let tags = v.form.get(sf::TAGS_FORM).cloned().unwrap_or_else(|| sf::meta_list(st, "tags").join(", "));
+    column![
+        labelled("类型".into(), chips.wrap().into(), note),
+        labelled("结论".into(), verdicts.wrap().into(), "研究结论，不是绩效分；策略中心「按结论」分组、过滤用它".into()),
+        field("结论说明".into(), "例如 成本后净 −0.3bp，证伪", sf::meta_str(st, "verdict_note"), FlMsg::MetaVerdictNote, String::new()),
+        field("标签".into(), "absorption, btc, intraday", tags, FlMsg::MetaTags, "逗号或空格分开；只用来搜索（策略中心还会自动加 swe_workflow）".into()),
+    ]
+    .spacing(space(2))
+    .into()
+}
+
 /// 一个参数：按它的类型给控件（docs/45 §4.3）。
 fn param_field<'a>(v: &View, n: &Node, pd: &ParamDef) -> Element<'a, FlMsg> {
     let (id, name) = (n.id.clone(), pd.name.clone());
@@ -1729,6 +1766,7 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
         col = col.push(w::section("这份策略"));
         col = col.push(field("id（主题.名字）".into(), "ea.my_strategy", v.graph.id.clone(), FlMsg::MetaId, "决定文件放在哪：strategies/research/<主题>/<名字>".into()));
         col = col.push(field("显示名".into(), "", v.graph.name.clone(), FlMsg::MetaName, String::new()));
+        col = col.push(classify(v));
         col = col.push(t::metadata(match &v.path {
             Some(p) => format!("文件：{p}"),
             None => "还没保存".to_string(),

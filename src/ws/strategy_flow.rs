@@ -1131,6 +1131,11 @@ pub enum FlMsg {
     Pace(String),
     MetaId(String),
     MetaName(String),
+    /// 分类（docs/37 §3.1）：类型点一下加 / 再点去掉（最多 3 个，先加的是主类型）、结论、结论说明、标签（逗号分隔）
+    MetaStyle(String),
+    MetaVerdict(String),
+    MetaVerdictNote(String),
+    MetaTags(String),
     AddNode(String),
     /// 只选这一个（None = 全不选）
     Select(Option<String>),
@@ -1611,6 +1616,62 @@ pub fn rows_table(rows: &[[String; 3]]) -> Option<Value> {
         }
     }
     (!out.is_empty()).then_some(Value::Object(out))
+}
+
+/// 标签输入框原文的键（允许打到一半的逗号）。
+pub const TAGS_FORM: &str = "meta\u{1}tags";
+
+/// 策略分类最多几个类型（与 `factory.lab.contract` 一致）。
+pub const MAX_STYLES: usize = 3;
+
+/// 图的 `strategy`（保存时原样进 `.swe.toml` 的 `[strategy]`）里的一个字符串列表。
+#[must_use]
+pub fn meta_list(strategy: &Value, key: &str) -> Vec<String> {
+    strategy.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
+/// 图的 `strategy` 里的一个字符串（没有 = 空串）。
+#[must_use]
+pub fn meta_str(strategy: &Value, key: &str) -> String {
+    strategy.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
+}
+
+/// 改 `strategy` 的一项：空值（空串、空列表）就删掉这一项，免得写出 `styles = []`。
+fn set_meta(strategy: &mut Value, key: &str, v: Value) {
+    if !strategy.is_object() {
+        *strategy = Value::Object(Map::new());
+    }
+    let Some(m) = strategy.as_object_mut() else { return };
+    let empty = matches!(&v, Value::String(x) if x.is_empty()) || matches!(&v, Value::Array(a) if a.is_empty());
+    if empty {
+        m.remove(key);
+    } else {
+        m.insert(key.to_string(), v);
+    }
+}
+
+/// 类型点一下：没选就加在后面（第一个是主类型），选了就去掉。满 3 个再加：不改，返回说明。
+pub fn toggle_style(styles: &mut Vec<String>, k: &str) -> Result<(), String> {
+    if let Some(i) = styles.iter().position(|x| x == k) {
+        styles.remove(i);
+    } else if styles.len() >= MAX_STYLES {
+        return Err(format!("类型最多 {MAX_STYLES} 个：先去掉一个"));
+    } else {
+        styles.push(k.to_string());
+    }
+    Ok(())
+}
+
+/// 标签原文 → 列表：逗号（中英文）、顿号、空白都算分隔；去掉重复，保留先后。
+#[must_use]
+pub fn parse_tags(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in text.split(|c: char| c == ',' || c == '，' || c == '、' || c.is_whitespace()).map(str::trim).filter(|t| !t.is_empty()) {
+        if !out.iter().any(|x| x == t) {
+            out.push(t.to_string());
+        }
+    }
+    out
 }
 
 pub fn form_key(node: &str, param: &str) -> String {
@@ -3078,6 +3139,42 @@ pub fn handle(m: FlMsg) {
                 g.graph.name = v;
             });
         }
+        FlMsg::MetaStyle(k) => {
+            with(|g| {
+                let mut styles = meta_list(&g.graph.strategy, "styles");
+                match toggle_style(&mut styles, &k) {
+                    Ok(()) => {
+                        edit(g, "");
+                        set_meta(&mut g.graph.strategy, "styles", Value::from(styles));
+                    }
+                    Err(e) => g.msg = e,
+                }
+            });
+        }
+        FlMsg::MetaVerdict(v) => {
+            with(|g| {
+                // 选中的按钮也可点（不可点的按钮发灰，看着像没选中）：点同一个什么都不做
+                if meta_str(&g.graph.strategy, "verdict") == v {
+                    return;
+                }
+                edit(g, "");
+                set_meta(&mut g.graph.strategy, "verdict", Value::from(v));
+            });
+        }
+        FlMsg::MetaVerdictNote(v) => {
+            with(|g| {
+                edit(g, "meta.verdict_note");
+                // 不 trim：逐键都写回，trim 会吃掉刚打的空格；全是空白才算没写
+                set_meta(&mut g.graph.strategy, "verdict_note", Value::from(if v.trim().is_empty() { String::new() } else { v }));
+            });
+        }
+        FlMsg::MetaTags(text) => {
+            with(|g| {
+                edit(g, "meta.tags");
+                set_meta(&mut g.graph.strategy, "tags", Value::from(parse_tags(&text)));
+                g.form.insert(TAGS_FORM.to_string(), text);
+            });
+        }
         FlMsg::AddNode(refer) => {
             with(|g| {
                 // 放在当前视野的左上附近，逐个错开
@@ -3892,6 +3989,31 @@ pub fn busy() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classification_goes_into_strategy_and_empty_values_drop_out() {
+        let mut st = Value::Null;
+        let mut styles = meta_list(&st, "styles");
+        for k in ["orderflow", "mean_reversion", "momentum"] {
+            toggle_style(&mut styles, k).unwrap();
+        }
+        assert!(toggle_style(&mut styles, "trend").unwrap_err().contains("最多 3"), "满 3 个不再加");
+        toggle_style(&mut styles, "mean_reversion").unwrap();
+        toggle_style(&mut styles, "trend").unwrap();
+        assert_eq!(styles, vec!["orderflow", "momentum", "trend"], "先选的是主类型，去掉的从中间拿走");
+        set_meta(&mut st, "styles", Value::from(styles));
+        set_meta(&mut st, "verdict", Value::from("candidate"));
+        set_meta(&mut st, "tags", Value::from(parse_tags("btc, absorption，intraday、btc  dsl ,")));
+        assert_eq!(meta_list(&st, "tags"), vec!["btc", "absorption", "intraday", "dsl"], "各种分隔、去重、保留先后");
+        assert_eq!(meta_str(&st, "verdict"), "candidate");
+        set_meta(&mut st, "tags", Value::from(parse_tags(" , ")));
+        set_meta(&mut st, "styles", Value::from(Vec::<String>::new()));
+        assert_eq!(st, serde_json::json!({"verdict": "candidate"}), "清空了就删掉这一项，不写 styles = []");
+        // 别的字段（docs、replaces…）原样留着
+        let mut st = serde_json::json!({"docs": ["docs/40"], "verdict": "falsified"});
+        set_meta(&mut st, "verdict_note", Value::from("成本后为负"));
+        assert_eq!(st["docs"][0], "docs/40");
+    }
 
     #[test]
     fn graph_json_roundtrips_with_python_field_names() {
