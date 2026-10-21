@@ -252,6 +252,14 @@ impl RunRow {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScMsg {
     Refresh,
+    /// 改分类（docs/37 §19）：打开 / 收起编辑、类型点一下加 / 再点去掉、结论、结论说明、标签、写回策略文件
+    ClsOpen,
+    ClsCancel,
+    ClsStyle(String),
+    ClsVerdict(String),
+    ClsNote(String),
+    ClsTags(String),
+    ClsSave,
     Select(String),
     Search(String),
     Verdict(Option<String>),
@@ -388,6 +396,8 @@ struct St {
     ai_err: String,
     /// 策略库过滤（存本机）
     lib: Option<LibFilter>,
+    /// 改分类的草稿（打开了编辑才有）
+    cls: Option<ClsEdit>,
 }
 
 static ST: OnceLock<Mutex<St>> = OnceLock::new();
@@ -414,6 +424,123 @@ fn db_path() -> PathBuf {
 
 fn control_sock() -> PathBuf {
     super::paths::runtime_dir().join("control.sock")
+}
+
+/// 改分类的草稿（docs/37 §19）：打开编辑时从策略的元数据抄一份，改完「写回策略文件」——
+/// 分类只有一份真相（策略文件），写的人只有 Python（`factory.lab.classify`，写完重读核对、不对就还原）。
+#[derive(Debug, Clone, Default)]
+pub struct ClsEdit {
+    pub id: String,
+    pub path: String,
+    pub styles: Vec<String>,
+    pub verdict: String,
+    pub note: String,
+    /// 标签原文（逗号、空格分隔；保存时才拆）
+    pub tags: String,
+    pub saving: bool,
+    pub err: String,
+}
+
+impl ClsEdit {
+    fn of(e: &Entry) -> Option<Self> {
+        let m = e.meta.as_ref()?;
+        Some(Self {
+            id: e.id.clone(),
+            path: e.path.clone(),
+            styles: m.styles.clone(),
+            verdict: m.verdict.clone(),
+            note: m.verdict_note.clone(),
+            // 工作流的 swe_workflow 是目录扫描自动加的，不写进文件
+            tags: m.tags.iter().filter(|t| *t != "swe_workflow").cloned().collect::<Vec<_>>().join(", "),
+            ..Self::default()
+        })
+    }
+
+    /// 发给 `factory.lab classify --set` 的 JSON。
+    #[must_use]
+    pub fn payload(&self) -> Value {
+        serde_json::json!({
+            "styles": self.styles, "verdict": self.verdict, "verdict_note": self.note.trim(),
+            "tags": super::strategy_flow::parse_tags(&self.tags),
+        })
+    }
+
+    /// 能写回哪些文件（画布工作流连图一起改）。
+    #[must_use]
+    pub fn files(&self) -> String {
+        match self.path.strip_suffix(".swe.toml") {
+            Some(stem) if super::paths::repo_root().join(format!("{stem}.swe.graph.json")).exists() => {
+                format!("{} 与 {stem}.swe.graph.json", self.path)
+            }
+            _ => self.path.clone(),
+        }
+    }
+}
+
+/// 写回分类：只在后台跑 `python -m factory.lab classify`，成功就重读目录。
+fn save_cls() {
+    let Some((path, payload)) = with(|g| {
+        let c = g.cls.as_mut()?;
+        if c.saving {
+            return None;
+        }
+        c.saving = true;
+        c.err.clear();
+        Some((c.path.clone(), c.payload().to_string()))
+    })
+    .flatten() else {
+        return;
+    };
+    super::spawn_named("ws-stratcls", move || {
+        let out = std::process::Command::new(super::paths::python())
+            .args(["-m", "factory.lab", "classify", &path, "--set", &payload, "--json"])
+            .current_dir(super::paths::repo_root())
+            .output();
+        let r: Result<(Vec<String>, Value), String> = match out {
+            Ok(o) => match serde_json::from_slice::<Value>(&o.stdout) {
+                Ok(v) if v["ok"] == true => Ok((
+                    v["files"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+                    v["meta"].clone(),
+                )),
+                Ok(v) => Err(v["error"].as_str().unwrap_or("写回失败").to_string()),
+                Err(_) => Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("写回失败").to_string()),
+            },
+            Err(e) => Err(format!("起不来 Python：{e}")),
+        };
+        let ok = r.is_ok();
+        with(|g| match r {
+            Ok((files, meta)) => {
+                // 先用 Python 写完重读出来的分类更新界面：整个目录重读要十几秒
+                let strs = |k: &str| meta[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>());
+                if let Some(m) = g.catalog.iter_mut().find(|e| e.path == path).and_then(|e| e.meta.as_mut()) {
+                    if let Some(v) = strs("styles") {
+                        m.styles = v;
+                    }
+                    if let Some(v) = strs("tags") {
+                        m.tags = v;
+                    }
+                    if let Some(v) = meta["verdict"].as_str() {
+                        m.verdict = v.to_string();
+                    }
+                    if let Some(v) = meta["verdict_note"].as_str() {
+                        m.verdict_note = v.to_string();
+                    }
+                }
+                g.cls = None;
+                g.msg = format!("分类已写回 {}", files.join("、"));
+            }
+            Err(e) => {
+                if let Some(c) = g.cls.as_mut() {
+                    c.saving = false;
+                    c.err = e;
+                }
+            }
+        });
+        if ok {
+            load_catalog();
+        }
+        KICK.store(true, Ordering::Relaxed);
+    });
 }
 
 // ── 视图读的快照 ────────────────────────────────────────────────────────
@@ -466,6 +593,7 @@ pub struct View {
     pub ai_loading: bool,
     pub ai_err: String,
     pub lib: LibFilter,
+    pub cls: Option<ClsEdit>,
 }
 
 /// 页签状态角标（docs/41 §3.4）：有排队 / 在跑的运行。
@@ -542,6 +670,7 @@ pub fn view() -> View {
         ai_loading: g.ai_loading,
         ai_err: g.ai_err.clone(),
         lib: g.lib.clone().unwrap_or_default(),
+        cls: g.cls.clone(),
     }
 }
 
@@ -1089,6 +1218,7 @@ fn same_value(a: &Value, b: &Value) -> bool {
 
 fn select_in(g: &mut St, id: &str) {
     g.selected = Some(id.to_string());
+    g.cls = None;
     g.runs.clear();
     g.studies.clear();
     g.validations.clear();
@@ -1202,6 +1332,31 @@ pub fn handle(m: ScMsg) {
             load_catalog();
             KICK.store(true, Ordering::Relaxed);
         }
+        ScMsg::ClsOpen => {
+            with(|g| {
+                g.cls = g.selected.as_ref().and_then(|id| g.catalog.iter().find(|e| &e.id == id)).and_then(ClsEdit::of);
+            });
+        }
+        ScMsg::ClsCancel => {
+            with(|g| g.cls = None);
+        }
+        ScMsg::ClsStyle(k) => {
+            with(|g| {
+                if let Some(c) = g.cls.as_mut() {
+                    c.err = super::strategy_flow::toggle_style(&mut c.styles, &k).err().unwrap_or_default();
+                }
+            });
+        }
+        ScMsg::ClsVerdict(v) => {
+            with(|g| g.cls.as_mut().map(|c| c.verdict = v));
+        }
+        ScMsg::ClsNote(v) => {
+            with(|g| g.cls.as_mut().map(|c| c.note = v));
+        }
+        ScMsg::ClsTags(v) => {
+            with(|g| g.cls.as_mut().map(|c| c.tags = v));
+        }
+        ScMsg::ClsSave => save_cls(),
         ScMsg::Select(id) => {
             with(|g| select_in(g, &id));
             KICK.store(true, Ordering::Relaxed);
@@ -1615,6 +1770,28 @@ mod master_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_draft_copies_meta_and_sends_clean_payload() {
+        let e = Entry {
+            id: "intraday.x".into(),
+            path: "strategies/research/intraday/x.swe.toml".into(),
+            meta: Some(Meta {
+                styles: vec!["momentum".into()],
+                verdict: "alive".into(),
+                verdict_note: "说明".into(),
+                tags: vec!["gold".into(), "swe_workflow".into()],
+                ..Meta::default()
+            }),
+            ..Entry::default()
+        };
+        let mut c = ClsEdit::of(&e).unwrap();
+        assert_eq!(c.tags, "gold", "目录扫描自动加的 swe_workflow 不抄进来");
+        c.tags = "gold，rsi  gold".into();
+        c.note = " 新说明 ".into();
+        assert_eq!(c.payload(), json!({"styles": ["momentum"], "verdict": "alive", "verdict_note": "新说明", "tags": ["gold", "rsi"]}));
+        assert!(ClsEdit::of(&Entry::default()).is_none(), "元数据读不出来的不能改分类");
+    }
 
     fn p(name: &str, kind: &str, default: Value) -> Param {
         Param { name: name.into(), kind: kind.into(), default, ..Default::default() }

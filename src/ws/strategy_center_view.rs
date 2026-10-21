@@ -311,6 +311,44 @@ fn param_row<'a>(p: &Param, v: &View) -> Element<'a, ScMsg> {
     c.into()
 }
 
+/// 改分类（docs/37 §19）：类型（13 选 ≤3，先选的是主类型）、结论、结论说明、标签；「写回策略文件」由 Python 写、重读核对。
+fn classify_editor<'a>(c: &super::strategy_center::ClsEdit) -> Element<'a, ScMsg> {
+    use super::strategy_center_lib::STYLES;
+    let mut chips = row![].spacing(space(1));
+    for (k, label) in STYLES {
+        let at = c.styles.iter().position(|x| x == k);
+        let text = if at == Some(0) { format!("{label}（主）") } else { label.to_string() };
+        chips = chips.push(w::btn(text, if at.is_some() { Kind::Standard } else { Kind::Ghost }, Some(ScMsg::ClsStyle(k.to_string()))));
+    }
+    let mut verdicts = row![].spacing(space(1));
+    for k in ["untested", "candidate", "alive", "paper", "live", "falsified", "retired"] {
+        verdicts = verdicts.push(w::btn(verdict_label(k), if c.verdict == k { Kind::Standard } else { Kind::Ghost }, Some(ScMsg::ClsVerdict(k.to_string()))));
+    }
+    let lab = |s: &str| container(t::caption(s.to_string())).width(Length::Fixed(LABEL_W));
+    let mut col = column![
+        w::section("分类（写回策略文件）"),
+        row![lab("类型"), chips.wrap()].spacing(space(2)),
+        row![Space::new().width(Length::Fixed(LABEL_W)), t::metadata(format!("已选 {}/3；先选的是主类型（「按类型」按它分组）。没选 = 未归类", c.styles.len())).color(pal::dim())].spacing(space(2)),
+        row![lab("结论"), verdicts.wrap()].spacing(space(2)),
+        row![lab("结论说明"), text_input("例如 成本后净 −0.3bp，证伪", &c.note).on_input(ScMsg::ClsNote).size(t::s_small())].spacing(space(2)).align_y(Alignment::Center),
+        row![lab("标签"), text_input("逗号或空格分开", &c.tags).on_input(ScMsg::ClsTags).size(t::s_small())].spacing(space(2)).align_y(Alignment::Center),
+        row![
+            Space::new().width(Length::Fixed(LABEL_W)),
+            w::btn_busy("写回策略文件", Kind::Primary, (!c.saving).then_some(ScMsg::ClsSave), c.saving),
+            w::btn("取消", Kind::Ghost, Some(ScMsg::ClsCancel)),
+            t::metadata(format!("改的是 {}；只动这四项，写完重读核对，不对就还原", c.files())).color(pal::dim()),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center)
+        .wrap(),
+    ]
+    .spacing(space(2));
+    if !c.err.is_empty() {
+        col = col.push(t::caption(c.err.clone()).color(pal::bad()));
+    }
+    container(col).padding(space(3)).style(|_| iced::widget::container::Style { border: crate::ui::metrics::hairline(crate::ui::metrics::radius::SM), ..Default::default() }).into()
+}
+
 fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
     let Some(e) = &v.selected else {
         return container(w::empty("选一个策略", "左侧策略库里点一个")).width(Length::FillPortion(5)).into();
@@ -321,11 +359,24 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
     let mut col = column![w::panel_header(
         m.name.clone(),
         Some(verdict_badge(&m.verdict)),
-        vec![w::btn("打开源码", Kind::Subtle, Some(ScMsg::OpenSource))],
+        vec![
+            w::btn(if v.cls.is_some() { "✎ 分类 ▴" } else { "✎ 分类" }, Kind::Subtle, Some(if v.cls.is_some() { ScMsg::ClsCancel } else { ScMsg::ClsOpen })),
+            w::btn("打开源码", Kind::Subtle, Some(ScMsg::OpenSource)),
+        ],
     )]
     .spacing(space(2));
 
     col = col.push(t::metadata(format!("{} · v{} · {}", m.id, m.version, e.path)).color(pal::dim()));
+    if !m.styles.is_empty() {
+        let st: Vec<String> = m.styles.iter().enumerate().map(|(i, s)| {
+            let l = super::strategy_center_lib::style_label(s);
+            if i == 0 && m.styles.len() > 1 { format!("{l}（主）") } else { l.to_string() }
+        }).collect();
+        col = col.push(t::metadata(format!("类型：{}", st.join("、"))).color(pal::dim()));
+    }
+    if let Some(c) = &v.cls {
+        col = col.push(classify_editor(c));
+    }
     if !m.verdict_note.is_empty() {
         col = col.push(t::caption(format!("研究结论：{}", m.verdict_note)));
     }
