@@ -1137,6 +1137,25 @@ pub enum FlMsg {
     AiEdit(iced::widget::text_editor::Action),
     AiDraft,
     AiLoad,
+    /// 改当前图（AI2）：`true` = 改当前图，`false` = 起草新图
+    AiMode(bool),
+    /// 应用 AI 的改动（可撤销）/ 不要
+    AiApply,
+    AiDiscard,
+    /// 新对话：清掉之前几轮
+    AiNewChat,
+    /// 清空描述框（编辑器在面板里，见 pane.rs）
+    AiClear,
+    /// 试跑：先保存，按图里的数据只跑第一天、全速，只验能跑通
+    AiTrial,
+    /// 写法（AI3）：auto / graph / dsl
+    AiRoute(String),
+    /// 把描述语言起草存成 specs 下的文件
+    AiDslSave,
+    /// 起草一个新模块（要补的那一块）
+    AiModule(String),
+    /// 把起草的模块加入模块库
+    AiModuleAccept,
     AiProv(super::ai_providers::AiMsg),
     MetaStyle(String),
     MetaVerdict(String),
@@ -1271,6 +1290,8 @@ struct St {
     pick: DataPick,
     /// 端到端自测钩子（`WS_FLOW_RUN`）用：这次运行把结束日改成它，不改图
     auto_end: Option<String>,
+    /// 这一次运行是试跑：不用倍速（全速），跑完就算
+    trial_once: bool,
     pace: String,
     run_id: String,
     child: Option<Child>,
@@ -1363,6 +1384,7 @@ impl Default for St {
             zoom: 1.0,
             pick: DataPick::default(),
             auto_end: None,
+            trial_once: false,
             pace: "3600".into(),
             run_id: String::new(),
             child: None,
@@ -1644,6 +1666,29 @@ pub struct AiState {
     pub err: String,
     /// 当前图有没保存的改动：「放进画布」点了一次，等确认
     pub confirm: bool,
+    /// 改当前图还是起草新图（`None` = 看画布：有图就改，空的就新起草）
+    pub edit_mode: Option<bool>,
+    /// 之前几轮对话（你说的, AI 的说明）；「新对话」清空
+    pub history: Vec<(String, String)>,
+    /// 改图的结果已经应用了
+    pub applied: bool,
+    /// 写法（AI3）：空 / "auto" = 让 AI 定；"graph"；"dsl"
+    pub route: String,
+    /// 描述语言起草已经存成文件了（路径）
+    pub dsl_saved: Option<String>,
+    /// 起草新模块（AI3）：在起草哪一块、结果、加入了没有
+    pub module_need: String,
+    pub module_busy: bool,
+    pub module: Option<Value>,
+    pub module_accepted: Option<String>,
+}
+
+impl AiState {
+    /// 这次是改当前图吗：选了就按选的；没选看画布上有没有图（除了执行节点还有别的）。
+    #[must_use]
+    pub fn editing(&self, graph: &Graph) -> bool {
+        self.edit_mode.unwrap_or(graph.nodes.len() > 1)
+    }
 }
 
 /// 描述框的原文（面板新建时用它恢复编辑器）。
@@ -1659,7 +1704,7 @@ pub fn set_ai_text(text: String) {
 
 /// 起草：后台跑 `python -m factory.ai draft --stdin --json`（描述走标准输入，多行也行）。
 fn ai_draft() {
-    let Some((text, provider)) = with(|g| {
+    let Some((req, provider)) = with(|g| {
         if g.ai.busy || g.ai.text.trim().is_empty() {
             return None;
         }
@@ -1667,25 +1712,49 @@ fn ai_draft() {
         g.ai.started = Some(Instant::now());
         g.ai.err.clear();
         g.ai.confirm = false;
+        g.ai.applied = false;
         g.ai.provider = super::ai_providers::current();
-        Some((g.ai.text.clone(), super::ai_providers::chosen()))
+        let editing = g.ai.editing(&g.graph);
+        // 改当前图（AI2）：把画布上的图与之前几轮对话一起交给 Python
+        let history: Vec<Value> = g.ai.history.iter().map(|(u, r)| serde_json::json!({"user": u, "reply": r})).collect();
+        g.ai.dsl_saved = None;
+        let route = if editing || g.ai.route.is_empty() || g.ai.route == "auto" { Value::Null } else { Value::String(g.ai.route.clone()) };
+        let req = serde_json::json!({
+            "request": g.ai.text,
+            "base": if editing { serde_json::to_value(&g.graph).unwrap_or(Value::Null) } else { Value::Null },
+            "history": history,
+            "route": route,
+        });
+        Some((req.to_string(), super::ai_providers::chosen()))
     })
     .flatten() else {
         return;
     };
     super::spawn_named("ws-flowai", move || {
-        let mut args: Vec<&str> = vec!["-m", "factory.ai", "draft", "--stdin", "--json"];
+        let mut args: Vec<&str> = vec!["-m", "factory.ai", "draft", "--stdin-json", "--json"];
         if let Some(p) = provider.as_deref() {
             args.extend(["--provider", p]);
         }
-        let r = python(&args, Some(text.as_bytes())).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| format!("起草结果解析失败：{e}")));
+        let r = python(&args, Some(req.as_bytes())).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| format!("起草结果解析失败：{e}")));
         with(|g| {
             g.ai.busy = false;
             match r {
                 Ok(v) if v.get("draft_id").is_some() => {
                     let has_graph = v.get("graph").is_some_and(|x| !x.is_null());
+                    let editing = v.get("mode").and_then(Value::as_str) == Some("edit");
+                    let reply = v.get("reply").and_then(Value::as_str).unwrap_or("").replace("**", "");
+                    let user = g.ai.text.trim().to_string();
+                    if !reply.is_empty() {
+                        g.ai.history.push((user, reply));
+                    }
                     g.ai.result = Some(v);
-                    if has_graph && !g.dirty {
+                    if editing {
+                        // 改图不自动应用：先看改动预览，点「应用改动」才换（可撤销）
+                        g.msg = "AI 改好了：在 AI 页看改动预览，点「应用改动」才会改画布".into();
+                    } else if v_is_dsl(g) {
+                        // 描述语言写法：规格存成 specs 下的文件；画布写法只是预览，不自动放进画布
+                        g.msg = "AI 写成了描述语言：在 AI 页看规格，点「保存为描述语言文件」".into();
+                    } else if has_graph && !g.dirty {
                         ai_load_in(g);
                     } else if has_graph {
                         g.msg = "AI 起草好了：当前图有没保存的改动，点 AI 页里的「放进画布」替换".into();
@@ -1693,6 +1762,55 @@ fn ai_draft() {
                 }
                 Ok(v) => g.ai.err = v.get("error").and_then(Value::as_str).unwrap_or("起草失败").to_string(),
                 Err(e) => g.ai.err = e,
+            }
+        });
+    });
+}
+
+fn v_is_dsl(g: &St) -> bool {
+    g.ai.result.as_ref().and_then(|r| r.get("route")).and_then(Value::as_str) == Some("dsl")
+}
+
+/// 跑 `python -m factory.ai <args>`，要 `{"ok": true, …}`；`stdin` 给的话写进标准输入。
+fn ai_cmd(args: &[&str], stdin: Option<&str>) -> Result<Value, String> {
+    let mut full = vec!["-m", "factory.ai"];
+    full.extend_from_slice(args);
+    let v = python(&full, stdin.map(str::as_bytes)).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| format!("结果解析失败：{e}")))?;
+    if v.get("ok") == Some(&Value::Bool(false)) {
+        return Err(v.get("error").and_then(Value::as_str).unwrap_or("失败").to_string());
+    }
+    Ok(v)
+}
+
+/// 起草一个新模块（AI3）：后台跑 `factory.ai module`，代码与契约测试结果回到 AI 页；不往仓库里留文件。
+fn ai_module(need: String) {
+    let Some((ctx, provider)) = with(|g| {
+        if g.ai.module_busy {
+            return None;
+        }
+        g.ai.module_busy = true;
+        g.ai.module_need.clone_from(&need);
+        g.ai.module = None;
+        g.ai.module_accepted = None;
+        g.ai.err.clear();
+        let ctx = g.ai.history.last().map(|(u, _)| u.clone()).unwrap_or_else(|| g.ai.text.clone());
+        Some((ctx, super::ai_providers::chosen()))
+    })
+    .flatten() else {
+        return;
+    };
+    super::spawn_named("ws-flowaimod", move || {
+        let req = serde_json::json!({"need": need, "context": ctx}).to_string();
+        let mut args = vec!["module", "--stdin-json", "--json"];
+        if let Some(p) = provider.as_deref() {
+            args.extend(["--provider", p]);
+        }
+        let r = ai_cmd(&args, Some(&req));
+        with(|g| {
+            g.ai.module_busy = false;
+            match r {
+                Ok(v) => g.ai.module = Some(v),
+                Err(e) => g.ai.err = format!("起草模块失败：{e}"),
             }
         });
     });
@@ -2151,7 +2269,11 @@ fn run_async() {
         stop();
         let run_id = format!("flow-{}", chrono::Local::now().format("%H%M%S"));
         write_breakpoints(&run_id); // 回测一起来就要读到，所以在起进程之前写
-        let (args, roots, pace, auto_end) = with(|g| (run_overrides(&g.graph.backtest), root_env(&g.pick), g.pace.clone(), g.auto_end.take())).unwrap_or_default();
+        let (args, roots, pace, auto_end) = with(|g| {
+            let pace = if std::mem::take(&mut g.trial_once) { String::new() } else { g.pace.clone() };
+            (run_overrides(&g.graph.backtest), root_env(&g.pick), pace, g.auto_end.take())
+        })
+        .unwrap_or_default();
         let log = std::env::temp_dir().join(format!("ws-{run_id}.log"));
         let out = std::fs::File::create(&log).ok();
         let mut cmd = Command::new(super::paths::python());
@@ -3264,6 +3386,91 @@ pub fn handle(m: FlMsg) {
             });
         }
         FlMsg::AiProv(m) => super::ai_providers::handle(m),
+        FlMsg::AiMode(on) => {
+            with(|g| g.ai.edit_mode = Some(on));
+        }
+        FlMsg::AiNewChat => {
+            with(|g| {
+                g.ai.history.clear();
+                g.ai.result = None;
+                g.ai.err.clear();
+            });
+        }
+        // 编辑器在面板里清（pane.rs）；到这里什么都不做
+        FlMsg::AiClear => {}
+        FlMsg::AiDiscard => {
+            with(|g| {
+                g.ai.result = None;
+                g.msg = "没用 AI 的这次改动".into();
+            });
+        }
+        FlMsg::AiApply => {
+            with(|g| {
+                let Some(v) = g.ai.result.as_ref().and_then(|r| r.get("graph")).cloned() else { return };
+                match serde_json::from_value::<Graph>(v) {
+                    Ok(graph) => {
+                        edit(g, ""); // 记一步撤销：Ctrl+Z 回到改之前
+                        g.graph = graph;
+                        after_swap(g);
+                        g.ai.applied = true;
+                        g.msg = "已应用 AI 的改动（↶ / Ctrl+Z 撤销；还没保存）".into();
+                    }
+                    Err(e) => g.ai.err = format!("这张图放不进画布：{e}"),
+                }
+            });
+        }
+        FlMsg::AiRoute(r) => {
+            with(|g| g.ai.route = r);
+        }
+        FlMsg::AiDslSave => {
+            let Some(id) = with(|g| g.ai.result.as_ref().and_then(|r| r.get("draft_id")).and_then(Value::as_str).map(str::to_string)).flatten() else { return };
+            super::spawn_named("ws-flowaidsl", move || {
+                let r = ai_cmd(&["dsl-save", &id, "--json"], None);
+                with(|g| match r {
+                    Ok(v) => {
+                        let path = v.get("path").and_then(Value::as_str).unwrap_or("").to_string();
+                        g.msg = format!("已存成描述语言文件 {path}：策略中心点「刷新」就能看到");
+                        g.ai.dsl_saved = Some(path);
+                    }
+                    Err(e) => g.ai.err = format!("没存成：{e}"),
+                });
+            });
+        }
+        FlMsg::AiModule(need) => ai_module(need),
+        FlMsg::AiModuleAccept => {
+            let Some(id) = with(|g| g.ai.module.as_ref().and_then(|r| r.get("draft_id")).and_then(Value::as_str).map(str::to_string)).flatten() else { return };
+            super::spawn_named("ws-flowaimod", move || {
+                let r = ai_cmd(&["module-accept", &id, "--json"], None);
+                let ok = r.is_ok();
+                with(|g| match r {
+                    Ok(v) => {
+                        let refer = v.get("ref").and_then(Value::as_str).unwrap_or("").to_string();
+                        g.msg = format!("已加入模块库：{refer}（左边模块库里能看到；可以让 AI 重新起草用上它）");
+                        g.ai.module_accepted = Some(refer);
+                    }
+                    Err(e) => g.ai.err = format!("没加入：{e}"),
+                });
+                if ok {
+                    load_palette(); // 新模块进模块库：重读一遍
+                }
+            });
+        }
+        FlMsg::AiTrial => {
+            // 试跑：按图里的数据只跑第一天、全速；运行本身与「▶ 运行」同一条路（会先保存）
+            let go = with(|g| {
+                if g.running || g.busy {
+                    return false;
+                }
+                let (start, _) = data_range(&g.graph.backtest);
+                g.auto_end = (!start.is_empty()).then_some(start);
+                g.trial_once = true;
+                true
+            })
+            .unwrap_or(false);
+            if go {
+                run_async();
+            }
+        }
         FlMsg::MetaStyle(k) => {
             with(|g| {
                 let mut styles = meta_list(&g.graph.strategy, "styles");
@@ -4114,6 +4321,18 @@ pub fn busy() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_edits_the_current_graph_unless_told_otherwise() {
+        let mut a = AiState::default();
+        let blank = Graph::blank();
+        let mut drawn = Graph::blank();
+        drawn.nodes.push(Node { id: "n2".into(), module: "value.close".into(), ..Default::default() });
+        assert!(!a.editing(&blank), "空画布：起草新图");
+        assert!(a.editing(&drawn), "画布上有图：改它");
+        a.edit_mode = Some(false);
+        assert!(!a.editing(&drawn), "选了「起草新图」就起草新图");
+    }
 
     #[test]
     fn classification_goes_into_strategy_and_empty_values_drop_out() {

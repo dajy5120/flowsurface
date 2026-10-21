@@ -2252,9 +2252,45 @@ fn ai_panel<'a>(v: &View, content: &'a iced::widget::text_editor::Content) -> El
     if super::ai_providers::manager_open() {
         col = col.push(super::ai_providers::manager().map(FlMsg::AiProv));
     }
+    // 改当前图 / 起草新图（AI2）：缺省看画布——有图就改它
+    let editing = a.editing(&v.graph);
+    col = col.push(
+        row![
+            w::btn("改当前图", if editing { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::AiMode(true))),
+            w::btn("起草新图", if editing { Kind::Ghost } else { Kind::Standard }, Some(FlMsg::AiMode(false))),
+            t::metadata(if editing { format!("改「{}」：只出改动，看过再应用", v.graph.name) } else { "从零起草一张新图".to_string() }).color(pal::dim()),
+        ]
+        .spacing(space(1))
+        .align_y(Alignment::Center)
+        .wrap(),
+    );
+    // 写法（AI3）：起草新图时可以指定画布图 / 描述语言，缺省让 AI 定
+    if !editing {
+        let cur = if a.route.is_empty() { "auto" } else { a.route.as_str() };
+        let mut r = row![t::metadata("写法").color(pal::dim())].spacing(space(1)).align_y(Alignment::Center);
+        for (k, label) in [("auto", "AI 定"), ("graph", "画布图"), ("dsl", "描述语言")] {
+            r = r.push(w::btn(label, if cur == k { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::AiRoute(k.to_string()))));
+        }
+        col = col.push(r.push(t::metadata("描述语言 = 订单流规格（OFMS 事件触发也能写）").color(pal::dim())).wrap());
+    }
+    // 之前几轮对话（多轮：「再把止损改成 2 倍」）
+    if !a.history.is_empty() {
+        let mut h = column![row![
+            t::metadata(format!("对话（{} 轮）", a.history.len())).color(pal::dim()),
+            Space::new().width(Length::Fill),
+            w::btn("新对话", Kind::Ghost, Some(FlMsg::AiNewChat)),
+        ]
+        .align_y(Alignment::Center)]
+        .spacing(0);
+        for (u, r) in a.history.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev() {
+            h = h.push(t::caption(format!("你：{u}")));
+            h = h.push(t::metadata(format!("AI：{}", r.lines().find(|l| !l.trim().is_empty()).unwrap_or(""))).color(pal::dim()));
+        }
+        col = col.push(h);
+    }
     col = col.push(
         iced::widget::text_editor(content)
-            .placeholder("用自然语言描述策略：在什么品种、什么周期上，什么条件进场、怎么止损、什么时候出场、怎么定仓、用哪段数据回测……")
+            .placeholder(if editing { "说要怎么改：比如「止损改成 2 倍 ATR」「加一个只在欧美盘交易的过滤」「去掉最长持仓」……" } else { "用自然语言描述策略：在什么品种、什么周期上，什么条件进场、怎么止损、什么时候出场、怎么定仓、用哪段数据回测……" })
             .on_action(FlMsg::AiEdit)
             .size(t::s_small())
             .height(Length::Fixed(space(3) * 14.0)),
@@ -2262,8 +2298,9 @@ fn ai_panel<'a>(v: &View, content: &'a iced::widget::text_editor::Content) -> El
     let can = !a.text.trim().is_empty() && !a.busy;
     col = col.push(
         row![
-            w::btn_busy("起草", Kind::Primary, can.then_some(FlMsg::AiDraft), a.busy),
-            t::metadata("AI 用现有模块搭一张图并给出分类；约 1–2 分钟，每次都记账").color(pal::dim()),
+            w::btn_busy(if editing { "让 AI 改" } else { "起草" }, Kind::Primary, can.then_some(FlMsg::AiDraft), a.busy),
+            w::btn("清空", Kind::Ghost, (!a.text.is_empty()).then_some(FlMsg::AiClear)),
+            t::metadata("AI 只用现有模块；约 1–2 分钟，每次都记账").color(pal::dim()),
         ]
         .spacing(space(2))
         .align_y(Alignment::Center)
@@ -2277,12 +2314,122 @@ fn ai_panel<'a>(v: &View, content: &'a iced::widget::text_editor::Content) -> El
         col = col.push(t::caption(a.err.clone()).color(pal::bad()));
     }
     if let Some(r) = &a.result {
-        col = col.push(ai_result(r, v.dirty, a.confirm));
+        col = col.push(ai_result(r, v.dirty, a.confirm, a.applied, a.dsl_saved.as_deref(), a.module_busy));
+    }
+    if a.module_busy || a.module.is_some() {
+        col = col.push(module_result(a));
+    }
+    // 试跑（AI2）：只验能跑通——按图里的数据跑第一天、全速；要先保存（与「▶ 运行」同一条路）
+    if v.graph.nodes.len() > 1 {
+        let (start, _) = sf::data_range(&v.graph.backtest);
+        col = col.push(
+            row![
+                w::btn("试跑 1 天", Kind::Standard, (!v.running && !v.busy).then_some(FlMsg::AiTrial)),
+                t::metadata(format!(
+                    "会先保存这张图（{}），再用 {} 全速跑一遍，只验能不能跑通、有没有成交，不说明有效",
+                    if v.path.is_some() { "存回原文件" } else { "第一次保存：核对「这份策略」里的 id" },
+                    if start.is_empty() { "最新一天".to_string() } else { start }
+                ))
+                .color(pal::dim()),
+            ]
+            .spacing(space(2))
+            .align_y(Alignment::Center)
+            .wrap(),
+        );
     }
     crate::ui::scroll(col.padding(iced::Padding::ZERO.right(space(3)))).height(Length::Fill).into()
 }
 
-fn ai_result<'a>(r: &Value, dirty: bool, confirm: bool) -> Element<'a, FlMsg> {
+/// 改图的改动预览（AI2）：加了 / 删了 / 改了哪些节点，线与数据变没变；「应用改动」才换画布（可撤销）。
+fn diff_view<'a>(d: &Value, applied: bool) -> Element<'a, FlMsg> {
+    let arr = |k: &str| d.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
+    let field = |x: &Value, k: &str| x.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let mut col = column![w::section("改动预览")].spacing(space(1));
+    if d.get("empty").and_then(Value::as_bool).unwrap_or(false) {
+        col = col.push(t::caption("AI 没有改图（见上面的说明）"));
+        return col.into();
+    }
+    for x in arr("added") {
+        col = col.push(t::caption(format!("＋ {} {}", field(&x, "id"), field(&x, "use"))).color(pal::ok()));
+    }
+    for x in arr("removed") {
+        col = col.push(t::caption(format!("－ {} {}", field(&x, "id"), field(&x, "use"))).color(pal::bad()));
+    }
+    for x in arr("changed") {
+        let what: Vec<String> = x.get("what").and_then(Value::as_array).map(|a| a.iter().filter_map(|w| w.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        col = col.push(t::caption(format!("～ {} {}：{}", field(&x, "id"), field(&x, "use"), what.join("；"))).color(pal::warn()));
+    }
+    let n = |k: &str| d.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let mut extra = vec![];
+    if n("edges_added") + n("edges_removed") > 0 {
+        extra.push(format!("连线 +{} −{}", n("edges_added"), n("edges_removed")));
+    }
+    if d.get("settings").and_then(Value::as_bool).unwrap_or(false) {
+        extra.push("运行配置变了".into());
+    }
+    if d.get("backtest").and_then(Value::as_bool).unwrap_or(false) {
+        extra.push("回测数据变了".into());
+    }
+    if !extra.is_empty() {
+        col = col.push(t::metadata(extra.join(" · ")).color(pal::dim()));
+    }
+    col = col.push(if applied {
+        Element::from(t::metadata("已应用（↶ / Ctrl+Z 撤销；还没保存）").color(pal::ok()))
+    } else {
+        row![
+            w::btn("应用改动", Kind::Primary, Some(FlMsg::AiApply)),
+            w::btn("不要", Kind::Ghost, Some(FlMsg::AiDiscard)),
+            t::metadata("没改的节点一个字都不动；应用后可撤销").color(pal::dim()),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center)
+        .wrap()
+        .into()
+    });
+    col.into()
+}
+
+/// 起草新模块的结果（AI3）：代码、契约测试、「加入模块库」（人点了才写进仓库）。
+fn module_result<'a>(a: &sf::AiState) -> Element<'a, FlMsg> {
+    let mut col = column![w::section(format!("新模块：{}", a.module_need))].spacing(space(1));
+    if a.module_busy {
+        col = col.push(t::metadata("AI 在写模块，写完跑契约测试（不过会让它再改，最多两轮）…").color(pal::dim()));
+        return col.into();
+    }
+    let Some(m) = &a.module else { return col.into() };
+    let s = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let ok = m.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    col = col.push(row![t::caption(format!("{} → {}", s("ref"), s("path"))), w::badge(if ok { "契约测试通过" } else { "契约测试没过" }, if ok { Tone::Success } else { Tone::Danger })].spacing(space(2)).align_y(Alignment::Center).wrap());
+    col = col.push(t::body(s("reply").replace("**", "")));
+    for e in m.get("errors").and_then(Value::as_array).cloned().unwrap_or_default() {
+        col = col.push(t::metadata(format!("✗ {}", e.as_str().unwrap_or(""))).color(pal::bad()));
+    }
+    for x in m.get("assumptions").and_then(Value::as_array).cloned().unwrap_or_default() {
+        col = col.push(t::metadata(format!("假设：{}", x.as_str().unwrap_or(""))).color(pal::dim()));
+    }
+    let code = s("code");
+    if !code.is_empty() {
+        col = col.push(
+            container(crate::ui::scroll(t::code(code)).height(Length::Fixed(space(3) * 30.0)))
+                .padding(space(2))
+                .style(|_| container::Style { border: crate::ui::metrics::hairline(crate::ui::metrics::radius::SM), ..Default::default() }),
+        );
+    }
+    col = col.push(match &a.module_accepted {
+        Some(r) => Element::from(t::metadata(format!("已加入模块库：{r}")).color(pal::ok())),
+        None => row![
+            w::btn("加入模块库", Kind::Primary, ok.then_some(FlMsg::AiModuleAccept)),
+            t::metadata("看过代码再加：写进 strategies/modules/，再跑一遍契约测试").color(pal::dim()),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center)
+        .wrap()
+        .into(),
+    });
+    col.into()
+}
+
+fn ai_result<'a>(r: &Value, dirty: bool, confirm: bool, applied: bool, dsl_saved: Option<&str>, module_busy: bool) -> Element<'a, FlMsg> {
     let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let list = |k: &str| r.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
     let strs = |k: &str| list(k).iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>();
@@ -2297,7 +2444,29 @@ fn ai_result<'a>(r: &Value, dirty: bool, confirm: bool) -> Element<'a, FlMsg> {
     col = col.push(row![w::section("结果"), badge].spacing(space(2)).align_y(Alignment::Center));
     // AI 的说明里可能带 Markdown 加粗：界面不渲染 Markdown，去掉星号
     col = col.push(t::body(s("reply").replace("**", "")));
-    if let Some(g) = graph {
+    let editing = s("mode") == "edit";
+    if s("route") == "dsl" {
+        // 描述语言写法（AI3）：规格文本 + 存成文件；特征轨还有画布写法预览
+        let d = r.get("dsl").cloned().unwrap_or(Value::Null);
+        let ds = |k: &str| d.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        col = col.push(t::caption(format!("描述语言规格 → {}", ds("path"))));
+        col = col.push(
+            container(crate::ui::scroll(t::code(ds("text"))).height(Length::Fixed(space(3) * 30.0)))
+                .padding(space(2))
+                .style(|_| container::Style { border: crate::ui::metrics::hairline(crate::ui::metrics::radius::SM), ..Default::default() }),
+        );
+        let mut btns = row![].spacing(space(2)).align_y(Alignment::Center);
+        btns = btns.push(match dsl_saved {
+            Some(p) => Element::from(t::metadata(format!("已存成 {p}")).color(pal::ok())),
+            None => w::btn("保存为描述语言文件", Kind::Primary, ok.then_some(FlMsg::AiDslSave)),
+        });
+        if graph.is_some() {
+            btns = btns.push(w::btn("在画布里看（画布写法）", Kind::Ghost, Some(FlMsg::AiLoad)));
+        }
+        col = col.push(btns.wrap());
+    } else if let (true, Some(d)) = (editing && graph.is_some(), r.get("diff").filter(|d| !d.is_null())) {
+        col = col.push(diff_view(d, applied));
+    } else if let Some(g) = graph {
         let gs = |k: &str| g.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         let n = g.get("nodes").and_then(Value::as_array).map_or(0, Vec::len);
         let styles: Vec<String> = g.pointer("/strategy/styles").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| super::strategy_center_lib::style_label(x).to_string()).collect()).unwrap_or_default();
@@ -2330,13 +2499,28 @@ fn ai_result<'a>(r: &Value, dirty: bool, confirm: bool) -> Element<'a, FlMsg> {
             ]);
         }
     }
-    for (title, key, tone) in [("AI 自己补的假设", "assumptions", pal::txt()), ("没实现（现有模块做不到）", "unimplemented", pal::warn()), ("要新增的模块", "needs_modules", pal::txt())] {
+    for (title, key, tone) in [("AI 自己补的假设", "assumptions", pal::txt()), ("没实现（现有模块做不到）", "unimplemented", pal::warn())] {
         let xs = strs(key);
         if !xs.is_empty() {
             col = col.push(w::section(title));
             for x in xs {
                 col = col.push(t::metadata(format!("· {x}")).color(tone));
             }
+        }
+    }
+    // 要新增的模块（AI3）：每条都能让 AI 起草一个模块
+    let needs = strs("needs_modules");
+    if !needs.is_empty() {
+        col = col.push(w::section("要新增的模块"));
+        for x in needs {
+            col = col.push(
+                row![
+                    container(t::metadata(format!("· {x}"))).width(Length::Fill),
+                    w::btn("起草这个模块", Kind::Ghost, (!module_busy).then(|| FlMsg::AiModule(x.clone()))),
+                ]
+                .spacing(space(2))
+                .align_y(Alignment::Center),
+            );
         }
     }
     let cost = r.get("cost_usd").and_then(Value::as_f64).map(|c| format!(" · ${c:.3}")).unwrap_or_default();

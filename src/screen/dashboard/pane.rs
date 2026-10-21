@@ -1966,6 +1966,10 @@ impl State {
             Event::OptionsGrid(m) => crate::ws::options_view::grid_update(m),
             Event::StrategyCenterInteraction(m) => crate::ws::strategy_center::handle(m),
             Event::StrategyLayersInteraction(m) => crate::ws::strategy_layers::handle(m),
+            Event::StrategyFlowInteraction(crate::ws::strategy_flow::FlMsg::AiClear) => {
+                self.ai_text = iced::widget::text_editor::Content::new();
+                crate::ws::strategy_flow::set_ai_text(String::new());
+            }
             Event::StrategyFlowInteraction(crate::ws::strategy_flow::FlMsg::AiEdit(a)) => {
                 self.ai_text.perform(a);
                 crate::ws::strategy_flow::set_ai_text(self.ai_text.text());
