@@ -2207,6 +2207,7 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
     };
     let idle = !v.busy;
     row![
+        w::btn(if v.ai.open { "🤖 AI ▸" } else { "🤖 AI" }, if v.ai.open { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::AiToggle)),
         w::btn("新建", Kind::Ghost, Some(FlMsg::New)),
         pick_list(v.palette.as_ref().map(|p| p.templates.clone()).unwrap_or_default(), None::<sf::Template>, FlMsg::NewFrom).placeholder("从模板…").text_size(t::s_small()),
         pick_list(v.files.clone(), None::<sf::FileItem>, FlMsg::Open).placeholder("打开 / 导入…").text_size(t::s_small()),
@@ -2237,7 +2238,122 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
 }
 
 /// `view` = 这个面板锁定的视图：「模块库」页签显示模块注册表，其余是画布。
-pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
+/// AI 页宽（逻辑像素）。
+const AI_W: f32 = 400.0;
+
+/// AI 起草页（docs/53 AI1）：接口、描述、起草；结果是需求对照、假设、没实现的、检查问题，图自动放进画布（未保存）。
+fn ai_panel<'a>(v: &View, content: &'a iced::widget::text_editor::Content) -> Element<'a, FlMsg> {
+    let a = &v.ai;
+    let mut col = column![
+        row![w::section("🤖 AI 起草（只起草，你来保存）"), Space::new().width(Length::Fill), w::btn("收起", Kind::Ghost, Some(FlMsg::AiToggle))].align_y(Alignment::Center),
+        super::ai_providers::picker().map(FlMsg::AiProv),
+    ]
+    .spacing(space(2));
+    if super::ai_providers::manager_open() {
+        col = col.push(super::ai_providers::manager().map(FlMsg::AiProv));
+    }
+    col = col.push(
+        iced::widget::text_editor(content)
+            .placeholder("用自然语言描述策略：在什么品种、什么周期上，什么条件进场、怎么止损、什么时候出场、怎么定仓、用哪段数据回测……")
+            .on_action(FlMsg::AiEdit)
+            .size(t::s_small())
+            .height(Length::Fixed(space(3) * 14.0)),
+    );
+    let can = !a.text.trim().is_empty() && !a.busy;
+    col = col.push(
+        row![
+            w::btn_busy("起草", Kind::Primary, can.then_some(FlMsg::AiDraft), a.busy),
+            t::metadata("AI 用现有模块搭一张图并给出分类；约 1–2 分钟，每次都记账").color(pal::dim()),
+        ]
+        .spacing(space(2))
+        .align_y(Alignment::Center)
+        .wrap(),
+    );
+    if a.busy {
+        let secs = a.started.map_or(0, |s| s.elapsed().as_secs());
+        col = col.push(t::metadata(format!("AI（{}）在起草…已 {secs} 秒（检查不过会让它再改，最多两轮）", a.provider)).color(pal::dim()));
+    }
+    if !a.err.is_empty() {
+        col = col.push(t::caption(a.err.clone()).color(pal::bad()));
+    }
+    if let Some(r) = &a.result {
+        col = col.push(ai_result(r, v.dirty, a.confirm));
+    }
+    crate::ui::scroll(col.padding(iced::Padding::ZERO.right(space(3)))).height(Length::Fill).into()
+}
+
+fn ai_result<'a>(r: &Value, dirty: bool, confirm: bool) -> Element<'a, FlMsg> {
+    let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let list = |k: &str| r.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
+    let strs = |k: &str| list(k).iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>();
+    let ok = r.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let graph = r.get("graph").filter(|g| !g.is_null());
+    let mut col = column![].spacing(space(2));
+    let badge = match (graph.is_some(), ok) {
+        (true, true) => w::badge("检查通过", Tone::Success),
+        (true, false) => w::badge("检查没过", Tone::Danger),
+        (false, _) => w::badge("没有起草出图", Tone::Warning),
+    };
+    col = col.push(row![w::section("结果"), badge].spacing(space(2)).align_y(Alignment::Center));
+    // AI 的说明里可能带 Markdown 加粗：界面不渲染 Markdown，去掉星号
+    col = col.push(t::body(s("reply").replace("**", "")));
+    if let Some(g) = graph {
+        let gs = |k: &str| g.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let n = g.get("nodes").and_then(Value::as_array).map_or(0, Vec::len);
+        let styles: Vec<String> = g.pointer("/strategy/styles").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| super::strategy_center_lib::style_label(x).to_string()).collect()).unwrap_or_default();
+        col = col.push(t::caption(format!("{}「{}」· {n} 个节点 · 类型 {}", gs("id"), gs("name"), if styles.is_empty() { "未归类".into() } else { styles.join("、") })));
+        col = col.push(
+            row![
+                w::btn(if confirm { "确认替换当前的图" } else { "放进画布" }, if confirm { Kind::Destructive } else { Kind::Standard }, Some(FlMsg::AiLoad)),
+                t::metadata(if confirm { "当前图有没保存的改动，会被替换（可以先保存它）" } else if dirty { "放进去的图还没保存：核对 id 与分类再「保存」" } else { "起草完已经放进画布了；改乱了可以再放一次" }).color(if confirm { pal::warn() } else { pal::dim() }),
+            ]
+            .spacing(space(2))
+            .align_y(Alignment::Center)
+            .wrap(),
+        );
+    }
+    for w_ in strs("warnings") {
+        col = col.push(t::metadata(format!("⚠ {w_}")).color(pal::warn()));
+    }
+    for e in strs("errors") {
+        col = col.push(t::metadata(format!("✗ {e}")).color(pal::bad()));
+    }
+    let mapping = list("mapping");
+    if !mapping.is_empty() {
+        col = col.push(w::section("需求对照"));
+        for m in mapping {
+            let ms = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            let nodes: Vec<&str> = m.get("nodes").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            col = col.push(column![
+                t::caption(ms("requirement")),
+                t::metadata(format!("{}{}", if nodes.is_empty() { String::new() } else { format!("{} · ", nodes.join(" ")) }, ms("how"))).color(pal::dim()),
+            ]);
+        }
+    }
+    for (title, key, tone) in [("AI 自己补的假设", "assumptions", pal::txt()), ("没实现（现有模块做不到）", "unimplemented", pal::warn()), ("要新增的模块", "needs_modules", pal::txt())] {
+        let xs = strs(key);
+        if !xs.is_empty() {
+            col = col.push(w::section(title));
+            for x in xs {
+                col = col.push(t::metadata(format!("· {x}")).color(tone));
+            }
+        }
+    }
+    let cost = r.get("cost_usd").and_then(Value::as_f64).map(|c| format!(" · ${c:.3}")).unwrap_or_default();
+    col = col.push(
+        t::metadata(format!(
+            "{} · {} · AI 调用 {} 次 · {:.0}s{cost}。草稿的结论一律「未验证」，标签带 ai_draft；回测、优化照常计入试验数",
+            s("draft_id"),
+            s("provider"),
+            r.get("n_calls").and_then(Value::as_u64).unwrap_or(0),
+            r.get("seconds").and_then(Value::as_f64).unwrap_or(0.0),
+        ))
+        .color(pal::dim()),
+    );
+    col.into()
+}
+
+pub fn pane_body<'a>(view: Option<&str>, ai_text: &'a iced::widget::text_editor::Content) -> Element<'a, FlMsg> {
     if view == Some(LIBRARY) {
         return super::strategy_center_view::modules_page().map(FlMsg::Center);
     }
@@ -2269,12 +2385,16 @@ pub fn pane_body<'a>(view: Option<&str>) -> Element<'a, FlMsg> {
         let (x, y) = ((q.x * v.zoom + v.pan.0).max(0.0), (q.y * v.zoom + v.pan.1).max(0.0));
         layers = layers.push(column![Space::new().height(Length::Fixed(y)), row![Space::new().width(Length::Fixed(x)), quick_popup(&v, q)]]);
     }
-    let body = row![
+    let mut body = row![
         container(palette_col(&v)).width(Length::Fixed(196.0)).height(Length::Fill),
         container(layers).width(Length::Fill).height(Length::Fill).clip(true).style(|_| container::Style { border: iced::Border { color: pal::line(), width: 1.0, radius: 0.0.into() }, ..Default::default() }),
     ]
     .spacing(space(2))
     .height(Length::Fill);
+    if v.ai.open {
+        // AI 起草（docs/53 AI1）：点工具栏「🤖 AI」才出来，不常驻
+        body = body.push(container(ai_panel(&v, ai_text)).width(Length::Fixed(AI_W)).height(Length::Fill));
+    }
     let mut col = column![w::panel_header(title, None, vec![]), toolbar(&v)].spacing(space(2));
     if let Some(p) = &v.paused {
         // 调试器停住了：停在哪条决策上

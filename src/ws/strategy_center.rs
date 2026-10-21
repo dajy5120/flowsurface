@@ -252,6 +252,8 @@ impl RunRow {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScMsg {
     Refresh,
+    /// AI 接口（docs/53，下拉框与管理卡共用 `ws::ai_providers`）
+    Ai(super::ai_providers::AiMsg),
     /// 改分类（docs/37 §19）：打开 / 收起编辑、类型点一下加 / 再点去掉、结论、结论说明、标签、写回策略文件
     ClsOpen,
     ClsCancel,
@@ -1053,9 +1055,15 @@ fn load_assist() {
     .flatten() else {
         return;
     };
+    // 用下拉框选的接口（docs/53）；没选 = 配置的缺省
+    let provider = super::ai_providers::chosen();
     super::spawn_named("ws-stratai", move || {
+        let mut args = vec!["-m".to_string(), "factory.lab".into(), "assist".into(), id.clone(), "--text".into(), text, "--json".into()];
+        if let Some(p) = provider {
+            args.extend(["--provider".into(), p]);
+        }
         let out = std::process::Command::new(super::paths::python())
-            .args(["-m", "factory.lab", "assist", &id, "--text", &text, "--json"])
+            .args(&args)
             .current_dir(super::paths::repo_root())
             .output();
         let parsed: Result<Assist, String> = match out {
@@ -1503,6 +1511,7 @@ pub fn handle(m: ScMsg) {
             with(|g| g.ai_text = s);
         }
         ScMsg::AiDraft => load_assist(),
+        ScMsg::Ai(m) => super::ai_providers::handle(m),
         ScMsg::AiApply => {
             with(|g| {
                 let Some(a) = g.ai.clone() else { return };

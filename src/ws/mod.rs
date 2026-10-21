@@ -11,6 +11,7 @@ pub mod data_dirs;
 pub mod data_dirs_view;
 pub mod backtest_readout;
 pub mod backtest_view;
+pub mod ai_providers;
 pub mod strategy_center;
 pub mod strategy_center_ai;
 pub mod strategy_center_cmp;

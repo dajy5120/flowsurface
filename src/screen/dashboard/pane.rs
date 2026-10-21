@@ -192,6 +192,8 @@ pub struct State {
     pub table_view: bool,
     /// 标题栏「⋯」展开着（不常用的动作露出来）。不存盘
     pub overflow: bool,
+    /// 策略画布 AI 页的描述框（docs/53 AI1）：多行编辑器的状态只能放在这里；原文同步进 `strategy_flow`。不存盘
+    pub ai_text: iced::widget::text_editor::Content,
 }
 
 impl State {
@@ -1135,7 +1137,7 @@ impl State {
             }
             Content::StrategyFlow => {
                 // 策略画布（docs/44 §21）：节点 + 连线设计策略，运行时按决策轨迹高亮
-                let base = crate::ws::strategy_flow_view::pane_body(self.settings.view.as_deref())
+                let base = crate::ws::strategy_flow_view::pane_body(self.settings.view.as_deref(), &self.ai_text)
                     .map(move |m| Message::PaneEvent(id, Event::StrategyFlowInteraction(m)));
                 self.compose_stack_view(
                     base,
@@ -1964,6 +1966,10 @@ impl State {
             Event::OptionsGrid(m) => crate::ws::options_view::grid_update(m),
             Event::StrategyCenterInteraction(m) => crate::ws::strategy_center::handle(m),
             Event::StrategyLayersInteraction(m) => crate::ws::strategy_layers::handle(m),
+            Event::StrategyFlowInteraction(crate::ws::strategy_flow::FlMsg::AiEdit(a)) => {
+                self.ai_text.perform(a);
+                crate::ws::strategy_flow::set_ai_text(self.ai_text.text());
+            }
             Event::StrategyFlowInteraction(m) => crate::ws::strategy_flow::handle(m),
             Event::OfmsLabInteraction(m) => crate::ws::ofms_lab::handle(self.unique_id(), m),
             Event::BacktestGrid(w, m) => crate::ws::backtest_view::grid_update(w, m),
@@ -2742,6 +2748,7 @@ impl Default for State {
             frozen: false,
             table_view: false,
             overflow: false,
+            ai_text: iced::widget::text_editor::Content::with_text(&crate::ws::strategy_flow::ai_text()),
         }
     }
 }

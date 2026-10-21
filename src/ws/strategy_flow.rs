@@ -1132,6 +1132,12 @@ pub enum FlMsg {
     MetaId(String),
     MetaName(String),
     /// 分类（docs/37 §3.1）：类型点一下加 / 再点去掉（最多 3 个，先加的是主类型）、结论、结论说明、标签（逗号分隔）
+    /// AI 起草（docs/53 AI1）：页开 / 关、描述的编辑（编辑器状态在面板里，见 pane.rs）、起草、放进画布、接口选择
+    AiToggle,
+    AiEdit(iced::widget::text_editor::Action),
+    AiDraft,
+    AiLoad,
+    AiProv(super::ai_providers::AiMsg),
     MetaStyle(String),
     MetaVerdict(String),
     MetaVerdictNote(String),
@@ -1256,6 +1262,8 @@ struct St {
     whence: HashMap<String, String>,
     checked: Option<bool>,
     busy: bool,
+    /// AI 起草（docs/53 AI1）
+    ai: AiState,
     msg: String,
     pan: (f32, f32),
     zoom: f32,
@@ -1350,6 +1358,7 @@ impl Default for St {
             checked: None,
             busy: false,
             msg: String::new(),
+            ai: AiState::default(),
             pan: (24.0, 16.0),
             zoom: 1.0,
             pick: DataPick::default(),
@@ -1433,6 +1442,7 @@ pub struct View {
     pub needs: Needs,
     pub checked: Option<bool>,
     pub busy: bool,
+    pub ai: AiState,
     pub msg: String,
     pub pan: (f32, f32),
     pub zoom: f32,
@@ -1510,6 +1520,7 @@ pub fn view() -> View {
         checked: g.checked,
         busy: g.busy,
         msg: g.msg.clone(),
+        ai: g.ai.clone(),
         pan: g.pan,
         zoom: g.zoom,
         pick: g.pick.clone(),
@@ -1616,6 +1627,104 @@ pub fn rows_table(rows: &[[String; 3]]) -> Option<Value> {
         }
     }
     (!out.is_empty()).then_some(Value::Object(out))
+}
+
+/// 画布 AI 起草的状态（docs/53 AI1）。起草与检查都在 Python（`python -m factory.ai draft`），这里只跑它、读 JSON。
+#[derive(Debug, Clone, Default)]
+pub struct AiState {
+    pub open: bool,
+    /// 描述（编辑器在面板里，改一下同步一次）
+    pub text: String,
+    pub busy: bool,
+    pub started: Option<Instant>,
+    /// 用的接口（起草时的选择）
+    pub provider: String,
+    /// `factory.ai draft --json` 的结果
+    pub result: Option<Value>,
+    pub err: String,
+    /// 当前图有没保存的改动：「放进画布」点了一次，等确认
+    pub confirm: bool,
+}
+
+/// 描述框的原文（面板新建时用它恢复编辑器）。
+#[must_use]
+pub fn ai_text() -> String {
+    with(|g| g.ai.text.clone()).unwrap_or_default()
+}
+
+/// 面板里的编辑器改了：同步原文。
+pub fn set_ai_text(text: String) {
+    with(|g| g.ai.text = text);
+}
+
+/// 起草：后台跑 `python -m factory.ai draft --stdin --json`（描述走标准输入，多行也行）。
+fn ai_draft() {
+    let Some((text, provider)) = with(|g| {
+        if g.ai.busy || g.ai.text.trim().is_empty() {
+            return None;
+        }
+        g.ai.busy = true;
+        g.ai.started = Some(Instant::now());
+        g.ai.err.clear();
+        g.ai.confirm = false;
+        g.ai.provider = super::ai_providers::current();
+        Some((g.ai.text.clone(), super::ai_providers::chosen()))
+    })
+    .flatten() else {
+        return;
+    };
+    super::spawn_named("ws-flowai", move || {
+        let mut args: Vec<&str> = vec!["-m", "factory.ai", "draft", "--stdin", "--json"];
+        if let Some(p) = provider.as_deref() {
+            args.extend(["--provider", p]);
+        }
+        let r = python(&args, Some(text.as_bytes())).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| format!("起草结果解析失败：{e}")));
+        with(|g| {
+            g.ai.busy = false;
+            match r {
+                Ok(v) if v.get("draft_id").is_some() => {
+                    let has_graph = v.get("graph").is_some_and(|x| !x.is_null());
+                    g.ai.result = Some(v);
+                    if has_graph && !g.dirty {
+                        ai_load_in(g);
+                    } else if has_graph {
+                        g.msg = "AI 起草好了：当前图有没保存的改动，点 AI 页里的「放进画布」替换".into();
+                    }
+                }
+                Ok(v) => g.ai.err = v.get("error").and_then(Value::as_str).unwrap_or("起草失败").to_string(),
+                Err(e) => g.ai.err = e,
+            }
+        });
+    });
+}
+
+/// 把 AI 起草的图放进画布：未保存（没有文件路径），检查自动跑一遍，问题标在节点上。
+fn ai_load_in(g: &mut St) {
+    let Some(v) = g.ai.result.as_ref().and_then(|r| r.get("graph")).cloned() else { return };
+    match serde_json::from_value::<Graph>(v) {
+        Ok(graph) => {
+            g.graph = graph;
+            g.path = None;
+            g.dirty = true;
+            fit(g);
+            reset_editing(g);
+            g.form.clear();
+            g.issues.clear();
+            g.whence.clear();
+            g.checked = None;
+            g.live.clear();
+            g.values.clear();
+            g.progress.clear();
+            g.prog_seen.clear();
+            g.run_prog = None;
+            g.costs = None;
+            g.live_n = 0;
+            g.ai.confirm = false;
+            g.msg = "已放进 AI 起草的图（还没保存：看过、改好，在「这份策略」里核对 id 与分类，再点「保存」）".into();
+            touch(g);
+        }
+        Err(e) => g.ai.err = format!("这张图放不进画布：{e}"),
+    }
 }
 
 /// 标签输入框原文的键（允许打到一半的逗号）。
@@ -3139,6 +3248,22 @@ pub fn handle(m: FlMsg) {
                 g.graph.name = v;
             });
         }
+        FlMsg::AiToggle => {
+            with(|g| g.ai.open = !g.ai.open);
+        }
+        // 编辑器的动作在面板（pane.rs）里执行并同步原文；到这里什么都不做
+        FlMsg::AiEdit(_) => {}
+        FlMsg::AiDraft => ai_draft(),
+        FlMsg::AiLoad => {
+            with(|g| {
+                if g.dirty && !g.ai.confirm {
+                    g.ai.confirm = true;
+                } else {
+                    ai_load_in(g);
+                }
+            });
+        }
+        FlMsg::AiProv(m) => super::ai_providers::handle(m),
         FlMsg::MetaStyle(k) => {
             with(|g| {
                 let mut styles = meta_list(&g.graph.strategy, "styles");
