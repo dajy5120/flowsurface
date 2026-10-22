@@ -314,6 +314,14 @@ pub enum GridMsg {
 /// 网格复制出来、等主循环写进剪贴板的文字（网格自己发不了 iced 的剪贴板 Task）。
 static CLIP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// 面板交一段文字给主循环写进剪贴板（面板的 handle 发不了 iced 的剪贴板 Task）。
+/// 提示按「行数 − 1」报（网格的第一行是表头）：第一行写标题。
+pub fn post_clipboard(text: String) {
+    if let Ok(mut g) = CLIP.lock() {
+        *g = Some(text);
+    }
+}
+
 /// 主循环每个 Tick 取一次：有就写进剪贴板。
 pub fn take_clipboard() -> Option<String> {
     CLIP.lock().ok().and_then(|mut g| g.take())
@@ -1699,6 +1707,23 @@ impl PartialEq for Named {
     fn eq(&self, _: &Self) -> bool {
         false
     }
+}
+
+/// 从表外选中命名表的某一行（数据下标；`None` = 取消选中）：图上点了一笔、键盘换笔时让表里的高亮跟上。
+pub fn named_select(key: &str, row: Option<usize>) {
+    NAMED.with(|g| {
+        if let Some((st, _, _)) = g.borrow_mut().get_mut(key) {
+            st.selected = row;
+            st.extra.clear();
+        }
+    });
+}
+
+/// 命名表当前的显示顺序（数据下标，已按表头排序与表内过滤）；表还没画过时 `None`。
+pub fn named_order(key: &str) -> Option<Vec<usize>> {
+    NAMED.with(|g| {
+        g.borrow().get(key).map(|(st, _, _)| st.order.clone())
+    })
 }
 
 /// 命名表的消息（排序、调宽、选中、滚动……）。

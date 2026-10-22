@@ -143,6 +143,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    TradeReview {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     StrategyFlow {
         #[serde(deserialize_with = "ok_or_default", default)]
         settings: Settings,
@@ -407,6 +413,9 @@ pub enum ContentKind {
     StrategyCenter,
     /// 七层（docs/39）：大师策略的七层流水线 + 共用件矩阵，跟随策略中心当前选中的策略与运行。
     StrategyLayers,
+    /// 交易核对（docs/56）：读交易清单（`~/ws-data/trade_review/<运行>/`），逐笔画在秒级 / 1 分钟 K 线上人工核对；
+    /// 回测跑的时候边跑边出笔。K 线数据由 `strategies.trade_journal chart` 生成，面板不算任何东西。
+    TradeReview,
     StrategyFlow,
     /// 订单流层析（docs/40）：OFMS-10 事件 · 因果链 · 价格响应；数据由 `factory.ofms.run` 回放生成并按窗口缓存。
     OfmsLab,
@@ -457,7 +466,7 @@ pub enum WsPaneMode {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 33] = [
+    pub const ALL: [ContentKind; 34] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -478,6 +487,7 @@ impl ContentKind {
         ContentKind::FeatureMatrix,
         ContentKind::StrategyCenter,
         ContentKind::StrategyLayers,
+        ContentKind::TradeReview,
         ContentKind::StrategyFlow,
         ContentKind::OfmsLab,
         ContentKind::MarketMap,
@@ -517,6 +527,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::FeatureMatrix => "特征矩阵",
             ContentKind::StrategyCenter => "策略中心",
             ContentKind::StrategyLayers => "七层",
+            ContentKind::TradeReview => "交易核对",
             ContentKind::StrategyFlow => "策略画布",
             ContentKind::OfmsLab => "订单流层析",
             ContentKind::MarketMap => "全市场雷达",
@@ -611,6 +622,7 @@ impl PaneSetup {
                 | ContentKind::FeatureMatrix
                 | ContentKind::StrategyCenter
                 | ContentKind::StrategyLayers
+                | ContentKind::TradeReview
                 | ContentKind::StrategyFlow
                 | ContentKind::OfmsLab
                 | ContentKind::MarketMap
@@ -657,6 +669,7 @@ impl PaneSetup {
             | ContentKind::FeatureMatrix
             | ContentKind::StrategyCenter
                 | ContentKind::StrategyLayers
+                | ContentKind::TradeReview
                 | ContentKind::StrategyFlow
                 | ContentKind::OfmsLab
             | ContentKind::MarketMap

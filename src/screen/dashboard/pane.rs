@@ -154,6 +154,7 @@ pub enum Event {
     FeatureMatrixInteraction(crate::ws::feature_matrix::FeatureMatrixMsg),
     StrategyCenterInteraction(crate::ws::strategy_center::ScMsg),
     StrategyLayersInteraction(crate::ws::strategy_layers::LyMsg),
+    TradeReviewInteraction(crate::ws::trade_review::TrMsg),
     StrategyFlowInteraction(crate::ws::strategy_flow::FlMsg),
     OfmsLabInteraction(crate::ws::ofms_lab::OfMsg),
     /// 回测结果面板顶上的「发起回测」（共用数据选择组件 + 起 runner）。
@@ -497,6 +498,7 @@ impl State {
                 ContentKind::FeatureMatrix => (Content::FeatureMatrix, vec![]),
                 ContentKind::StrategyCenter => (Content::StrategyCenter, vec![]),
                 ContentKind::StrategyLayers => (Content::StrategyLayers, vec![]),
+                ContentKind::TradeReview => (Content::TradeReview, vec![]),
                 ContentKind::StrategyFlow => (Content::StrategyFlow, vec![]),
                 ContentKind::OfmsLab => (Content::OfmsLab, vec![]),
                 ContentKind::PmReplay => {
@@ -858,6 +860,7 @@ impl State {
                 | Content::FeatureMatrix
                 | Content::StrategyCenter
                 | Content::StrategyLayers
+                | Content::TradeReview
                 | Content::StrategyFlow
                 | Content::OfmsLab
                 | Content::MarketMap
@@ -1111,6 +1114,20 @@ impl State {
                 // 回测经 ws-control 发起。面板不跑回测、不算指标。
                 let base = crate::ws::strategy_center_view::pane_body()
                     .map(move |m| Message::PaneEvent(id, Event::StrategyCenterInteraction(m)));
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
+            }
+            Content::TradeReview => {
+                // 交易核对（docs/56）：交易清单逐笔上 K 线，人工核对
+                let base = crate::ws::trade_review_view::pane_body()
+                    .map(move |m| Message::PaneEvent(id, Event::TradeReviewInteraction(m)));
                 self.compose_stack_view(
                     base,
                     id,
@@ -1887,6 +1904,7 @@ impl State {
                         | ContentKind::FeatureMatrix
                         | ContentKind::StrategyCenter
                         | ContentKind::StrategyLayers
+                        | ContentKind::TradeReview
                         | ContentKind::StrategyFlow
                         | ContentKind::OfmsLab
                         | ContentKind::MarketMap
@@ -1966,6 +1984,7 @@ impl State {
             Event::OptionsGrid(m) => crate::ws::options_view::grid_update(m),
             Event::StrategyCenterInteraction(m) => crate::ws::strategy_center::handle(m),
             Event::StrategyLayersInteraction(m) => crate::ws::strategy_layers::handle(m),
+            Event::TradeReviewInteraction(m) => crate::ws::trade_review::handle(m),
             Event::StrategyFlowInteraction(crate::ws::strategy_flow::FlMsg::AiClear) => {
                 self.ai_text = iced::widget::text_editor::Content::new();
                 crate::ws::strategy_flow::set_ai_text(String::new());
@@ -2638,7 +2657,7 @@ impl State {
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::Calendar | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::StrategyCenter | Content::StrategyLayers | Content::StrategyFlow | Content::OfmsLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::Calendar | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::StrategyCenter | Content::StrategyLayers | Content::TradeReview | Content::StrategyFlow | Content::OfmsLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => None,
         }
     }
@@ -2679,6 +2698,7 @@ impl State {
             | Content::FeatureMatrix
             | Content::StrategyCenter
             | Content::StrategyLayers
+            | Content::TradeReview
             | Content::StrategyFlow
             | Content::OfmsLab
             | Content::MarketMap
@@ -2824,6 +2844,8 @@ pub enum Content {
     StrategyCenter,
     /// 七层（docs/39）：状态在 `ws::strategy_layers` 的进程级静态里，这里不带载荷。
     StrategyLayers,
+    /// 交易核对（docs/56）：状态在 `ws::trade_review` 的进程级静态里。
+    TradeReview,
     /// 策略画布（docs/44 §21）：状态在 `ws::strategy_flow` 的进程级静态里，这里不带载荷。
     StrategyFlow,
     /// 订单流层析（docs/40）：状态在 `ws::ofms_lab` 的进程级静态里。
@@ -3067,6 +3089,7 @@ impl Content {
             ContentKind::FeatureMatrix => Content::FeatureMatrix,
             ContentKind::StrategyCenter => Content::StrategyCenter,
             ContentKind::StrategyLayers => Content::StrategyLayers,
+            ContentKind::TradeReview => Content::TradeReview,
             ContentKind::StrategyFlow => Content::StrategyFlow,
             ContentKind::OfmsLab => Content::OfmsLab,
             ContentKind::PmReplay => {
@@ -3112,6 +3135,7 @@ impl Content {
             | Content::FeatureMatrix
             | Content::StrategyCenter
             | Content::StrategyLayers
+            | Content::TradeReview
             | Content::StrategyFlow
             | Content::OfmsLab
             | Content::MarketMap
@@ -3211,6 +3235,7 @@ impl Content {
             | Content::FeatureMatrix
             | Content::StrategyCenter
             | Content::StrategyLayers
+            | Content::TradeReview
             | Content::StrategyFlow
             | Content::OfmsLab
             | Content::MarketMap
@@ -3281,6 +3306,7 @@ impl Content {
             | Content::FeatureMatrix
             | Content::StrategyCenter
             | Content::StrategyLayers
+            | Content::TradeReview
             | Content::StrategyFlow
             | Content::OfmsLab
             | Content::MarketMap
@@ -3370,6 +3396,7 @@ impl Content {
             Content::FeatureMatrix => ContentKind::FeatureMatrix,
             Content::StrategyCenter => ContentKind::StrategyCenter,
             Content::StrategyLayers => ContentKind::StrategyLayers,
+            Content::TradeReview => ContentKind::TradeReview,
             Content::StrategyFlow => ContentKind::StrategyFlow,
             Content::OfmsLab => ContentKind::OfmsLab,
             Content::MarketMap => ContentKind::MarketMap,
@@ -3396,7 +3423,7 @@ impl Content {
             Content::Ladder(panel) => panel.is_some(),
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
-            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::Calendar | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::StrategyCenter | Content::StrategyLayers | Content::StrategyFlow | Content::OfmsLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
+            Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::Calendar | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::StrategyCenter | Content::StrategyLayers | Content::TradeReview | Content::StrategyFlow | Content::OfmsLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
             | Content::Orders => true,
         }
     }

@@ -1126,6 +1126,13 @@ pub enum FlMsg {
     Check,
     Run,
     Stop,
+    /// 「⚡ 快速回测」：存图编译后跑 `strategies.swe.fast run`（特征仓库，docs/56 §8）
+    QuickRun,
+    QuickStop,
+    /// 快速回测引擎：true = 网格宿主，false = 列式
+    QuickGrid(bool),
+    /// 快速回测日期：true = 仓库全部日子，false = 数据选择的日期
+    QuickAll(bool),
     /// 共用数据选择组件（docs/45 §21）：选完写回 `[backtest]`
     Data(DataPickMsg),
     Pace(String),
@@ -1296,6 +1303,12 @@ struct St {
     run_id: String,
     child: Option<Child>,
     running: bool,
+    /// 「⚡ 快速回测」（docs/56 §8）：走特征仓库的列式 / 网格宿主，不起完整引擎
+    quick_grid: bool,
+    /// 快速回测的日期：true = 仓库里这个标的全部建好的日子，false = 数据选择里的日期
+    quick_all: bool,
+    quick_child: Option<Child>,
+    quick_running: bool,
     live: HashMap<String, NodeLive>,
     live_n: usize,
     /// 节点实时数值（docs/49 M2）：节点 → 怎么取值；节点 → 最近收到的值
@@ -1386,6 +1399,10 @@ impl Default for St {
             auto_end: None,
             trial_once: false,
             pace: "3600".into(),
+            quick_all: true,
+            quick_grid: false,
+            quick_child: None,
+            quick_running: false,
             run_id: String::new(),
             child: None,
             running: false,
@@ -1470,6 +1487,9 @@ pub struct View {
     pub zoom: f32,
     pub pick: DataPick,
     pub pace: String,
+    pub quick_grid: bool,
+    pub quick_all: bool,
+    pub quick_running: bool,
     pub run_id: String,
     pub running: bool,
     pub live: HashMap<String, NodeLive>,
@@ -1549,6 +1569,9 @@ pub fn view() -> View {
         pace: g.pace.clone(),
         run_id: g.run_id.clone(),
         running: g.running,
+        quick_grid: g.quick_grid,
+        quick_all: g.quick_all,
+        quick_running: g.quick_running,
         live: g.live.clone(),
         values: g.values.clone(),
         progress: g.progress.clone(),
@@ -2010,6 +2033,24 @@ fn ensure_started() {
                     handle(FlMsg::Run);
                 });
             }
+            // 端到端自测用：`WS_FLOW_QUICK=columnar|grid` 打开之后自动「保存 → 编译 → ⚡ 快速回测」（仓库全部日子）
+            if let Ok(engine) = std::env::var("WS_FLOW_QUICK") {
+                super::spawn_named("ws-flowquickauto", move || {
+                    // 等打开 / 检查做完（忙的时候按钮不响应）
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    for _ in 0..120 {
+                        if with(|g| !g.busy).unwrap_or(false) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                    with(|g| {
+                        g.quick_grid = engine == "grid";
+                        g.quick_all = true;
+                    });
+                    handle(FlMsg::QuickRun);
+                });
+            }
             // 样张截图用：`WS_FLOW_PICK=<秒>` 过这么久打开调试面板、点最后一笔成交（配合 WS_FLOW_RUN 看反查路径）
             if let Some(secs) = std::env::var("WS_FLOW_PICK").ok().and_then(|s| s.parse::<u64>().ok()) {
                 super::spawn_named("ws-flowpick", move || {
@@ -2332,6 +2373,118 @@ fn run_async() {
                 with(|g| g.msg = format!("起不来回测：{e}"));
             }
         }
+    });
+}
+
+/// 「⚡ 快速回测」的命令行参数（不含工作流路径）。数据源不是 Tardis、没写标的、没选日期时返回原因。
+pub fn quick_args(bt: &Value, grid: bool, all_days: bool) -> Result<Vec<String>, String> {
+    let src = bt_source(bt);
+    if src != "tardis" {
+        return Err(format!("快速回测只走 Tardis 的特征仓库：这张图的数据源是 {src}，请用「▶ 运行」"));
+    }
+    let sym = bt_symbol(bt).ok_or("数据选择里没有标的")?;
+    let mut out: Vec<String> = ["--engine", if grid { "grid" } else { "columnar" }, "--symbol", &sym, "--jobs", "7"].map(str::to_string).to_vec();
+    let (start, end) = data_range(bt);
+    if all_days {
+        out.push("--all-days".into());
+    } else if start.is_empty() {
+        return Err("数据选择里没有日期：选好日期，或把快速回测的日期改成「仓库全部日子」".into());
+    } else {
+        out.extend(["--start".into(), start, "--end".into(), end]);
+    }
+    Ok(out)
+}
+
+/// 「⚡ 快速回测」：存图并编译，再跑 `strategies.swe.fast run`。逐笔进「回测｜交易核对」（fast 自己写交易清单）。
+fn quick_async() {
+    if with(|g| g.quick_running || std::mem::replace(&mut g.busy, true)).unwrap_or(true) {
+        return;
+    }
+    super::spawn_named("ws-flowquick", || {
+        with(|g| g.busy = false);
+        let toml = match save_blocking() {
+            Ok(t) => t,
+            Err(e) => {
+                with(|g| g.msg = e);
+                return;
+            }
+        };
+        let r = with(|g| (quick_args(&g.graph.backtest, g.quick_grid, g.quick_all), g.quick_grid, root_env(&g.pick)));
+        let Some((args, grid, roots)) = r else { return };
+        let args = match args {
+            Ok(a) => a,
+            Err(e) => {
+                with(|g| g.msg = e);
+                return;
+            }
+        };
+        let engine = if grid { "网格宿主" } else { "列式" };
+        let log = std::env::temp_dir().join(format!("ws-quick-{}.log", chrono::Local::now().format("%H%M%S")));
+        let out = std::fs::File::create(&log).ok();
+        let mut cmd = Command::new(super::paths::python());
+        cmd.args(["-m", "strategies.swe.fast", "run", &toml]).args(&args).envs(roots);
+        cmd.current_dir(super::paths::repo_root()).stdin(Stdio::null());
+        match out {
+            Some(f) => {
+                cmd.stdout(f.try_clone().map(Stdio::from).unwrap_or_else(|_| Stdio::null())).stderr(Stdio::from(f));
+            }
+            None => {
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                with(|g| g.msg = format!("起不来快速回测：{e}"));
+                return;
+            }
+        };
+        let t0 = std::time::Instant::now();
+        with(|g| {
+            g.quick_child = Some(child);
+            g.quick_running = true;
+            g.msg = format!("快速回测中（{engine}，特征仓库）…");
+        });
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let done = with(|g| match g.quick_child.as_mut().map(Child::try_wait) {
+                Some(Ok(Some(st))) => Some(Some(st.success())),
+                Some(Ok(None)) => None,
+                _ => Some(None), // 被「停止」拿走了
+            })
+            .flatten();
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            let Some(result) = done else {
+                // 运行中：状态条显示最近一行进度（网格宿主一天两三分钟，列式十来秒）
+                let last = text.lines().rev().find(|l| l.starts_with("[fast]") && !l.contains("交易清单")).unwrap_or("").to_string();
+                with(|g| g.msg = format!("快速回测中（{engine}，{:.0} 秒）{}", t0.elapsed().as_secs_f64(), if last.is_empty() { String::new() } else { format!("：{last}") }));
+                continue;
+            };
+            let summary = text.lines().find(|l| l.contains("天、") && l.contains("笔")).map(str::to_string);
+            let tail = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string();
+            with(|g| {
+                g.quick_running = false;
+                g.quick_child = None;
+                g.msg = match (result, summary) {
+                    (Some(true), Some(s)) => format!("快速回测完成（{engine}，估算成交）：{} → 逐笔在「回测｜交易核对」", s.trim_start_matches("[fast] ")),
+                    (Some(true), None) => "快速回测完成 → 逐笔在「回测｜交易核对」".into(),
+                    (Some(false), _) => format!("快速回测失败：{tail}"),
+                    (None, _) => "快速回测已停止".into(),
+                };
+            });
+            return;
+        }
+    });
+}
+
+fn quick_stop() {
+    with(|g| {
+        if let Some(mut c) = g.quick_child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        g.quick_running = false;
+        g.msg = "快速回测已停止".into();
     });
 }
 
@@ -3348,6 +3501,14 @@ pub fn handle(m: FlMsg) {
         }
         FlMsg::Run => run_async(),
         FlMsg::Stop => stop(),
+        FlMsg::QuickRun => quick_async(),
+        FlMsg::QuickStop => quick_stop(),
+        FlMsg::QuickGrid(b) => {
+            with(|g| g.quick_grid = b);
+        }
+        FlMsg::QuickAll(b) => {
+            with(|g| g.quick_all = b);
+        }
         FlMsg::Data(m) => {
             with(|g| {
                 g.pick.update(m);
@@ -4694,6 +4855,17 @@ mod tests {
         g.graph.backtest = serde_json::json!({"source": "auto", "symbols": "ESU6"});
         sync_pick(&mut g);
         assert_eq!(g.pick.pipeline, None);
+    }
+
+    #[test]
+    fn 快速回测的参数() {
+        let bt = serde_json::json!({"source": "tardis", "symbols": "BTCUSDT", "start": "2026-06-01", "end": "2026-06-03"});
+        let all = quick_args(&bt, false, true).unwrap();
+        assert_eq!(all, ["--engine", "columnar", "--symbol", "BTCUSDT", "--jobs", "7", "--all-days"]);
+        let some = quick_args(&bt, true, false).unwrap();
+        assert!(some.starts_with(&["--engine".to_string(), "grid".to_string()]) && some.ends_with(&["--start".into(), "2026-06-01".into(), "--end".into(), "2026-06-03".into()]));
+        assert!(quick_args(&serde_json::json!({"source": "databento", "symbols": "ESU6"}), false, true).unwrap_err().contains("Tardis"));
+        assert!(quick_args(&serde_json::json!({"source": "tardis", "symbols": "BTCUSDT"}), false, false).unwrap_err().contains("没有日期"));
     }
 
     #[test]

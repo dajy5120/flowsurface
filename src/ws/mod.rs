@@ -21,6 +21,8 @@ pub mod strategy_center_opt;
 pub mod strategy_center_val;
 pub mod strategy_center_view;
 pub mod strategy_layers;
+pub mod trade_review;
+pub mod trade_review_view;
 pub mod strategy_flow;
 pub mod drawing;
 pub mod drawing_view;

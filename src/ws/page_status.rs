@@ -30,6 +30,7 @@ pub fn of(d: &Dashboard, backtest_running: bool) -> Option<Badge> {
         match &st.content {
             Content::StrategyCenter if super::strategy_center::any_active() => bump(Badge::Running),
             Content::OfmsLab if super::ofms_lab::busy() => bump(Badge::Running),
+            Content::TradeReview if super::trade_review::busy() => bump(Badge::Running),
             Content::BacktestResult | Content::WealthSpring(_) if backtest_running => bump(Badge::Running),
             Content::Procs if procs_problem() => bump(Badge::Problem),
             _ => {}

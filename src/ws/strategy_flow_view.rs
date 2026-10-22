@@ -2219,6 +2219,14 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
         text_input("3600", &v.pace).on_input(FlMsg::Pace).size(t::s_small()).width(Length::Fixed(64.0)),
         if v.running { w::btn("■ 停止", Kind::Standard, Some(FlMsg::Stop)) } else { w::btn("▶ 运行", Kind::Primary, idle.then_some(FlMsg::Run)) },
         w::btn("排进队列", Kind::Standard, idle.then_some(FlMsg::Enqueue)),
+        // 快速回测（docs/56 §8）：走特征仓库，列式十来秒、网格宿主一天两三分钟；估算成交，逐笔进「回测｜交易核对」
+        if v.quick_running {
+            w::btn("■ 停止快速回测", Kind::Standard, Some(FlMsg::QuickStop))
+        } else {
+            w::btn_why("⚡ 快速回测", Kind::Standard, idle.then_some(FlMsg::QuickRun), "走特征仓库（Tardis），估算成交；逐笔看「回测｜交易核对」")
+        },
+        w::segmented(&[("列式", false), ("网格宿主", true)], &v.quick_grid, FlMsg::QuickGrid),
+        w::segmented(&[("仓库全部日子", true), ("所选日期", false)], &v.quick_all, FlMsg::QuickAll),
         run_controls(v),
         w::btn(if v.debug_open { "调试 ▾" } else { "调试 ▸" }, if v.debug_open { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::DebugToggle)),
         Space::new().width(Length::Fill),

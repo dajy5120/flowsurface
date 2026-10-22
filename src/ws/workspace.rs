@@ -123,7 +123,7 @@ pub const PAGES: [(&str, &[&str]); 13] = [
     (WS_CANVAS, &["画布", "模块库"]),
     (WS_FACTORY, &["Alpha Factory", "特征库"]),
     (WS_PREDICTION, &["币安钱包", "Polymarket"]),
-    (WS_BACKTEST, &["运行", "结果报告", "订单明细"]),
+    (WS_BACKTEST, &["运行", "结果报告", "订单明细", "交易核对"]),
     (WS_RESOURCES, &["进程", "网络出口", "检查更新"]),
 ];
 
@@ -156,6 +156,8 @@ fn page_template(layout: &str) -> Option<String> {
         WS_TARDIS if t == "预测市场回放" => locked("PmReplay", t),
         WS_TARDIS => format!(r#"{{"WealthSpring":{{"mode":"SelfChart","settings":{{"view":"{t}"}},"link_group":null}}}}"#),
         WS_BACKTEST if t == "结果报告" => locked("BacktestResult", t),
+        // 交易核对（docs/56）：交易清单逐笔上 K 线
+        WS_BACKTEST if t == "交易核对" => locked("TradeReview", t),
         WS_BACKTEST if t == "订单明细" => format!(r#"{{"WealthSpring":{{"mode":"Backtest","settings":{{"view":"{t}"}},"link_group":null}}}}"#),
         WS_RESOURCES if t == "网络出口" => locked("NetEgress", t),
         WS_RESOURCES => locked("Procs", t),
@@ -653,7 +655,7 @@ mod tests {
         // 只读面板类：没有 ticker、不吃行情流，各自是一个独立用途的页面。
         for kind in [
             "Factory", "C4Shadow", "Recorder", "OptionsBoard", "PredictionBoard", "PmBinance", "PmReplay", "FeatureLab", "FeatureMatrix", "StrategyCenter", "StrategyLayers", "StrategyFlow", "OfmsLab", "TardisBoard",
-            "MarketMap", "Observatory", "NetEgress", "Procs", "News", "Calendar",
+            "TradeReview", "MarketMap", "Observatory", "NetEgress", "Procs", "News", "Calendar",
         ] {
             assert!(
                 templates.contains(&format!("\"{kind}\"")),
