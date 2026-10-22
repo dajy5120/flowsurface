@@ -343,6 +343,72 @@ pub struct Graph {
 }
 
 pub const EXEC: &str = "kernel.exec";
+/// 「回测日期」节点（docs/56 §9）：不接线；参数就是 `[backtest]` 的日期与时段，和检查器里的数据选择双向同步。
+pub const DATES: &str = "kernel.dates";
+
+/// `[backtest]` → 日期节点的参数（与 graph.py 的 `dates_of` 一致）。
+pub fn dates_params(bt: &Value) -> Map<String, Value> {
+    let mut m = Map::new();
+    let s = |v: Option<&Value>| v.and_then(Value::as_str).filter(|x| !x.is_empty()).map(|x| Value::String(x.to_string()));
+    if let Some(v) = s(bt.get("start")) {
+        m.insert("start".into(), v);
+    }
+    if let Some(v) = s(bt.get("end")) {
+        m.insert("end".into(), v);
+    }
+    if let Some(sess) = bt.get("session") {
+        if let Some(v) = s(sess.get("start")) {
+            m.insert("session_start".into(), v);
+        }
+        if let Some(v) = sess.get("minutes").filter(|v| v.is_u64()) {
+            m.insert("minutes".into(), v.clone());
+        }
+    }
+    m
+}
+
+/// 日期节点的参数 → 改好的 `[backtest]`（其余项照留）。格式对不对由 Python 编译时查（错误标在节点上）。
+pub fn backtest_with_dates(bt: &Value, params: &Map<String, Value>) -> Value {
+    let mut out = bt.as_object().cloned().unwrap_or_default();
+    let s = |k: &str| params.get(k).and_then(Value::as_str).map(str::trim).filter(|x| !x.is_empty()).map(str::to_string);
+    for k in ["start", "end"] {
+        match s(k) {
+            Some(v) => out.insert(k.into(), Value::String(v)),
+            None => out.remove(k),
+        };
+    }
+    let mins = params.get("minutes").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|x| x.trim().parse().ok())));
+    match (s("session_start"), mins) {
+        (Some(hm), Some(m)) => {
+            out.insert("session".into(), serde_json::json!({"start": hm, "minutes": m}));
+        }
+        (None, None) => {
+            out.remove("session");
+        }
+        _ => {} // 只给了一半：先不动（编译时报在节点上）
+    }
+    Value::Object(out)
+}
+
+/// 日期节点改了 → `[backtest]` 与数据选择器跟上。
+fn dates_to_backtest(g: &mut St, id: &str) {
+    let Some(n) = g.graph.node(id).filter(|n| n.module == DATES) else { return };
+    let bt = backtest_with_dates(&g.graph.backtest, &n.params);
+    if bt != g.graph.backtest {
+        g.graph.backtest = bt;
+        sync_pick(g);
+    }
+}
+
+/// 数据选择器改了 `[backtest]` → 日期节点跟上。
+fn backtest_to_dates(g: &mut St) {
+    let p = dates_params(&g.graph.backtest);
+    for n in g.graph.nodes.iter_mut().filter(|n| n.module == DATES) {
+        n.params = p.clone();
+    }
+    let ids: Vec<String> = g.graph.nodes.iter().filter(|n| n.module == DATES).map(|n| form_key(&n.id, "")).collect();
+    g.form.retain(|k, _| !ids.iter().any(|p| k.starts_with(p.as_str())));
+}
 /// 这份代码写出的图格式版本，与 `strategies/swe/graph.py` 的 FORMAT 一致（Python 端拒绝比它新的）。
 pub const GRAPH_FORMAT: u32 = 6;
 /// 最小缩放：上千个节点的图要能整张看全（低于 0.3 只画色块，见视图的细节层级）。
@@ -3010,6 +3076,7 @@ fn write_pick(g: &mut St) {
         edit(g, "c.backtest.data");
         g.graph.backtest = bt;
         g.form.retain(|k, _| !k.starts_with(&form_key("backtest", "")));
+        backtest_to_dates(g);
         touch(g);
     }
 }
@@ -3056,8 +3123,15 @@ fn add_node(g: &mut St, refer: &str, x: f32, y: f32) -> Option<String> {
         g.msg = "「执行」节点已经有一个了".to_string();
         return None;
     }
+    if def.kind == "dates" && g.graph.nodes.iter().any(|n| n.module == DATES) {
+        g.msg = "「回测日期」节点已经有一个了".to_string();
+        return None;
+    }
     let id = g.graph.fresh_id();
     let mut node = Node { id: id.clone(), module: refer.to_string(), x, y, ..Default::default() };
+    if def.kind == "dates" {
+        node.params = dates_params(&g.graph.backtest); // 新放的日期节点 = 现在的数据选择
+    }
     if def.kind == "entry" {
         let taken: Vec<String> = g.graph.nodes.iter().filter_map(|n| n.lane.as_ref().and_then(|l| l.get("name")).and_then(Value::as_str).map(str::to_string)).collect();
         let mut lane = Map::new();
@@ -3864,6 +3938,7 @@ pub fn handle(m: FlMsg) {
                         }
                     }
                 }
+                dates_to_backtest(g, &id);
             });
         }
         FlMsg::ParamValue(id, name, value) => {
@@ -3880,6 +3955,7 @@ pub fn handle(m: FlMsg) {
                         }
                     }
                 }
+                dates_to_backtest(g, &id);
             });
         }
         FlMsg::CatQuery(q) => {
@@ -4855,6 +4931,28 @@ mod tests {
         g.graph.backtest = serde_json::json!({"source": "auto", "symbols": "ESU6"});
         sync_pick(&mut g);
         assert_eq!(g.pick.pipeline, None);
+    }
+
+    #[test]
+    fn 日期节点与回测日期互相同步() {
+        let bt = serde_json::json!({"source": "tardis", "symbols": "BTCUSDT", "start": "2026-06-01", "end": "2026-06-03",
+                                     "session": {"start": "13:30", "minutes": 60}, "taker_bp": 4.5});
+        let p = dates_params(&bt);
+        assert_eq!(serde_json::Value::Object(p.clone()), serde_json::json!({"start": "2026-06-01", "end": "2026-06-03", "session_start": "13:30", "minutes": 60}));
+        // 节点 → backtest：其余项照留；时段两项都清空 = 整天
+        let mut q = p.clone();
+        q.insert("end".into(), "2026-06-30".into());
+        q.remove("session_start");
+        q.remove("minutes");
+        let b2 = backtest_with_dates(&bt, &q);
+        assert_eq!(b2["end"], "2026-06-30");
+        assert!(b2.get("session").is_none() && b2["taker_bp"] == 4.5 && b2["symbols"] == "BTCUSDT");
+        // 只填了一半的时段：先不动 backtest（编译时报在节点上）
+        q.insert("session_start".into(), "09:30".into());
+        assert!(backtest_with_dates(&b2, &q).get("session").is_none());
+        // 手填的数字是字符串也认
+        q.insert("minutes".into(), "90".into());
+        assert_eq!(backtest_with_dates(&b2, &q)["session"], serde_json::json!({"start": "09:30", "minutes": 90}));
     }
 
     #[test]

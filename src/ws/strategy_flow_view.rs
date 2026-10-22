@@ -79,6 +79,22 @@ fn type_label(ty: &str) -> &str {
     }
 }
 
+/// 「回测日期」节点底栏：`06-01 → 06-30` / `2026-06-01 · 13:30 起 60 分钟` / `最新一天`。
+fn dates_brief(p: &serde_json::Map<String, Value>) -> String {
+    let s = |k: &str| p.get(k).and_then(Value::as_str).filter(|x| !x.is_empty());
+    let mut out = match (s("start"), s("end")) {
+        (None, _) => "最新一天".to_string(),
+        (Some(a), Some(z)) if z != a => format!("{} → {}", &a[a.len().min(5)..], &z[z.len().min(5)..]),
+        (Some(a), _) => a.to_string(),
+    };
+    if let (Some(hm), Some(m)) = (s("session_start"), p.get("minutes").and_then(Value::as_u64))
+        && !(hm == "00:00" && m >= 1440)
+    {
+        out.push_str(&format!(" · {hm} 起 {m} 分钟"));
+    }
+    out
+}
+
 fn port_color(ty: &str) -> Color {
     pal::series(PORT_TYPES.iter().position(|x| *x == ty).unwrap_or(0))
 }
@@ -179,6 +195,7 @@ impl Geom {
             .as_ref()
             .and_then(|l| l.get("name").and_then(|v| v.as_str()).map(|s| format!("线 {s}")))
             .or_else(|| n.name.clone())
+            .or_else(|| def.filter(|d| d.kind == "dates").map(|_| dates_brief(&n.params)))
             .unwrap_or_else(|| if def.is_some_and(|d| d.kind == "value") { brief.chars().take(22).collect() } else { String::new() });
         let base_h = HEAD_H + rows * ROW_H + FOOT_H;
         Geom {
@@ -1899,7 +1916,7 @@ pub fn inspector_panel<'a>() -> Element<'a, FlMsg> {
         ));
     }
     if let (Some(d), Some(p)) = (def, &v.palette)
-        && !matches!(d.kind.as_str(), "exec" | "value" | "sub")
+        && !matches!(d.kind.as_str(), "exec" | "value" | "sub" | "dates")
     {
         col = col.push(vary_section(v, n, d, p));
     }
