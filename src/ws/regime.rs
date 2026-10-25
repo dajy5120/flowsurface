@@ -398,8 +398,10 @@ pub fn draw_overlay(
                 );
             }
         }
-        // 切换标记：竖短线 + 新状态名（太挤的省掉名字）
+        // 切换标记：竖短线 + 新状态名（太挤的省掉名字）。放在底部条带正上方、不放图顶：
+        // 画布的文字总画在所有底板之上，放图顶会透过十字线读数的底板
         if s.marks {
+            let base = region.y + region.height - s.strips.len() as f32 * (STRIP_H + STRIP_GAP) / scaling;
             let mut last_label = f32::NEG_INFINITY;
             for seg in f.overlapping(&s.band, earliest, hi) {
                 let x = interval_to_x(seg.t0) - half;
@@ -407,13 +409,13 @@ pub fn draw_overlay(
                     continue;
                 }
                 let c = state_color(d, seg.s).unwrap_or_else(pal::dim);
-                frame.fill_rectangle(Point::new(x, region.y), Size::new(1.0 / scaling, 10.0 / scaling), c);
-                // 「不明」之类不着色的状态只画竖线、不写名字（太多了会糊住图顶）
+                frame.fill_rectangle(Point::new(x, base - 10.0 / scaling), Size::new(1.0 / scaling, 10.0 / scaling), c);
+                // 「不明」之类不着色的状态只画竖线、不写名字（太多了会糊成一片）
                 let named = d.states.get(seg.s).is_some_and(|st| tone_color(&st.tone).is_some());
                 if named && (x - last_label) * scaling >= 70.0 {
                     frame.fill_text(canvas::Text {
                         content: d.states.get(seg.s).map(|st| st.name.clone()).unwrap_or_default(),
-                        position: Point::new(x + 2.0 / scaling, region.y + 14.0 / scaling),
+                        position: Point::new(x + 2.0 / scaling, base - 13.0 / scaling),
                         size: iced::Pixels(9.0 / scaling),
                         color: c,
                         font: crate::ui::text::ui_font(),

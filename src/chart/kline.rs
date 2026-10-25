@@ -2307,6 +2307,28 @@ fn draw_crosshair_tooltip(
         (PlotData::TickBased(tick_aggr), None) => tick_aggr.datapoints.last().map(|dp| &dp.kline),
     };
 
+    // 市场状态（docs/62 R2）：OHLC 下面一行列出这根 K 线所在的各维度状态，再下一行是底色维度这一段的切换原因
+    let regime = match (data, at_interval) {
+        (PlotData::TimeBased(ts), Some(at)) => {
+            let symbol = crate::ws::drawing::symbol_key(&ticker_info.ticker);
+            let iv = ts.interval.to_milliseconds();
+            crate::ws::regime::describe_at(&symbol, iv, at).map(|(tf, items)| {
+                let mut segs: Vec<(String, iced::Color)> = vec![(format!("状态 {tf}"), palette.background.base.text.scale_alpha(0.6))];
+                for (dim, st, c) in items {
+                    segs.push((format!("{dim} {st}"), c.unwrap_or(palette.background.base.text)));
+                }
+                (segs, crate::ws::regime::reason_at(&symbol, iv, at))
+            })
+        }
+        _ => None,
+    };
+    // 估宽：中文按整字宽，ASCII 按约六成
+    let est = |s: &str| s.chars().map(|c| if c.is_ascii() { TEXT_SIZE * 0.62 } else { TEXT_SIZE }).sum::<f32>();
+    const ROW_H: f32 = 18.0;
+    const GAP: f32 = 14.0;
+    // 图顶第一行留给日历事件标签（docs/43 K5b），读数从它下面开始
+    const TOP: f32 = 18.0;
+
     if let Some(kline) = kline_opt {
         let change_pct = ((kline.close - kline.open).to_f32() / kline.open.to_f32()) * 100.0;
         let change_color = if change_pct >= 0.0 {
@@ -2330,26 +2352,29 @@ fn draw_crosshair_tooltip(
             (&format!("{change_pct:+.2}%"), change_color, true),
         ];
 
-        let total_width: f32 = segments
+        let ohlc_width: f32 = segments
             .iter()
-            .map(|(s, _, _)| s.len() as f32 * (TEXT_SIZE * 0.8))
+            .map(|(s, _, v)| s.len() as f32 * 8.0 + if *v { 6.0 } else { 2.0 })
             .sum();
 
-        let position = Point::new(8.0, 8.0);
-
-        let tooltip_rect = Rectangle {
-            x: position.x,
-            y: position.y,
-            width: total_width,
-            height: 16.0,
-        };
-
+        // OHLC 和状态行共用一块连续底板，行间不留缝，免得图上的切换标记文字从缝里透出来
+        let mut width = ohlc_width;
+        let mut rows = 1.0;
+        if let Some((segs, why)) = &regime {
+            width = width.max(segs.iter().map(|(s, _)| est(s) + GAP).sum());
+            rows += 1.0;
+            if let Some(w) = why {
+                width = width.max(est(w));
+                rows += 1.0;
+            }
+        }
         frame.fill_rectangle(
-            tooltip_rect.position(),
-            tooltip_rect.size(),
-            palette.background.weakest.color.scale_alpha(0.9),
+            Point::new(4.0, TOP - 3.0),
+            Size::new(width + 8.0, rows * ROW_H + 4.0),
+            palette.background.weakest.color.scale_alpha(0.96),
         );
 
+        let position = Point::new(8.0, TOP);
         let mut x = position.x;
         for (text, seg_color, is_value) in segments {
             frame.fill_text(canvas::Text {
@@ -2363,23 +2388,12 @@ fn draw_crosshair_tooltip(
             x += text.len() as f32 * 8.0;
             x += if is_value { 6.0 } else { 2.0 };
         }
-    }
 
-    // 市场状态（docs/62 R2）：OHLC 下面一行列出这根 K 线所在的各维度状态，再下一行是底色维度这一段的切换原因
-    if let (PlotData::TimeBased(ts), Some(at)) = (data, at_interval) {
-        let symbol = crate::ws::drawing::symbol_key(&ticker_info.ticker);
-        let iv = ts.interval.to_milliseconds();
-        if let Some((tf, items)) = crate::ws::regime::describe_at(&symbol, iv, at) {
-            let mut segs: Vec<(String, iced::Color)> = vec![(format!("状态 {tf}"), palette.background.base.text.scale_alpha(0.6))];
-            for (dim, st, c) in items {
-                segs.push((format!("{dim} {st}"), c.unwrap_or(palette.background.base.text)));
-            }
-            let width: f32 = segs.iter().map(|(s, _)| s.chars().count() as f32 * TEXT_SIZE + 8.0).sum();
-            let y = 8.0 + 18.0;
-            frame.fill_rectangle(Point::new(8.0, y), Size::new(width, 16.0), palette.background.weakest.color.scale_alpha(0.9));
+        if let Some((segs, why)) = regime {
+            let y = TOP + ROW_H;
             let mut x = 8.0;
             for (s, c) in segs {
-                let w = s.chars().count() as f32 * TEXT_SIZE + 8.0;
+                let w = est(&s) + GAP;
                 frame.fill_text(canvas::Text {
                     content: s,
                     position: Point::new(x, y),
@@ -2390,16 +2404,10 @@ fn draw_crosshair_tooltip(
                 });
                 x += w;
             }
-            if let Some(why) = crate::ws::regime::reason_at(&symbol, iv, at) {
-                let y = y + 18.0;
-                frame.fill_rectangle(
-                    Point::new(8.0, y),
-                    Size::new(why.chars().count() as f32 * TEXT_SIZE + 8.0, 16.0),
-                    palette.background.weakest.color.scale_alpha(0.9),
-                );
+            if let Some(why) = why {
                 frame.fill_text(canvas::Text {
                     content: why,
-                    position: Point::new(8.0, y),
+                    position: Point::new(8.0, y + ROW_H),
                     size: iced::Pixels(crate::style::text_size::BODY),
                     color: palette.background.base.text.scale_alpha(0.7),
                     font: crate::ui::text::ui_font(),
