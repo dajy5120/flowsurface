@@ -453,26 +453,36 @@ pub fn draw_overlay(
     }
 }
 
-/// 十字线读数：时刻 `t`（这根 K 线的开始）各维度的状态 [(维度名, 状态名, 颜色)]。底色维度排第一。
+/// 十字线读数：时刻 `t`（这根 K 线的开始）各维度的状态，按层分行 [(层, [(维度名, 状态名, 颜色)])]。
+/// 层按文件里第一次出现的先后（L2 在前、L1 在后），底色维度排在它那一行的第一个。
 #[must_use]
-pub fn describe_at(symbol: &str, chart_iv: u64, t: u64) -> Option<(String, Vec<StateItem>)> {
+pub fn describe_at(symbol: &str, chart_iv: u64, t: u64) -> Option<(String, Vec<(String, Vec<StateItem>)>)> {
     let s = settings();
     if !s.on {
         return None;
     }
     let f = pick(&files_for(symbol), chart_iv, s.tf.as_deref())?;
-    let mut keys: Vec<&str> = vec![s.band.as_str()];
-    keys.extend(f.dims.iter().map(|d| d.key.as_str()).filter(|k| *k != s.band));
-    let items: Vec<_> = keys
-        .into_iter()
-        .filter_map(|k| {
-            let d = f.dim(k)?;
-            let seg = f.at(k, t)?;
-            let st = d.states.get(seg.s)?;
-            Some((d.name.clone(), st.name.clone(), tone_color(&st.tone)))
-        })
-        .collect();
-    (!items.is_empty()).then(|| (f.timeframe.clone(), items))
+    let mut keys: Vec<&DimDef> = f.dim(&s.band).into_iter().collect();
+    keys.extend(f.dims.iter().filter(|d| d.key != s.band));
+    let mut rows: Vec<(String, Vec<StateItem>)> = Vec::new();
+    for layer in f.dims.iter().map(|d| d.layer.as_str()) {
+        if rows.iter().any(|(l, _)| l == layer) {
+            continue;
+        }
+        let items: Vec<StateItem> = keys
+            .iter()
+            .filter(|d| d.layer == layer)
+            .filter_map(|d| {
+                let seg = f.at(&d.key, t)?;
+                let st = d.states.get(seg.s)?;
+                Some((d.name.clone(), st.name.clone(), tone_color(&st.tone)))
+            })
+            .collect();
+        if !items.is_empty() {
+            rows.push((layer.to_string(), items));
+        }
+    }
+    (!rows.is_empty()).then(|| (f.timeframe.clone(), rows))
 }
 
 /// 时刻 `t` 底色维度那一段的切换原因。

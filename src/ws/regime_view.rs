@@ -78,6 +78,13 @@ pub fn inspector<'a>(symbol: &str) -> Element<'a, RegimeMsg> {
         strips = strips.push(chip(d.name.clone(), on, RegimeMsg::Strip(d.key.clone(), !on)));
     }
     b = b.push(t::metadata("底部条带（按点选的先后从上到下）").color(pal::dim())).push(strips.wrap());
+    if f.dims.iter().any(|d| d.layer == "L1") {
+        b = b.push(
+            text("拥挤度 / 持仓流向 / 资金费来自资金费 + 持仓（L1）：只作看盘描述，检验过没有择时价值（docs/62 §11–§13）")
+                .size(t::s_meta())
+                .color(pal::dim()),
+        );
+    }
 
     let made = chrono::DateTime::from_timestamp_millis(f.generated_ms)
         .map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
