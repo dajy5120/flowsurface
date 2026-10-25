@@ -187,7 +187,17 @@ pub fn view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
             b.width(Length::Fill).into()
         }),
         // 图表：画线（docs/46 G1）——选中对象的属性与这个品种的对象树
-        Content::Kline { .. } | Content::Heatmap { .. } => {
+        // K 线图另有「市场状态」一节（docs/62 R2）
+        Content::Kline { .. } => drawing_target(content).map(|(sym, dec, mult)| {
+            column![
+                super::regime_view::inspector(&sym).map(Event::Regime),
+                super::drawing_view::inspector(&sym, dec, mult).map(Event::Drawing),
+            ]
+            .spacing(crate::ui::metrics::space(4))
+            .width(Length::Fill)
+            .into()
+        }),
+        Content::Heatmap { .. } => {
             drawing_target(content).map(|(sym, dec, mult)| super::drawing_view::inspector(&sym, dec, mult).map(Event::Drawing))
         }
         _ => None,

@@ -794,6 +794,8 @@ pub struct ViewState {
     linked_seen: std::sync::atomic::AtomicU64,
     /// 上次画绘图层时的画线版本（docs/46）：变了就重画绘图层与十字线层
     drawings_seen: std::sync::atomic::AtomicU64,
+    /// 上次画主图时的市场状态叠加层版本（docs/62 R2）：变了就重画主图
+    pub regime_seen: std::sync::atomic::AtomicU64,
     /// 价格轴宽度的高水位（f32 位）：只增不减。见 [`ViewState::y_labels_width`]。
     y_labels_max: std::sync::atomic::AtomicU32,
     /// 见过的「在图上看」请求版本（[`goto_time`]）。
@@ -1113,6 +1115,7 @@ impl ViewState {
             layout,
             linked_seen: std::sync::atomic::AtomicU64::new(0),
             drawings_seen: std::sync::atomic::AtomicU64::new(0),
+            regime_seen: std::sync::atomic::AtomicU64::new(0),
             y_labels_max: std::sync::atomic::AtomicU32::new(0),
             goto_seen: 0,
             view_seen: 0,

@@ -1040,6 +1040,12 @@ impl canvas::Program<Message> for KlineChart {
         let bounds_size = bounds.size();
         let palette = theme.extended_palette();
 
+        // 市场状态叠加层（docs/62 R2）画在主图缓存里：时间线文件或设置变了就重画主图
+        if matches!(chart.basis, Basis::Time(_)) && crate::ws::regime::changed_since(&chart.regime_seen) {
+            chart.cache.main.clear();
+        }
+        let regime_symbol = crate::ws::drawing::symbol_key(&chart.ticker_info.ticker);
+
         let klines = chart.cache.main.draw(renderer, bounds_size, |frame| {
             let center = Vector::new(bounds.width / 2.0, bounds.height / 2.0);
 
@@ -1167,6 +1173,20 @@ impl canvas::Program<Message> for KlineChart {
                         },
                     );
                 }
+            }
+
+            // 市场状态（docs/62 R2）：底色带 + 底部条带 + 切换标记，画在 K 线下面一层的颜色上（半透明）
+            if let PlotData::TimeBased(ts) = &self.data_source {
+                crate::ws::regime::draw_overlay(
+                    frame,
+                    region,
+                    &interval_to_x,
+                    chart.scaling,
+                    earliest,
+                    latest,
+                    &regime_symbol,
+                    ts.interval.to_milliseconds(),
+                );
             }
 
             // 缺口标记（docs/35 §6.3）：时间轴上缺了 K 线的地方画淡色带，不插值连过去
@@ -2342,6 +2362,50 @@ fn draw_crosshair_tooltip(
             });
             x += text.len() as f32 * 8.0;
             x += if is_value { 6.0 } else { 2.0 };
+        }
+    }
+
+    // 市场状态（docs/62 R2）：OHLC 下面一行列出这根 K 线所在的各维度状态，再下一行是底色维度这一段的切换原因
+    if let (PlotData::TimeBased(ts), Some(at)) = (data, at_interval) {
+        let symbol = crate::ws::drawing::symbol_key(&ticker_info.ticker);
+        let iv = ts.interval.to_milliseconds();
+        if let Some((tf, items)) = crate::ws::regime::describe_at(&symbol, iv, at) {
+            let mut segs: Vec<(String, iced::Color)> = vec![(format!("状态 {tf}"), palette.background.base.text.scale_alpha(0.6))];
+            for (dim, st, c) in items {
+                segs.push((format!("{dim} {st}"), c.unwrap_or(palette.background.base.text)));
+            }
+            let width: f32 = segs.iter().map(|(s, _)| s.chars().count() as f32 * TEXT_SIZE + 8.0).sum();
+            let y = 8.0 + 18.0;
+            frame.fill_rectangle(Point::new(8.0, y), Size::new(width, 16.0), palette.background.weakest.color.scale_alpha(0.9));
+            let mut x = 8.0;
+            for (s, c) in segs {
+                let w = s.chars().count() as f32 * TEXT_SIZE + 8.0;
+                frame.fill_text(canvas::Text {
+                    content: s,
+                    position: Point::new(x, y),
+                    size: iced::Pixels(crate::style::text_size::BODY),
+                    color: c,
+                    font: crate::ui::text::ui_font(),
+                    ..canvas::Text::default()
+                });
+                x += w;
+            }
+            if let Some(why) = crate::ws::regime::reason_at(&symbol, iv, at) {
+                let y = y + 18.0;
+                frame.fill_rectangle(
+                    Point::new(8.0, y),
+                    Size::new(why.chars().count() as f32 * TEXT_SIZE + 8.0, 16.0),
+                    palette.background.weakest.color.scale_alpha(0.9),
+                );
+                frame.fill_text(canvas::Text {
+                    content: why,
+                    position: Point::new(8.0, y),
+                    size: iced::Pixels(crate::style::text_size::BODY),
+                    color: palette.background.base.text.scale_alpha(0.7),
+                    font: crate::ui::text::ui_font(),
+                    ..canvas::Text::default()
+                });
+            }
         }
     }
 }
