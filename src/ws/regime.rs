@@ -500,6 +500,18 @@ const STRIP_GAP: f32 = 1.0;
 
 /// 在 K 线主图上画状态叠加层（时间基）。`interval_to_x`：K 线开始时刻 → 这根中心的 x；`chart_iv`：图的周期（毫秒）。
 #[allow(clippy::too_many_arguments)]
+/// 底部状态条带占的高度（图上指标的副图摞在它上面，docs/63 I3）。
+#[must_use]
+pub fn bottom_reserved(symbol: &str, chart_iv: u64, scaling: f32) -> f32 {
+    let s = settings();
+    if !s.on || scaling <= f32::EPSILON || pick(&files_for(symbol), chart_iv, s.tf.as_deref()).is_none() {
+        return 0.0;
+    }
+    s.strips.len() as f32 * (STRIP_H + STRIP_GAP) / scaling
+}
+
+/// `extra_bottom`：条带上面还被图上指标的副图占了多高（切换标记画在它们上面）。
+#[allow(clippy::too_many_arguments)]
 pub fn draw_overlay(
     frame: &mut canvas::Frame,
     region: Rectangle,
@@ -509,6 +521,7 @@ pub fn draw_overlay(
     latest: u64,
     symbol: &str,
     chart_iv: u64,
+    extra_bottom: f32,
 ) {
     let s = settings();
     if !s.on || scaling <= f32::EPSILON || chart_iv == 0 {
@@ -538,7 +551,7 @@ pub fn draw_overlay(
         // 切换标记：竖短线 + 新状态名（太挤的省掉名字）。放在底部条带正上方、不放图顶：
         // 画布的文字总画在所有底板之上，放图顶会透过十字线读数的底板
         if s.marks {
-            let base = region.y + region.height - s.strips.len() as f32 * (STRIP_H + STRIP_GAP) / scaling;
+            let base = region.y + region.height - s.strips.len() as f32 * (STRIP_H + STRIP_GAP) / scaling - extra_bottom;
             let mut last_label = f32::NEG_INFINITY;
             for seg in f.overlapping(&s.band, earliest, hi) {
                 let x = interval_to_x(seg.t0) - half;

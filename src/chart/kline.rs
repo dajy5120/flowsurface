@@ -1041,7 +1041,10 @@ impl canvas::Program<Message> for KlineChart {
         let palette = theme.extended_palette();
 
         // 市场状态叠加层（docs/62 R2）画在主图缓存里：时间线文件或设置变了就重画主图
-        if matches!(chart.basis, Basis::Time(_)) && crate::ws::regime::changed_since(&chart.regime_seen) {
+        // 图上指标（docs/63 I3）的设置变了也一样（`|` 不短路：两个版本都要记下）
+        if matches!(chart.basis, Basis::Time(_))
+            && (crate::ws::regime::changed_since(&chart.regime_seen) | crate::ws::studies::changed_since(&chart.studies_seen))
+        {
             chart.cache.main.clear();
         }
         let regime_symbol = crate::ws::drawing::symbol_key(&chart.ticker_info.ticker);
@@ -1177,6 +1180,7 @@ impl canvas::Program<Message> for KlineChart {
 
             // 市场状态（docs/62 R2）：底色带 + 底部条带 + 切换标记，画在 K 线下面一层的颜色上（半透明）
             if let PlotData::TimeBased(ts) = &self.data_source {
+                let iv = ts.interval.to_milliseconds();
                 crate::ws::regime::draw_overlay(
                     frame,
                     region,
@@ -1185,8 +1189,37 @@ impl canvas::Program<Message> for KlineChart {
                     earliest,
                     latest,
                     &regime_symbol,
-                    ts.interval.to_milliseconds(),
+                    iv,
+                    crate::ws::studies::sub_height(&regime_symbol, iv, chart.scaling),
                 );
+                // 图上指标（docs/63 I3）：叠加线 / 带 + 副图分区（摞在状态条带上面）。计算在指标核心，按图增量
+                if !crate::ws::studies::studies_for(&regime_symbol).is_empty() {
+                    let kl: Vec<crate::ws::studies::Ohlcv> = ts
+                        .datapoints
+                        .iter()
+                        .map(|(t, dp)| {
+                            let k = &dp.kline;
+                            let p = |x: Price| x.units as f64 / 1e11;
+                            (t.as_u64(), p(k.open), p(k.high), p(k.low), p(k.close), k.volume.total().units as f64 / 1e8)
+                        })
+                        .collect();
+                    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                    let comp = crate::ws::studies::compute(&regime_symbol, iv, &kl, now);
+                    let price_to_y_f64 = |v: f64| chart.price_to_y(Price::from_units((v * 1e11).round() as i64));
+                    crate::ws::studies::draw(
+                        frame,
+                        region,
+                        &interval_to_x,
+                        &price_to_y_f64,
+                        chart.scaling,
+                        earliest,
+                        latest,
+                        &regime_symbol,
+                        iv,
+                        &comp,
+                        crate::ws::regime::bottom_reserved(&regime_symbol, iv, chart.scaling),
+                    );
+                }
             }
 
             // 缺口标记（docs/35 §6.3）：时间轴上缺了 K 线的地方画淡色带，不插值连过去
@@ -2311,7 +2344,7 @@ fn draw_crosshair_tooltip(
     let est = |s: &str| s.chars().map(|c| if c.is_ascii() { TEXT_SIZE * 0.62 } else { TEXT_SIZE }).sum::<f32>();
     const GAP: f32 = 14.0;
     // 市场状态（docs/62 R2）：OHLC 下面每层一行（L2 价格状态、L1 资金费 + 持仓），再下一行是底色维度这一段的切换原因
-    let regime = match (data, at_interval) {
+    let mut regime = match (data, at_interval) {
         (PlotData::TimeBased(ts), Some(at)) => {
             let symbol = crate::ws::drawing::symbol_key(&ticker_info.ticker);
             let iv = ts.interval.to_milliseconds();
@@ -2342,6 +2375,29 @@ fn draw_crosshair_tooltip(
         }
         _ => None,
     };
+    // 图上指标（docs/63 I3）：再加一行「指标」（放不下折行），在状态各行之后、切换原因之前
+    if let (PlotData::TimeBased(ts), Some(at)) = (data, at_interval) {
+        let symbol = crate::ws::drawing::symbol_key(&ticker_info.ticker);
+        let items = crate::ws::studies::describe_at(&symbol, ts.interval.to_milliseconds(), at);
+        if !items.is_empty() {
+            let max_w = (frame.width() - 90.0).max(240.0);
+            let dim_c = palette.background.base.text.scale_alpha(0.6);
+            let entry = regime.get_or_insert_with(|| (Vec::new(), None));
+            let mut cur = vec![("指标".to_string(), dim_c)];
+            let mut w = est("指标") + GAP;
+            for (s, c) in items {
+                let sw = est(&s) + GAP;
+                if w + sw > max_w && cur.len() > 1 {
+                    entry.0.push(std::mem::take(&mut cur));
+                    cur.push(("　".to_string(), dim_c));
+                    w = est("　") + GAP;
+                }
+                w += sw;
+                cur.push((s, c));
+            }
+            entry.0.push(cur);
+        }
+    }
     const ROW_H: f32 = 18.0;
     // 图顶第一行留给日历事件标签（docs/43 K5b），读数从它下面开始
     const TOP: f32 = 18.0;

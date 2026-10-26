@@ -1062,13 +1062,18 @@ fn desktop_notify(title: &str, body: &str, importance: u8) -> Result<(), String>
 /// 画线到价提醒（docs/46 G5）：现在就发一条——与日历提醒同一套通知中心、桌面通知、Telegram 与免打扰。
 /// **只提醒，不下单**。`want_tg`：这条线勾了「也发 Telegram」（还要配好、开着）。`dry`：测试用，不弹桌面通知、不起发送进程。
 pub fn queue_drawing_alert(c: &Connection, now: i64, title: &str, body: &str, want_tg: bool, dry: bool) -> rusqlite::Result<i64> {
+    queue_now(c, now, "drawing", title, body, want_tg, dry)
+}
+
+/// 即时提醒的通用入口（画线 `drawing`、指标条件 `indicator` docs/63 I5）：写一条已发的任务 + 各渠道投递。
+pub fn queue_now(c: &Connection, now: i64, what: &str, title: &str, body: &str, want_tg: bool, dry: bool) -> rusqlite::Result<i64> {
     let q = quiet(c);
     let local_now = Local.timestamp_millis_opt(now).single().map(|t| t.time()).unwrap_or_default();
     let suppressed = q.on() && q.covers(local_now);
     c.execute(
         "INSERT INTO alert_jobs (idem_key, event_id, rule_id, offset_min, what, version, fire_at, state, title, body, importance, created_at, fired_at, note)
-         VALUES (?1, '', 0, 0, 'drawing', 0, ?2, ?3, ?4, ?5, 1, ?2, ?2, ?6)",
-        params![format!("drawing|{now}|{title}|{body}"), now, if suppressed { "suppressed" } else { "fired" }, title, body, suppressed.then_some("免打扰时段")],
+         VALUES (?1, '', 0, 0, ?7, 0, ?2, ?3, ?4, ?5, 1, ?2, ?2, ?6)",
+        params![format!("{what}|{now}|{title}|{body}"), now, if suppressed { "suppressed" } else { "fired" }, title, body, suppressed.then_some("免打扰时段"), what],
     )?;
     let id = c.last_insert_rowid();
     if suppressed {

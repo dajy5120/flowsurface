@@ -133,6 +133,7 @@ pub enum Event {
     Drawing(crate::ws::drawing::DrawMsg),
     /// 市场状态叠加层（docs/62 R2）：检查器里 K 线图「市场状态」一节。设置全局一份，与 pane 无关。
     Regime(crate::ws::regime::RegimeMsg),
+    Studies(crate::ws::studies::StudyMsg),
     PmReplayInteraction(crate::ws::pm_replay::PmReplayMsg),
     /// Factory 面板交互（docs/20 §26）：nightly 手动启停。
     FactoryInteraction(crate::ws::factory::FactoryMsg),
@@ -2030,6 +2031,7 @@ impl State {
             }
             Event::Drawing(m) => crate::ws::drawing::handle(m),
             Event::Regime(m) => crate::ws::regime::handle(m),
+            Event::Studies(m) => crate::ws::studies::handle(m),
             Event::TardisBoardInteraction(m) => {
                 // Tardis 历史面板（docs/20 §9）：改选择 + 副作用（调 Python 生成面板 JSON）。
                 if let Content::TardisBoard(tb) = &mut self.content {

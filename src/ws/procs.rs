@@ -123,6 +123,14 @@ pub static ALL: &[Proc] = &[
         if_stopped: "雷达面板停在最后一张快照上",
     },
     Proc {
+        key: "regime",
+        label: "市场状态实时发布",
+        what: "K 线收盘后重算市场状态 → 时间线文件 + Redis ws:regime:*（docs/62 F6）",
+        unit: "ws-regime",
+        kind: Kind::Daemon,
+        if_stopped: "市场状态面板显示「不是实时」；Redis 上的状态 3 个周期后过期，实时运行的工作流读到不明、停开新仓",
+    },
+    Proc {
         key: "news",
         label: "新闻聚合",
         what: "RSS/Atom/JSON 多源抓取 → news_board.json",
