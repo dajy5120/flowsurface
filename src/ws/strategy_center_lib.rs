@@ -45,6 +45,11 @@ pub struct LibFilter {
     pub open: BTreeSet<String>,
     /// 目录树是否折叠起来（省地方）
     pub tree_hidden: bool,
+    /// 只看「市场状态」面板当前状态下可运行的（docs/62 F5）
+    pub regime_now: bool,
+    /// 开了 `regime_now` 时视图填进来的当前状态快照（不存盘）；写了声明却不满足的策略不显示，没写声明的不限
+    #[serde(skip)]
+    pub regime_want: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// 策略文件所在目录（相对 `strategies/`）：`strategies/research/masters/trend/turtle.py` → `research/masters/trend`。
@@ -71,6 +76,11 @@ pub fn matches(e: &Entry, f: &LibFilter, verdict: Option<&str>, query: &str) -> 
         return false;
     }
     if !f.styles.is_empty() && !m.styles.iter().any(|s| f.styles.contains(s)) {
+        return false;
+    }
+    if let Some(want) = &f.regime_want
+        && !super::regime_board::check(&m.regime, want).0
+    {
         return false;
     }
     let q = query.to_lowercase();

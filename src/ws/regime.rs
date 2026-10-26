@@ -9,7 +9,7 @@
 //! - 设置是全局的（所有 K 线图一份），存在 `<小文件目录>/cockpit/regime_overlay.json`；改在检查器「属性」页。
 //! - 每两秒看一次目录，文件改了就重读并让各图重画（[`changed_since`]）。只画时间基的图。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -57,6 +57,10 @@ pub struct RegimeFile {
     pub generated_ms: i64,
     pub dims: Vec<DimDef>,
     pub segs: HashMap<String, Vec<Seg>>,
+    /// 层号 → 读数里那一行的名字（例如 `L1` → 「资金 · 持仓」或「宏观 · 跨资产」）；没给就用层号
+    pub layer_names: HashMap<String, String>,
+    /// 最后一根 K 线的收盘时刻（毫秒）；老文件没有，用各维度最后一段推
+    pub last_ms: Option<u64>,
 }
 
 /// 文件里的一段：`[开始, 结束|null, 状态下标, 原因]`。
@@ -77,6 +81,11 @@ struct Raw {
     generated_ms: i64,
     dimensions: Vec<DimDef>,
     segments: HashMap<String, Vec<RawSeg>>,
+    #[serde(default)]
+    layer_names: HashMap<String, String>,
+    /// 最后一根 K 线的收盘时刻（毫秒）；老文件没有
+    #[serde(default)]
+    last_ms: Option<u64>,
 }
 
 /// 解析一个时间线文件。坏文件返回说明。
@@ -108,6 +117,8 @@ pub fn parse(text: &str) -> Result<RegimeFile, String> {
         generated_ms: r.generated_ms,
         dims: r.dimensions,
         segs,
+        layer_names: r.layer_names,
+        last_ms: r.last_ms,
     })
 }
 
@@ -122,6 +133,32 @@ impl RegimeFile {
         let k = v.partition_point(|s| s.t0 <= t);
         let s = v.get(k.checked_sub(1)?)?;
         s.t1.is_none_or(|e| t < e).then_some(s)
+    }
+
+    /// 「代码 周期」——面板里认这份文件用（同名不同来源的 symbol 里带来源前缀，不会撞）。
+    #[must_use]
+    pub fn key(&self) -> String {
+        format!("{} {}", self.symbol, self.timeframe)
+    }
+
+    /// 全部维度最早的段开始与最晚的段开始（最后一段持续到最新，以它的开始 + 一根为右端）。
+    #[must_use]
+    pub fn span(&self) -> Option<(u64, u64)> {
+        let lo = self.segs.values().filter_map(|v| v.first()).map(|s| s.t0).min()?;
+        let hi = self.segs.values().filter_map(|v| v.last()).map(|s| s.t1.unwrap_or(s.t0 + self.tf_ms)).max()?;
+        // 文件给了最后一根的收盘就用它（右端 = 它 + 1 毫秒，「看的时刻」= 最后一根收盘）。
+        // 没给的老文件：「各维度最后一段开始 + 一根」——最后一段持续很久时会低估
+        let hi = self.last_ms.map_or(hi, |l| l + 1);
+        Some((lo, hi.max(lo + 1)))
+    }
+
+    /// 时刻 t 各维度的状态快照 {维度: 状态键}（缺的维度不出现）。
+    #[must_use]
+    pub fn snapshot(&self, t: u64) -> BTreeMap<String, String> {
+        self.dims
+            .iter()
+            .filter_map(|d| self.at(&d.key, t).and_then(|s| d.states.get(s.s)).map(|st| (d.key.clone(), st.key.clone())))
+            .collect()
     }
 
     /// 和 [lo, hi] 有重叠的段。
@@ -212,6 +249,74 @@ pub fn note() -> String {
     cache().lock().map(|c| c.note.clone()).unwrap_or_default()
 }
 
+// ── 刷新一次（docs/62 F6）──────────────────────────────────────────────────
+
+/// (在跑, 上一次的结果)
+static ONCE: Mutex<(bool, String)> = Mutex::new((false, String::new()));
+
+/// 子进程跑一轮 `factory.regime live --once`（live.toml 里的品种 × 周期：重算、写时间线、发 Redis）。
+/// 子进程留在 Cockpit 的 cgroup 里，关窗即停；输出写运行目录下的 `regime-once.log`。
+pub fn refresh_once() {
+    {
+        let mut g = ONCE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if g.0 {
+            return;
+        }
+        *g = (true, "正在算……".into());
+    }
+    super::spawn_named("ws-regime-once", || {
+        let log = super::paths::runtime_dir().join("regime-once.log");
+        let t0 = Instant::now();
+        let st = std::fs::File::create(&log).and_then(|f| {
+            let e = f.try_clone()?;
+            std::process::Command::new(super::paths::python())
+                .args(["-m", "factory.regime", "live", "--once"])
+                .current_dir(super::paths::repo_root())
+                .stdout(f)
+                .stderr(e)
+                .status()
+        });
+        let at = chrono::Local::now().format("%H:%M").to_string();
+        let msg = match st {
+            Ok(s) if s.success() => format!("{at} 刷新完成（{:.0} 秒）", t0.elapsed().as_secs_f32()),
+            Ok(s) => format!("{at} 刷新失败（退出码 {:?}），见 {}", s.code(), log.display()),
+            Err(e) => format!("{at} 起不来 Python：{e}"),
+        };
+        *ONCE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = (false, msg);
+    });
+}
+
+#[must_use]
+pub fn once_status() -> (bool, String) {
+    ONCE.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+/// 全部时间线文件，按 (品种, 周期长短) 排。
+#[must_use]
+pub fn all_files() -> Vec<Arc<RegimeFile>> {
+    refresh();
+    let c = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut v: Vec<Arc<RegimeFile>> = c.files.values().filter_map(|(_, f)| f.clone()).collect();
+    v.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.tf_ms.cmp(&b.tf_ms)));
+    v
+}
+
+/// 面板选中的时间线：设置里的那份，没有就第一份。
+#[must_use]
+pub fn board_file() -> Option<Arc<RegimeFile>> {
+    let s = settings();
+    let all = all_files();
+    s.board.as_ref().and_then(|k| all.iter().find(|f| &f.key() == k).cloned()).or_else(|| all.first().cloned())
+}
+
+/// 面板选中那份时间线**最新**一刻的全部维度状态（策略中心「只看当前状态可运行」用）。
+#[must_use]
+pub fn latest_snapshot() -> Option<(String, BTreeMap<String, String>)> {
+    let f = board_file()?;
+    let (_, hi) = f.span()?;
+    Some((f.key(), f.snapshot(hi.saturating_sub(1))))
+}
+
 /// 给一张周期为 `chart_iv` 的图挑时间线：设置里指定了周期就用它；否则周期最接近的（一样近取不小于图周期的）。
 #[must_use]
 pub fn pick(files: &[Arc<RegimeFile>], chart_iv: u64, want: Option<&str>) -> Option<Arc<RegimeFile>> {
@@ -245,6 +350,12 @@ pub struct Settings {
     pub marks: bool,
     /// 指定周期；空 = 跟图的周期自动挑
     pub tf: Option<String>,
+    /// 「市场状态」面板看哪份时间线（`RegimeFile::key`）；空 = 第一份
+    pub board: Option<String>,
+    /// 面板统计与时间轴的范围（天）；0 = 全部
+    pub board_days: u32,
+    /// 面板转移矩阵看哪个维度；空 = 底色维度
+    pub board_dim: Option<String>,
 }
 
 impl Default for Settings {
@@ -255,6 +366,9 @@ impl Default for Settings {
             strips: vec!["direction".into(), "trend_quality".into(), "vol_level".into(), "structure".into()],
             marks: true,
             tf: None,
+            board: None,
+            board_days: 90,
+            board_dim: None,
         }
     }
 }
@@ -282,10 +396,29 @@ pub enum RegimeMsg {
     Strip(String, bool),
     Marks(bool),
     Tf(Option<String>),
+    /// 面板（docs/62 F5）：选时间线 / 范围 / 转移矩阵的维度
+    Board(String),
+    BoardDays(u32),
+    BoardDim(String),
+    /// 面板时间轴上的光标（毫秒；None = 离开）：发到同页时间联动，K 线图跟着画竖线
+    Hover(Option<u64>),
+    /// 「刷新一次」（docs/62 F6）：子进程跑 `python -m factory.regime live --once`
+    RefreshOnce,
 }
+
+/// 面板时间轴的光标只发联动，不改设置、不存盘。
+const BOARD_CURSOR_SRC: u64 = 0x5245_4749_4d45;          // 「REGIME」：联动来源 id，与图表的指针地址不会撞
 
 /// 改设置：存盘 + 让各图重画。
 pub fn handle(m: RegimeMsg) {
+    if let RegimeMsg::Hover(t) = m {
+        crate::chart::linked_cursor::publish(BOARD_CURSOR_SRC, t);
+        return;
+    }
+    if matches!(m, RegimeMsg::RefreshOnce) {
+        refresh_once();
+        return;
+    }
     let mut s = settings_cell().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     apply(&mut s, m);
     let p = settings_path();
@@ -313,6 +446,10 @@ fn apply(s: &mut Settings, m: RegimeMsg) {
         }
         RegimeMsg::Marks(v) => s.marks = v,
         RegimeMsg::Tf(t) => s.tf = t,
+        RegimeMsg::Board(k) => s.board = Some(k),
+        RegimeMsg::BoardDays(d) => s.board_days = d,
+        RegimeMsg::BoardDim(k) => s.board_dim = Some(k),
+        RegimeMsg::Hover(_) | RegimeMsg::RefreshOnce => {}
     }
 }
 
@@ -453,7 +590,8 @@ pub fn draw_overlay(
     }
 }
 
-/// 十字线读数：时刻 `t`（这根 K 线的开始）各维度的状态，按层分行 [(层, [(维度名, 状态名, 颜色)])]。
+/// 十字线读数：时刻 `t`（这根 K 线的开始）各维度的状态，按层分行 [(行名, [(维度名, 状态名, 颜色)])]。
+/// 行名取文件的 `layer_names`，没有就是层号。
 /// 层按文件里第一次出现的先后（L2 在前、L1 在后），底色维度排在它那一行的第一个。
 #[must_use]
 pub fn describe_at(symbol: &str, chart_iv: u64, t: u64) -> Option<(String, Vec<(String, Vec<StateItem>)>)> {
@@ -462,13 +600,21 @@ pub fn describe_at(symbol: &str, chart_iv: u64, t: u64) -> Option<(String, Vec<(
         return None;
     }
     let f = pick(&files_for(symbol), chart_iv, s.tf.as_deref())?;
-    let mut keys: Vec<&DimDef> = f.dim(&s.band).into_iter().collect();
-    keys.extend(f.dims.iter().filter(|d| d.key != s.band));
+    let rows = layer_rows(&f, &s.band, t);
+    (!rows.is_empty()).then(|| (f.timeframe.clone(), rows))
+}
+
+/// 按层分行（纯函数，便于测试）：层按文件里第一次出现的先后，底色维度排在它那一行第一个。
+fn layer_rows(f: &RegimeFile, band: &str, t: u64) -> Vec<(String, Vec<StateItem>)> {
+    let mut keys: Vec<&DimDef> = f.dim(band).into_iter().collect();
+    keys.extend(f.dims.iter().filter(|d| d.key != band));
     let mut rows: Vec<(String, Vec<StateItem>)> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
     for layer in f.dims.iter().map(|d| d.layer.as_str()) {
-        if rows.iter().any(|(l, _)| l == layer) {
+        if seen.contains(&layer) {
             continue;
         }
+        seen.push(layer);
         let items: Vec<StateItem> = keys
             .iter()
             .filter(|d| d.layer == layer)
@@ -479,10 +625,10 @@ pub fn describe_at(symbol: &str, chart_iv: u64, t: u64) -> Option<(String, Vec<(
             })
             .collect();
         if !items.is_empty() {
-            rows.push((layer.to_string(), items));
+            rows.push((f.layer_names.get(layer).cloned().unwrap_or_else(|| layer.to_string()), items));
         }
     }
-    (!rows.is_empty()).then(|| (f.timeframe.clone(), rows))
+    rows
 }
 
 /// 时刻 `t` 底色维度那一段的切换原因。
@@ -550,6 +696,25 @@ mod tests {
         assert_eq!(back, s);
         let partial: Settings = serde_json::from_str(r#"{"on": false}"#).unwrap();
         assert_eq!((partial.on, partial.band.as_str()), (false, "composite"), "缺的字段用缺省");
+    }
+
+    #[test]
+    fn 按层分行不重复() {
+        const J: &str = r#"{"format": 1, "symbol": "BTCUSDT", "timeframe": "1h", "tf_ms": 3600000,
+          "dimensions": [
+            {"key": "composite", "layer": "L2", "name": "综合", "states": [{"key": "a", "name": "甲", "tone": "bull"}]},
+            {"key": "crowding", "layer": "L1", "name": "拥挤度", "states": [{"key": "a", "name": "甲", "tone": "none"}]},
+            {"key": "oi_flow", "layer": "L1", "name": "持仓流向", "states": [{"key": "a", "name": "甲", "tone": "none"}]},
+            {"key": "transition", "layer": "L2", "name": "转换", "states": [{"key": "a", "name": "甲", "tone": "warn"}]}],
+          "segments": {"composite": [[0, null, 0, ""]], "crowding": [[0, null, 0, ""]], "oi_flow": [[0, null, 0, ""]],
+                       "transition": [[0, null, 0, ""]]},
+          "layer_names": {"L1": "资金 · 持仓"}}"#;
+        let f = parse(J).unwrap();
+        let rows = layer_rows(&f, "crowding", 10);
+        let names: Vec<&str> = rows.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["L2", "资金 · 持仓"], "同一层只出一行；行名取 layer_names");
+        assert_eq!(rows[0].1.len(), 2, "后面才出现的 L2 维度也并进 L2 那一行");
+        assert_eq!(rows[1].1[0].0, "拥挤度", "底色维度排在它那一行第一个");
     }
 
     #[test]

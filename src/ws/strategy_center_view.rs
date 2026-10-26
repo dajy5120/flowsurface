@@ -123,6 +123,16 @@ fn library<'a>(v: &View) -> Element<'a, ScMsg> {
         chips = chips.push(w::btn(label, if on { Kind::Standard } else { Kind::Ghost }, Some(ScMsg::LibStyle(k.to_string()))));
     }
     col = col.push(chips.wrap());
+    // 适用环境（docs/62 F5）：按「市场状态」面板所选时间线的当前状态，只留声明满足的（没写声明的不限）
+    let now = super::regime::latest_snapshot().map(|(k, _)| k);
+    col = col.push(w::btn(
+        match &now {
+            Some(k) => format!("{}只看当前状态可运行（{k}）", if f.regime_now { "✓ " } else { "" }),
+            None => "只看当前状态可运行（还没有状态时间线）".to_string(),
+        },
+        if f.regime_now { Kind::Standard } else { Kind::Ghost },
+        now.is_some().then_some(ScMsg::LibRegimeNow),
+    ));
 
     // 目录树
     let q = v.search.clone();

@@ -81,6 +81,9 @@ pub struct Meta {
     /// 策略类型（docs/39），第一个是主类型
     #[serde(default)]
     pub styles: Vec<String>,
+    /// 适用环境声明（docs/62 F4，`[strategy.regime]` 规范化后）：{维度: [允许的状态]}；空 = 不限
+    #[serde(default)]
+    pub regime: BTreeMap<String, Vec<String>>,
 }
 
 /// `STRATEGY["master"]`（字段与 factory.lab.contract.parse_master 一致）。
@@ -320,6 +323,8 @@ pub enum ScMsg {
     // ── 策略库过滤（docs/39）──
     LibStyle(String),
     LibStylesClear,
+    /// 只看「市场状态」面板所选时间线**当前**状态下可运行的（docs/62 F5）
+    LibRegimeNow,
     LibDir(Option<String>),
     LibOpen(String),
     LibGroup(lib::GroupBy),
@@ -671,7 +676,13 @@ pub fn view() -> View {
         ai: g.ai.clone(),
         ai_loading: g.ai_loading,
         ai_err: g.ai_err.clone(),
-        lib: g.lib.clone().unwrap_or_default(),
+        lib: {
+            let mut f = g.lib.clone().unwrap_or_default();
+            if f.regime_now {
+                f.regime_want = Some(super::regime::latest_snapshot().map(|(_, snap)| snap).unwrap_or_default());
+            }
+            f
+        },
         cls: g.cls.clone(),
     }
 }
@@ -745,6 +756,21 @@ fn ensure_started() {
 }
 
 // ── 目录：python -m factory.lab catalog ────────────────────────────────
+
+/// 别的面板要用策略目录时调（docs/62 F5「当前可运行的策略」）：还没读过就后台读一次。
+pub fn ensure_catalog() {
+    let need = with(|g| g.catalog.is_empty() && !g.catalog_loading && g.catalog_err.is_empty()).unwrap_or(false);
+    if need {
+        load_catalog();
+    }
+}
+
+/// 目录里每个策略的 (id, 名字, 适用环境声明)；轻量，不克隆整张目录。
+#[must_use]
+pub fn catalog_regimes() -> Vec<(String, String, BTreeMap<String, Vec<String>>)> {
+    with(|g| g.catalog.iter().filter_map(|e| e.meta.as_ref().map(|m| (m.id.clone(), m.name.clone(), m.regime.clone()))).collect())
+        .unwrap_or_default()
+}
 
 fn load_catalog() {
     let started = with(|g| {
@@ -1478,7 +1504,7 @@ pub fn handle(m: ScMsg) {
             maybe_compare();
         }
         ScMsg::Split(m) => crate::ui::split::handle(m),
-        ScMsg::LibStyle(_) | ScMsg::LibStylesClear | ScMsg::LibDir(_) | ScMsg::LibOpen(_) | ScMsg::LibGroup(_) | ScMsg::LibTreeHidden => {
+        ScMsg::LibStyle(_) | ScMsg::LibStylesClear | ScMsg::LibRegimeNow | ScMsg::LibDir(_) | ScMsg::LibOpen(_) | ScMsg::LibGroup(_) | ScMsg::LibTreeHidden => {
             with(|g| {
                 let f = g.lib.get_or_insert_with(lib::load);
                 match m {
@@ -1488,6 +1514,7 @@ pub fn handle(m: ScMsg) {
                         }
                     }
                     ScMsg::LibStylesClear => f.styles.clear(),
+                    ScMsg::LibRegimeNow => f.regime_now = !f.regime_now,
                     ScMsg::LibDir(d) => {
                         // 选中一个目录时顺手展开它（看得到下一级）
                         if let Some(x) = &d {

@@ -231,6 +231,15 @@ pub static ALL: &[Source] = &[
         unit: "ws-telegram",
     },
     Source {
+        key: "regime",
+        label: "市场状态实时发布",
+        // 每根 K 线收盘后取一次 K 线 / 资金费 / 持仓（REST，不是长连接），连接数多数时候是 0；停了 Redis 上的状态 3 个周期后过期
+        what: "币安公开 REST（K 线、资金费、持仓历史）→ 重算市场状态，写 Cockpit 时间线 + Redis ws:regime:*（docs/62 F6）；需 VPN",
+        kind: Kind::Service,
+        scope: Scope::External,
+        unit: "ws-regime",
+    },
+    Source {
         key: "news",
         label: "新闻资讯",
         what: "监管/交易所/媒体的 RSS·Atom·JSON 源 + 金融日历日程（ICS/官方日程页/JSON，docs/25、docs/43）",

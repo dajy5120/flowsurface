@@ -384,6 +384,7 @@ pub fn about(content: &Content) -> Option<String> {
         Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) => "预测市场（docs/19）：Polymarket 决策支持与币安钱包 5 分钟盘口；只读旁路快照。\n\nPolymarket 夜跑启停与每日定时、币安钱包的录制状态、回放的符号与日期在「数据」页。",
         Content::WealthSpring(data::layout::pane::WsPaneMode::SelfChart) => "自有数据图：把任意 CSV / JSON 数据画成自适应折线（横轴时间或数值按数据自动判定），与策略运行无关，纯展示。\n\n数据文件在「数据」页选（选择文件… 或直接填路径），选过的会记住；文件改了自动重读。",
         Content::Orders => "订单：活动挂单与成交明细；选中一行，「属性」页列出它的全部字段。",
+        Content::RegimeBoard => "市场状态（docs/62）：多维状态矩阵、历史时间轴、描述统计、转移矩阵、当前可运行的策略、检验台账。\n\n只做描述：状态有没有用只看检验台账（python -m factory.regime.validate）。时间轴与同页 K 线双向联动十字线。\n\n时间线由 python -m factory.regime run <来源:代码> --tf <周期> 生成（与 K 线叠加层同一份）。",
         Content::Kline { .. } | Content::Heatmap { .. } | Content::ShaderHeatmap { .. } | Content::TimeAndSales(_) | Content::Ladder(_) | Content::Comparison(_) => {
             "行情图表：标的与周期在顶部工具栏改（作用于选中的这张图，开了 ⛓ 联动时同组一起改）。指标与显示设置在面板标题栏的齿轮里。\n\n同页按时间轴的图会联动十字线：光标放在一张上，其他图在同一时刻画竖线。\n\n画线（docs/46）：顶部工具栏「绘图」选工具（或光标在图上按 Alt+T 趋势线、Alt+H 水平线、Alt+V 垂直线、Alt+R 射线、Alt+Shift+R 矩形）；点线选中、拖动，Delete 删除，Ctrl+Z 撤销。画线跟着品种走：同一品种的所有图、所有周期共用一套，重启照旧。选中的对象在「属性」页改颜色、线型、精确价格与时间、在哪类周期上显示，下面是这个品种的对象树。"
         }

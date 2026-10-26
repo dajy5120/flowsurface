@@ -116,6 +116,8 @@ pub mod svcctl;
 pub mod radar;
 pub mod regime;
 pub mod regime_view;
+pub mod regime_board;
+pub mod regime_board_view;
 pub mod radar_filter;
 pub mod radar_readout;
 pub mod radar_view;

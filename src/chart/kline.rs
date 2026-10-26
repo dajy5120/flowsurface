@@ -2307,34 +2307,42 @@ fn draw_crosshair_tooltip(
         (PlotData::TickBased(tick_aggr), None) => tick_aggr.datapoints.last().map(|dp| &dp.kline),
     };
 
+    // 估宽：中文按整字宽，ASCII 按约六成
+    let est = |s: &str| s.chars().map(|c| if c.is_ascii() { TEXT_SIZE * 0.62 } else { TEXT_SIZE }).sum::<f32>();
+    const GAP: f32 = 14.0;
     // 市场状态（docs/62 R2）：OHLC 下面每层一行（L2 价格状态、L1 资金费 + 持仓），再下一行是底色维度这一段的切换原因
     let regime = match (data, at_interval) {
         (PlotData::TimeBased(ts), Some(at)) => {
             let symbol = crate::ws::drawing::symbol_key(&ticker_info.ticker);
             let iv = ts.interval.to_milliseconds();
             crate::ws::regime::describe_at(&symbol, iv, at).map(|(tf, layers)| {
-                // 每层一行：L2 价格状态打头写周期，L1 是资金费 + 持仓
-                let lines: Vec<Vec<(String, iced::Color)>> = layers
-                    .into_iter()
-                    .enumerate()
-                    .map(|(k, (layer, items))| {
-                        let head = if k == 0 { format!("状态 {tf}") } else if layer == "L1" { "资金 · 持仓".into() } else { layer };
-                        let mut segs = vec![(head, palette.background.base.text.scale_alpha(0.6))];
-                        for (dim, st, c) in items {
-                            segs.push((format!("{dim} {st}"), c.unwrap_or(palette.background.base.text)));
+                // 每层一行（第一行写周期，其余用文件给的行名）；一行放不下就折到下一行，折出来的行不再写行名
+                let max_w = (frame.width() - 90.0).max(240.0);
+                let dim_c = palette.background.base.text.scale_alpha(0.6);
+                let mut lines: Vec<Vec<(String, iced::Color)>> = Vec::new();
+                for (k, (name, items)) in layers.into_iter().enumerate() {
+                    let head = if k == 0 { format!("状态 {tf}") } else { name };
+                    let mut cur = vec![(head, dim_c)];
+                    let mut w = est(&cur[0].0) + GAP;
+                    for (dim, st, c) in items {
+                        let s = format!("{dim} {st}");
+                        let sw = est(&s) + GAP;
+                        if w + sw > max_w && cur.len() > 1 {
+                            lines.push(std::mem::take(&mut cur));
+                            cur.push(("　".to_string(), dim_c));
+                            w = est("　") + GAP;
                         }
-                        segs
-                    })
-                    .collect();
+                        w += sw;
+                        cur.push((s, c.unwrap_or(palette.background.base.text)));
+                    }
+                    lines.push(cur);
+                }
                 (lines, crate::ws::regime::reason_at(&symbol, iv, at))
             })
         }
         _ => None,
     };
-    // 估宽：中文按整字宽，ASCII 按约六成
-    let est = |s: &str| s.chars().map(|c| if c.is_ascii() { TEXT_SIZE * 0.62 } else { TEXT_SIZE }).sum::<f32>();
     const ROW_H: f32 = 18.0;
-    const GAP: f32 = 14.0;
     // 图顶第一行留给日历事件标签（docs/43 K5b），读数从它下面开始
     const TOP: f32 = 18.0;
 

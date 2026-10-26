@@ -283,6 +283,10 @@ impl From<&pane::State> for data::Pane {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
             },
+            pane::Content::RegimeBoard => data::Pane::RegimeBoard {
+                settings: pane.settings.clone(),
+                link_group: pane.link_group,
+            },
             pane::Content::BacktestResult => data::Pane::BacktestResult {
                 settings: pane.settings.clone(),
                 link_group: pane.link_group,
@@ -627,6 +631,15 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             link_group,
         } => Configuration::Pane(pane::State::from_config(
             pane::Content::Orders,
+            vec![],
+            settings,
+            link_group,
+        )),
+        data::Pane::RegimeBoard {
+            settings,
+            link_group,
+        } => Configuration::Pane(pane::State::from_config(
+            pane::Content::RegimeBoard,
             vec![],
             settings,
             link_group,

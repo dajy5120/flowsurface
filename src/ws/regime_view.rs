@@ -9,7 +9,7 @@ use iced::{Background, Element, Length};
 use super::regime::{self as rg, RegimeMsg};
 use crate::ui::{metrics, pal, text as t};
 
-fn chip<'a>(label: impl Into<String>, active: bool, msg: RegimeMsg) -> Element<'a, RegimeMsg> {
+pub(crate) fn chip<'a>(label: impl Into<String>, active: bool, msg: RegimeMsg) -> Element<'a, RegimeMsg> {
     let label: String = label.into();
     let shown = if active { format!("✓ {label}") } else { label };
     button(text(shown).size(t::s_small()))

@@ -520,6 +520,7 @@ impl State {
                 ),
                 ContentKind::BacktestResult => (Content::BacktestResult, vec![]),
             ContentKind::Orders => (Content::Orders, vec![]),
+            ContentKind::RegimeBoard => (Content::RegimeBoard, vec![]),
                 ContentKind::Starter => unreachable!(),
             }
         };
@@ -871,6 +872,7 @@ impl State {
                 | Content::TardisBoard(_)
                 | Content::BacktestResult
             | Content::Orders
+            | Content::RegimeBoard
         ) && !self.has_stream()
         {
             let content = row![
@@ -1335,6 +1337,10 @@ impl State {
                     None,
                     tickers_table,
                 )
+            }
+            Content::RegimeBoard => {
+                // 市场状态（docs/62 F5）：读 K 线叠加层同一份时间线；交互（选时间线 / 范围 / 时间轴光标）走 ws::regime
+                crate::ws::regime_board_view::pane_body().map(move |m| Message::PaneEvent(id, Event::Regime(m)))
             }
             Content::Orders => {
                 // 数据走 ws::readout 旁路快照；表格交互（排序、分组、调宽）包成 pane 事件。
@@ -2661,7 +2667,8 @@ impl State {
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
             Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::Calendar | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::StrategyCenter | Content::StrategyLayers | Content::TradeReview | Content::StrategyFlow | Content::OfmsLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
-            | Content::Orders => None,
+            | Content::Orders
+            | Content::RegimeBoard => None,
         }
     }
 
@@ -2709,7 +2716,8 @@ impl State {
             | Content::TardisReplay(_)
             | Content::TardisBoard(_)
             | Content::BacktestResult
-            | Content::Orders => None,
+            | Content::Orders
+            | Content::RegimeBoard => None,
         }
     }
 
@@ -2867,6 +2875,8 @@ pub enum Content {
     /// 订单（docs/27 §10）：持仓/收益读数 + 活动挂单 + 逐笔明细，回测/实盘过程中实时更新。
     /// 无行情流，渲染走 `ws::readout` 旁路快照。
     Orders,
+    /// 市场状态（docs/62 F5）：多维状态矩阵、历史时间轴、描述统计、当前可运行的策略、检验台账。
+    RegimeBoard,
 }
 
 impl Content {
@@ -3110,6 +3120,7 @@ impl Content {
             }
             ContentKind::BacktestResult => Content::BacktestResult,
             ContentKind::Orders => Content::Orders,
+            ContentKind::RegimeBoard => Content::RegimeBoard,
         }
     }
 
@@ -3146,7 +3157,8 @@ impl Content {
             | Content::TardisReplay(_)
             | Content::TardisBoard(_)
             | Content::BacktestResult
-            | Content::Orders => None,
+            | Content::Orders
+            | Content::RegimeBoard => None,
         }
     }
 
@@ -3247,6 +3259,7 @@ impl Content {
             | Content::TardisBoard(_)
             | Content::BacktestResult
             | Content::Orders
+            | Content::RegimeBoard
             | Content::ShaderHeatmap { .. } => {
                 panic!("indicator reorder on {} pane", self)
             }
@@ -3318,6 +3331,7 @@ impl Content {
             | Content::TardisBoard(_)
             | Content::BacktestResult
             | Content::Orders
+            | Content::RegimeBoard
             | Content::Comparison(_) => None,
         }
     }
@@ -3408,6 +3422,7 @@ impl Content {
             Content::TardisBoard(_) => ContentKind::TardisBoard,
             Content::BacktestResult => ContentKind::BacktestResult,
             Content::Orders => ContentKind::Orders,
+            Content::RegimeBoard => ContentKind::RegimeBoard,
         }
     }
 
@@ -3427,7 +3442,8 @@ impl Content {
             Content::Comparison(chart) => chart.is_some(),
             Content::Starter => true,
             Content::WealthSpring(_) | Content::Factory | Content::C4Shadow | Content::Observatory | Content::NetEgress | Content::Procs | Content::News | Content::Calendar | Content::OptionsBoard | Content::PredictionBoard | Content::PmBinance | Content::PmReplay(_) | Content::FeatureLab | Content::FeatureMatrix | Content::StrategyCenter | Content::StrategyLayers | Content::TradeReview | Content::StrategyFlow | Content::OfmsLab | Content::MarketMap | Content::Recorder(_) | Content::TardisReplay(_) | Content::TardisBoard(_) | Content::BacktestResult
-            | Content::Orders => true,
+            | Content::Orders
+            | Content::RegimeBoard => true,
         }
     }
 }
