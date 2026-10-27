@@ -1,6 +1,8 @@
 use crate::{
     Event, Kline, Price, PushFrequency, Ticker, TickerInfo, Timeframe, Trade, UnixMs, Volume,
-    adapter::connect::{State, channel, connect_ws},
+    adapter::connect::{
+        DEPTH_STALE_AFTER, State, channel, connect_ws, kline_stale_after, read_data_frame_since,
+    },
     adapter::{MarketKind, StreamKind, StreamTicksize, TRADE_BUCKET_INTERVAL, flush_trade_buffers},
     depth::{DeOrder, DepthPayload, DepthUpdate, LocalDepthCache},
     unit::qty::{QtyNormalization, SizeUnit, volume_size_unit},
@@ -269,6 +271,10 @@ pub fn connect_depth_stream(
 
         let mut ping_interval = tokio::time::interval(Duration::from_secs(PING_INTERVAL));
 
+        // 看门狗跟着「上次收到数据」走：select 每次 ping 都会重开读帧，不能每次重新计时
+
+        let mut last_data = tokio::time::Instant::now();
+
         loop {
             match &mut state {
                 State::Disconnected => {
@@ -301,6 +307,7 @@ pub fn connect_depth_stream(
                             snapshot_ready = false;
                             snapshot_time = UnixMs::ZERO;
                             let _ = output.send(Event::Connected(exchange)).await;
+                            last_data = tokio::time::Instant::now();
                             state = State::Connected(websocket);
                         }
                         Err(_) => {
@@ -323,10 +330,13 @@ pub fn connect_depth_stream(
                             }
                         }
 
-                        msg = websocket.read_frame() => {
+                        msg = read_data_frame_since(websocket, last_data, Some(DEPTH_STALE_AFTER)) => {
                             match msg {
                                 Ok(msg) => match msg.opcode {
                                     OpCode::Text => {
+                                        if !is_pong(&msg.payload) {
+                                            last_data = tokio::time::Instant::now();
+                                        }
                                         match feed_de(&msg.payload[..], Some(ticker), market_type) {
                                             Ok(data) => {
                                                 match data {
@@ -470,6 +480,10 @@ pub fn connect_trade_stream(
 
         let mut ping_interval = tokio::time::interval(Duration::from_secs(PING_INTERVAL));
 
+        // 看门狗跟着「上次收到数据」走：select 每次 ping 都会重开读帧，不能每次重新计时
+
+        let mut last_data = tokio::time::Instant::now();
+
         loop {
             match &mut state {
                 State::Disconnected => {
@@ -503,6 +517,7 @@ pub fn connect_trade_stream(
                             }
 
                             let _ = output.send(Event::Connected(exchange)).await;
+                            last_data = tokio::time::Instant::now();
                             state = State::Connected(websocket);
                         }
                         Err(_) => {
@@ -524,10 +539,13 @@ pub fn connect_trade_stream(
                             }
                         }
 
-                        msg = websocket.read_frame() => {
+                        msg = read_data_frame_since(websocket, last_data, None) => {
                             match msg {
                                 Ok(msg) => match msg.opcode {
                                     OpCode::Text => {
+                                        if !is_pong(&msg.payload) {
+                                            last_data = tokio::time::Instant::now();
+                                        }
                                         match feed_de(&msg.payload[..], None, market_type) {
                                             Ok(data) => {
                                                 match data {
@@ -671,6 +689,10 @@ pub fn connect_kline_stream(
 
         let mut ping_interval = tokio::time::interval(Duration::from_secs(PING_INTERVAL));
 
+        // 看门狗跟着「上次收到数据」走：select 每次 ping 都会重开读帧，不能每次重新计时
+
+        let mut last_data = tokio::time::Instant::now();
+
         loop {
             match &mut state {
                 State::Disconnected => {
@@ -731,6 +753,7 @@ pub fn connect_kline_stream(
                             }
 
                             let _ = output.send(Event::Connected(exchange)).await;
+                            last_data = tokio::time::Instant::now();
                             state = State::Connected(websocket);
                         }
                         Err(err) => {
@@ -751,10 +774,13 @@ pub fn connect_kline_stream(
                                 state = State::Disconnected;
                             }
                         }
-                        msg = websocket.read_frame() => {
+                        msg = read_data_frame_since(websocket, last_data, kline_stale_after(&streams)) => {
                             match msg {
                                 Ok(msg) => match msg.opcode {
                                     OpCode::Text => {
+                                        if !is_pong(&msg.payload) {
+                                            last_data = tokio::time::Instant::now();
+                                        }
                                         if let Ok(StreamData::Kline(ticker, de_kline_vec)) =
                                             feed_de(&msg.payload[..], None, market_type)
                                         {
@@ -833,4 +859,18 @@ pub fn connect_kline_stream(
             }
         }
     })
+}
+
+/// MEXC 的 pong 是文本帧（`{"channel":"pong",...}`）：回 ping 不算收到行情数据。
+fn is_pong(payload: &[u8]) -> bool {
+    payload.windows(6).any(|w| w == b"\"pong\"")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn pong_is_not_market_data() {
+        assert!(super::is_pong(br#"{"channel":"pong","data":1700000000000}"#));
+        assert!(!super::is_pong(br#"{"channel":"push.deal","data":{"p":1.0}}"#));
+    }
 }

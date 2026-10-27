@@ -1456,7 +1456,12 @@ impl Dashboard {
                         }
                         pane::Content::Kline { chart, .. } => {
                             if let Some(c) = chart {
-                                c.insert_trades(buffer);
+                                // 按时间周期的蜡烛图：逐笔只用来让最后一根跳（不攒原始成交、不算足迹）
+                                if matches!(c.kind(), data::chart::KlineChartKind::Candles) && matches!(c.basis(), data::chart::Basis::Time(_)) {
+                                    c.apply_live_trades(buffer);
+                                } else {
+                                    c.insert_trades(buffer);
+                                }
                             }
                         }
                         pane::Content::TimeAndSales(panel) => {
@@ -1875,10 +1880,11 @@ impl Dashboard {
     }
 
     fn refresh_streams(&mut self, main_window: window::Id) -> Task<Message> {
-        let all_pane_streams = self
+        let all_pane_streams: Vec<StreamKind> = self
             .iter_all_panes(main_window)
-            .flat_map(|(_, _, pane_state)| pane_state.streams.ready_iter().into_iter().flatten());
-        self.streams = UniqueStreams::from(all_pane_streams);
+            .flat_map(|(_, _, pane_state)| pane_state.subscribed_streams())
+            .collect();
+        self.streams = UniqueStreams::from(all_pane_streams.iter());
 
         Task::none()
     }

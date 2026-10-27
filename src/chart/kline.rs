@@ -374,9 +374,50 @@ impl KlineChart {
                 }
 
                 chart.last_price = Some(PriceInfoLabel::new(kline.close, kline.open));
+                self.live_redraw();
             }
             PlotData::TickBased(_) => {}
         }
+    }
+
+    /// 实时数据到了就重画。原来 K 线图只按 1 秒的时钟重画（`pane::update_interval`），数据到了只进缓冲——
+    /// 价格每秒最多动一次。这里只是清缓存、标记要重画，真正的绘制每帧最多一次（同一帧里多次标记自然合并），
+    /// 所以不另外节流：数据到了的下一帧就画出来。
+    fn live_redraw(&mut self) {
+        self.invalidate_with(None, true);
+    }
+
+    /// 逐笔成交让正在走的那根 K 线跳（按时间周期的蜡烛图）：只改那根的收盘、最高、最低与价格标签；
+    /// 那根还没由 K 线推送建出来就不管（K 线推送随后就到，它才是准数，到了会整根覆盖）。成交量不动。
+    pub fn apply_live_trades(&mut self, buffer: &[Trade]) {
+        let PlotData::TimeBased(ref mut timeseries) = self.data_source else { return };
+        let iv = timeseries.interval.to_milliseconds();
+        if iv == 0 || buffer.is_empty() {
+            return;
+        }
+        let mut touched = false;
+        for t in buffer {
+            let bucket = UnixMs::new(t.time.as_u64() / iv * iv);
+            if let Some(dp) = timeseries.datapoints.get_mut(&bucket) {
+                let k = &mut dp.kline;
+                if t.price > k.high {
+                    k.high = t.price;
+                }
+                if t.price < k.low {
+                    k.low = t.price;
+                }
+                k.close = t.price;
+                touched = true;
+            }
+        }
+        if !touched {
+            return;
+        }
+        if let Some((_, dp)) = timeseries.datapoints.last_key_value() {
+            let (close, open) = (dp.kline.close, dp.kline.open);
+            self.mut_state().last_price = Some(PriceInfoLabel::new(close, open));
+        }
+        self.live_redraw();
     }
 
     pub fn kind(&self) -> &KlineChartKind {
@@ -832,6 +873,12 @@ impl KlineChart {
     }
 
     pub fn invalidate(&mut self, now: Option<Instant>) -> Option<Action> {
+        self.invalidate_with(now, false)
+    }
+
+    /// `from_live`：实时数据触发的。视野（自动缩放 / 跟随最新）算完没变，就只清主图、价格轴、十字线三层（[`ViewState::clear_live`]）。
+    fn invalidate_with(&mut self, now: Option<Instant>, from_live: bool) -> Option<Action> {
+        let view_before = self.chart.view_key();
         // 「在图上看」（docs/43 §8）：把请求的时刻放到视野中心，价格轴改回自动适配（否则那段 K 线可能在上下边外）
         if matches!(self.chart.basis, Basis::Time(_))
             && let Some((v, at)) = super::goto_time::pending(self.chart.goto_seen)
@@ -975,7 +1022,11 @@ impl KlineChart {
             }
         }
 
-        chart.cache.clear_all();
+        if from_live && chart.view_key() == view_before {
+            chart.clear_live();
+        } else {
+            chart.clear_all();
+        }
         for indi in self.indicators.values_mut().filter_map(Option::as_mut) {
             indi.clear_all_caches();
         }
@@ -1203,8 +1254,20 @@ impl canvas::Program<Message> for KlineChart {
                             (t.as_u64(), p(k.open), p(k.high), p(k.low), p(k.close), k.volume.total().units as f64 / 1e8)
                         })
                         .collect();
+                    // 主动买入量（K 线带买卖量的交易所才有；CVD 之类要它，docs/63 §10）
+                    let buy: Vec<f64> = ts
+                        .datapoints
+                        .values()
+                        .map(|dp| match dp.kline.volume {
+                            exchange::Volume::BuySell(b, _) => b.units as f64 / 1e8,
+                            exchange::Volume::TotalOnly(_) => f64::NAN,
+                        })
+                        .collect();
+                    // 图上最后一根始终当未收盘：到了收盘时刻、交易所的最终版还没推来时，按「现在」会把它当已收盘，
+                    // 最终版一到又判成「数据修正」（1m 图上每分钟一次）；交易所开出下一根，它才算收盘
                     let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-                    let comp = crate::ws::studies::compute(&regime_symbol, iv, &kl, now);
+                    let now = kl.last().map_or(now, |k| now.min(k.0 + iv - 1));
+                    let comp = crate::ws::studies::compute_ex(&regime_symbol, iv, &kl, Some(&buy), now);
                     let price_to_y_f64 = |v: f64| chart.price_to_y(Price::from_units((v * 1e11).round() as i64));
                     crate::ws::studies::draw(
                         frame,

@@ -773,6 +773,14 @@ impl Caches {
         self.y_labels.clear();
         self.x_labels.clear();
     }
+
+    /// 实时数据到了、视野没动：只重画主图（K 线、指标）、价格轴（最新价标签）与十字线读数；
+    /// 时间轴与画线层的坐标都没变，不重画。
+    fn clear_live(&self) {
+        self.main.clear();
+        self.y_labels.clear();
+        self.crosshair.clear();
+    }
 }
 
 pub struct ViewState {
@@ -917,6 +925,20 @@ pub mod linked_cursor {
 }
 
 impl ViewState {
+    /// 决定画面坐标的那几个量（平移、缩放、格宽、格高、基准价、最新 K 线位置）：实时更新前后一样 = 视野没动。
+    pub fn view_key(&self) -> (u32, u32, u32, u32, u32, i64, u64) {
+        (self.translation.x.to_bits(), self.translation.y.to_bits(), self.scaling.to_bits(), self.cell_width.to_bits(),
+         self.cell_height.to_bits(), self.base_price_y.units, self.latest_x)
+    }
+
+    pub(crate) fn clear_live(&self) {
+        self.cache.clear_live();
+    }
+
+    pub(crate) fn clear_all(&self) {
+        self.cache.clear_all();
+    }
+
     pub(crate) fn linked_id(&self) -> u64 {
         std::ptr::from_ref(self) as usize as u64
     }

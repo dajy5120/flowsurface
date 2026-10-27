@@ -51,6 +51,13 @@ enum FetchCommand<M> {
         ticker: Ticker,
         reply: ResponseTx<DepthPayload>,
     },
+    Derivs {
+        ticker: TickerInfo,
+        kind: super::DerivKind,
+        timeframe: Timeframe,
+        range: Option<(UnixMs, UnixMs)>,
+        reply: ResponseTx<Vec<super::DerivPoint>>,
+    },
     Trades {
         ticker: TickerInfo,
         from_time: UnixMs,
@@ -313,6 +320,17 @@ pub trait FetchCommandHandler<M> {
         Box::pin(async { Err(unsupported_fetch("Depth snapshot fetch")) })
     }
 
+    fn fetch_derivs(
+        &mut self,
+        ticker_info: TickerInfo,
+        kind: super::DerivKind,
+        timeframe: Timeframe,
+        range: Option<(UnixMs, UnixMs)>,
+    ) -> BoxFuture<'_, Result<Vec<super::DerivPoint>, AdapterError>> {
+        let _ = (ticker_info, kind, timeframe, range);
+        Box::pin(async { Err(unsupported_fetch("Derivatives series fetch")) })
+    }
+
     fn fetch_trades(
         &mut self,
         ticker_info: TickerInfo,
@@ -381,6 +399,16 @@ where
         }
         FetchCommand::DepthSnapshot { ticker, reply } => {
             let result = handler.fetch_depth_snapshot(ticker).await;
+            let _ = reply.send(result);
+        }
+        FetchCommand::Derivs {
+            ticker,
+            kind,
+            timeframe,
+            range,
+            reply,
+        } => {
+            let result = handler.fetch_derivs(ticker, kind, timeframe, range).await;
             let _ = reply.send(result);
         }
         FetchCommand::Trades {

@@ -10,8 +10,9 @@ use wealthspring_indicators::meta::ParamKind;
 use super::studies::{self as st, AlertOp, StudyMsg, StudySrc};
 use crate::ui::{metrics, pal, text as t};
 
-const CATEGORIES: [(&str, &str); 8] = [("trend", "趋势"), ("momentum", "动量"), ("volatility", "波动"), ("volume", "成交量"),
-                                      ("vwap", "VWAP"), ("structure", "结构"), ("statistics", "统计"), ("custom", "自定义")];
+const CATEGORIES: [(&str, &str); 10] = [("trend", "趋势"), ("momentum", "动量"), ("volatility", "波动"), ("volume", "成交量"),
+                                       ("vwap", "VWAP"), ("structure", "结构"), ("statistics", "统计"), ("derivatives", "衍生品"), ("breadth", "广度"),
+                                       ("custom", "自定义")];
 
 fn chip<'a>(label: impl Into<String>, active: bool, msg: StudyMsg) -> Element<'a, StudyMsg> {
     let label: String = label.into();
@@ -138,6 +139,76 @@ pub fn inspector<'a>(symbol: &str) -> Element<'a, StudyMsg> {
         if s.tf_ms != 0 {
             body = body.push(t::metadata("高周期的值在它收盘之后才出现（不前视）；比图小的周期在这张图上不算").color(pal::dim()));
         }
+        // 在哪个品种上算：别的品种用它已收盘的 K 线（后台取），按收盘时刻对齐到这张图上（不前视）
+        let draft = ui.symbol_draft.as_ref().filter(|d| d.0 == uid).map(|d| d.1.clone());
+        let shown_sym = draft.clone().unwrap_or_else(|| s.symbol.rsplit(':').next().unwrap_or_default().to_string());
+        let sym2 = sym.clone();
+        let typed = draft.unwrap_or_default();
+        body = body.push(
+            row![
+                text("品种").size(t::s_meta()).color(pal::dim()).width(Length::Fixed(60.0)),
+                chip("本品种", s.symbol.is_empty(), StudyMsg::CalcSymbol { symbol: sym.clone(), uid, text: String::new() }),
+                text_input("别的品种，如 ETHUSDT，回车", &shown_sym)
+                    .on_input(move |v| StudyMsg::SymbolDraft { uid, text: v })
+                    .on_submit(StudyMsg::CalcSymbol { symbol: sym2, uid, text: typed })
+                    .size(t::s_small())
+                    .width(Length::Fixed(200.0)),
+            ]
+            .spacing(metrics::space(1))
+            .align_y(iced::Alignment::Center),
+        );
+        // 对照品种（相关 / 价差这类要第二条序列的）
+        if st::study_needs(s).contains(&"aux") && s.id != "breadth" {
+            let draft = ui.aux_draft.as_ref().filter(|d| d.0 == uid).map(|d| d.1.clone());
+            let shown = draft.clone().unwrap_or_else(|| if s.aux_symbol.starts_with('@') { String::new() } else { s.aux_symbol.rsplit(':').next().unwrap_or_default().to_string() });
+            let typed = draft.unwrap_or_default();
+            let sym4 = sym.clone();
+            body = body.push(
+                row![
+                    text("对照品种").size(t::s_meta()).color(pal::dim()).width(Length::Fixed(60.0)),
+                    text_input("如 ETHUSDT，回车", &shown)
+                        .on_input(move |v| StudyMsg::AuxDraft { uid, text: v })
+                        .on_submit(StudyMsg::AuxSymbol { symbol: sym4, uid, text: typed })
+                        .size(t::s_small())
+                        .width(Length::Fixed(200.0)),
+                ]
+                .spacing(metrics::space(1))
+                .align_y(iced::Alignment::Center),
+            );
+            body = body.push(t::metadata("对照序列 = 那个品种已收盘的收盘价，按收盘时刻对齐（不前视）；只写代码 = 与图同一交易所").color(pal::dim()));
+            // 或者：订单流特征 / 图表参数（特征引擎在跑时实时记录，docs/63 §10）
+            let q = ui.feat_query.as_ref().filter(|d| d.0 == uid).map(|d| d.1.clone()).unwrap_or_default();
+            body = body.push(
+                row![
+                    text("或用特征").size(t::s_meta()).color(pal::dim()).width(Length::Fixed(60.0)),
+                    text_input("搜特征 / 图表参数（中文名或键）", &q).on_input(move |v| StudyMsg::FeatQuery { uid, text: v }).size(t::s_small()).width(Length::Fixed(220.0)),
+                ]
+                .spacing(metrics::space(1))
+                .align_y(iced::Alignment::Center),
+            );
+            let ql = q.trim().to_lowercase();
+            if !ql.is_empty() {
+                let mut r = row![].spacing(metrics::space(1));
+                for (id, label) in super::studies_feat::catalog().into_iter().filter(|(id, l)| id.to_lowercase().contains(&ql) || l.to_lowercase().contains(&ql)).take(8) {
+                    let on = s.aux_symbol == format!("@feature:{id}");
+                    r = r.push(chip(label, on, StudyMsg::AuxSymbol { symbol: sym.clone(), uid, text: format!("@feature:{id}") }));
+                }
+                body = body.push(r.wrap());
+            }
+            if let Some(f) = s.aux_symbol.strip_prefix("@feature:") {
+                body = body.push(t::metadata(format!("对照序列 = 特征 {f}（只读，原样搬；Cockpit 开着、引擎在跑的那段才有值）")).color(pal::dim()));
+            }
+        }
+        if !s.symbol.is_empty() {
+            body = body.push(
+                t::metadata(format!(
+                    "在 {} 上算：只用它已收盘的 K 线，那根收盘后才出现在这张图上（不前视）；K 线由后台每根收盘后取一次。\
+                     只写代码 = 与这张图同一交易所；别的交易所写全，如 Bybit Linear:ETHUSDT",
+                    s.symbol
+                ))
+                .color(pal::dim()),
+            );
+        }
         // 计算参数
         for p in &d.inputs {
             let cur = s.params.get(p.key).unwrap_or(&p.default).clone();
@@ -161,7 +232,8 @@ pub fn inspector<'a>(symbol: &str) -> Element<'a, StudyMsg> {
                     // 数据源：K 线字段，或排在前面的指标的输出（study on study）
                     let mut r = row![].spacing(metrics::space(1));
                     let cur_src = s.source.clone();
-                    for f in ["close", "open", "high", "low", "hl2", "hlc3", "ohlc4", "volume"] {
+                    // K 线字段，再是 K 线之外的（主动买卖、衍生品；没有的品种 / 交易所给 NaN，指标那一行会说原因）
+                    for f in ["close", "open", "high", "low", "hl2", "hlc3", "ohlc4", "volume", "delta", "buy_volume", "oi", "funding", "premium", "ls_ratio", "taker_ratio"] {
                         let on = match &cur_src {
                             None => cur.as_str() == Some(f),
                             Some(StudySrc::Field(x)) => x == f,
@@ -181,6 +253,30 @@ pub fn inspector<'a>(symbol: &str) -> Element<'a, StudyMsg> {
                 }
             };
             body = body.push(row![text(p.name).size(t::s_meta()).color(pal::dim()).width(Length::Fixed(60.0)), ctl].spacing(metrics::space(1)).align_y(iced::Alignment::Center));
+        }
+        // 锚点（锚定 VWAP，docs/63 §8.2）：按会话 / 选中画线的起点 / 最近的重要日历事件
+        if d.inputs.iter().any(|p| p.key == "anchor_ms") {
+            let cur = s.params.get("anchor_ms").and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+            let fmt = |t: i64| chrono::DateTime::from_timestamp_millis(t).map(|x| x.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default();
+            let set = |t: i64| StudyMsg::Param { symbol: sym.clone(), uid, key: "anchor_ms".into(), value: t.to_string() };
+            let mut r = row![text("锚点").size(t::s_meta()).color(pal::dim()).width(Length::Fixed(60.0)), chip("按会话", cur == 0, set(0))].spacing(metrics::space(1));
+            if let Some(dw) = super::drawing::selected_drawing(&sym)
+                && let Some(a) = dw.anchors.iter().map(|a| a.t).min()
+            {
+                r = r.push(chip(format!("选中画线的起点 {}", fmt(a as i64)), cur == a as i64, set(a as i64)));
+            }
+            let now = chrono::Utc::now().timestamp_millis();
+            let cal = super::calendar_readout::snapshot();
+            let mut evs: Vec<_> = cal.events.iter().filter(|e| e.importance <= 1 && e.scheduled_at.is_some_and(|t| t <= now)).collect();
+            evs.sort_by_key(|e| std::cmp::Reverse(e.scheduled_at));
+            for e in evs.into_iter().take(6) {
+                let t0 = e.scheduled_at.unwrap_or_default();
+                r = r.push(chip(format!("{} {}", super::calendar_readout::display_title(e), fmt(t0)), cur == t0, set(t0)));
+            }
+            body = body.push(r.wrap());
+            if cur > 0 {
+                body = body.push(t::metadata(format!("从 {} 起累计（锚定，不按会话重置）", fmt(cur))).color(pal::dim()));
+            }
         }
         // 各输出：显示与颜色（不影响计算）
         let mut outs = row![].spacing(metrics::space(2));
@@ -276,7 +372,7 @@ fn alert_rows<'a>(sym: &str, s: &st::Study, d: &wealthspring_indicators::meta::I
     r = r.push(chip("只响一次", a.once, op(AlertOp::Once(!a.once))));
     r = r.push(chip("也发 Telegram", a.telegram, op(AlertOp::Telegram(!a.telegram))));
     c = c.push(r.wrap());
-    c = c.push(t::metadata("只提醒，不下单。要开着这个品种这个周期的图才判；打开图时不补报历史").color(pal::dim()));
+    c = c.push(t::metadata("只提醒，不下单。没开着这个品种这个周期的图时由后台取 K 线判（出口总闸关着不判）；打开图、开始判时不补报历史").color(pal::dim()));
     c.into()
 }
 

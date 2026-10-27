@@ -842,6 +842,7 @@ impl State {
             // 数据链路徽标：数据从哪来、流到哪、通不通（与上面的「性质」各说一件事）。
             top_left_buttons = top_left_buttons.push(link_badge(
                 id,
+                &base_ti.ticker.exchange.to_string(),
                 &base_ti.ticker.exchange.venue().to_string(),
                 &base_ti.ticker.display_symbol_and_type().0,
             ));
@@ -2621,7 +2622,30 @@ impl State {
     }
 
     pub fn matches_stream(&self, stream: &StreamKind) -> bool {
-        self.streams.matches_stream(stream)
+        self.streams.matches_stream(stream) || self.live_extra().as_ref() == Some(stream)
+    }
+
+    /// 按时间周期的蜡烛图另订同品种的逐笔成交：最后一根 K 线随每笔成交跳（交易所的 K 线推送每秒只有约 2 次），
+    /// K 线推送照旧是准数、到了就覆盖。不改面板存下来的流列表——从旧布局恢复的图也自动有。
+    /// 只看面板自己记的种类与流（不看图建好没有：订阅汇总时图常常还没建出来）。有 K 线流 = 按时间周期（按笔数的只有逐笔流）。
+    fn live_extra(&self) -> Option<StreamKind> {
+        let Content::Kline { kind: data::chart::KlineChartKind::Candles, .. } = &self.content else { return None };
+        let ti = self.streams.ready_iter()?.find_map(|s| match s {
+            StreamKind::Kline { ticker_info, .. } => Some(*ticker_info),
+            _ => None,
+        })?;
+        Some(StreamKind::Trades { ticker_info: ti })
+    }
+
+    /// 实际要订阅的流：面板自己的 + [`Self::live_extra`]。
+    pub fn subscribed_streams(&self) -> Vec<StreamKind> {
+        let mut v: Vec<StreamKind> = self.streams.ready_iter().into_iter().flatten().copied().collect();
+        if let Some(x) = self.live_extra()
+            && !v.contains(&x)
+        {
+            v.push(x);
+        }
+        v
     }
 
     fn show_modal_with_focus(&mut self, requested_modal: Modal) -> Option<Effect> {
@@ -3504,10 +3528,10 @@ fn provenance_badge<'a>() -> Element<'a, Message> {
 /// 渲染数据链路徽标：描边 + `⇢`，与左边实心的「性质」徽标一眼分开。
 ///
 /// 能跳转时是按钮：点它展开对应面板的数据源选择。
-fn link_badge<'a>(pane_id: pane_grid::Pane, venue: &str, symbol: &str) -> Element<'a, Message> {
+fn link_badge<'a>(pane_id: pane_grid::Pane, exchange: &str, venue: &str, symbol: &str) -> Element<'a, Message> {
     use crate::ws::provenance::{self, LinkTone};
 
-    let l = provenance::link(crate::ws::workspace::replay_mode(), venue, symbol);
+    let l = provenance::link_for(crate::ws::workspace::replay_mode(), exchange, venue, symbol);
     let color = match l.tone {
         LinkTone::Ok => crate::ui::pal::ok(),
         LinkTone::Running => crate::ui::pal::info(),

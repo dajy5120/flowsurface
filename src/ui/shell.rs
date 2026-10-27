@@ -688,7 +688,14 @@ pub fn status_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
             if info.streams_on && !info.streams_down.is_empty() {
                 let names: Vec<&str> = info.streams_down.iter().map(|(k, _)| k.as_str()).collect();
                 let why: Vec<String> = info.streams_down.iter().map(|(k, w)| format!("{k}：{w}")).collect();
-                chip(format!("▲ 连不上 {}", names.join("、")), color(c.status_warning), format!("{}\n每秒重试；检查网络 / 代理设置", why.join("\n")))
+                // 看门狗判的「行情中断」（连着、不推数据）与「连不上」分开说：前者查本机网络是白查
+                let stale = info.streams_down.iter().all(|(_, w)| w.contains(exchange::adapter::STALE_REASON));
+                let (what, hint) = if stale {
+                    ("行情中断", "连接还在、交易所不推数据，在重连；收到数据就自动恢复")
+                } else {
+                    ("连不上", "每秒重试；检查网络 / 代理设置")
+                };
+                chip(format!("▲ {what} {}", names.join("、")), color(c.status_warning), format!("{}\n{hint}", why.join("\n")))
             } else {
                 iced::widget::Space::new().into()
             },

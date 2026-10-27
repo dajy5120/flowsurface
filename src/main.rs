@@ -293,6 +293,10 @@ enum Message {
         event: dashboard::Message,
     },
     Tick(std::time::Instant),
+    /// 后台指标取回的 K 线（docs/63 §9.5 续：没开图的提醒、跨品种指标；每根带主动买入量）
+    StudiesBgKlines { symbol: String, tf: u64, got: Result<Vec<(ws::studies::Ohlcv, f64)>, String> },
+    /// 后台指标取回的 K 线之外的序列（docs/63 §10：持仓、资金费、溢价、标记价、多空比、主动买卖比）
+    StudiesBgSeries { symbol: String, kind: &'static str, tf: u64, got: Result<Vec<(u64, f64)>, String> },
     WindowEvent(window::Event),
     ExitRequested(HashMap<window::Id, WindowSpec>),
     RestartRequested(Option<HashMap<window::Id, WindowSpec>>),
@@ -557,20 +561,40 @@ impl Flowsurface {
                 if let exchange::Event::DepthReceived(_, _, depth) = &event {
                     self.ws_flow.apply_depth(depth);
                 }
+                // 「行情中断」（连着但没数据，exchange 看门狗）要等真收到数据才算好——
+                // 重连上不算：这次币安就是连接好好的、一条 K 线都不推
+                if !self.stream_down.is_empty() {
+                    let got = match &event {
+                        exchange::Event::DepthReceived(s, ..)
+                        | exchange::Event::TradesReceived(s, ..)
+                        | exchange::Event::KlineReceived(s, _) => Some(s.ticker_info().exchange().to_string()),
+                        _ => None,
+                    };
+                    if let Some((t0, _)) = got.and_then(|k| self.stream_down.remove(&k)) {
+                        log::info!("[行情] 数据恢复（中断了 {} 秒）", t0.elapsed().as_secs());
+                    }
+                }
                 let main_window_id = self.main_window.id;
                 let dashboard = self.active_dashboard_mut();
 
                 match event {
                     exchange::Event::Connected(exchange) => {
-                        if let Some((t0, _)) = self.stream_down.remove(&exchange.to_string()) {
-                            log::info!("[行情] {exchange} 已重新连上（断开了 {} 秒）", t0.elapsed().as_secs());
+                        let key = exchange.to_string();
+                        if self.stream_down.get(&key).is_some_and(|(_, why)| !why.contains(exchange::adapter::STALE_REASON)) {
+                            if let Some((t0, _)) = self.stream_down.remove(&key) {
+                                log::info!("[行情] {exchange} 已重新连上（断开了 {} 秒）", t0.elapsed().as_secs());
+                            }
                         }
                     }
                     exchange::Event::Disconnected(exchange, reason) => {
                         log::info!("a stream disconnected from {exchange} WS: {reason:?}");
                         // 只在「从好变坏」时记一条警告（进问题页）；上游每秒重试，逐次记会刷屏
                         self.stream_down.entry(exchange.to_string()).or_insert_with(|| {
-                            log::warn!("[行情] {exchange} 连不上：{reason}——在重试（每秒一次）");
+                            if reason.contains(exchange::adapter::STALE_REASON) {
+                                log::warn!("[行情] {exchange} {reason}");
+                            } else {
+                                log::warn!("[行情] {exchange} 连不上：{reason}——在重试（每秒一次）");
+                            }
                             (std::time::Instant::now(), reason.to_string())
                         });
                     }
@@ -619,7 +643,37 @@ impl Flowsurface {
                     g.update(m);
                 }
             }
+            Message::StudiesBgKlines { symbol, tf, got } => {
+                let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                if let Some((bars, buy, as_now)) = ws::studies_bg::ingest(&symbol, tf, got, now_ms) {
+                    // 这一路挂着提醒、又没有图在管：在这儿算、在这儿判（同一份提醒状态）。
+                    // 哪根已收盘、已定稿由 `ingest` 判（`as_now`），冷却用真实时刻
+                    if ws::studies::armed_alerts().iter().any(|(s, t, _)| *s == symbol && *t == tf) {
+                        ws::studies::compute_bg(&symbol, tf, &bars, Some(&buy), as_now, now_ms);
+                    }
+                    // 有图挂着这个品种的跨品种指标：让它重画
+                    if ws::studies_bg::is_wanted(&symbol, tf) {
+                        ws::studies::touch();
+                    }
+                }
+            }
+            Message::StudiesBgSeries { symbol, kind, tf, got } => {
+                let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                // 有图挂着要它的指标：让图重画（新数据进了 K 线之外的列）
+                if ws::studies_bg::ingest_series(&symbol, kind, tf, got, now_ms) {
+                    ws::studies::touch();
+                }
+            }
             Message::Tick(now) => {
+                // 被指标引用的订单流特征 / 图表参数：快照前进就记一个点（每秒最多一次，docs/63 §10）
+                ws::studies_feat::tick(chrono::Utc::now().timestamp_millis().max(0) as u64);
+                // 后台指标（没开图的提醒、跨品种指标）：到点就取 K 线（每秒最多扫一次；出口总闸关着不取）
+                if self.specimen.is_none() && ws::egress::streams_enabled() {
+                    let tasks = self.studies_bg_fetch();
+                    if !tasks.is_empty() {
+                        return Task::batch(tasks);
+                    }
+                }
                 // 定时自动存盘（每分钟；内容没变不写，见 save_state_to_disk）。样张模式不存
                 if self.specimen.is_none() && now.duration_since(self.last_autosave) >= std::time::Duration::from_secs(60) {
                     self.last_autosave = now;
@@ -2662,8 +2716,16 @@ impl Flowsurface {
             .filter(|(w, _)| *w == self.main_window.id)
             .and_then(|(_, p)| dashboard.panes.get(p))
             .map(|st| st.content.to_string());
+        // 断开超过 3 秒才算（正常的断线重连一两秒就好，不该闪）；图上的链路徽标也读这一份
+        let streams_down: Vec<(String, String)> = self
+            .stream_down
+            .iter()
+            .filter(|(_, (t0, _))| t0.elapsed().as_secs() >= 3)
+            .map(|(k, (_, why))| (k.clone(), why.clone()))
+            .collect();
+        ws::provenance::set_streams_down(streams_down.clone());
         // 命令栏的数据链路（docs/35 §5.1）：聚焦面板吃行情就取它，否则取第一个吃行情的面板；
-        // 与面板标题上的链路徽标同一份计算（ws::provenance::link）
+        // 与面板标题上的链路徽标同一份计算（ws::provenance::link_for）
         let link_pane = dashboard
             .focus
             .filter(|(w, _)| *w == self.main_window.id)
@@ -2671,8 +2733,9 @@ impl Flowsurface {
             .and_then(|st| st.stream_pair())
             .or_else(|| dashboard.panes.iter().find_map(|(_, st)| st.stream_pair()));
         let link = link_pane.map(|ti| {
-            let l = ws::provenance::link(
+            let l = ws::provenance::link_for(
                 ws::workspace::replay_mode(),
+                &ti.ticker.exchange.to_string(),
                 &ti.ticker.exchange.venue().to_string(),
                 &ti.ticker.display_symbol_and_type().0,
             );
@@ -2701,19 +2764,94 @@ impl Flowsurface {
             env_detail: badge.detail,
             run,
             streams_on: ws::egress::streams_enabled(),
-            // 断开超过 3 秒才算（正常的断线重连一两秒就好，不该闪）
-            streams_down: self
-                .stream_down
-                .iter()
-                .filter(|(_, (t0, _))| t0.elapsed().as_secs() >= 3)
-                .map(|(k, (_, why))| (k.clone(), why.clone()))
-                .collect(),
+            streams_down,
             wire: ws::egress::wire_rate(),
             egress_conns: ws::egress::external_conns(),
             focused,
             pane_count: dashboard.panes.len(),
             activity,
         }
+    }
+
+    /// 派出该取的后台 K 线 / 序列（`ws::studies_bg::due`）。品种键在交易所的品种列表里找不到、或周期交易所不支持的，直接记成失败。
+    fn studies_bg_fetch(&self) -> Vec<Task<Message>> {
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let jobs = ws::studies_bg::due(now_ms, &ws::studies::armed_alerts());
+        let mut tasks = Vec::new();
+        for j in jobs {
+            let ti = self
+                .sidebar
+                .tickers_info()
+                .iter()
+                .find(|(t, _)| ws::drawing::symbol_key(t) == j.symbol)
+                .and_then(|(_, ti)| *ti);
+            let tf = exchange::Timeframe::KLINE.into_iter().find(|t| t.to_milliseconds() == j.tf);
+            let (Some(ti), Some(tf)) = (ti, tf) else {
+                let why = if tf.is_none() { format!("交易所没有 {} 毫秒这个周期", j.tf) } else { "交易所的品种列表里没有它（还没加载完，或代码写错了）".into() };
+                if j.kind == ws::studies_bg::BARS {
+                    ws::studies_bg::ingest(&j.symbol, j.tf, Err(why), now_ms);
+                } else {
+                    ws::studies_bg::ingest_series(&j.symbol, j.kind, j.tf, Err(why), now_ms);
+                }
+                continue;
+            };
+            let range = j.since.map(|s| (exchange::UnixMs::from(s), exchange::UnixMs::from(now_ms)));
+            let handles = self.handles.clone();
+            let (symbol, tfm, kind) = (j.symbol.clone(), j.tf, j.kind);
+            if kind == ws::studies_bg::BARS {
+                tasks.push(Task::perform(
+                    async move { handles.fetch_klines(ti, tf, range).await },
+                    move |r| Message::StudiesBgKlines {
+                        symbol: symbol.clone(),
+                        tf: tfm,
+                        got: r
+                            .map(|ks| {
+                                ks.iter()
+                                    .map(|k| {
+                                        let p = |x: exchange::unit::Price| x.units as f64 / 1e11;
+                                        let buy = match k.volume {
+                                            exchange::Volume::BuySell(b, _) => b.units as f64 / 1e8,
+                                            exchange::Volume::TotalOnly(_) => f64::NAN,
+                                        };
+                                        ((k.time.as_u64(), p(k.open), p(k.high), p(k.low), p(k.close), k.volume.total().units as f64 / 1e8), buy)
+                                    })
+                                    .collect()
+                            })
+                            .map_err(|e| e.to_string()),
+                    },
+                ));
+            } else if kind == "oi" {
+                // 持仓快照：发布有延迟，按快照时刻 + 5 分钟当「能被知道」（与 Python `IND.request` 同口径，docs/62 R6）
+                let period = oi_period(tf);
+                tasks.push(Task::perform(
+                    async move { handles.fetch_open_interest(ti, period, range).await },
+                    move |r| Message::StudiesBgSeries {
+                        symbol: symbol.clone(),
+                        kind,
+                        tf: tfm,
+                        got: r.map(|v| v.iter().map(|o| (o.time.as_u64() + 300_000, f64::from(o.value))).collect()).map_err(|e| e.to_string()),
+                    },
+                ));
+            } else {
+                let dk = match kind {
+                    "funding" => exchange::adapter::DerivKind::Funding,
+                    "premium" => exchange::adapter::DerivKind::Premium,
+                    "mark" => exchange::adapter::DerivKind::Mark,
+                    "ls_ratio" => exchange::adapter::DerivKind::LsRatio,
+                    _ => exchange::adapter::DerivKind::TakerRatio,
+                };
+                tasks.push(Task::perform(
+                    async move { handles.fetch_derivs(ti, dk, tf, range).await },
+                    move |r| Message::StudiesBgSeries {
+                        symbol: symbol.clone(),
+                        kind,
+                        tf: tfm,
+                        got: r.map(|v| v.iter().map(|p| (p.avail, p.value)).collect()).map_err(|e| e.to_string()),
+                    },
+                ));
+            }
+        }
+        tasks
     }
 
     fn load_layout(&mut self, layout_uid: uuid::Uuid, main_window: window::Id) -> Task<Message> {
@@ -3335,4 +3473,11 @@ impl Flowsurface {
 
         close_windows.chain(init_task)
     }
+}
+
+/// 持仓历史接口的周期只有 5m–1d 几档（docs/63 §10 后台序列）：取不大于图周期的最大一档（比 5m 还小用 5m）。
+fn oi_period(tf: exchange::Timeframe) -> exchange::Timeframe {
+    use exchange::Timeframe as T;
+    let ms = tf.to_milliseconds();
+    [T::D1, T::H4, T::H2, T::H1, T::M30, T::M15, T::M5].into_iter().find(|t| t.to_milliseconds() <= ms).unwrap_or(T::M5)
 }

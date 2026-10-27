@@ -171,6 +171,49 @@ fn hops_text(hops: &[super::feature_source::Hop]) -> String {
         .join("\n")
 }
 
+/// 管线 A 此刻断着的交易所流：(交易所，如 `Binance Linear`；原因)。
+/// `main.rs` 装配状态栏时写入（已过滤掉 3 秒内的正常重连），链路徽标读它。
+static STREAMS_DOWN: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_streams_down(v: Vec<(String, String)>) {
+    if let Ok(mut g) = STREAMS_DOWN.lock() {
+        if *g != v {
+            *g = v;
+        }
+    }
+}
+
+fn stream_down(exchange: &str) -> Option<String> {
+    STREAMS_DOWN.lock().ok()?.iter().find(|(k, _)| k == exchange).map(|(_, w)| w.clone())
+}
+
+/// [`link`] 再叠上管线 A 的通断：`exchange` 是这张图的交易所全名（`Exchange` 的 Display）。
+///
+/// 「行情中断」= 连接还在、数据不来（exchange 看门狗判的），与「连不上」分开说——
+/// 前者通常是交易所那边停推，查本机网络是白查。
+pub fn link_for(replay_mode: bool, exchange: &str, venue: &str, symbol: &str) -> Link {
+    let mut l = link(replay_mode, venue, symbol);
+    if replay_mode || super::workspace::feature_feed() {
+        return l;
+    }
+    if let Some(why) = stream_down(exchange) {
+        let stale = why.contains(exchange::adapter::STALE_REASON);
+        l.label = format!("A · {venue} {symbol} {}", if stale { "行情中断" } else { "连不上" });
+        l.short = "✗".into();
+        l.tone = LinkTone::Bad;
+        l.detail = format!(
+            "✗ {exchange}：{why}\n{}\n\n{}",
+            if stale {
+                "连接还在、交易所不推数据——多半是交易所那边的问题；收到数据就自动恢复"
+            } else {
+                "每秒重试；检查网络 / 代理设置"
+            },
+            l.detail
+        );
+    }
+    l
+}
+
 /// 计算链路徽标。`venue` / `symbol` 是这张图自己的交易所与标的（管线 A 用）。
 pub fn link(replay_mode: bool, venue: &str, symbol: &str) -> Link {
     use super::feature_source::LinkState as S;
@@ -329,6 +372,28 @@ mod tests {
         let b = badge(true);
         assert_eq!(b.label, "等待运行");
         assert_eq!(b.tone, Tone::Warn);
+    }
+
+    #[test]
+    fn 链路徽标标出行情中断与连不上() {
+        let _g = crate::ws::workspace::replay_mode_test_lock();
+        crate::ws::workspace::set_feature_feed(false);
+        // 交易所名用测试专用的，免得和别的测试共用的全局状态互相踩
+        let stale = format!("{}：60 秒没收到数据（连接还在），重连", exchange::adapter::STALE_REASON);
+        set_streams_down(vec![
+            ("Test Stale".into(), stale),
+            ("Test Down".into(), "Failed to connect to websocket".into()),
+        ]);
+        let l = link_for(false, "Test Stale", "Binance", "BTCUSDT");
+        assert_eq!(l.label, "A · Binance BTCUSDT 行情中断");
+        assert_eq!(l.tone, LinkTone::Bad);
+        let l = link_for(false, "Test Down", "Binance", "BTCUSDT");
+        assert_eq!(l.label, "A · Binance BTCUSDT 连不上");
+        // 没断的交易所不受影响；回放态不看管线 A 的通断
+        assert_eq!(link_for(false, "Test Ok", "Binance", "BTCUSDT").tone, LinkTone::Ok);
+        assert_ne!(link_for(true, "Test Stale", "", "").label, "A · Binance BTCUSDT 行情中断");
+        set_streams_down(vec![]);
+        assert_eq!(link_for(false, "Test Stale", "Binance", "BTCUSDT").tone, LinkTone::Ok);
     }
 
     #[test]

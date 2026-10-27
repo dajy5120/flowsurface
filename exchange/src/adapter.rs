@@ -5,6 +5,25 @@ mod limiter;
 pub mod proxy;
 
 pub use super::error::AdapterError;
+pub use connect::STALE_REASON;
+
+/// K 线之外的衍生品序列（docs/63 §10 J3：图上指标的资金费、溢价、标记价、多空比、主动买卖比）。持仓走 `fetch_open_interest`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DerivKind {
+    Funding,
+    Premium,
+    Mark,
+    LsRatio,
+    TakerRatio,
+}
+
+/// 一个数据点：`avail` = 这个值**能被知道**的时刻（毫秒；资金费 = 结算时刻、溢价 / 标记价 K 线 = 收盘、
+/// 统计类 = 统计时段结束），宿主按它对齐、不前视。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DerivPoint {
+    pub avail: u64,
+    pub value: f64,
+}
 use super::{Ticker, Timeframe};
 use crate::{
     Kline, Price, PushFrequency, TickMultiplier, TickerInfo, Trade, UnixMs, depth::Depth, unit::Qty,
@@ -19,8 +38,15 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 pub use client::{AdapterHandles, MAX_KLINE_STREAMS_PER_STREAM, MAX_TRADE_TICKERS_PER_STREAM};
 pub use proxy::Proxy;
 
-/// Buffer trades and flush in this interval
-const TRADE_BUCKET_INTERVAL: Duration = Duration::from_micros(33_333);
+/// 逐笔攒批的间隔。各交易所的流都是「收到一条消息时，距上次下发够这么久才下发」——**没有定时器**，
+/// 所以间隔 > 0 时，一串里第一笔之后的会被扣到下一串来了才下发：币安 U 本位永续的逐笔一串十几笔挤在 ~2 ms 内、
+/// 串与串隔 ~150 ms（2026-10-27 实测），原来的 33 ms 让图上的最新价总晚一串、显示的是这串的第一笔。
+/// 现在每条消息到了就下发；界面那边一帧之内来的事件在同一帧里处理、只画一次（iced 按帧合并重画）。
+const TRADE_BUCKET_INTERVAL: Duration = Duration::ZERO;
+
+/// 下发事件里的更新时刻对齐到的格子（毫秒）：下游（热力图等）按它分桶，保持上游原来的 33 ms。
+/// 与上面的下发节奏无关——那个改成 0 时，这里拿它做除数就是除以零（2026-10-27 逐笔流任务因此崩溃）。
+const TRADE_UPDATE_GRID_MS: u64 = 33;
 
 pub fn allowed_multipliers_for_min_tick(min_ticksize: crate::unit::MinTicksize) -> &'static [u16] {
     hub::hyperliquid::allowed_multipliers_for_min_tick(min_ticksize)
@@ -31,7 +57,7 @@ async fn flush_trade_buffers<V>(
     ticker_info_map: &FxHashMap<Ticker, (TickerInfo, V)>,
     trade_buffers_map: &mut FxHashMap<Ticker, Vec<Trade>>,
 ) {
-    let interval_ms = TRADE_BUCKET_INTERVAL.as_millis() as u64;
+    let interval_ms = TRADE_UPDATE_GRID_MS;
 
     for (ticker, trades_buffer) in trade_buffers_map.iter_mut() {
         if trades_buffer.is_empty() {
@@ -559,5 +585,31 @@ impl<I> StreamConfig<I> {
             tick_mltp,
             push_freq,
         }
+    }
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn every_message_flushes_and_update_time_stays_on_the_grid() {
+        // 下发节奏是 0（每条就发）；更新时刻仍按 33 ms 的格子对齐——拿下发节奏做除数会除以零
+        assert_eq!(TRADE_BUCKET_INTERVAL, Duration::ZERO);
+        let ti = TickerInfo::new(Ticker::new("BTCUSDT", Exchange::BinanceLinear), 0.1, 0.001, None);
+        let mut infos: FxHashMap<Ticker, (TickerInfo, ())> = FxHashMap::default();
+        infos.insert(ti.ticker, (ti, ()));
+        let mut bufs: FxHashMap<Ticker, Vec<Trade>> = FxHashMap::default();
+        bufs.insert(ti.ticker, vec![Trade { time: UnixMs::new(1_000_050), is_sell: false, price: crate::Price::from_f32(1.0), qty: crate::unit::Qty::from_f32(1.0) }]);
+        let (mut tx, mut rx) = futures::channel::mpsc::channel(4);
+        flush_trade_buffers(&mut tx, &infos, &mut bufs).await;
+        match rx.try_next() {
+            Ok(Some(Event::TradesReceived(_, t, b))) => {
+                assert_eq!(t.as_u64() % TRADE_UPDATE_GRID_MS, 0);
+                assert_eq!(b.len(), 1);
+            }
+            _ => panic!("没下发"),
+        }
+        assert!(bufs[&ti.ticker].is_empty());
     }
 }

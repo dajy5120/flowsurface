@@ -1,6 +1,8 @@
 use crate::{
     Event, Kline, Price, PushFrequency, Ticker, TickerInfo, Timeframe, Trade, Volume,
-    adapter::connect::{State, channel, connect_ws},
+    adapter::connect::{
+        DEPTH_STALE_AFTER, State, channel, connect_ws, kline_stale_after, read_data_frame,
+    },
     adapter::{MarketKind, StreamKind, StreamTicksize, TRADE_BUCKET_INTERVAL, flush_trade_buffers},
     depth::{DeOrder, DepthPayload, DepthUpdate, LocalDepthCache},
     serde_util::de_string_to_number,
@@ -315,7 +317,7 @@ pub fn connect_depth_stream(
                     )
                     .await;
                 }
-                State::Connected(websocket) => match websocket.read_frame().await {
+                State::Connected(websocket) => match read_data_frame(websocket, Some(DEPTH_STALE_AFTER)).await {
                     Ok(msg) => match msg.opcode {
                         OpCode::Text => {
                             if let Ok(data) = feed_de(&msg.payload[..], Some(ticker), market_type) {
@@ -459,7 +461,7 @@ pub fn connect_trade_stream(
                     .await;
                     last_flush = tokio::time::Instant::now();
                 }
-                State::Connected(websocket) => match websocket.read_frame().await {
+                State::Connected(websocket) => match read_data_frame(websocket, None).await {
                     Ok(msg) => match msg.opcode {
                         OpCode::Text => {
                             if let Ok(StreamData::Trade(ticker, de_trade_vec)) =
@@ -597,7 +599,7 @@ pub fn connect_kline_stream(
                     )
                     .await;
                 }
-                State::Connected(websocket) => match websocket.read_frame().await {
+                State::Connected(websocket) => match read_data_frame(websocket, kline_stale_after(&streams)).await {
                     Ok(msg) => match msg.opcode {
                         OpCode::Text => {
                             if let Ok(StreamData::Kline(ticker, de_kline_vec)) =

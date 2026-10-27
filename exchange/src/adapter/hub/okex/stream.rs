@@ -1,6 +1,8 @@
 use crate::{
     Event, Kline, Price, PushFrequency, Ticker, TickerInfo, Timeframe, Trade, Volume,
-    adapter::connect::{State, channel, connect_ws},
+    adapter::connect::{
+        DEPTH_STALE_AFTER, State, channel, connect_ws, kline_stale_after, read_data_frame,
+    },
     adapter::{MarketKind, StreamKind, StreamTicksize, TRADE_BUCKET_INTERVAL, flush_trade_buffers},
     depth::{DeOrder, DepthPayload, DepthUpdate, LocalDepthCache},
     serde_util,
@@ -206,7 +208,7 @@ pub fn connect_depth_stream(
                     )
                     .await;
                 }
-                State::Connected(ws) => match ws.read_frame().await {
+                State::Connected(ws) => match read_data_frame(ws, Some(DEPTH_STALE_AFTER)).await {
                     Ok(msg) => match msg.opcode {
                         OpCode::Text => {
                             if let Ok(data) = feed_de(&msg.payload[..]) {
@@ -358,7 +360,7 @@ pub fn connect_trade_stream(
                     .await;
                     last_flush = tokio::time::Instant::now();
                 }
-                State::Connected(ws) => match ws.read_frame().await {
+                State::Connected(ws) => match read_data_frame(ws, None).await {
                     Ok(msg) => match msg.opcode {
                         OpCode::Text => {
                             if let Ok(StreamData::Trade(inst_id, de_trade_vec)) =
@@ -486,7 +488,7 @@ pub fn connect_kline_stream(
                     )
                     .await;
                 }
-                State::Connected(ws) => match ws.read_frame().await {
+                State::Connected(ws) => match read_data_frame(ws, kline_stale_after(&streams)).await {
                     Ok(msg) => match msg.opcode {
                         OpCode::Text => {
                             if let Ok(v) = serde_json::from_slice::<Value>(&msg.payload[..]) {

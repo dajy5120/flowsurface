@@ -738,3 +738,77 @@ pub(super) async fn fetch_trades(
         }
     }
 }
+
+/// 衍生品序列（docs/63 §10 J3）。只有 U 本位永续。统计类接口（多空比、主动买卖比）只有最近 30 天、周期只有 5m–1d：
+/// 图的周期不在里面就取不大于它的最大一档（比 5m 还小就用 5m）；它们的 `timestamp` 按「统计时段开始」处理，
+/// 可得时刻 = 开始 + 周期（宁晚勿早，不前视）。
+pub(super) async fn fetch_derivs(
+    hub: &mut HttpHub<BinanceLimiter>,
+    ticker_info: TickerInfo,
+    kind: crate::adapter::DerivKind,
+    timeframe: Timeframe,
+    range: Option<(UnixMs, UnixMs)>,
+) -> Result<Vec<crate::adapter::DerivPoint>, AdapterError> {
+    use crate::adapter::{DerivKind, DerivPoint};
+    let (symbol, market) = ticker_info.ticker.to_full_symbol_and_type();
+    if market != MarketKind::LinearPerps {
+        return Err(AdapterError::InvalidRequest(format!("{symbol}：衍生品序列只有 U 本位永续")));
+    }
+    let tf = timeframe.to_milliseconds();
+    let num = |v: &Value| -> Option<f64> {
+        match v {
+            Value::String(s) => s.parse().ok(),
+            Value::Number(n) => n.as_f64(),
+            _ => None,
+        }
+    };
+    let window = |max_n: u64, step: u64, clamp_30d: bool| -> String {
+        match range {
+            Some((s, e)) => {
+                let (mut s, e) = (s.as_u64(), e.as_u64());
+                if clamp_30d {
+                    let now = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                    s = s.max(now.saturating_sub(THIRTY_DAYS_MS) + 60_000);
+                }
+                let n = (e.saturating_sub(s) / step.max(1) + 2).clamp(2, max_n);
+                format!("&startTime={s}&endTime={e}&limit={n}")
+            }
+            None => format!("&limit={max_n}"),
+        }
+    };
+    match kind {
+        DerivKind::Funding => {
+            let url = format!("{LINEAR_PERP_DOMAIN}/fapi/v1/fundingRate?symbol={symbol}{}", window(1000, 8 * 3_600_000, false));
+            let rows: Vec<Value> = hub.http_json_with_limiter(&url, 1, None, None).await?;
+            Ok(rows
+                .iter()
+                .filter_map(|r| Some(DerivPoint { avail: r.get("fundingTime")?.as_u64()?, value: num(r.get("fundingRate")?)? }))
+                .collect())
+        }
+        DerivKind::Premium | DerivKind::Mark => {
+            let path = if kind == DerivKind::Premium { "premiumIndexKlines" } else { "markPriceKlines" };
+            let url = format!("{LINEAR_PERP_DOMAIN}/fapi/v1/{path}?symbol={symbol}&interval={timeframe}{}", window(1000, tf, false));
+            let rows: Vec<Vec<Value>> = hub.http_json_with_limiter(&url, 5, None, None).await?;
+            Ok(rows
+                .iter()
+                .filter_map(|r| Some(DerivPoint { avail: r.first()?.as_u64()? + tf, value: num(r.get(4)?)? }))
+                .collect())
+        }
+        DerivKind::LsRatio | DerivKind::TakerRatio => {
+            const PERIODS: [(&str, u64); 9] = [("5m", 300_000), ("15m", 900_000), ("30m", 1_800_000), ("1h", 3_600_000), ("2h", 7_200_000),
+                                                ("4h", 14_400_000), ("6h", 21_600_000), ("12h", 43_200_000), ("1d", 86_400_000)];
+            let (p, pms) = PERIODS.iter().rev().find(|(_, ms)| *ms <= tf).copied().unwrap_or(PERIODS[0]);
+            let (path, field) = if kind == DerivKind::LsRatio {
+                ("globalLongShortAccountRatio", "longShortRatio")
+            } else {
+                ("takerlongshortRatio", "buySellRatio")
+            };
+            let url = format!("{LINEAR_PERP_DOMAIN}/futures/data/{path}?symbol={symbol}&period={p}{}", window(500, pms, true));
+            let rows: Vec<Value> = hub.http_json_with_limiter(&url, 1, None, None).await?;
+            Ok(rows
+                .iter()
+                .filter_map(|r| Some(DerivPoint { avail: r.get("timestamp")?.as_u64()? + pms, value: num(r.get(field)?)? }))
+                .collect())
+        }
+    }
+}

@@ -364,6 +364,25 @@ impl AdapterHandles {
         }
     }
 
+    /// 衍生品序列（资金费 / 溢价 / 标记价 / 多空比 / 主动买卖比）。目前只有币安 U 本位永续。
+    pub async fn fetch_derivs(
+        &self,
+        ticker_info: TickerInfo,
+        kind: super::DerivKind,
+        timeframe: Timeframe,
+        range: Option<(UnixMs, UnixMs)>,
+    ) -> Result<Vec<super::DerivPoint>, AdapterError> {
+        match ticker_info.ticker.exchange {
+            Exchange::BinanceLinear => {
+                let Some(handle) = self.binance.as_ref() else {
+                    return Err(Self::missing_venue_error(Venue::Binance));
+                };
+                handle.fetch_derivs(ticker_info, kind, timeframe, range).await
+            }
+            ex => Err(AdapterError::InvalidRequest(format!("{ex} 没有这类衍生品数据（目前只有币安 U 本位永续）"))),
+        }
+    }
+
     pub async fn fetch_open_interest(
         &self,
         ticker_info: TickerInfo,

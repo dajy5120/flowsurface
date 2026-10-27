@@ -1,6 +1,8 @@
 use crate::{
     Event, Kline, Price, PushFrequency, Ticker, TickerInfo, Timeframe, Trade, Volume,
-    adapter::connect::{State, channel, connect_ws},
+    adapter::connect::{
+        DEPTH_STALE_AFTER, State, channel, connect_ws, kline_stale_after, read_data_frame,
+    },
     adapter::{MarketKind, StreamKind, StreamTicksize, TRADE_BUCKET_INTERVAL, flush_trade_buffers},
     depth::{DeOrder, DepthPayload, DepthUpdate, LocalDepthCache},
     serde_util::de_string_to_number,
@@ -238,7 +240,7 @@ async fn read_next_depth_message(
     market: MarketKind,
 ) -> DepthReaderMsg {
     loop {
-        match websocket.read_frame().await {
+        match read_data_frame(websocket, Some(DEPTH_STALE_AFTER)).await {
             Ok(msg) => match msg.opcode {
                 OpCode::Text => {
                     if let Ok(StreamData::Depth(depth_type)) = feed_de(&msg.payload[..], market) {
@@ -599,7 +601,7 @@ pub fn connect_kline_stream(
                             .await;
                     }
                 }
-                State::Connected(ws) => match ws.read_frame().await {
+                State::Connected(ws) => match read_data_frame(ws, kline_stale_after(&streams)).await {
                     Ok(msg) => match msg.opcode {
                         OpCode::Text => {
                             if let Ok(StreamData::Kline(ticker, de_kline)) =
@@ -755,7 +757,7 @@ pub fn connect_trade_stream(
                     }
                 }
                 State::Connected(ws) => {
-                    match ws.read_frame().await {
+                    match read_data_frame(ws, None).await {
                         Ok(msg) => match msg.opcode {
                             OpCode::Text => {
                                 if let Ok(StreamData::Trade(ticker, de_trade)) =

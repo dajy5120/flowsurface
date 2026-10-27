@@ -174,6 +174,24 @@ impl BinanceHandle {
             .await
     }
 
+    pub async fn fetch_derivs(
+        &self,
+        ticker: TickerInfo,
+        kind: crate::adapter::DerivKind,
+        timeframe: Timeframe,
+        range: Option<(UnixMs, UnixMs)>,
+    ) -> Result<Vec<crate::adapter::DerivPoint>, AdapterError> {
+        self.request_port
+            .request(move |reply| BinanceCommand::Derivs {
+                ticker,
+                kind,
+                timeframe,
+                range,
+                reply,
+            })
+            .await
+    }
+
     pub async fn fetch_trades(
         &self,
         ticker: TickerInfo,
@@ -310,6 +328,17 @@ impl super::FetchCommandHandler<BinanceMarketScope> for Worker {
             fetch::fetch_historical_oi(self.hub_for_market(market), ticker_info, range, timeframe)
                 .await
         })
+    }
+
+    fn fetch_derivs(
+        &mut self,
+        ticker_info: TickerInfo,
+        kind: crate::adapter::DerivKind,
+        timeframe: Timeframe,
+        range: Option<(UnixMs, UnixMs)>,
+    ) -> futures::future::BoxFuture<'_, Result<Vec<crate::adapter::DerivPoint>, AdapterError>> {
+        let market = ticker_info.market_type();
+        Box::pin(async move { fetch::fetch_derivs(self.hub_for_market(market), ticker_info, kind, timeframe, range).await })
     }
 
     fn fetch_depth_snapshot(

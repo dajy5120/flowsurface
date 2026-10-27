@@ -65,12 +65,17 @@ pub struct Study {
     pub tf_ms: u64,
     /// 指标条件提醒（I5）：只提醒，不下单
     pub alert: Option<StudyAlert>,
+    /// 在哪个品种上算（品种键，`Binance Linear:ETHUSDT`；空 = 这张图的品种）。别的品种只用已收盘的 K 线，
+    /// 按收盘时刻对齐到图上（不前视）；K 线由后台取（`studies_bg`）
+    pub symbol: String,
+    /// 对照品种（docs/63 §10 J2：相关 / 价差这类双输入统计的另一条序列 = 它已收盘的收盘价，按收盘时刻对齐）
+    pub aux_symbol: String,
 }
 
 impl Default for Study {
     fn default() -> Self {
         Self { uid: 0, id: String::new(), params: BTreeMap::new(), source: None, visible: true, pane: "overlay".into(),
-               styles: BTreeMap::new(), min_tf_ms: 0, max_tf_ms: 0, tf_ms: 0, alert: None }
+               styles: BTreeMap::new(), min_tf_ms: 0, max_tf_ms: 0, tf_ms: 0, alert: None, symbol: String::new(), aux_symbol: String::new() }
     }
 }
 
@@ -162,7 +167,15 @@ impl Study {
                 }
             }
         }
-        let base = if parts.is_empty() { name } else { format!("{name} {}", parts.join(" ")) };
+        let mut base = if parts.is_empty() { name } else { format!("{name} {}", parts.join(" ")) };
+        if !self.symbol.is_empty() {
+            base = format!("{base} · {}", self.symbol.rsplit(':').next().unwrap_or(&self.symbol));
+        }
+        if let Some(f) = self.aux_symbol.strip_prefix("@feature:") {
+            base = format!("{base} · {f}");
+        } else if !self.aux_symbol.is_empty() {
+            base = format!("{base} vs {}", self.aux_symbol.rsplit(':').next().unwrap_or(&self.aux_symbol));
+        }
         if self.tf_ms == 0 { base } else { format!("{base} @{}", tf_label(self.tf_ms)) }
     }
 
@@ -291,6 +304,10 @@ pub enum StudyMsg {
     Alert { symbol: String, uid: u64, op: AlertOp },
     /// 在哪个周期上算（毫秒；0 = 跟图）
     CalcTf { symbol: String, uid: u64, tf: u64 },
+    /// 在哪个品种上算：输入框原文（`ETHUSDT` = 与图同一交易所；`Bybit Linear:ETHUSDT` 写全；空 = 图的品种）
+    CalcSymbol { symbol: String, uid: u64, text: String },
+    /// 对照品种（相关 / 价差的另一条序列）：输入框原文，写法同上；空 = 清掉
+    AuxSymbol { symbol: String, uid: u64, text: String },
     Favorite(String),
     SaveTemplate { symbol: String, name: String },
     ApplyTemplate { symbol: String, name: String },
@@ -300,6 +317,11 @@ pub enum StudyMsg {
     Category(Option<String>),
     TemplateName(String),
     Expand(Option<u64>),
+    /// 「品种」/「对照品种」输入框里正在打的字（回车才生效）
+    SymbolDraft { uid: u64, text: String },
+    AuxDraft { uid: u64, text: String },
+    /// 「对照序列」里搜特征 / 图表参数的字（不存盘）
+    FeatQuery { uid: u64, text: String },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -309,6 +331,10 @@ pub struct UiState {
     pub template_name: String,
     pub expanded: Option<u64>,
     pub note: String,
+    /// 「品种」输入框：（哪个指标, 正在打的字）
+    pub symbol_draft: Option<(u64, String)>,
+    pub aux_draft: Option<(u64, String)>,
+    pub feat_query: Option<(u64, String)>,
 }
 
 fn ui() -> &'static Mutex<UiState> {
@@ -359,6 +385,20 @@ pub fn handle(m: StudyMsg) {
                 u.expanded = *x;
                 return;
             }
+            StudyMsg::SymbolDraft { uid, text } => {
+                u.symbol_draft = Some((*uid, text.clone()));
+                return;
+            }
+            StudyMsg::AuxDraft { uid, text } => {
+                u.aux_draft = Some((*uid, text.clone()));
+                return;
+            }
+            StudyMsg::FeatQuery { uid, text } => {
+                u.feat_query = Some((*uid, text.clone()));
+                return;
+            }
+            StudyMsg::CalcSymbol { .. } => u.symbol_draft = None,
+            StudyMsg::AuxSymbol { .. } => u.aux_draft = None,
             _ => {}
         }
     }
@@ -504,6 +544,33 @@ pub fn handle(m: StudyMsg) {
                 }
             }
         }),
+        StudyMsg::CalcSymbol { symbol, uid, text } => with_list(&mut s, &symbol, |l| {
+            let refs = l.iter().any(|x| matches!(&x.source, Some(StudySrc::Study { uid: u, .. }) if *u == uid));
+            let other = resolve_symbol(&symbol, &text);
+            for x in l.iter_mut().filter(|x| x.uid == uid) {
+                if matches!(x.source, Some(StudySrc::Study { .. })) || refs {
+                    note = "引用了别的指标、或被别的指标引用的，跟着对方的品种（先断开引用）".into();
+                } else {
+                    x.symbol = other.clone();
+                }
+            }
+        }),
+        StudyMsg::AuxSymbol { symbol, uid, text } => with_list(&mut s, &symbol, |l| {
+            // 对照品种写法同「品种」；和图同一个也照样记（自己对自己的相关没意义，但不替用户改）
+            let t = text.trim();
+            let key = if t.is_empty() {
+                String::new()
+            } else if t.starts_with('@') {
+                t.to_string()                        // @feature:… 原样
+            } else if t.contains(':') {
+                resolve_symbol("", t)
+            } else {
+                format!("{}:{}", symbol.rsplit_once(':').map_or("", |x| x.0), t.to_uppercase())
+            };
+            for x in l.iter_mut().filter(|x| x.uid == uid) {
+                x.aux_symbol = key.clone();
+            }
+        }),
         StudyMsg::Favorite(id) => {
             if s.favorites.contains(&id) {
                 s.favorites.retain(|x| x != &id);
@@ -540,10 +607,44 @@ pub fn handle(m: StudyMsg) {
         StudyMsg::DeleteTemplate(name) => {
             s.templates.remove(&name);
         }
-        StudyMsg::Search(_) | StudyMsg::Category(_) | StudyMsg::TemplateName(_) | StudyMsg::Expand(_) => {}
+        StudyMsg::Search(_) | StudyMsg::Category(_) | StudyMsg::TemplateName(_) | StudyMsg::Expand(_) | StudyMsg::SymbolDraft { .. } | StudyMsg::AuxDraft { .. }
+        | StudyMsg::FeatQuery { .. } => {}
     }
     save(&s);
     ui().lock().unwrap_or_else(std::sync::PoisonError::into_inner).note = note;
+}
+
+/// 输入框里的品种 → 品种键。`ETHUSDT` 用图的交易所；写了 `交易所:代码` 的照原样；空或与图相同 → 空（图的品种）。
+pub fn resolve_symbol(chart_symbol: &str, text: &str) -> String {
+    let t = text.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let key = match t.rsplit_once(':') {
+        Some((ex, code)) => format!("{}:{}", ex.trim(), code.trim().to_uppercase()),
+        None => {
+            let ex = chart_symbol.rsplit_once(':').map_or("", |x| x.0);
+            format!("{ex}:{}", t.to_uppercase())
+        }
+    };
+    if key == chart_symbol { String::new() } else { key }
+}
+
+/// 挂着、开着的提醒：（品种, 判的周期, 盘中?）——后台据此决定取哪几路 K 线（`studies_bg`）。
+pub fn armed_alerts() -> Vec<(String, u64, bool)> {
+    let s = store().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut v: Vec<(String, u64, bool)> = s
+        .by_symbol
+        .iter()
+        .flat_map(|(sym, l)| l.iter().filter_map(|x| x.alert.as_ref().filter(|a| a.armed).map(|a| (sym.clone(), a.tf_ms, a.intrabar))))
+        .collect();
+    v.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+    v
+}
+
+/// 让图重画（跨品种的 K 线到了）。
+pub fn touch() {
+    VERSION.fetch_add(1, Ordering::Relaxed);
 }
 
 // ── 计算（按图增量）──────────────────────────────────────────────────────────
@@ -585,8 +686,15 @@ fn caches() -> &'static Mutex<HashMap<(String, u64), Cache>> {
 /// K 线（开盘时刻毫秒, 开, 高, 低, 收, 量）。
 pub type Ohlcv = (u64, f64, f64, f64, f64, f64);
 
-fn to_bar(k: &Ohlcv, tf: u64) -> Bar {
-    Bar::new(k.0 as i64, tf as i64, k.1, k.2, k.3, k.4, k.5)
+/// K 线之外的列（docs/63 §10）：（字段名, 与 K 线一一对应的值）。字段名见指标核心 `ind::EXTRA_FIELDS`。
+type Extras = Vec<(&'static str, Vec<f64>)>;
+
+fn to_bar(k: &Ohlcv, tf: u64, ex: &Extras, i: usize) -> Bar {
+    let mut b = Bar::new(k.0 as i64, tf as i64, k.1, k.2, k.3, k.4, k.5);
+    for (f, col) in ex {
+        b.set_extra(f, col.get(i).copied().unwrap_or(f64::NAN));
+    }
+    b
 }
 
 fn build(studies: &[Study], bars: &[Bar]) -> (IndicatorSet, Vec<Option<usize>>, Vec<Option<String>>) {
@@ -656,8 +764,14 @@ fn materialize(c: &Cache, prov: Option<&Bar>) -> Computed {
     Computed { ts, provisional_ts: prov.map(|p| p.ts as u64), cols, errors: c.errors.clone(), recomputed_from: c.last_fix }
 }
 
-fn same_bar(b: &Bar, k: &Ohlcv, tf: u64) -> bool {
-    b.ts == k.0 as i64 && b.tf_ms == tf as i64 && [b.open, b.high, b.low, b.close, b.volume].iter().zip([k.1, k.2, k.3, k.4, k.5]).all(|(a, x)| a.to_bits() == x.to_bits())
+/// 两根是否相同：0 = 相同；1 = 只有 K 线之外的字段不同（持仓之类晚到了，静默重算）；2 = K 线本身不同（交易所修正，要提示）。
+fn bar_diff(a: &Bar, b: &Bar) -> u8 {
+    let same = |x: f64, y: f64| x.to_bits() == y.to_bits();
+    if a.ts != b.ts || a.tf_ms != b.tf_ms || ![(a.open, b.open), (a.high, b.high), (a.low, b.low), (a.close, b.close), (a.volume, b.volume)].iter().all(|&(x, y)| same(x, y)) {
+        return 2;
+    }
+    let ex = wealthspring_indicators::ind::EXTRA_FIELDS;
+    u8::from(!ex.iter().all(|f| same(a.extra(f).unwrap_or(f64::NAN), b.extra(f).unwrap_or(f64::NAN))))
 }
 
 /// 每张图（品种, 周期）合并后的结果：十字线读数、错误列表读它。
@@ -710,37 +824,230 @@ pub fn align_closed(chart_ts: &[u64], tf: u64, hi_ts: &[u64], hi: u64, col: &[f6
 }
 
 /// 按图的 K 线算这个品种的全部指标（增量）。`klines` 按时间升序；`now_ms` 判断最后一根是否收盘。
-/// 设了「在哪个周期上算」比图大的，单独并成高周期 K 线算一份，再对齐回来（I6）。
+/// 设了「在哪个周期上算」比图大的，单独并成高周期 K 线算一份，再对齐回来（I6）；
+/// 设了别的品种的，用后台取来的那个品种的已收盘 K 线算，同样按收盘时刻对齐回来。
+///
+/// 图调这个；它同时告诉后台「这个（品种, 周期）有图在管」，提醒由图判（`studies_bg`）。
 pub fn compute(symbol: &str, tf: u64, klines: &[Ohlcv], now_ms: u64) -> Arc<Computed> {
+    compute_ex(symbol, tf, klines, None, now_ms)
+}
+
+/// 同 [`compute`]，另给与 `klines` 一一对应的主动买入量（图的 K 线带买卖量时；CVD 之类要它）。
+pub fn compute_ex(symbol: &str, tf: u64, klines: &[Ohlcv], buy: Option<&[f64]>, now_ms: u64) -> Arc<Computed> {
+    super::studies_bg::mark_chart(symbol, tf, now_ms);
+    compute_inner(symbol, tf, klines, buy, now_ms, now_ms)
+}
+
+/// 后台（没有图在算这个品种这个周期时）：同一套计算、同一份提醒状态（`studies_bg`）。
+/// `as_now` 只用来判哪根已收盘（`studies_bg::ingest` 给的，可能比真实时刻早或晚）；冷却、响的时刻用 `wall_ms`
+pub fn compute_bg(symbol: &str, tf: u64, klines: &[Ohlcv], buy: Option<&[f64]>, as_now: u64, wall_ms: u64) -> Arc<Computed> {
+    compute_inner(symbol, tf, klines, buy, as_now, wall_ms)
+}
+
+/// 一个指标要的、K 线之外的数据（元数据 `data` 里的、加上数据源用到的；docs/63 §10）。
+pub fn study_needs(s: &Study) -> Vec<&'static str> {
+    use wealthspring_indicators::ind::EXTRA_FIELDS;
+    let mut v: Vec<&'static str> = s.def().map(|d| d.data.iter().copied().filter(|x| EXTRA_FIELDS.contains(x)).collect()).unwrap_or_default();
+    let src = match &s.source {
+        Some(StudySrc::Field(f)) => Some(f.clone()),
+        Some(StudySrc::Study { .. }) => None,
+        None => s.params.get("source").and_then(|x| x.as_str()).map(str::to_string),
+    };
+    if let Some(n) = src.as_deref().and_then(Field::parse).and_then(Field::needs) {
+        v.push(n);
+    }
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// 各列按「这根收盘时能知道的最后一个值」对齐（不前视）。持仓、比值类超过这么久没新值算缺（资金费 8 小时一次，不限）。
+fn max_age(field: &str, tf: u64) -> Option<i64> {
+    match field {
+        "funding" => None,
+        _ => Some((3 * tf).max(1_800_000) as i64),
+    }
+}
+
+/// 一组 K 线（`ts` 开盘时刻、周期 `e`）要的 K 线之外的列，与取不到的原因（字段, 说明）。
+#[allow(clippy::too_many_arguments)]
+fn extras_for(sym: &str, e: u64, ts: &[u64], buy: Option<&[f64]>, needs: &std::collections::BTreeSet<&'static str>, aux: &str, now_ms: u64)
+    -> (Extras, Vec<(&'static str, String)>) {
+    let at: Vec<i64> = ts.iter().map(|t| (t + e) as i64).collect();
+    let nan = || vec![f64::NAN; ts.len()];
+    let mut ex: Extras = Vec::new();
+    let mut errs: Vec<(&'static str, String)> = Vec::new();
+    for &f in needs {
+        let col = match f {
+            "buy_volume" => match buy.filter(|b| b.len() == ts.len() && b.iter().any(|x| x.is_finite())) {
+                Some(b) => b.to_vec(),
+                None => {
+                    errs.push((f, "这张图的 K 线没有主动买卖量（这家交易所的 K 线不给）".into()));
+                    nan()
+                }
+            },
+            "aux" if aux.starts_with("@feature:") => {
+                let code = sym.rsplit(':').next().unwrap_or(sym);
+                match super::studies_feat::series(aux.trim_start_matches("@feature:"), code, now_ms) {
+                    Ok(pts) => {
+                        let avail: Vec<i64> = pts.iter().map(|p| p.0 as i64).collect();
+                        let vals: Vec<f64> = pts.iter().map(|p| p.1).collect();
+                        wealthspring_indicators::engine::align_asof(&at, &avail, &vals, Some((2 * e).max(10_000) as i64))
+                    }
+                    Err(m) => {
+                        errs.push((f, m));
+                        nan()
+                    }
+                }
+            }
+            "aux" if aux.starts_with("@breadth:") => match breadth_aux(aux, e, &at, now_ms) {
+                Ok(v) => v,
+                Err(m) => {
+                    errs.push((f, m));
+                    nan()
+                }
+            },
+            "aux" if aux.is_empty() => {
+                errs.push((f, "还没选对照品种（展开指标 → 对照品种）".into()));
+                nan()
+            }
+            "aux" => match super::studies_bg::closed_klines(aux, e, now_ms) {
+                Ok((bars, _)) => {
+                    let avail: Vec<i64> = bars.iter().map(|k| (k.0 + e) as i64).collect();
+                    let close: Vec<f64> = bars.iter().map(|k| k.4).collect();
+                    wealthspring_indicators::engine::align_asof(&at, &avail, &close, None)
+                }
+                Err(m) => {
+                    errs.push((f, m));
+                    nan()
+                }
+            },
+            _ => match super::studies_bg::series(sym, f, e, now_ms) {
+                Ok(pts) => {
+                    let avail: Vec<i64> = pts.iter().map(|p| p.0 as i64).collect();
+                    let vals: Vec<f64> = pts.iter().map(|p| p.1).collect();
+                    wealthspring_indicators::engine::align_asof(&at, &avail, &vals, max_age(f, e))
+                }
+                Err(m) => {
+                    errs.push((f, m));
+                    nan()
+                }
+            },
+        };
+        ex.push((f, col));
+    }
+    (ex, errs)
+}
+
+/// 市场广度的对照序列（`@breadth:<条件>:<N>`）：篮子里每个品种的已收盘 K 线由后台取，条件与合并都在指标核心（`breadth`）。
+fn breadth_aux(key: &str, e: u64, at: &[i64], now_ms: u64) -> Result<Vec<f64>, String> {
+    use wealthspring_indicators::breadth;
+    let mut it = key.trim_start_matches("@breadth:").split(':');
+    let kind = it.next().unwrap_or("above_ema");
+    let n: usize = it.next().and_then(|x| x.parse().ok()).unwrap_or(50);
+    let mut members = Vec::new();
+    let mut got = 0;
+    for sym in breadth::BASKET {
+        if let Ok((bars, _)) = super::studies_bg::closed_klines(&format!("Binance Linear:{sym}"), e, now_ms) {
+            got += 1;
+            let closes: Vec<f64> = bars.iter().map(|k| k.4).collect();
+            members.push((bars.iter().map(|k| (k.0 + e) as i64).collect::<Vec<_>>(), breadth::flags(kind, n, &closes)));
+        }
+    }
+    if got * 2 < breadth::BASKET.len() {
+        return Err(if super::egress::streams_enabled() {
+            format!("在取篮子的 K 线（{got} / {}）…", breadth::BASKET.len())
+        } else {
+            "对外连接关着（网络出口 → Cockpit 行情图），取不了篮子的 K 线".into()
+        });
+    }
+    Ok(breadth::combine(at, &members, Some(2 * e as i64)))
+}
+
+/// 并成高周期时，主动买量跟着加（有一根没有就算没有）。`agg` 是 [`aggregate_closed`] 的结果。
+fn aggregate_buy(klines: &[Ohlcv], buy: Option<&[f64]>, hi: u64, agg: &[Ohlcv]) -> Option<Vec<f64>> {
+    let buy = buy.filter(|b| b.len() == klines.len())?;
+    let mut sums: HashMap<u64, f64> = HashMap::new();
+    for (k, b) in klines.iter().zip(buy) {
+        *sums.entry(k.0 / hi * hi).or_insert(0.0) += b;
+    }
+    Some(agg.iter().map(|a| sums.get(&a.0).copied().unwrap_or(f64::NAN)).collect())
+}
+
+fn compute_inner(symbol: &str, tf: u64, klines: &[Ohlcv], buy: Option<&[f64]>, now_ms: u64, wall_ms: u64) -> Arc<Computed> {
     refresh_user();
     let studies = studies_for(symbol);
     if studies.is_empty() || klines.is_empty() || tf == 0 {
         return Arc::new(Computed::default());
     }
-    // 按实际计算周期分组；比图小、或不是图周期整数倍的算不了
+    // 按（品种, 实际计算周期, 对照品种）分组；本品种比图小、或不是图周期整数倍的算不了（并不出来）。
+    // 别的品种不并 K 线，直接取那个周期的，所以不受这条限制
     let eff = |s: &Study| if s.tf_ms == 0 { tf } else { s.tf_ms };
-    let mut groups: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    let other = |s: &Study| if s.symbol.is_empty() || s.symbol == symbol { String::new() } else { s.symbol.clone() };
+    // 对照序列：广度指标按自己的条件生成（`@breadth:<条件>:<N>`），其余用用户选的对照品种
+    let auxof = |s: &Study| {
+        if !study_needs(s).contains(&"aux") {
+            String::new()
+        } else if s.id == "breadth" {
+            let p = s.def().and_then(|d| ind::resolve(&d, &s.params).ok());
+            let (k, n) = p.map_or(("above_ema".to_string(), 50), |p| (p.str("kind").to_string(), p.int("n")));
+            format!("@breadth:{k}:{n}")
+        } else {
+            s.aux_symbol.clone()
+        }
+    };
+    let mut groups: BTreeMap<(String, u64, String), Vec<usize>> = BTreeMap::new();
     let mut bad: HashMap<usize, String> = HashMap::new();
     for (i, s) in studies.iter().enumerate() {
-        let e = eff(s);
-        if e < tf || e % tf != 0 {
+        let (o, e) = (other(s), eff(s));
+        if o.is_empty() && (e < tf || e % tf != 0) {
             bad.insert(i, format!("计算周期 {} 比图的周期 {} 小或不是它的整数倍，这张图上不算", tf_label(e), tf_label(tf)));
         } else {
-            groups.entry(e).or_default().push(i);
+            groups.entry((o, e, auxof(s))).or_default().push(i);
         }
     }
-    let mut parts: Vec<(u64, Vec<usize>, Arc<Computed>)> = Vec::new();
+    let mut parts: Vec<(bool, u64, Vec<usize>, Arc<Computed>)> = Vec::new();
+    let mut data_errs: HashMap<usize, String> = HashMap::new();
     let mut changed = false;
-    for (e, idx) in groups {
+    for ((o, e, a), idx) in groups {
         let sub: Vec<Study> = idx.iter().map(|&i| studies[i].clone()).collect();
-        let (c, ch) = if e == tf {
-            compute_raw((symbol.to_string(), tf), tf, sub, klines, now_ms)
+        let needs: std::collections::BTreeSet<&'static str> = sub.iter().flat_map(study_needs).collect();
+        let tag = if a.is_empty() { String::new() } else { format!("~{a}") };
+        let mut errs: Vec<(&'static str, String)> = Vec::new();
+        let (c, ch) = if !o.is_empty() {
+            match super::studies_bg::closed_klines(&o, e, now_ms) {
+                // 缓存键带上图（品种, 周期）：不同的图挂的那组指标不同，共用一份会来回重建
+                Ok((bars, bbuy)) => {
+                    let ts: Vec<u64> = bars.iter().map(|k| k.0).collect();
+                    let (ex, er) = extras_for(&o, e, &ts, Some(&bbuy), &needs, &a, now_ms);
+                    errs = er;
+                    compute_raw((format!("{o}#{symbol}@{tf}{tag}"), e), e, sub, &bars, &ex, u64::MAX)
+                }
+                Err(msg) => (Arc::new(Computed { cols: vec![None; sub.len()], errors: vec![Some(msg); sub.len()], ..Computed::default() }), false),
+            }
+        } else if e == tf {
+            let ts: Vec<u64> = klines.iter().map(|k| k.0).collect();
+            let (ex, er) = extras_for(symbol, tf, &ts, buy, &needs, &a, now_ms);
+            errs = er;
+            let key = if a.is_empty() { symbol.to_string() } else { format!("{symbol}{tag}") };
+            compute_raw((key, tf), tf, sub, klines, &ex, now_ms)
         } else {
             let agg = aggregate_closed(klines, tf, e, now_ms);
-            compute_raw((format!("{symbol}@{tf}"), e), e, sub, &agg, u64::MAX)
+            let abuy = aggregate_buy(klines, buy, e, &agg);
+            let ts: Vec<u64> = agg.iter().map(|k| k.0).collect();
+            let (ex, er) = extras_for(symbol, e, &ts, abuy.as_deref(), &needs, &a, now_ms);
+            errs = er;
+            compute_raw((format!("{symbol}@{tf}{tag}"), e), e, sub, &agg, &ex, u64::MAX)
         };
+        // 取不到的数据：挂到要它的那几个指标上（参数错之类的错误优先）
+        for &i in &idx {
+            let mine: Vec<&str> = errs.iter().filter(|(f, _)| study_needs(&studies[i]).contains(f)).map(|(_, m)| m.as_str()).collect();
+            if !mine.is_empty() {
+                data_errs.insert(i, mine.join("；"));
+            }
+        }
         changed |= ch;
-        parts.push((e, idx, c));
+        parts.push((!o.is_empty(), e, idx, c));
     }
     let key = (symbol.to_string(), tf);
     let prev = merged().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).cloned();
@@ -757,11 +1064,11 @@ pub fn compute(symbol: &str, tf: u64, klines: &[Ohlcv], now_ms: u64) -> Arc<Comp
             for (i, e) in &bad {
                 errors[*i] = Some(e.clone());
             }
-            for (e, idx, c) in &parts {
+            for (cross, e, idx, c) in &parts {
                 for (k, &i) in idx.iter().enumerate() {
-                    errors[i] = c.errors.get(k).cloned().flatten();
+                    errors[i] = c.errors.get(k).cloned().flatten().or_else(|| data_errs.get(&i).cloned());
                     cols[i] = c.cols.get(k).cloned().flatten().map(|cs| {
-                        if *e == tf {
+                        if *e == tf && !cross {
                             cs
                         } else {
                             cs.iter().map(|col| align_closed(&native_ts, tf, &c.ts, *e, col)).collect()
@@ -769,7 +1076,7 @@ pub fn compute(symbol: &str, tf: u64, klines: &[Ohlcv], now_ms: u64) -> Arc<Comp
                     });
                 }
             }
-            let recomputed_from = parts.iter().filter_map(|p| p.2.recomputed_from).min();
+            let recomputed_from = parts.iter().filter(|p| !p.0).filter_map(|p| p.3.recomputed_from).min();
             let m = Arc::new(Computed { ts: native_ts, provisional_ts: last_open.then(|| klines.last().map(|k| k.0)).flatten(), cols, errors,
                                         recomputed_from });
             merged().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, m.clone());
@@ -777,26 +1084,28 @@ pub fn compute(symbol: &str, tf: u64, klines: &[Ohlcv], now_ms: u64) -> Arc<Comp
         }
     };
     if changed && studies.iter().any(|s| s.alert.as_ref().is_some_and(|a| a.armed && a.tf_ms == tf)) {
-        check_alerts(symbol, tf, &studies, &out, now_ms);
+        check_alerts(symbol, tf, &studies, &out, wall_ms);
     }
     out
 }
 
 /// 一组同周期的指标按 K 线增量算。`ckey` 是缓存键（高周期那组带上图的周期，免得和真的高周期图互相顶掉）。
-fn compute_raw(ckey: (String, u64), tf: u64, studies: Vec<Study>, klines: &[Ohlcv], now_ms: u64) -> (Arc<Computed>, bool) {
+/// `ex`：与 `klines` 一一对应的 K 线之外的列（没有的字段不出现）。
+fn compute_raw(ckey: (String, u64), tf: u64, studies: Vec<Study>, klines: &[Ohlcv], ex: &Extras, now_ms: u64) -> (Arc<Computed>, bool) {
     if klines.is_empty() {
         return (Arc::new(Computed { cols: vec![None; studies.len()], errors: vec![None; studies.len()], ..Computed::default() }), true);
     }
     let last_open = klines.last().is_some_and(|k| k.0 + tf > now_ms);
     let n_conf = if last_open { klines.len() - 1 } else { klines.len() };
     let conf = &klines[..n_conf];
-    let prov = if last_open { klines.last().map(|k| to_bar(k, tf)) } else { None };
+    let mk = |i: usize| to_bar(&klines[i], tf, ex, i);
+    let prov = if last_open { Some(mk(klines.len() - 1)) } else { None };
     let mut map = caches().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let key = ckey;
     // 历史往左延伸（滚回去加载更早的）或指标列表结构变了 → 重建；中间的 K 线变了 → 下面从那根起重算
     let reusable = map.get(&key).is_some_and(|c| c.first_ts == conf.first().map_or(0, |k| k.0) && same_shape(&c.studies, &studies));
     if !reusable {
-        let bars: Vec<Bar> = conf.iter().map(|k| to_bar(k, tf)).collect();
+        let bars: Vec<Bar> = (0..n_conf).map(mk).collect();
         let (set, node, errors) = build(&studies, &bars);
         map.insert(key.clone(), Cache { studies: studies.clone(), set, node, errors, first_ts: conf.first().map_or(0, |k| k.0),
                                         confirmed: conf.iter().map(|k| k.0).collect(), out: Arc::new(Computed::default()), last_fix: None });
@@ -816,31 +1125,36 @@ fn compute_raw(ckey: (String, u64), tf: u64, studies: Vec<Study>, klines: &[Ohlc
         c.studies = studies.clone();
     }
     // 数据修正（§8.1 #7）：已收盘的 K 线被改了、中间补进来、或者末尾被删了 → 核心从第一处不同起重放（检查点恢复），
-    // 下游依赖跟着重算。逐根比对的是核心里存着的已确认 K 线，不另存一份
+    // 下游依赖跟着重算。逐根比对的是核心里存着的已确认 K 线，不另存一份。只是 K 线之外的字段变了（持仓之类晚到）
+    // 也照样重算，但不算「数据修正」（不提示）
     let mut fixed = false;
     {
         let old = c.set.bars();
-        let m = old.len().min(conf.len());
-        let d = (0..m).find(|&i| !same_bar(&old[i], &conf[i], tf)).unwrap_or(m);
+        let m = old.len().min(n_conf);
+        let diffs: Vec<u8> = (0..m).map(|i| bar_diff(&old[i], &mk(i))).collect();
+        let d = diffs.iter().position(|&x| x != 0).unwrap_or(m);
         if d < old.len() {
-            let fresh: Vec<Bar> = conf[d..].iter().map(|k| to_bar(k, tf)).collect();
+            let bars_changed = old.len() > n_conf || diffs[d..].contains(&2);
+            let fresh: Vec<Bar> = (d..n_conf).map(mk).collect();
             c.set.correct(d, fresh);
             c.confirmed.truncate(d);
             c.confirmed.extend(conf[d..].iter().map(|k| k.0));
-            c.last_fix = conf.get(d).or(conf.last()).map(|k| k.0);
+            if bars_changed {
+                c.last_fix = conf.get(d).or(conf.last()).map(|k| k.0);
+            }
             fixed = true;
         }
     }
     // 新收盘的根、未收盘那根在变、或者暂定那根刚收盘（暂定 → 没有）都要重新生成结果
-    let changed = conf.len() > c.confirmed.len()
+    let changed = n_conf > c.confirmed.len()
         || fixed
         || params_changed
         || prov.is_some()
         || c.out.ts.is_empty()
         || c.out.provisional_ts != prov.map(|p| p.ts as u64);
-    for k in &conf[c.confirmed.len()..] {
-        c.set.push(to_bar(k, tf));
-        c.confirmed.push(k.0);
+    for i in c.confirmed.len()..n_conf {
+        c.set.push(mk(i));
+        c.confirmed.push(klines[i].0);
     }
     if let Some(p) = &prov {
         c.set.provisional(*p);
@@ -1295,7 +1609,7 @@ mod tests {
         let e = set.add("ema", &[("n".to_string(), Value::from(10))].into_iter().collect(), None).unwrap();
         let m = set.add("sma", &[("n".to_string(), Value::from(5))].into_iter().collect(), Some(Src::Node { node: e, out: 0 })).unwrap();
         for k in &b[..299] {
-            set.push(to_bar(k, 60_000));
+            set.push(to_bar(k, 60_000, &Vec::new(), 0));
         }
         let got = c2.cols[1].as_ref().unwrap()[0].clone();
         assert!(got.iter().zip(set.column(m, 0)).all(|(a, b)| a.to_bits() == b.to_bits()));
@@ -1339,6 +1653,161 @@ mod tests {
     }
 
     #[test]
+    fn 没开图时后台判提醒_图接手后不重报() {
+        let _g = super::super::studies_bg::test_guard();
+        super::super::studies_bg::reset();
+        let sym = "测试:BGALERT";
+        let tf = 60_000;
+        let b: Vec<Ohlcv> = (0..60).map(|i| { let c = 100.0 + i as f64; (i as u64 * tf, c, c, c, c, 1.0) }).collect();
+        store().lock().unwrap().by_symbol.insert(sym.into(), vec![Study {
+            uid: 8, id: "ema".into(), params: [("n".to_string(), Value::from(3))].into_iter().collect(),
+            alert: Some(StudyAlert { out: "ema".into(), cond: "cross_up".into(), level: 150.0, level_text: "150".into(),
+                                     tf_ms: tf, cooldown_s: 0, ..StudyAlert::default() }),
+            ..Study::default()
+        }]);
+        let n_fired = || fired_log().iter().filter(|(t, _)| t.contains("BGALERT")).count();
+        // 没有图：后台要取这一路
+        let now = 45 * tf;
+        assert!(armed_alerts().iter().any(|a| a.0 == sym && a.1 == tf));
+        assert!(super::super::studies_bg::due(now, &armed_alerts()).iter().any(|j| j.symbol == sym));
+        // 后台逐根算：与开着图时一样只在穿越那根收盘时响一次
+        let _ = compute_bg(sym, tf, &b[..45], None, now, now);
+        for k in 46..=52 {
+            let _ = compute_bg(sym, tf, &b[..k], None, k as u64 * tf, k as u64 * tf);
+        }
+        assert_eq!(n_fired(), 1, "{:?}", fired_log());
+        // 图打开（同样的 K 线）：同一份提醒状态，不重报；之后由图判，后台不再取
+        let _ = compute(sym, tf, &b[..52], 52 * tf + 1);
+        assert_eq!(n_fired(), 1);
+        assert!(!super::super::studies_bg::due(52 * tf + 5_000, &armed_alerts()).iter().any(|j| j.symbol == sym));
+        store().lock().unwrap().by_symbol.remove(sym);
+    }
+
+    #[test]
+    fn 跨品种指标只用已收盘的k线_与在那个品种上直接算的逐位相同() {
+        let _g = super::super::studies_bg::test_guard();
+        super::super::studies_bg::reset();
+        let (btc, eth) = ("测试:XBTC", "测试:XETH");
+        let tf = 60_000u64;
+        let mk = |f: f64| -> Vec<Ohlcv> { (0..80).map(|i| { let c = 100.0 + (i as f64 * f).sin() * 7.0 + i as f64 * 0.1; (i as u64 * tf, c, c + 1.0, c - 1.0, c, 5.0) }).collect() };
+        let (b, e) = (mk(0.3), mk(0.17));
+        let rsi = |symbol: &str| Study { uid: 1, id: "rsi".into(), symbol: symbol.into(), pane: "sub".into(), ..Study::default() };
+        store().lock().unwrap().by_symbol.insert(btc.into(), vec![rsi(eth)]);
+        // 图：BTC 前 60 根已收盘 + 第 61 根未收盘
+        let now = 60 * tf + 30_000;
+        let c0 = compute(btc, tf, &b[..61], now);
+        assert!(c0.errors[0].as_deref().is_some_and(|x| x.contains("在取")), "{:?}", c0.errors);
+        // 后台取到 ETH：连未收盘那根（第 61 根）一起给，算的时候不能用它
+        let jobs = super::super::studies_bg::due(now, &[]);
+        assert!(jobs.iter().any(|j| j.symbol == eth && j.tf == tf));
+        super::super::studies_bg::ingest(eth, tf, Ok(e[..61].iter().map(|k| (*k, f64::NAN)).collect()), now);
+        let c = compute(btc, tf, &b[..61], now);
+        assert!(c.errors[0].is_none(), "{:?}", c.errors);
+        // 对照：在 ETH 自己的图上直接算（只给已收盘的 60 根）
+        store().lock().unwrap().by_symbol.insert(eth.into(), vec![rsi("")]);
+        let d = compute_raw(("测试对照".into(), tf), tf, vec![rsi("")], &e[..60], &Vec::new(), u64::MAX).0;
+        let got = &c.cols[0].as_ref().unwrap()[0];
+        let want = &d.cols[0].as_ref().unwrap()[0];
+        assert_eq!(got.len(), 61);
+        for i in 0..60 {
+            assert_eq!(got[i].to_bits(), want[i].to_bits(), "第 {i} 根");
+        }
+        // 未收盘那根：只能是 ETH 上一根已收盘的值，不是 ETH 第 61 根（还没收盘）的
+        assert_eq!(got[60].to_bits(), want[59].to_bits());
+        store().lock().unwrap().by_symbol.remove(btc);
+        store().lock().unwrap().by_symbol.remove(eth);
+    }
+
+    #[test]
+    fn 持仓按可得时刻对齐_晚到的数据静默重算() {
+        use super::super::studies_bg as bg;
+        let _g = bg::test_guard();
+        bg::reset();
+        let (sym, tf) = ("测试:OIX", 60_000u64);
+        let b: Vec<Ohlcv> = (0..30).map(|i| { let c = 100.0 + i as f64; (i as u64 * tf, c, c, c, c, 1.0) }).collect();
+        store().lock().unwrap().by_symbol.insert(sym.into(), vec![Study { uid: 1, id: "oi".into(), pane: "sub".into(),
+                                                                         params: [("n".to_string(), Value::from(3))].into_iter().collect(), ..Study::default() }]);
+        let now = 30 * tf + 20_000;
+        let c0 = compute(sym, tf, &b, now);
+        assert!(c0.errors[0].as_deref().is_some_and(|e| e.contains("持仓")), "{:?}", c0.errors);
+        // 后台取到：第 i 根收盘时（(i+1)·tf）能知道持仓 = 1000 + i；只到第 19 根
+        assert!(bg::due(now, &[]).iter().any(|j| j.kind == "oi"));
+        bg::ingest_series(sym, "oi", tf, Ok((0..20).map(|i| ((i + 1) * tf, 1000.0 + i as f64)).collect()), now);
+        let c1 = compute(sym, tf, &b, now);
+        let oi = &c1.cols[0].as_ref().unwrap()[0];
+        assert_eq!(oi[5], 1005.0, "收盘那一刻刚好能知道");
+        assert_eq!(oi[25], 1019.0, "之后没新值：沿用最近的（30 分钟内）");
+        assert!(c1.errors[0].is_none());
+        // 晚到的补上：静默重算，与「一开始就有」的结果相同；不算「数据修正」
+        bg::ingest_series(sym, "oi", tf, Ok((19..30).map(|i| ((i + 1) * tf, 1000.0 + i as f64)).collect()), now);
+        let c2 = compute(sym, tf, &b, now);
+        let oi2 = &c2.cols[0].as_ref().unwrap()[0];
+        assert_eq!(oi2[25], 1025.0);
+        let chg = &c2.cols[0].as_ref().unwrap()[1];
+        assert_eq!(chg[25].to_bits(), (100.0 * (1025.0f64 / 1022.0 - 1.0)).to_bits());
+        assert_eq!(c2.recomputed_from, None, "只是 K 线之外的数据晚到，不提示数据修正");
+        store().lock().unwrap().by_symbol.remove(sym);
+    }
+
+    #[test]
+    fn cvd用图自带的主动买量() {
+        let (sym, tf) = ("测试:CVDX", 60_000u64);
+        let b: Vec<Ohlcv> = (0..10).map(|i| (i as u64 * tf, 1.0, 1.0, 1.0, 1.0, 10.0 + i as f64)).collect();
+        let buy: Vec<f64> = b.iter().map(|k| 0.7 * k.5).collect();
+        store().lock().unwrap().by_symbol.insert(sym.into(), vec![Study { uid: 1, id: "cvd".into(), pane: "sub".into(), ..Study::default() }]);
+        let c = compute_ex(sym, tf, &b, Some(&buy), 10 * tf);
+        let cvd = &c.cols[0].as_ref().unwrap()[1];
+        let want: f64 = b.iter().map(|k| 2.0 * 0.7 * k.5 - k.5).sum();
+        assert!((cvd[9] - want).abs() < 1e-9, "{} vs {want}", cvd[9]);
+        // 没给主动买量（交易所 K 线不带）：说原因
+        let c = compute_ex(sym, tf, &b, None, 10 * tf);
+        assert!(c.errors[0].as_deref().is_some_and(|e| e.contains("主动买卖量")), "{:?}", c.errors);
+        store().lock().unwrap().by_symbol.remove(sym);
+    }
+
+    #[test]
+    fn 相关的对照品种从后台取_与直接给对照列算的逐位相同() {
+        use super::super::studies_bg as bg;
+        use wealthspring_indicators::engine::IndicatorSet;
+        let _g = bg::test_guard();
+        bg::reset();
+        let (sym, aux, tf) = ("测试:PAIRA", "测试:PAIRB", 60_000u64);
+        let mk = |f: f64| -> Vec<Ohlcv> { (0..60).map(|i| { let c = 100.0 + (i as f64 * f).sin() * 5.0 + i as f64 * 0.1; (i as u64 * tf, c, c + 1.0, c - 1.0, c, 3.0) }).collect() };
+        let (a, x) = (mk(0.3), mk(0.21));
+        let st = Study { uid: 1, id: "correl".into(), pane: "sub".into(), aux_symbol: aux.into(),
+                         params: [("n".to_string(), Value::from(10)), ("on".to_string(), Value::from("levels"))].into_iter().collect(), ..Study::default() };
+        store().lock().unwrap().by_symbol.insert(sym.into(), vec![st]);
+        let now = 60 * tf + 20_000;
+        assert!(compute(sym, tf, &a, now).errors[0].as_deref().is_some_and(|e| e.contains("PAIRB")));
+        assert!(bg::due(now, &[]).iter().any(|j| j.symbol == aux && j.kind == bg::BARS));
+        bg::ingest(aux, tf, Ok(x.iter().map(|k| (*k, f64::NAN)).collect()), now);
+        let c = compute(sym, tf, &a, now);
+        assert!(c.errors[0].is_none(), "{:?}", c.errors);
+        let got = &c.cols[0].as_ref().unwrap()[0];
+        // 对照：直接在核心里给 aux 列
+        let mut s = IndicatorSet::new();
+        let n = s.add("correl", &[("n".to_string(), Value::from(10)), ("on".to_string(), Value::from("levels"))].into_iter().collect(), None).unwrap();
+        for (k, y) in a.iter().zip(&x) {
+            let mut bar = Bar::new(k.0 as i64, tf as i64, k.1, k.2, k.3, k.4, k.5);
+            bar.aux = y.4;
+            s.push(bar);
+        }
+        assert!(got.iter().zip(s.column(n, 0)).all(|(p, q)| p.to_bits() == q.to_bits() || (p.is_nan() && q.is_nan())));
+        assert!(Study { id: "correl".into(), aux_symbol: aux.into(), ..Study::default() }.label().contains("vs PAIRB"));
+        store().lock().unwrap().by_symbol.remove(sym);
+    }
+
+    #[test]
+    fn 品种输入() {
+        assert_eq!(resolve_symbol("Binance Linear:BTCUSDT", " ethusdt "), "Binance Linear:ETHUSDT");
+        assert_eq!(resolve_symbol("Binance Linear:BTCUSDT", "Bybit Linear:ethusdt"), "Bybit Linear:ETHUSDT");
+        assert_eq!(resolve_symbol("Binance Linear:BTCUSDT", "btcusdt"), "", "和图同一个 = 本品种");
+        assert_eq!(resolve_symbol("Binance Linear:BTCUSDT", ""), "");
+        let s = Study { id: "rsi".into(), symbol: "Binance Linear:ETHUSDT".into(), ..Study::default() };
+        assert!(s.label().contains("· ETHUSDT"), "{}", s.label());
+    }
+
+    #[test]
     fn 高周期只用已收盘的k线_不前视() {
         let tf = 300_000u64; // 5m
         let hi = 3_600_000u64; // 1h
@@ -1379,7 +1848,7 @@ mod tests {
         let mut set = IndicatorSet::new();
         let e = set.add("ema", &[("n".to_string(), Value::from(5))].into_iter().collect(), None).unwrap();
         for b in &agg {
-            set.push(to_bar(b, hi));
+            set.push(to_bar(b, hi, &Vec::new(), 0));
         }
         let hts: Vec<u64> = agg.iter().map(|b| b.0).collect();
         let want = align_closed(&c.ts, tf, &hts, hi, set.column(e, 0));
