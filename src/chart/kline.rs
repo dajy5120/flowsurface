@@ -199,6 +199,8 @@ pub struct KlineChart {
     study_configurator: study::Configurator<FootprintStudy>,
     last_tick: Instant,
     visual_config: Config,
+    /// 主图层上次画副图时用的纵轴（`studies::sub_scales`）：实时层发现变了就让主图层重画
+    sub_scales: std::sync::Mutex<Vec<(u64, u64)>>,
 }
 
 impl KlineChart {
@@ -295,6 +297,7 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
+                    sub_scales: Default::default(),
                 }
             }
             Basis::Tick(interval) => {
@@ -352,6 +355,7 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
+                    sub_scales: Default::default(),
                 }
             }
         }
@@ -374,7 +378,7 @@ impl KlineChart {
                 }
 
                 chart.last_price = Some(PriceInfoLabel::new(kline.close, kline.open));
-                self.live_redraw();
+                self.live_redraw(true);
             }
             PlotData::TickBased(_) => {}
         }
@@ -383,13 +387,65 @@ impl KlineChart {
     /// 实时数据到了就重画。原来 K 线图只按 1 秒的时钟重画（`pane::update_interval`），数据到了只进缓冲——
     /// 价格每秒最多动一次。这里只是清缓存、标记要重画，真正的绘制每帧最多一次（同一帧里多次标记自然合并），
     /// 所以不另外节流：数据到了的下一帧就画出来。
-    fn live_redraw(&mut self) {
-        self.invalidate_with(None, true);
+    ///
+    /// `volume_changed`：成交量也变了（K 线推送）。逐笔只动价格，下面的成交量 / 主动买卖差 / 持仓副图不必重画。
+    fn live_redraw(&mut self, volume_changed: bool) {
+        self.invalidate_with(None, if volume_changed { Redraw::Live } else { Redraw::LivePrice });
+    }
+
+    /// 这张图拆不拆实时层（[`crate::chart::Caches`] 的 `live`）：按时间周期的蜡烛图拆；
+    /// 足迹图（每根随逐笔整列变）、按笔数的图不拆；开着市场状态叠加层的也不拆
+    /// （底色与条带要压在全部 K 线上面，最后一根单独画在上层就盖不住了）。
+    fn live_split(&self) -> bool {
+        let PlotData::TimeBased(ts) = &self.data_source else { return false };
+        matches!(self.kind, KlineChartKind::Candles)
+            && !crate::ws::regime::active(&crate::ws::drawing::symbol_key(&self.chart.ticker_info.ticker), ts.interval.to_milliseconds())
+    }
+
+    /// 图上指标（docs/63 I3）的计算结果；没挂指标、不是时间周期的图为 None。按图增量（实时每跳只改最后一个值）
+    fn compute_studies(&self, symbol: &str) -> Option<std::sync::Arc<crate::ws::studies::Computed>> {
+        let PlotData::TimeBased(ts) = &self.data_source else { return None };
+        if crate::ws::studies::studies_for(symbol).is_empty() {
+            return None;
+        }
+        let t0 = Instant::now();
+        let iv = ts.interval.to_milliseconds();
+        let kl: Vec<crate::ws::studies::Ohlcv> = ts
+            .datapoints
+            .iter()
+            .map(|(t, dp)| {
+                let k = &dp.kline;
+                let p = |x: Price| x.units as f64 / 1e11;
+                (t.as_u64(), p(k.open), p(k.high), p(k.low), p(k.close), k.volume.total().units as f64 / 1e8)
+            })
+            .collect();
+        // 主动买入量（K 线带买卖量的交易所才有；CVD 之类要它，docs/63 §10）
+        let buy: Vec<f64> = ts
+            .datapoints
+            .values()
+            .map(|dp| match dp.kline.volume {
+                exchange::Volume::BuySell(b, _) => b.units as f64 / 1e8,
+                exchange::Volume::TotalOnly(_) => f64::NAN,
+            })
+            .collect();
+        // 图上最后一根始终当未收盘：到了收盘时刻、交易所的最终版还没推来时，按「现在」会把它当已收盘，
+        // 最终版一到又判成「数据修正」（1m 图上每分钟一次）；交易所开出下一根，它才算收盘
+        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let now = kl.last().map_or(now, |k| now.min(k.0 + iv - 1));
+        let comp = crate::ws::studies::compute_ex(symbol, iv, &kl, Some(&buy), now);
+        crate::ui::perf::live_sample("指标计算", t0.elapsed());
+        Some(comp)
     }
 
     /// 逐笔成交让正在走的那根 K 线跳（按时间周期的蜡烛图）：只改那根的收盘、最高、最低与价格标签；
     /// 那根还没由 K 线推送建出来就不管（K 线推送随后就到，它才是准数，到了会整根覆盖）。成交量不动。
     pub fn apply_live_trades(&mut self, buffer: &[Trade]) {
+        let t0 = Instant::now();
+        self.apply_live_trades_inner(buffer);
+        crate::ui::perf::live_sample("逐笔进图", t0.elapsed());
+    }
+
+    fn apply_live_trades_inner(&mut self, buffer: &[Trade]) {
         let PlotData::TimeBased(ref mut timeseries) = self.data_source else { return };
         let iv = timeseries.interval.to_milliseconds();
         if iv == 0 || buffer.is_empty() {
@@ -417,7 +473,7 @@ impl KlineChart {
             let (close, open) = (dp.kline.close, dp.kline.open);
             self.mut_state().last_price = Some(PriceInfoLabel::new(close, open));
         }
-        self.live_redraw();
+        self.live_redraw(false);
     }
 
     pub fn kind(&self) -> &KlineChartKind {
@@ -873,12 +929,13 @@ impl KlineChart {
     }
 
     pub fn invalidate(&mut self, now: Option<Instant>) -> Option<Action> {
-        self.invalidate_with(now, false)
+        self.invalidate_with(now, Redraw::All)
     }
 
     /// `from_live`：实时数据触发的。视野（自动缩放 / 跟随最新）算完没变，就只清主图、价格轴、十字线三层（[`ViewState::clear_live`]）。
-    fn invalidate_with(&mut self, now: Option<Instant>, from_live: bool) -> Option<Action> {
+    fn invalidate_with(&mut self, now: Option<Instant>, redraw: Redraw) -> Option<Action> {
         let view_before = self.chart.view_key();
+        let split = self.live_split();
         // 「在图上看」（docs/43 §8）：把请求的时刻放到视野中心，价格轴改回自动适配（否则那段 K 线可能在上下边外）
         if matches!(self.chart.basis, Basis::Time(_))
             && let Some((v, at)) = super::goto_time::pending(self.chart.goto_seen)
@@ -1022,13 +1079,18 @@ impl KlineChart {
             }
         }
 
-        if from_live && chart.view_key() == view_before {
+        let view_same = redraw != Redraw::All && chart.view_key() == view_before;
+        if !view_same {
+            chart.clear_all();
+        } else if split {
             chart.clear_live();
         } else {
-            chart.clear_all();
+            chart.clear_main_live();
         }
-        for indi in self.indicators.values_mut().filter_map(Option::as_mut) {
-            indi.clear_all_caches();
+        if !(view_same && redraw == Redraw::LivePrice) {
+            for indi in self.indicators.values_mut().filter_map(Option::as_mut) {
+                indi.clear_all_caches();
+            }
         }
 
         if let Some(t) = now {
@@ -1097,18 +1159,85 @@ impl canvas::Program<Message> for KlineChart {
             && (crate::ws::regime::changed_since(&chart.regime_seen) | crate::ws::studies::changed_since(&chart.studies_seen))
         {
             chart.cache.main.clear();
+            chart.cache.live.clear();
         }
         let regime_symbol = crate::ws::drawing::symbol_key(&chart.ticker_info.ticker);
-
-        let klines = chart.cache.main.draw(renderer, bounds_size, |frame| {
-            let center = Vector::new(bounds.width / 2.0, bounds.height / 2.0);
-
-            frame.translate(center);
+        let split = self.live_split();
+        let iv = match &self.data_source {
+            PlotData::TimeBased(ts) => ts.interval.to_milliseconds(),
+            PlotData::TickBased(_) => 0,
+        };
+        // 图上指标：两层共用一次计算，哪层要重画才算
+        let comp_cell = std::cell::OnceCell::new();
+        let comp = || comp_cell.get_or_init(|| self.compute_studies(&regime_symbol)).clone();
+        let transform = |frame: &mut canvas::Frame| {
+            frame.translate(Vector::new(bounds.width / 2.0, bounds.height / 2.0));
             frame.scale(chart.scaling);
             frame.translate(chart.translation);
+        };
+
+        // 实时层（先画：它发现副图纵轴变了要让主图层这一帧也重画；叠放次序由返回的顺序定，与画的先后无关）
+        let live = split.then(|| {
+            chart.cache.live.draw(renderer, bounds_size, |frame| {
+                let _t = LiveTimer::new("实时层重画");
+                transform(frame);
+                let region = chart.visible_region(frame.size());
+                let (earliest, latest) = chart.interval_range(&region);
+                let comp = comp();
+                if let Some(c) = &comp {
+                    let now = crate::ws::studies::sub_scales(&regime_symbol, iv, c, earliest, latest);
+                    let mut seen = self.sub_scales.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if *seen != now {
+                        *seen = now;
+                        chart.cache.main.clear();
+                    }
+                }
+                // 最后一根与叠加线的最后一段：副图的底板在主图层里压着前面的 K 线，
+                // 这里只画在没被副图盖住的几条带里（屏幕坐标裁剪），叠起来与一层画完的一样
+                let panes = comp.as_ref().map(|c| crate::ws::studies::sub_panes_px(&regime_symbol, iv, c, bounds.height)).unwrap_or_default();
+                let mut open: Vec<(f32, f32)> = Vec::new();
+                let mut y = 0.0;
+                for (top, bottom) in &panes {
+                    open.push((y, *top));
+                    y = *bottom;
+                }
+                open.push((y, bounds.height));
+                let last = match &self.data_source {
+                    PlotData::TimeBased(ts) => ts.datapoints.last_key_value().filter(|(t, _)| (earliest..=latest).contains(&t.as_u64())),
+                    PlotData::TickBased(_) => None,
+                };
+                for (y0, y1) in open {
+                    if y1 <= y0 {
+                        continue;
+                    }
+                    frame.with_clip(Rectangle::new(Point::new(0.0, y0), Size::new(bounds.width, y1 - y0)), |frame| {
+                        transform(frame);
+                        if let Some((t, dp)) = last {
+                            draw_candle_dp(frame, |p| chart.price_to_y(p), chart.cell_width * 0.8, palette, chart.interval_to_x(t.as_u64()), &dp.kline);
+                        }
+                        if let Some(c) = &comp {
+                            draw_studies(frame, chart, region, &regime_symbol, iv, c, earliest, latest, crate::ws::studies::Layer::LiveOverlay);
+                        }
+                    });
+                }
+                if let Some(c) = &comp {
+                    draw_studies(frame, chart, region, &regime_symbol, iv, c, earliest, latest, crate::ws::studies::Layer::LiveSub);
+                }
+                chart.draw_last_price_line(frame, palette, region);
+            })
+        });
+
+        let klines = chart.cache.main.draw(renderer, bounds_size, |frame| {
+            let _t = LiveTimer::new("主图重画");
+            transform(frame);
 
             let region = chart.visible_region(frame.size());
             let (earliest, latest) = chart.interval_range(&region);
+            // 拆了实时层：最后一根在实时层画
+            let latest_static = match (&self.data_source, split) {
+                (PlotData::TimeBased(ts), true) => ts.datapoints.last_key_value().map_or(latest, |(t, _)| latest.min(t.as_u64().saturating_sub(1))),
+                _ => latest,
+            };
 
             let price_to_y = |price| chart.price_to_y(price);
             let interval_to_x = |interval| chart.interval_to_x(interval);
@@ -1213,7 +1342,7 @@ impl canvas::Program<Message> for KlineChart {
                         &self.data_source,
                         frame,
                         earliest,
-                        latest,
+                        latest_static,
                         interval_to_x,
                         |frame, x_position, kline, _| {
                             draw_candle_dp(
@@ -1244,44 +1373,13 @@ impl canvas::Program<Message> for KlineChart {
                     crate::ws::studies::sub_height(&regime_symbol, iv, chart.scaling),
                 );
                 // 图上指标（docs/63 I3）：叠加线 / 带 + 副图分区（摞在状态条带上面）。计算在指标核心，按图增量
-                if !crate::ws::studies::studies_for(&regime_symbol).is_empty() {
-                    let kl: Vec<crate::ws::studies::Ohlcv> = ts
-                        .datapoints
-                        .iter()
-                        .map(|(t, dp)| {
-                            let k = &dp.kline;
-                            let p = |x: Price| x.units as f64 / 1e11;
-                            (t.as_u64(), p(k.open), p(k.high), p(k.low), p(k.close), k.volume.total().units as f64 / 1e8)
-                        })
-                        .collect();
-                    // 主动买入量（K 线带买卖量的交易所才有；CVD 之类要它，docs/63 §10）
-                    let buy: Vec<f64> = ts
-                        .datapoints
-                        .values()
-                        .map(|dp| match dp.kline.volume {
-                            exchange::Volume::BuySell(b, _) => b.units as f64 / 1e8,
-                            exchange::Volume::TotalOnly(_) => f64::NAN,
-                        })
-                        .collect();
-                    // 图上最后一根始终当未收盘：到了收盘时刻、交易所的最终版还没推来时，按「现在」会把它当已收盘，
-                    // 最终版一到又判成「数据修正」（1m 图上每分钟一次）；交易所开出下一根，它才算收盘
-                    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-                    let now = kl.last().map_or(now, |k| now.min(k.0 + iv - 1));
-                    let comp = crate::ws::studies::compute_ex(&regime_symbol, iv, &kl, Some(&buy), now);
-                    let price_to_y_f64 = |v: f64| chart.price_to_y(Price::from_units((v * 1e11).round() as i64));
-                    crate::ws::studies::draw(
-                        frame,
-                        region,
-                        &interval_to_x,
-                        &price_to_y_f64,
-                        chart.scaling,
-                        earliest,
-                        latest,
-                        &regime_symbol,
-                        iv,
-                        &comp,
-                        crate::ws::regime::bottom_reserved(&regime_symbol, iv, chart.scaling),
-                    );
+                if let Some(c) = comp() {
+                    if split {
+                        *self.sub_scales.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            crate::ws::studies::sub_scales(&regime_symbol, iv, &c, earliest, latest);
+                    }
+                    let layer = if split { crate::ws::studies::Layer::Static } else { crate::ws::studies::Layer::All };
+                    draw_studies(frame, chart, region, &regime_symbol, iv, &c, earliest, latest, layer);
                 }
             }
 
@@ -1311,7 +1409,9 @@ impl canvas::Program<Message> for KlineChart {
             }
 
 
-            chart.draw_last_price_line(frame, palette, region);
+            if !split {
+                chart.draw_last_price_line(frame, palette, region);
+            }
         });
 
         // 画线（docs/46）：单独一层；版本变了才重画
@@ -1362,6 +1462,7 @@ impl canvas::Program<Message> for KlineChart {
         });
 
         let mut out = vec![klines];
+        out.extend(live);
         out.extend(drawings);
         out.push(crosshair);
         out
@@ -1393,6 +1494,62 @@ impl canvas::Program<Message> for KlineChart {
                 }
             }
         }
+    }
+}
+
+/// 图上指标画到一层上（价格轴映射与状态条带让位在这里统一）。
+#[allow(clippy::too_many_arguments)]
+fn draw_studies(
+    frame: &mut canvas::Frame,
+    chart: &ViewState,
+    region: Rectangle,
+    symbol: &str,
+    iv: u64,
+    comp: &crate::ws::studies::Computed,
+    earliest: u64,
+    latest: u64,
+    layer: crate::ws::studies::Layer,
+) {
+    let price_to_y_f64 = |v: f64| chart.price_to_y(Price::from_units((v * 1e11).round() as i64));
+    crate::ws::studies::draw(
+        frame,
+        region,
+        &|t| chart.interval_to_x(t),
+        &price_to_y_f64,
+        chart.scaling,
+        earliest,
+        latest,
+        symbol,
+        iv,
+        comp,
+        crate::ws::regime::bottom_reserved(symbol, iv, chart.scaling),
+        layer,
+    );
+}
+
+/// 这次重画由什么引起。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Redraw {
+    /// 时钟、视野、设置……：全部重画
+    All,
+    /// K 线推送（价格与成交量）：视野没动就只重画实时层（拆了的图）与成交量等副图
+    Live,
+    /// 逐笔成交（只动价格）：视野没动就只重画实时层
+    LivePrice,
+}
+
+/// 一段绘制的计时（drop 时报给 [`crate::ui::perf::live_sample`]）。
+struct LiveTimer(&'static str, Instant);
+
+impl LiveTimer {
+    fn new(stage: &'static str) -> Self {
+        Self(stage, Instant::now())
+    }
+}
+
+impl Drop for LiveTimer {
+    fn drop(&mut self) {
+        crate::ui::perf::live_sample(self.0, self.1.elapsed());
     }
 }
 

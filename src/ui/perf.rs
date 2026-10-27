@@ -91,6 +91,7 @@ pub fn report() -> serde_json::Value {
         "switch_max_ms": switches.iter().map(|(_, d, w)| ms(d).max(ms(w))).fold(0.0, f64::max),
         "palette_max_ms": palette.iter().map(ms).fold(0.0, f64::max),
         "palette_n": palette.len(),
+        "live_chart": LIVE.lock().ok().and_then(|g| g.as_ref().map(|(t0, m)| live_summary(m, t0.elapsed().as_secs_f64().max(1e-3)))),
         "budget": {"cold_start_ms": 1500, "switch_ms": 100, "palette_ms": 50},
     })
 }
@@ -103,4 +104,39 @@ pub fn write(dir: &std::path::Path) {
     } else {
         log::info!("[perf] {}", report());
     }
+}
+
+/// K 线实时绘制各段的耗时（逐笔进来、主图重画、指标计算……）：每段留最近 4096 个样本，
+/// 每 30 秒在日志里报一次（debug 级：中位 / p95 / 最大 / 每秒次数），`report` 里也有。只计时，不改行为。
+type LiveSamples = std::collections::BTreeMap<&'static str, Vec<Duration>>;
+/// （这一轮的起点, 各段样本）
+static LIVE: Mutex<Option<(Instant, LiveSamples)>> = Mutex::new(None);
+
+pub fn live_sample(stage: &'static str, d: Duration) {
+    let Ok(mut g) = LIVE.lock() else { return };
+    let (t0, m) = g.get_or_insert_with(|| (Instant::now(), Default::default()));
+    let v = m.entry(stage).or_default();
+    if v.len() >= 4096 {
+        v.remove(0);
+    }
+    v.push(d);
+    if t0.elapsed() >= Duration::from_secs(30) {
+        let secs = t0.elapsed().as_secs_f64();
+        log::debug!("[K线实时] {}", live_summary(m, secs));
+        m.clear();
+        *t0 = Instant::now();
+    }
+}
+
+fn live_summary(m: &LiveSamples, secs: f64) -> serde_json::Value {
+    let ms = |d: Duration| (d.as_secs_f64() * 1e6).round() / 1e3;
+    m.iter()
+        .map(|(k, v)| {
+            let mut s = v.clone();
+            s.sort_unstable();
+            let at = |q: f64| s.get(((s.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or_default();
+            (k.to_string(), serde_json::json!({"n_per_s": (v.len() as f64 / secs * 10.0).round() / 10.0, "p50_ms": ms(at(0.5)), "p95_ms": ms(at(0.95)), "max_ms": ms(at(1.0))}))
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
 }

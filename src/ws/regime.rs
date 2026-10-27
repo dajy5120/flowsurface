@@ -500,6 +500,13 @@ const STRIP_GAP: f32 = 1.0;
 
 /// 在 K 线主图上画状态叠加层（时间基）。`interval_to_x`：K 线开始时刻 → 这根中心的 x；`chart_iv`：图的周期（毫秒）。
 #[allow(clippy::too_many_arguments)]
+/// 这张图上有没有市场状态叠加层（底色、条带、切换标记）。
+#[must_use]
+pub fn active(symbol: &str, chart_iv: u64) -> bool {
+    let s = settings();
+    s.on && chart_iv > 0 && pick(&files_for(symbol), chart_iv, s.tf.as_deref()).is_some()
+}
+
 /// 底部状态条带占的高度（图上指标的副图摞在它上面，docs/63 I3）。
 #[must_use]
 pub fn bottom_reserved(symbol: &str, chart_iv: u64, scaling: f32) -> f32 {

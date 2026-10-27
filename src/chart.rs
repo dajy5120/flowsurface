@@ -752,6 +752,9 @@ pub trait PlotConstants {
 #[derive(Default)]
 pub struct Caches {
     main: Cache,
+    /// 实时层（K 线图，见 `KlineChart::live_split`）：只画随每笔成交变的东西——最后一根 K 线、指标的最后一段、
+    /// 副图读数、最新价线。视野没动时实时数据只重画这一层，主图层原样复用
+    live: Cache,
     x_labels: Cache,
     y_labels: Cache,
     crosshair: Cache,
@@ -763,6 +766,7 @@ impl Caches {
     fn clear_all(&self) {
         self.drawings.clear();
         self.main.clear();
+        self.live.clear();
         self.x_labels.clear();
         self.y_labels.clear();
         self.crosshair.clear();
@@ -774,12 +778,18 @@ impl Caches {
         self.x_labels.clear();
     }
 
-    /// 实时数据到了、视野没动：只重画主图（K 线、指标）、价格轴（最新价标签）与十字线读数；
-    /// 时间轴与画线层的坐标都没变，不重画。
+    /// 实时数据到了、视野没动：只重画实时层、价格轴（最新价标签）与十字线读数；
+    /// 主图层、时间轴与画线层的坐标都没变，不重画。
     fn clear_live(&self) {
-        self.main.clear();
+        self.live.clear();
         self.y_labels.clear();
         self.crosshair.clear();
+    }
+
+    /// 同 [`Self::clear_live`]，但主图层也重画（这张图没拆实时层时）。
+    fn clear_main_live(&self) {
+        self.main.clear();
+        self.clear_live();
     }
 }
 
@@ -933,6 +943,10 @@ impl ViewState {
 
     pub(crate) fn clear_live(&self) {
         self.cache.clear_live();
+    }
+
+    pub(crate) fn clear_main_live(&self) {
+        self.cache.clear_main_live();
     }
 
     pub(crate) fn clear_all(&self) {

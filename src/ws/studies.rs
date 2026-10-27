@@ -676,6 +676,23 @@ struct Cache {
     confirmed: Vec<u64>,
     out: Arc<Computed>,
     last_fix: Option<u64>,
+    /// 上一次喂进来的已收盘 K 线与 K 线之外的列（实时每跳先整段按位比一遍：全同就跳过逐根比对与重建 Bar）
+    last_in: Vec<Ohlcv>,
+    last_ex: Extras,
+}
+
+/// 两段输入按位相同（f64 比位，NaN 也算相同）。
+fn same_input(a: &[Ohlcv], b: &[Ohlcv], ea: &Extras, eb: &Extras) -> bool {
+    let fb = |x: f64, y: f64| x.to_bits() == y.to_bits();
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| x.0 == y.0 && fb(x.1, y.1) && fb(x.2, y.2) && fb(x.3, y.3) && fb(x.4, y.4) && fb(x.5, y.5))
+        && ea.len() == eb.len()
+        && ea.iter().zip(eb).all(|((fa, ca), (fb_, cb))| fa == fb_ && ca.len() == cb.len() && ca.iter().zip(cb).all(|(x, y)| fb(*x, *y)))
+}
+
+/// 已收盘部分的输入：K 线之外的列只取前 `n` 个（最后那根未收盘的不算）。
+fn conf_extras(ex: &Extras, n: usize) -> Extras {
+    ex.iter().map(|(f, c)| (*f, c[..n.min(c.len())].to_vec())).collect()
 }
 
 fn caches() -> &'static Mutex<HashMap<(String, u64), Cache>> {
@@ -1006,9 +1023,8 @@ fn compute_inner(symbol: &str, tf: u64, klines: &[Ohlcv], buy: Option<&[f64]>, n
             groups.entry((o, e, auxof(s))).or_default().push(i);
         }
     }
-    let mut parts: Vec<(bool, u64, Vec<usize>, Arc<Computed>)> = Vec::new();
+    let mut parts: Vec<Part> = Vec::new();
     let mut data_errs: HashMap<usize, String> = HashMap::new();
-    let mut changed = false;
     for ((o, e, a), idx) in groups {
         let sub: Vec<Study> = idx.iter().map(|&i| studies[i].clone()).collect();
         let needs: std::collections::BTreeSet<&'static str> = sub.iter().flat_map(study_needs).collect();
@@ -1023,7 +1039,7 @@ fn compute_inner(symbol: &str, tf: u64, klines: &[Ohlcv], buy: Option<&[f64]>, n
                     errs = er;
                     compute_raw((format!("{o}#{symbol}@{tf}{tag}"), e), e, sub, &bars, &ex, u64::MAX)
                 }
-                Err(msg) => (Arc::new(Computed { cols: vec![None; sub.len()], errors: vec![Some(msg); sub.len()], ..Computed::default() }), false),
+                Err(msg) => (Arc::new(Computed { cols: vec![None; sub.len()], errors: vec![Some(msg); sub.len()], ..Computed::default() }), Change::None),
             }
         } else if e == tf {
             let ts: Vec<u64> = klines.iter().map(|k| k.0).collect();
@@ -1046,27 +1062,67 @@ fn compute_inner(symbol: &str, tf: u64, klines: &[Ohlcv], buy: Option<&[f64]>, n
                 data_errs.insert(i, mine.join("；"));
             }
         }
-        changed |= ch;
-        parts.push((!o.is_empty(), e, idx, c));
+        parts.push((!o.is_empty(), e, idx, c, ch));
     }
+    let changed = parts.iter().any(|p| p.4 != Change::None);
     let key = (symbol.to_string(), tf);
-    let prev = merged().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).cloned();
+    // 拿出来而不是拷一份引用：没人再拿着时下面「只改最后一个值」能就地改、不拷整列
+    let prev = merged().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
     let native_ts: Vec<u64> = {
         // 图的时间轴：已收盘的 + 未收盘那根
         klines.iter().map(|k| k.0).collect()
     };
     let last_open = klines.last().is_some_and(|k| k.0 + tf > now_ms);
+    let provisional_ts = last_open.then(|| klines.last().map(|k| k.0)).flatten();
+    let mut errors: Vec<Option<String>> = vec![None; studies.len()];
+    for (i, e) in &bad {
+        errors[*i] = Some(e.clone());
+    }
+    for (_, _, idx, c, _) in &parts {
+        for (k, &i) in idx.iter().enumerate() {
+            errors[i] = c.errors.get(k).cloned().flatten().or_else(|| data_errs.get(&i).cloned());
+        }
+    }
+    // 只有本周期那组的未收盘那根变了（实时每跳）、时间轴与错误都没变：把那几列的最后一个值换掉就行
+    let prov_only = |p: &Computed| {
+        p.cols.len() == studies.len()
+            && p.ts == native_ts
+            && p.provisional_ts == provisional_ts
+            && p.errors == errors
+            && parts.iter().all(|(cross, e, idx, c, ch)| match ch {
+                Change::None => true,
+                Change::Prov => !cross && *e == tf && c.ts.len() == native_ts.len() && idx.iter().all(|&i| p.cols[i].is_some()),
+                Change::Full => false,
+            })
+    };
     let out = match prev {
-        Some(p) if !changed && p.cols.len() == studies.len() && p.ts.len() == native_ts.len() => p,
+        Some(p) if !changed && p.cols.len() == studies.len() && p.ts.len() == native_ts.len() => {
+            merged().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, p.clone());
+            p
+        }
+        Some(mut p) if prov_only(&p) => {
+            let m = Arc::make_mut(&mut p);
+            for (_, _, idx, c, ch) in &parts {
+                if *ch != Change::Prov {
+                    continue;
+                }
+                for (k, &i) in idx.iter().enumerate() {
+                    if let (Some(dst), Some(Some(src))) = (m.cols[i].as_mut(), c.cols.get(k)) {
+                        for (d, s) in dst.iter_mut().zip(src) {
+                            if let (Some(d), Some(s)) = (d.last_mut(), s.last()) {
+                                *d = *s;
+                            }
+                        }
+                    }
+                }
+            }
+            merged().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, p.clone());
+            p
+        }
         _ => {
             let mut cols: Vec<Option<Vec<Vec<f64>>>> = vec![None; studies.len()];
-            let mut errors: Vec<Option<String>> = vec![None; studies.len()];
-            for (i, e) in &bad {
-                errors[*i] = Some(e.clone());
-            }
-            for (cross, e, idx, c) in &parts {
+            for (cross, e, idx, c, _) in &parts {
                 for (k, &i) in idx.iter().enumerate() {
-                    errors[i] = c.errors.get(k).cloned().flatten().or_else(|| data_errs.get(&i).cloned());
                     cols[i] = c.cols.get(k).cloned().flatten().map(|cs| {
                         if *e == tf && !cross {
                             cs
@@ -1077,8 +1133,7 @@ fn compute_inner(symbol: &str, tf: u64, klines: &[Ohlcv], buy: Option<&[f64]>, n
                 }
             }
             let recomputed_from = parts.iter().filter(|p| !p.0).filter_map(|p| p.3.recomputed_from).min();
-            let m = Arc::new(Computed { ts: native_ts, provisional_ts: last_open.then(|| klines.last().map(|k| k.0)).flatten(), cols, errors,
-                                        recomputed_from });
+            let m = Arc::new(Computed { ts: native_ts, provisional_ts, cols, errors, recomputed_from });
             merged().lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, m.clone());
             m
         }
@@ -1091,9 +1146,9 @@ fn compute_inner(symbol: &str, tf: u64, klines: &[Ohlcv], buy: Option<&[f64]>, n
 
 /// 一组同周期的指标按 K 线增量算。`ckey` 是缓存键（高周期那组带上图的周期，免得和真的高周期图互相顶掉）。
 /// `ex`：与 `klines` 一一对应的 K 线之外的列（没有的字段不出现）。
-fn compute_raw(ckey: (String, u64), tf: u64, studies: Vec<Study>, klines: &[Ohlcv], ex: &Extras, now_ms: u64) -> (Arc<Computed>, bool) {
+fn compute_raw(ckey: (String, u64), tf: u64, studies: Vec<Study>, klines: &[Ohlcv], ex: &Extras, now_ms: u64) -> (Arc<Computed>, Change) {
     if klines.is_empty() {
-        return (Arc::new(Computed { cols: vec![None; studies.len()], errors: vec![None; studies.len()], ..Computed::default() }), true);
+        return (Arc::new(Computed { cols: vec![None; studies.len()], errors: vec![None; studies.len()], ..Computed::default() }), Change::Full);
     }
     let last_open = klines.last().is_some_and(|k| k.0 + tf > now_ms);
     let n_conf = if last_open { klines.len() - 1 } else { klines.len() };
@@ -1108,7 +1163,8 @@ fn compute_raw(ckey: (String, u64), tf: u64, studies: Vec<Study>, klines: &[Ohlc
         let bars: Vec<Bar> = (0..n_conf).map(mk).collect();
         let (set, node, errors) = build(&studies, &bars);
         map.insert(key.clone(), Cache { studies: studies.clone(), set, node, errors, first_ts: conf.first().map_or(0, |k| k.0),
-                                        confirmed: conf.iter().map(|k| k.0).collect(), out: Arc::new(Computed::default()), last_fix: None });
+                                        confirmed: conf.iter().map(|k| k.0).collect(), out: Arc::new(Computed::default()), last_fix: None,
+                                        last_in: Vec::new(), last_ex: Vec::new() });
     }
     let c = map.get_mut(&key).expect("刚放进去");
     // 只改了计算参数：核心只重算这些实例和依赖它们的（§8.1 #8）
@@ -1128,7 +1184,9 @@ fn compute_raw(ckey: (String, u64), tf: u64, studies: Vec<Study>, klines: &[Ohlc
     // 下游依赖跟着重算。逐根比对的是核心里存着的已确认 K 线，不另存一份。只是 K 线之外的字段变了（持仓之类晚到）
     // 也照样重算，但不算「数据修正」（不提示）
     let mut fixed = false;
-    {
+    let conf_ex = conf_extras(ex, n_conf);
+    // 实时每跳：已收盘部分与上次逐位相同（最常见）→ 不必逐根比
+    if !same_input(&c.last_in, conf, &c.last_ex, &conf_ex) {
         let old = c.set.bars();
         let m = old.len().min(n_conf);
         let diffs: Vec<u8> = (0..m).map(|i| bar_diff(&old[i], &mk(i))).collect();
@@ -1145,24 +1203,55 @@ fn compute_raw(ckey: (String, u64), tf: u64, studies: Vec<Study>, klines: &[Ohlc
             fixed = true;
         }
     }
-    // 新收盘的根、未收盘那根在变、或者暂定那根刚收盘（暂定 → 没有）都要重新生成结果
-    let changed = n_conf > c.confirmed.len()
+    // 新收盘的根、暂定那根刚收盘（暂定 → 没有）、数据修正、改参数：整份重新生成结果
+    let full = n_conf > c.confirmed.len()
         || fixed
         || params_changed
-        || prov.is_some()
         || c.out.ts.is_empty()
+        || c.out.cols.len() != studies.len()
         || c.out.provisional_ts != prov.map(|p| p.ts as u64);
     for i in c.confirmed.len()..n_conf {
         c.set.push(mk(i));
         c.confirmed.push(klines[i].0);
     }
+    c.last_in.clear();
+    c.last_in.extend_from_slice(conf);
+    c.last_ex = conf_ex;
     if let Some(p) = &prov {
         c.set.provisional(*p);
     }
-    if changed || c.out.cols.len() != studies.len() {
+    let change = if full {
         c.out = Arc::new(materialize(c, prov.as_ref()));
-    }
-    (c.out.clone(), changed)
+        Change::Full
+    } else if prov.is_some() {
+        // 只有未收盘那根在变（实时每跳）：就地改各列最后一个值。上一跳的结果已没人拿着时不拷贝，否则拷一份再改
+        let pv: Vec<Option<Vec<f64>>> = c.node.iter().map(|n| n.and_then(|n| c.set.provisional_values(n).map(<[f64]>::to_vec))).collect();
+        let out = Arc::make_mut(&mut c.out);
+        for (col, v) in out.cols.iter_mut().zip(&pv) {
+            if let Some(col) = col {
+                for (o, series) in col.iter_mut().enumerate() {
+                    if let Some(last) = series.last_mut() {
+                        *last = v.as_ref().map_or(f64::NAN, |v| v[o]);
+                    }
+                }
+            }
+        }
+        Change::Prov
+    } else {
+        Change::None
+    };
+    (c.out.clone(), change)
+}
+
+/// 一组指标的计算结果：（别的品种？, 计算周期, 在 studies 里的下标, 结果, 这次变了什么）
+type Part = (bool, u64, Vec<usize>, Arc<Computed>, Change);
+
+/// 一次计算相对上一次变了什么：没变 / 只有未收盘那根的值变了（实时每跳）/ 要整份重建。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Change {
+    None,
+    Prov,
+    Full,
 }
 
 // ── 指标条件提醒（I5）────────────────────────────────────────────────────────
@@ -1307,24 +1396,37 @@ pub fn draw(
     tf: u64,
     comp: &Computed,
     reserved_bottom: f32,
+    layer: Layer,
 ) {
     if comp.ts.is_empty() || scaling <= f32::EPSILON {
         return;
     }
     let studies = studies_for(symbol);
-    let a = comp.ts.partition_point(|t| *t < earliest.saturating_sub(tf));
-    let b = comp.ts.partition_point(|t| *t <= latest.saturating_add(tf));
+    let (a, b) = visible_range(comp, tf, earliest, latest);
     if a >= b {
         return;
     }
+    // 主图层画到未收盘那根之前；实时层只画最后一段（前一根 → 未收盘那根）与那根的柱 / 点
+    let p = comp.provisional_ts.map(|_| comp.ts.len() - 1);
+    let live = matches!(layer, Layer::LiveOverlay | Layer::LiveSub);
+    let (sa, sb, spts) = match (layer, p) {
+        (Layer::All, _) => (a, b, a),
+        (Layer::Static, Some(p)) => (a, b.min(p), a),
+        (Layer::Static, None) => (a, b, a),
+        (_, Some(p)) if p >= a && p < b => (a.max(p.saturating_sub(1)), p + 1, p),
+        _ => (b, b, b),
+    };
     let w = 1.0 / scaling;
     let subs: Vec<usize> = studies.iter().enumerate().filter(|(i, s)| s.shown_on(tf) && s.pane == "sub" && comp.cols.get(*i).is_some_and(Option::is_some)).map(|(i, _)| i).collect();
     for (i, s) in studies.iter().enumerate() {
-        if !s.shown_on(tf) || s.pane == "sub" {
+        if !s.shown_on(tf) || s.pane == "sub" || sa >= sb || layer == Layer::LiveSub {
             continue;
         }
         let (Some(Some(cols)), Some(d)) = (comp.cols.get(i), s.def()) else { continue };
-        draw_outputs(frame, &d, s, cols, &comp.ts[..], a, b, interval_to_x, &|v| price_to_y(v), w, None, Unit::Price);
+        draw_outputs(frame, &d, s, cols, &comp.ts[..], sa, sb, spts, interval_to_x, &|v| price_to_y(v), w, None, Unit::Price);
+    }
+    if layer == Layer::LiveOverlay {
+        return;
     }
     // 副图：自下而上摞在状态条带上面
     let n = subs.len() as f32;
@@ -1333,53 +1435,32 @@ pub fn draw(
         let (Some(Some(cols)), Some(d)) = (comp.cols.get(i), s.def()) else { continue };
         let top = region.y + region.height - reserved_bottom - (n - k as f32) * (SUB_H + SUB_GAP) / scaling;
         let h = SUB_H / scaling;
-        frame.fill_rectangle(Point::new(region.x, top), Size::new(region.width, h), pal::alpha(pal::card_bg(), 0.97)); // 基本不透明：主图的 K 线与叠加线不透过来
-        frame.fill_rectangle(Point::new(region.x, top), Size::new(region.width, w), pal::alpha(pal::dim(), 0.25));
+        if !live {
+            frame.fill_rectangle(Point::new(region.x, top), Size::new(region.width, h), pal::alpha(pal::card_bg(), 0.97)); // 基本不透明：主图的 K 线与叠加线不透过来
+            frame.fill_rectangle(Point::new(region.x, top), Size::new(region.width, w), pal::alpha(pal::dim(), 0.25));
+        }
         // 纵轴：第一个可见输出的单位与坐标轴声明；只画同单位的输出
-        let Some(first) = d.outputs.iter().find(|o| s.style(o.key).visible) else { continue };
-        let (axis, unit) = (first.axis, first.unit);
-        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-        for (o, od) in d.outputs.iter().enumerate() {
-            if !s.style(od.key).visible || od.unit != unit {
-                continue;
+        let Some((unit, axis, lo, hi)) = sub_scale(&d, s, cols, a, b) else { continue };
+        let ymap = |v: f64| top + h - ((v - lo) / (hi - lo)) as f32 * h;
+        if !live {
+            // 参考线（RSI 30 / 70）与零轴
+            let mut levels: Vec<f64> = d.outputs.iter().flat_map(|o| o.levels.clone()).collect();
+            if matches!(axis, Axis::ZeroCentered) {
+                levels.push(0.0);
             }
-            for v in &cols[o][a..b] {
-                if v.is_finite() {
-                    lo = lo.min(*v);
-                    hi = hi.max(*v);
-                }
+            for lv in levels {
+                let y = ymap(lv);
+                frame.stroke(&Path::line(Point::new(region.x, y), Point::new(region.x + region.width, y)),
+                             Stroke::default().with_width(w).with_color(pal::alpha(pal::dim(), 0.35)));
             }
         }
-        match axis {
-            Axis::Fixed { lo: l, hi: hh } => {
-                lo = l;
-                hi = hh;
-            }
-            Axis::ZeroCentered => {
-                let m = lo.abs().max(hi.abs());
-                lo = -m;
-                hi = m;
-            }
-            _ => {}
+        if sa < sb {
+            draw_outputs(frame, &d, s, cols, &comp.ts[..], sa, sb, spts, interval_to_x, &ymap, w, Some(ymap(0.0f64.clamp(lo, hi))), unit);
         }
-        if !(lo.is_finite() && hi.is_finite()) || hi <= lo {
+        if layer == Layer::Static {
             continue;
         }
-        let pad = (hi - lo) * 0.06;
-        let (lo, hi) = (lo - pad, hi + pad);
-        let ymap = |v: f64| top + h - ((v - lo) / (hi - lo)) as f32 * h;
-        // 参考线（RSI 30 / 70）与零轴
-        let mut levels: Vec<f64> = d.outputs.iter().flat_map(|o| o.levels.clone()).collect();
-        if matches!(axis, Axis::ZeroCentered) {
-            levels.push(0.0);
-        }
-        for lv in levels {
-            let y = ymap(lv);
-            frame.stroke(&Path::line(Point::new(region.x, y), Point::new(region.x + region.width, y)),
-                         Stroke::default().with_width(w).with_color(pal::alpha(pal::dim(), 0.35)));
-        }
-        draw_outputs(frame, &d, s, cols, &comp.ts[..], a, b, interval_to_x, &ymap, w, Some(ymap(0.0f64.clamp(lo, hi))), unit);
-        // 左上角：名字 + 最后一个可见值
+        // 左上角：名字 + 最后一个可见值（随未收盘那根变，画在实时层）
         let last = cols.first().and_then(|c| c[..b].iter().rev().find(|v| v.is_finite())).copied();
         frame.fill_text(canvas::Text {
             content: format!("{}  {}", s.label(), last.map_or("—".into(), |v| fmt_val(v))),
@@ -1390,6 +1471,88 @@ pub fn draw(
             ..canvas::Text::default()
         });
     }
+}
+
+/// 图上指标画在哪一层（K 线图的主图层 / 实时层，见 `chart::Caches::live`）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layer {
+    /// 全画（没拆实时层的图）
+    All,
+    /// 不随未收盘那根变的：叠加线画到前一根、副图的底板 / 参考线 / 线画到前一根
+    Static,
+    /// 随未收盘那根变的、主图上的：叠加线的最后一段、那根的柱 / 点（宿主按副图位置裁剪，见 [`sub_panes_px`]）
+    LiveOverlay,
+    /// 随未收盘那根变的、副图里的：最后一段、那根的柱 / 点、左上角的读数
+    LiveSub,
+}
+
+/// 副图（自上而下）在屏幕上的 [上沿, 下沿)（像素，`bottom_px` = 主图底边减去状态条带后的位置）。
+/// 与 [`draw`] 里的摆法同一份：只数有结果的副图。
+pub fn sub_panes_px(symbol: &str, tf: u64, comp: &Computed, bottom_px: f32) -> Vec<(f32, f32)> {
+    let n = studies_for(symbol).iter().enumerate().filter(|(i, s)| s.shown_on(tf) && s.pane == "sub" && comp.cols.get(*i).is_some_and(Option::is_some)).count();
+    (0..n).map(|k| {
+        let top = bottom_px - (n - k) as f32 * (SUB_H + SUB_GAP);
+        (top, top + SUB_H)
+    }).collect()
+}
+
+/// 可见的下标区间 [a, b)（左右各多算一根，线能连到边外）。
+fn visible_range(comp: &Computed, tf: u64, earliest: u64, latest: u64) -> (usize, usize) {
+    let a = comp.ts.partition_point(|t| *t < earliest.saturating_sub(tf));
+    let b = comp.ts.partition_point(|t| *t <= latest.saturating_add(tf));
+    (a, b)
+}
+
+/// 一个副图的纵轴：（单位, 坐标轴声明, 下沿, 上沿），按 [a, b) 里同单位的可见输出（含未收盘那根）。
+fn sub_scale(d: &IndicatorDef, s: &Study, cols: &[Vec<f64>], a: usize, b: usize) -> Option<(Unit, Axis, f64, f64)> {
+    let first = d.outputs.iter().find(|o| s.style(o.key).visible)?;
+    let (axis, unit) = (first.axis, first.unit);
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (o, od) in d.outputs.iter().enumerate() {
+        if !s.style(od.key).visible || od.unit != unit {
+            continue;
+        }
+        for v in &cols[o][a..b] {
+            if v.is_finite() {
+                lo = lo.min(*v);
+                hi = hi.max(*v);
+            }
+        }
+    }
+    match axis {
+        Axis::Fixed { lo: l, hi: hh } => {
+            lo = l;
+            hi = hh;
+        }
+        Axis::ZeroCentered => {
+            let m = lo.abs().max(hi.abs());
+            lo = -m;
+            hi = m;
+        }
+        _ => {}
+    }
+    if !(lo.is_finite() && hi.is_finite()) || hi <= lo {
+        return None;
+    }
+    let pad = (hi - lo) * 0.06;
+    Some((unit, axis, lo - pad, hi + pad))
+}
+
+/// 各副图当前的纵轴（按位）：实时层拿它与主图层画的时候比，变了（未收盘那根冲出了原来的范围）主图层要重画。
+pub fn sub_scales(symbol: &str, tf: u64, comp: &Computed, earliest: u64, latest: u64) -> Vec<(u64, u64)> {
+    let (a, b) = visible_range(comp, tf, earliest, latest);
+    if a >= b {
+        return Vec::new();
+    }
+    studies_for(symbol)
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.shown_on(tf) && s.pane == "sub")
+        .filter_map(|(i, s)| {
+            let (Some(Some(cols)), Some(d)) = (comp.cols.get(i), s.def()) else { return None };
+            Some(sub_scale(&d, s, cols, a, b).map_or((0, 0), |(_, _, lo, hi)| (lo.to_bits(), hi.to_bits())))
+        })
+        .collect()
 }
 
 /// 副图一共占多高（主图底部要让出来的；与状态条带一起算）。
@@ -1420,6 +1583,7 @@ fn draw_outputs(
     ts: &[u64],
     a: usize,
     b: usize,
+    pts_from: usize,
     interval_to_x: &impl Fn(u64) -> f32,
     ymap: &dyn Fn(f64) -> f32,
     w: f32,
@@ -1472,7 +1636,7 @@ fn draw_outputs(
                 let base = zero_y.unwrap_or_else(|| ymap(0.0));
                 let bw = ((interval_to_x(ts[a.min(ts.len() - 1)] + 1) - interval_to_x(ts[a.min(ts.len() - 1)])).abs()).max(w);
                 let half = if b > a + 1 { ((interval_to_x(ts[a + 1]) - interval_to_x(ts[a])) * 0.35).abs() } else { bw };
-                for k in a..b {
+                for k in pts_from.max(a)..b {
                     let v = col[k];
                     if !v.is_finite() {
                         continue;
@@ -1486,7 +1650,7 @@ fn draw_outputs(
                 if od.kind == OutputKind::Events {
                     continue;                          // 方向之类的事件输出不画在价格上（读数里有）
                 }
-                for k in a..b {
+                for k in pts_from.max(a)..b {
                     if col[k].is_finite() {
                         frame.fill(&Path::circle(Point::new(interval_to_x(ts[k]), ymap(col[k])), 1.6 * w), c);
                     }
@@ -1614,6 +1778,47 @@ mod tests {
         let got = c2.cols[1].as_ref().unwrap()[0].clone();
         assert!(got.iter().zip(set.column(m, 0)).all(|(a, b)| a.to_bits() == b.to_bits()));
         assert!(!describe_at(sym, 60_000, b[200].0).is_empty());
+        store().lock().unwrap().by_symbol.remove(sym);
+    }
+
+    #[test]
+    fn 实时每跳就地改最后一个值_与整段重算逐位相同() {
+        let sym = "测试:STUDYLIVE";
+        let tf = 60_000;
+        let p = |k: &str, v: i64| [(k.to_string(), Value::from(v))].into_iter().collect();
+        store().lock().unwrap().by_symbol.insert(sym.into(), vec![
+            Study { uid: 1, id: "ema".into(), params: p("n", 10), ..Study::default() },
+            Study { uid: 2, id: "sma".into(), params: p("n", 4), source: Some(StudySrc::Study { uid: 1, out: "ema".into() }), pane: "sub".into(), ..Study::default() },
+            Study { uid: 3, id: "macd".into(), pane: "sub".into(), ..Study::default() },
+            // 高周期那组（5 分钟）：每跳不变，合并结果里与本周期那组摆在一起
+            Study { uid: 4, id: "rsi".into(), params: p("n", 6), tf_ms: 5 * tf, ..Study::default() },
+        ]);
+        let mut b = bars(400);
+        let buy = vec![4.0; 400];
+        let now = b[399].0 + 1;
+        let _ = compute_ex(sym, tf, &b, Some(&buy), now);
+        let fresh = |b: &[Ohlcv]| {
+            caches().lock().unwrap().retain(|k, _| !k.0.contains(sym));
+            merged().lock().unwrap().retain(|k, _| k.0 != sym);
+            compute_ex(sym, tf, b, Some(&buy), now)
+        };
+        for i in 0..30 {
+            // 未收盘那根随成交跳：收盘、最高、最低在变
+            let c = 100.0 + (i as f64 * 0.7).sin() * 3.0;
+            b[399].4 = c;
+            b[399].2 = b[399].2.max(c);
+            b[399].3 = b[399].3.min(c);
+            let live = compute_ex(sym, tf, &b, Some(&buy), now);
+            let want = fresh(&b);
+            assert_eq!(live.ts, want.ts);
+            assert_eq!(live.provisional_ts, Some(b[399].0));
+            for (x, y) in live.cols.iter().zip(&want.cols) {
+                let (x, y) = (x.as_ref().unwrap(), y.as_ref().unwrap());
+                for (cx, cy) in x.iter().zip(y) {
+                    assert!(cx.iter().zip(cy).all(|(u, v)| u.to_bits() == v.to_bits()), "第 {i} 跳");
+                }
+            }
+        }
         store().lock().unwrap().by_symbol.remove(sym);
     }
 
@@ -1878,8 +2083,9 @@ mod tests {
         k.truncate(2995);
         let fixed = compute(sym, tf, &k, now);
         assert_eq!(fixed.recomputed_from, Some(k[1200].0));
-        caches().lock().unwrap().clear();
-        merged().lock().unwrap().clear();
+        // 只清这个品种的（整张清会把并行跑的别的测试刚算好的结果抹掉）
+        caches().lock().unwrap().retain(|k, _| !k.0.contains(sym));
+        merged().lock().unwrap().retain(|k, _| k.0 != sym);
         let fresh = compute(sym, tf, &k, now);
         for i in 0..2 {
             let (a, b) = (&fixed.cols[i].as_ref().unwrap()[0], &fresh.cols[i].as_ref().unwrap()[0]);
@@ -1893,5 +2099,41 @@ mod tests {
     fn 标签只写数值参数() {
         let s = Study { uid: 9, id: "bbands".into(), ..Study::default() };
         assert_eq!(s.label(), "布林带 20 2");
+    }
+}
+
+#[cfg(test)]
+mod bench_live {
+    use super::*;
+
+    /// 手动跑：cargo test --release bench_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn 实时一跳的开销() {
+        let sym = "测试:BENCHLIVE";
+        let tf = 60_000u64;
+        let p = |k: &str, v: i64| [(k.to_string(), Value::from(v))].into_iter().collect();
+        store().lock().unwrap().by_symbol.insert(sym.into(), vec![
+            Study { uid: 1, id: "ema".into(), params: p("n", 20), ..Study::default() },
+            Study { uid: 2, id: "ema".into(), params: p("n", 50), ..Study::default() },
+            Study { uid: 3, id: "bbands".into(), params: p("n", 20), ..Study::default() },
+            Study { uid: 4, id: "rsi".into(), params: p("n", 14), pane: "sub".into(), ..Study::default() },
+            Study { uid: 5, id: "macd".into(), pane: "sub".into(), ..Study::default() },
+            Study { uid: 6, id: "vwap".into(), ..Study::default() },
+        ]);
+        for n in [1_000usize, 5_000, 20_000] {
+            let mut b: Vec<Ohlcv> = (0..n).map(|i| { let c = 100.0 + (i as f64 * 0.3).sin() * 5.0; (i as u64 * tf, c, c + 0.5, c - 0.5, c, 10.0) }).collect();
+            let buy = vec![5.0; n];
+            let now = b[n - 1].0 + 30_000;
+            let _ = compute_ex(sym, tf, &b, Some(&buy), now);
+            let iters = 200;
+            let t0 = std::time::Instant::now();
+            for i in 0..iters {
+                b[n - 1].4 = 100.0 + i as f64 * 0.01;
+                let _ = compute_ex(sym, tf, &b, Some(&buy), now);
+            }
+            eprintln!("N={n}: compute_ex 每跳 {:?}", t0.elapsed() / iters);
+        }
+        store().lock().unwrap().by_symbol.remove(sym);
     }
 }
