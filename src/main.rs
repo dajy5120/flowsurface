@@ -277,6 +277,8 @@ enum Message {
     Page(ws::pages::PageMsg),
     /// 图表绘图（docs/46 G1）：工具栏「绘图」组与它的菜单
     Draw(ws::drawing::DrawMsg),
+    /// 图上指标（docs/63 §12）：工具栏「指标 ▾」、浏览器卡片、设置弹窗、图例
+    Studies(ws::studies::StudyMsg),
     /// 统一回放时钟（docs/51 P2）：播放控件与快捷键
     Replay(ws::replay_clock::Cmd),
     /// 数据目录提醒与设置（docs/47）
@@ -632,6 +634,16 @@ impl Flowsurface {
                     }
                 }
             }
+            // Esc 被输入框之类接住时只发「关命令面板」：命令面板没开着，就用来取消指标设置 / 收起指标浏览器（docs/63 §12.1）
+            Message::Shell(ui::shell::ShellEvent::PaletteClose)
+                if self.shell.palette.is_none() && (ws::studies::ui_state().editing.is_some() || ws::studies::ui_state().menu.is_some()) =>
+            {
+                ws::studies::handle(if ws::studies::ui_state().editing.is_some() {
+                    ws::studies::StudyMsg::EditCancel
+                } else {
+                    ws::studies::StudyMsg::Menu(None)
+                });
+            }
             Message::Shell(ev) => {
                 if let Some(cmd) = self.shell.update(ev, &self.palette_entries) {
                     return self.run_command(cmd);
@@ -646,10 +658,14 @@ impl Flowsurface {
             Message::StudiesBgKlines { symbol, tf, got } => {
                 let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
                 if let Some((bars, buy, as_now)) = ws::studies_bg::ingest(&symbol, tf, got, now_ms) {
-                    // 这一路挂着提醒、又没有图在管：在这儿算、在这儿判（同一份提醒状态）。
-                    // 哪根已收盘、已定稿由 `ingest` 判（`as_now`），冷却用真实时刻
-                    if ws::studies::armed_alerts().iter().any(|(s, t, _)| *s == symbol && *t == tf) {
-                        ws::studies::compute_bg(&symbol, tf, &bars, Some(&buy), as_now, now_ms);
+                    // 挂着提醒、又没有图在管的（图, 周期）：在这儿算、在这儿判（同一份提醒状态）。每张图各自一组指标，
+                    // 同品种的几张图各判各的。哪根已收盘、已定稿由 `ingest` 判（`as_now`），冷却用真实时刻
+                    let mut done: Vec<String> = Vec::new();
+                    for a in ws::studies::armed_alerts() {
+                        if a.chart.symbol == symbol && a.tf == tf && !done.contains(&a.chart.id) && !ws::studies_bg::covered(&a.chart.id, tf, now_ms) {
+                            ws::studies::compute_bg(&a.chart, tf, &bars, Some(&buy), as_now, now_ms);
+                            done.push(a.chart.id);
+                        }
                     }
                     // 有图挂着这个品种的跨品种指标：让它重画
                     if ws::studies_bg::is_wanted(&symbol, tf) {
@@ -664,7 +680,10 @@ impl Flowsurface {
                     ws::studies::touch();
                 }
             }
+            Message::Studies(m) => ws::studies::handle(m),
             Message::Tick(now) => {
+                // 每张 K 线图的身份与它的指标（docs/63 §12.2）：每帧对一遍（几十个面板，微秒级）
+                self.sync_chart_ids();
                 // 被指标引用的订单流特征 / 图表参数：快照前进就记一个点（每秒最多一次，docs/63 §10）
                 ws::studies_feat::tick(chrono::Utc::now().timestamp_millis().max(0) as u64);
                 // 后台指标（没开图的提醒、跨品种指标）：到点就取 K 线（每秒最多扫一次；出口总闸关着不取）
@@ -978,6 +997,11 @@ impl Flowsurface {
                     self.confirm_dialog = None;
                 } else if self.sidebar.active_menu().is_some() {
                     self.sidebar.set_menu(None);
+                } else if ws::studies::ui_state().editing.is_some() {
+                    // 指标设置弹窗：Esc = 取消（docs/63 §12.1）
+                    ws::studies::handle(ws::studies::StudyMsg::EditCancel);
+                } else if ws::studies::ui_state().menu.is_some() {
+                    ws::studies::handle(ws::studies::StudyMsg::Menu(None));
                 } else {
                     let dashboard = self.active_dashboard_mut();
 
@@ -1506,6 +1530,25 @@ impl Flowsurface {
                 } else {
                     dashboard_view
                 };
+                // 指标浏览器（docs/63 §12）：点工具栏「指标 ▾」后盖在内容上方；只跟着工具栏当前那张图
+                let target_chart = self.toolbar_chart_id();
+                let dashboard_view: Element<'_, Message> = match ws::studies::ui_state().menu.filter(|c| Some(c) == target_chart.as_ref()) {
+                    Some(c) => {
+                        let sym = ws::studies::chart_symbol(&c);
+                        let card = container(ws::studies_view::menu_card(&c, &sym).map(Message::Studies)).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
+                            background: Some(iced::Background::Color(t.extended_palette().background.weak.color)),
+                            border: iced::Border { color: ui::pal::accent(), width: 1.0, radius: 4.0.into() },
+                            ..Default::default()
+                        });
+                        iced::widget::stack![dashboard_view, column![card]].into()
+                    }
+                    None => dashboard_view,
+                };
+                // 指标设置弹窗：居中盖在内容上方，图照常看得到（改了立刻生效）
+                let dashboard_view: Element<'_, Message> = match ws::studies_view::editor() {
+                    Some(e) => iced::widget::stack![dashboard_view, e.map(Message::Studies)].into(),
+                    None => dashboard_view,
+                };
                 // 事件筛选（docs/51 P4）：点工具栏「事件 ▾」后盖在内容上方
                 let dashboard_view: Element<'_, Message> = if ws::replay_clock::event_menu_open() {
                     let card = container(ws::replay_clock::event_menu().map(Message::Replay)).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
@@ -2011,6 +2054,51 @@ impl Flowsurface {
     }
 
     /// 顶部工具栏中段（docs/42 §2.1）：当前面板 · 数据源 · 标的 · 周期 · 主动作 · ⛓ · ⋯ 页面。
+    /// 工具栏当前那张 K 线图的身份（docs/63 §12.2）。
+    fn toolbar_chart_id(&self) -> Option<String> {
+        let (w, p) = self.toolbar_target()?;
+        let st = self.active_dashboard().get_pane(self.main_window.id, w, p)?;
+        matches!(st.content, dashboard::pane::Content::Kline { .. }).then(|| st.settings.chart_id.clone()).flatten()
+    }
+
+    /// 每张 K 线图的身份（docs/63 §12.2，每帧）：没有就发一个；两个面板撞了同一个（复制本页、模板再打开、从文件导入）
+    /// 后出现的换新 id、拷一份指标（提醒关着）。把身份交给图，再登记哪些图活着、各是什么品种（提醒只认活着的图）。
+    fn sync_chart_ids(&mut self) {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut live: Vec<(String, String)> = Vec::new();
+        let mut copies: Vec<(String, String)> = Vec::new();
+        for l in &mut self.layout_manager.layouts {
+            let d = &mut l.dashboard;
+            let panes = d.panes.iter_mut().map(|(_, st)| st).chain(d.popout.values_mut().flat_map(|(g, _)| g.iter_mut().map(|(_, st)| st)));
+            for st in panes {
+                if !matches!(st.content, dashboard::pane::Content::Kline { .. }) {
+                    continue;
+                }
+                let id = match st.settings.chart_id.clone() {
+                    Some(id) if !seen.contains(&id) => id,
+                    old => {
+                        let new = uuid::Uuid::new_v4().simple().to_string();
+                        if let Some(old) = old {
+                            copies.push((old, new.clone()));
+                        }
+                        st.settings.chart_id = Some(new.clone());
+                        new
+                    }
+                };
+                seen.insert(id.clone());
+                let sym = st.stream_pair().map(|ti| ws::drawing::symbol_key(&ti.ticker)).unwrap_or_default();
+                if let dashboard::pane::Content::Kline { chart: Some(c), .. } = &mut st.content {
+                    c.set_studies_chart(&id);
+                }
+                live.push((id, sym));
+            }
+        }
+        for (from, to) in copies {
+            ws::studies::copy_chart(&from, &to);
+        }
+        ws::studies::sync_charts(&live);
+    }
+
     fn toolbar_ctx(&self) -> Element<'_, Message> {
         use ui::shell::tool_pick;
         let mut r = row![].spacing(ui::metrics::space(2)).align_y(Alignment::Center);
@@ -2048,6 +2136,10 @@ impl Flowsurface {
                 // 画线（docs/46 G1）：当前工具（点开菜单）+ 收藏的工具
                 if ws::inspector_props::supports_drawing(&st.content) {
                     r = r.push(ws::drawing_view::toolbar().map(Message::Draw));
+                    // 指标（docs/63 §12）：紧跟「绘图」，这张图自己的一组
+                    if let Some(id) = st.settings.chart_id.as_deref().filter(|_| matches!(st.content, dashboard::pane::Content::Kline { .. })) {
+                        r = r.push(ws::studies_view::toolbar(id).map(Message::Studies));
+                    }
                     // 分析（docs/52）：这张图的品种上的分析
                     if let Some(ti) = st.stream_pair() {
                         r = r.push(ws::drawing_view::analysis_toolbar(&ws::drawing::symbol_key(&ti.ticker)).map(Message::Draw));

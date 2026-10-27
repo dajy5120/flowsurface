@@ -101,6 +101,24 @@ impl Chart for KlineChart {
         }
     }
 
+    fn study_hit(&self, p: Point, size: Size) -> Option<(String, u64)> {
+        let id = self.studies_chart.as_deref()?;
+        let PlotData::TimeBased(ts) = &self.data_source else { return None };
+        let iv = ts.interval.to_milliseconds();
+        let chart = self.state();
+        // 离点的位置最近的那根（K 线画在开盘时刻的 x 上）
+        let t = chart.time_at_x(p.x, size)?.saturating_add(iv / 2);
+        let (earliest, latest) = chart.interval_range(&chart.visible_region(size));
+        // 价格 → 屏幕 y：与绘制同一套变换（平移到中心、缩放、再平移）
+        let price_to_y = |v: f64| {
+            let y = chart.price_to_y(Price::from_units((v * 1e11).round() as i64));
+            size.height / 2.0 + chart.scaling * (y + chart.translation.y)
+        };
+        let symbol = crate::ws::drawing::symbol_key(&chart.ticker_info.ticker);
+        let sub_bottom = size.height - crate::ws::regime::bottom_reserved(&symbol, iv, chart.scaling) * chart.scaling;
+        crate::ws::studies::hit(id, iv, t, p.y, &price_to_y, sub_bottom, earliest, latest).map(|uid| (id.to_string(), uid))
+    }
+
     fn autoscaled_coords(&self) -> Vector {
         let chart = self.state();
         let x_translation = match &self.kind {
@@ -201,6 +219,8 @@ pub struct KlineChart {
     visual_config: Config,
     /// 主图层上次画副图时用的纵轴（`studies::sub_scales`）：实时层发现变了就让主图层重画
     sub_scales: std::sync::Mutex<Vec<(u64, u64)>>,
+    /// 这张图的身份（面板设置里的 `chart_id`，docs/63 §12.2）：图上指标按它取。面板每帧对一次，没有时不画指标
+    studies_chart: Option<String>,
 }
 
 impl KlineChart {
@@ -298,6 +318,7 @@ impl KlineChart {
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
                     sub_scales: Default::default(),
+                    studies_chart: None,
                 }
             }
             Basis::Tick(interval) => {
@@ -356,6 +377,7 @@ impl KlineChart {
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
                     sub_scales: Default::default(),
+                    studies_chart: None,
                 }
             }
         }
@@ -393,6 +415,18 @@ impl KlineChart {
         self.invalidate_with(None, if volume_changed { Redraw::Live } else { Redraw::LivePrice });
     }
 
+    /// 面板给这张图的身份（每帧对一次）；变了整张重画。
+    pub fn set_studies_chart(&mut self, id: &str) {
+        if self.studies_chart.as_deref() != Some(id) {
+            self.studies_chart = Some(id.to_string());
+            self.chart.clear_all();
+        }
+    }
+
+    pub fn studies_chart(&self) -> Option<&str> {
+        self.studies_chart.as_deref()
+    }
+
     /// 这张图拆不拆实时层（[`crate::chart::Caches`] 的 `live`）：按时间周期的蜡烛图拆；
     /// 足迹图（每根随逐笔整列变）、按笔数的图不拆；开着市场状态叠加层的也不拆
     /// （底色与条带要压在全部 K 线上面，最后一根单独画在上层就盖不住了）。
@@ -405,9 +439,11 @@ impl KlineChart {
     /// 图上指标（docs/63 I3）的计算结果；没挂指标、不是时间周期的图为 None。按图增量（实时每跳只改最后一个值）
     fn compute_studies(&self, symbol: &str) -> Option<std::sync::Arc<crate::ws::studies::Computed>> {
         let PlotData::TimeBased(ts) = &self.data_source else { return None };
-        if crate::ws::studies::studies_for(symbol).is_empty() {
+        let id = self.studies_chart.as_deref()?;
+        if crate::ws::studies::studies_of(id).is_empty() {
             return None;
         }
+        let chart = crate::ws::studies::ChartRef::new(id, symbol);
         let t0 = Instant::now();
         let iv = ts.interval.to_milliseconds();
         let kl: Vec<crate::ws::studies::Ohlcv> = ts
@@ -432,7 +468,7 @@ impl KlineChart {
         // 最终版一到又判成「数据修正」（1m 图上每分钟一次）；交易所开出下一根，它才算收盘
         let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
         let now = kl.last().map_or(now, |k| now.min(k.0 + iv - 1));
-        let comp = crate::ws::studies::compute_ex(symbol, iv, &kl, Some(&buy), now);
+        let comp = crate::ws::studies::compute_ex(&chart, iv, &kl, Some(&buy), now);
         crate::ui::perf::live_sample("指标计算", t0.elapsed());
         Some(comp)
     }
@@ -1162,6 +1198,8 @@ impl canvas::Program<Message> for KlineChart {
             chart.cache.live.clear();
         }
         let regime_symbol = crate::ws::drawing::symbol_key(&chart.ticker_info.ticker);
+        // 图上指标按图（docs/63 §12.2）
+        let sid = self.studies_chart.as_deref().unwrap_or("");
         let split = self.live_split();
         let iv = match &self.data_source {
             PlotData::TimeBased(ts) => ts.interval.to_milliseconds(),
@@ -1185,7 +1223,7 @@ impl canvas::Program<Message> for KlineChart {
                 let (earliest, latest) = chart.interval_range(&region);
                 let comp = comp();
                 if let Some(c) = &comp {
-                    let now = crate::ws::studies::sub_scales(&regime_symbol, iv, c, earliest, latest);
+                    let now = crate::ws::studies::sub_scales(sid, iv, c, earliest, latest);
                     let mut seen = self.sub_scales.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     if *seen != now {
                         *seen = now;
@@ -1194,7 +1232,7 @@ impl canvas::Program<Message> for KlineChart {
                 }
                 // 最后一根与叠加线的最后一段：副图的底板在主图层里压着前面的 K 线，
                 // 这里只画在没被副图盖住的几条带里（屏幕坐标裁剪），叠起来与一层画完的一样
-                let panes = comp.as_ref().map(|c| crate::ws::studies::sub_panes_px(&regime_symbol, iv, c, bounds.height)).unwrap_or_default();
+                let panes = comp.as_ref().map(|c| crate::ws::studies::sub_panes_px(sid, iv, c, bounds.height)).unwrap_or_default();
                 let mut open: Vec<(f32, f32)> = Vec::new();
                 let mut y = 0.0;
                 for (top, bottom) in &panes {
@@ -1216,12 +1254,12 @@ impl canvas::Program<Message> for KlineChart {
                             draw_candle_dp(frame, |p| chart.price_to_y(p), chart.cell_width * 0.8, palette, chart.interval_to_x(t.as_u64()), &dp.kline);
                         }
                         if let Some(c) = &comp {
-                            draw_studies(frame, chart, region, &regime_symbol, iv, c, earliest, latest, crate::ws::studies::Layer::LiveOverlay);
+                            draw_studies(frame, chart, region, sid, iv, c, earliest, latest, crate::ws::studies::Layer::LiveOverlay);
                         }
                     });
                 }
                 if let Some(c) = &comp {
-                    draw_studies(frame, chart, region, &regime_symbol, iv, c, earliest, latest, crate::ws::studies::Layer::LiveSub);
+                    draw_studies(frame, chart, region, sid, iv, c, earliest, latest, crate::ws::studies::Layer::LiveSub);
                 }
                 chart.draw_last_price_line(frame, palette, region);
             })
@@ -1370,16 +1408,16 @@ impl canvas::Program<Message> for KlineChart {
                     latest,
                     &regime_symbol,
                     iv,
-                    crate::ws::studies::sub_height(&regime_symbol, iv, chart.scaling),
+                    crate::ws::studies::sub_height(sid, iv, chart.scaling),
                 );
                 // 图上指标（docs/63 I3）：叠加线 / 带 + 副图分区（摞在状态条带上面）。计算在指标核心，按图增量
                 if let Some(c) = comp() {
                     if split {
                         *self.sub_scales.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            crate::ws::studies::sub_scales(&regime_symbol, iv, &c, earliest, latest);
+                            crate::ws::studies::sub_scales(sid, iv, &c, earliest, latest);
                     }
                     let layer = if split { crate::ws::studies::Layer::Static } else { crate::ws::studies::Layer::All };
-                    draw_studies(frame, chart, region, &regime_symbol, iv, &c, earliest, latest, layer);
+                    draw_studies(frame, chart, region, sid, iv, &c, earliest, latest, layer);
                 }
             }
 
@@ -1429,13 +1467,17 @@ impl canvas::Program<Message> for KlineChart {
             chart.draw_playhead(frame, theme, bounds_size);
             chart.draw_event_marks(frame, theme, bounds_size);
 
+            // 图例（docs/63 §12.1 T2）从读数块下面开始。读数块没显示时也按它（最后一根）的高度留位置：
+            // 不然光标一进图读数块出来、图例往下跳一行，鼠标下面那一行就换了
+            let mut legend_top = draw_crosshair_tooltip(&self.data_source, &chart.ticker_info, frame, palette, chart.basis, None, visible_range, false) + 4.0;
+            let mut legend_at = None;
             if let Some(cursor_position) = cursor.position_in(bounds) {
                 let (_, rounded_aggregation) =
                     chart.draw_crosshair(frame, theme, bounds_size, cursor_position, interaction);
                 // 同页图表时间联动（docs/41 E 期）
                 chart.publish_linked_cursor(Some(rounded_aggregation));
 
-                draw_crosshair_tooltip(
+                legend_top = legend_top.max(draw_crosshair_tooltip(
                     &self.data_source,
                     &chart.ticker_info,
                     frame,
@@ -1443,13 +1485,15 @@ impl canvas::Program<Message> for KlineChart {
                     chart.basis,
                     Some(rounded_aggregation),
                     visible_range,
-                );
+                    true,
+                ) + 4.0);
+                legend_at = Some(rounded_aggregation);
             } else {
                 chart.publish_linked_cursor(None);
                 chart.draw_linked_cursor(frame, theme, bounds_size);
             }
             if cursor.position_in(bounds).is_none() && self.visual_config.data_labels_always_visible {
-                draw_crosshair_tooltip(
+                legend_top = legend_top.max(draw_crosshair_tooltip(
                     &self.data_source,
                     &chart.ticker_info,
                     frame,
@@ -1457,7 +1501,14 @@ impl canvas::Program<Message> for KlineChart {
                     chart.basis,
                     None,
                     visible_range,
-                );
+                    true,
+                ) + 4.0);
+            }
+            if let (Some(id), PlotData::TimeBased(ts)) = (self.studies_chart.as_deref(), &self.data_source) {
+                // 十字线落在最后一根右边（还没有的 K 线）：读最后一根
+                let at = legend_at.filter(|t| ts.datapoints.contains_key(&UnixMs::new(*t)));
+                let strips = crate::ws::regime::bottom_reserved(&regime_symbol, iv, chart.scaling) * chart.scaling;
+                crate::ws::studies::set_legend_info(id, crate::ws::studies::LegendInfo { top: legend_top, at, sub_bottom: bounds.height - strips, tf: iv });
             }
         });
 
@@ -1503,13 +1554,14 @@ fn draw_studies(
     frame: &mut canvas::Frame,
     chart: &ViewState,
     region: Rectangle,
-    symbol: &str,
+    studies_chart: &str,
     iv: u64,
     comp: &crate::ws::studies::Computed,
     earliest: u64,
     latest: u64,
     layer: crate::ws::studies::Layer,
 ) {
+    let symbol = crate::ws::drawing::symbol_key(&chart.ticker_info.ticker);
     let price_to_y_f64 = |v: f64| chart.price_to_y(Price::from_units((v * 1e11).round() as i64));
     crate::ws::studies::draw(
         frame,
@@ -1519,10 +1571,10 @@ fn draw_studies(
         chart.scaling,
         earliest,
         latest,
-        symbol,
+        studies_chart,
         iv,
         comp,
-        crate::ws::regime::bottom_reserved(symbol, iv, chart.scaling),
+        crate::ws::regime::bottom_reserved(&symbol, iv, chart.scaling),
         layer,
     );
 }
@@ -2464,7 +2516,8 @@ fn draw_crosshair_tooltip(
     basis: Basis,
     at_interval: Option<u64>,
     visible_range: (u64, u64),
-) {
+    draw: bool,
+) -> f32 {
     let (visible_earliest, visible_latest) = visible_range;
 
     // 十字线落在缺口上（前后都有 K 线、这一格没有）：明说是缺口，不借前一根的数（docs/35 §6.3 不插值）
@@ -2487,7 +2540,7 @@ fn draw_crosshair_tooltip(
             color: crate::ui::pal::warn(),
             ..canvas::Text::default()
         });
-        return;
+        return 8.0 + 16.0 + 4.0;
     }
 
     let kline_opt = match (data, at_interval) {
@@ -2564,7 +2617,7 @@ fn draw_crosshair_tooltip(
     let est = |s: &str| s.chars().map(|c| if c.is_ascii() { TEXT_SIZE * 0.62 } else { TEXT_SIZE }).sum::<f32>();
     const GAP: f32 = 14.0;
     // 市场状态（docs/62 R2）：OHLC 下面每层一行（L2 价格状态、L1 资金费 + 持仓），再下一行是底色维度这一段的切换原因
-    let mut regime = match (data, at_interval) {
+    let regime = match (data, at_interval) {
         (PlotData::TimeBased(ts), Some(at)) => {
             let symbol = crate::ws::drawing::symbol_key(&ticker_info.ticker);
             let iv = ts.interval.to_milliseconds();
@@ -2595,33 +2648,13 @@ fn draw_crosshair_tooltip(
         }
         _ => None,
     };
-    // 图上指标（docs/63 I3）：再加一行「指标」（放不下折行），在状态各行之后、切换原因之前
-    if let (PlotData::TimeBased(ts), Some(at)) = (data, at_interval) {
-        let symbol = crate::ws::drawing::symbol_key(&ticker_info.ticker);
-        let items = crate::ws::studies::describe_at(&symbol, ts.interval.to_milliseconds(), at);
-        if !items.is_empty() {
-            let max_w = (frame.width() - 90.0).max(240.0);
-            let dim_c = palette.background.base.text.scale_alpha(0.6);
-            let entry = regime.get_or_insert_with(|| (Vec::new(), None));
-            let mut cur = vec![("指标".to_string(), dim_c)];
-            let mut w = est("指标") + GAP;
-            for (s, c) in items {
-                let sw = est(&s) + GAP;
-                if w + sw > max_w && cur.len() > 1 {
-                    entry.0.push(std::mem::take(&mut cur));
-                    cur.push(("　".to_string(), dim_c));
-                    w = est("　") + GAP;
-                }
-                w += sw;
-                cur.push((s, c));
-            }
-            entry.0.push(cur);
-        }
-    }
+    // 图上指标的读数在图例里（docs/63 §12.1 T2，界面组件），这里不再加「指标」那一行
     const ROW_H: f32 = 18.0;
     // 图顶第一行留给日历事件标签（docs/43 K5b），读数从它下面开始
     const TOP: f32 = 18.0;
 
+    // 读数块的下沿（图例从这里往下摆）
+    let mut bottom = TOP;
     if let Some(kline) = kline_opt {
         let change_pct = ((kline.close - kline.open).to_f32() / kline.open.to_f32()) * 100.0;
         let change_color = if change_pct >= 0.0 {
@@ -2662,6 +2695,11 @@ fn draw_crosshair_tooltip(
                 width = width.max(est(w));
                 rows += 1.0;
             }
+        }
+        bottom = TOP - 3.0 + rows * ROW_H + 4.0;
+        // 只量不画：图例按「读数块显示时」的高度留位置，光标进出图时图例不跳
+        if !draw {
+            return bottom;
         }
         frame.fill_rectangle(
             Point::new(4.0, TOP - 3.0),
@@ -2714,6 +2752,7 @@ fn draw_crosshair_tooltip(
             }
         }
     }
+    bottom
 }
 
 struct ProfileArea {

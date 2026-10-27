@@ -1,6 +1,6 @@
 //! 后台指标数据（docs/63 §9.5 续 + §10）：图自己没有的数据都从这里来——
 //!
-//! 1. **指标提醒**：挂了提醒的（品种, 周期）没有一张图在算它时，这里定时取 K 线、照常算、照常判
+//! 1. **指标提醒**：挂了提醒的（图, 周期）没有在算（那张图没显示、或显示的是别的周期）时，这里按图现在的品种定时取 K 线、照常算、照常判
 //!    （同一个 `studies::compute`，提醒的「看到过哪根」也是同一份状态，图和后台交接不重报、不漏报）；
 //! 2. **跨品种指标**：BTC 的图上挂「ETHUSDT 的 RSI」——ETH 的 K 线从这里来（只用已收盘的，对齐不前视）；
 //!    对照序列（相关 / 价差的另一个品种）同理；
@@ -9,12 +9,12 @@
 //!
 //! 都走交易所 REST（`AdapterHandles::fetch_klines` / `fetch_open_interest` / `fetch_derivs`）：K 线第一次取最近 400 根，
 //! 之后每根收盘后 15 秒（交易所那根定稿了）增量取一次；盘中提醒另外每 15 秒取一次。出口总闸关着时一律不取。
-//! 「有图在算」= 最近 30 秒内图对这个（品种, 周期）调过 `compute`——图不显示时不画、不算，后台就接手。
+//! 「有图在算」= 最近 30 秒内这张图在这个周期上调过 `compute`——图不显示时不画、不算，后台就接手（docs/63 §12.2：指标按图）。
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use super::studies::Ohlcv;
+use super::studies::{AlertRoute, Ohlcv};
 
 /// 图算过之后多久内算「有图在管」。图在显示时每次收到行情都会重画，远小于这个间隔。
 const CHART_FRESH_MS: u64 = 30_000;
@@ -76,9 +76,14 @@ fn kind_of(k: &str) -> Option<&'static str> {
     SERIES.iter().copied().find(|s| *s == k)
 }
 
-/// 图算过这个（品种, 周期）——提醒交给图判，后台不重复。
-pub fn mark_chart(symbol: &str, tf: u64, now_ms: u64) {
-    lock().chart_seen.insert((symbol.to_string(), tf), now_ms);
+/// 这张图在这个周期上算过——它的提醒交给图判，后台不重复。
+pub fn mark_chart(chart: &str, tf: u64, now_ms: u64) {
+    lock().chart_seen.insert((chart.to_string(), tf), now_ms);
+}
+
+/// 这张图这个周期现在有图在算（提醒由图判）。
+pub fn covered(chart: &str, tf: u64, now_ms: u64) -> bool {
+    chart_covers(&lock(), &(chart.to_string(), tf), now_ms)
 }
 
 /// 这根在 `asked_at` 发出的那次请求里是不是已经定稿（收盘超过 [`AFTER_CLOSE_MS`]）。
@@ -148,8 +153,8 @@ pub struct Job {
     pub since: Option<u64>,
 }
 
-/// 现在该取哪几路（每秒最多扫一次）。`alerts`：挂着提醒的（品种, 周期, 盘中?）。
-pub fn due(now_ms: u64, alerts: &[(String, u64, bool)]) -> Vec<Job> {
+/// 现在该取哪几路（每秒最多扫一次）。`alerts`：挂着的提醒（图与它现在的品种, 周期, 盘中?）。
+pub fn due(now_ms: u64, alerts: &[AlertRoute]) -> Vec<Job> {
     let mut b = lock();
     if now_ms.saturating_sub(b.last_scan) < 1_000 {
         return Vec::new();
@@ -157,9 +162,9 @@ pub fn due(now_ms: u64, alerts: &[(String, u64, bool)]) -> Vec<Job> {
     b.last_scan = now_ms;
     // 要的：没有图在管的提醒（K 线）+ 最近有人要的（跨品种 K 线、序列）
     let mut need: HashMap<Key, bool> = HashMap::new();
-    for (s, tf, intrabar) in alerts {
-        if *tf > 0 && !chart_covers(&b, &(s.clone(), *tf), now_ms) {
-            *need.entry((s.clone(), BARS, *tf)).or_default() |= *intrabar;
+    for a in alerts {
+        if a.tf > 0 && !chart_covers(&b, &(a.chart.id.clone(), a.tf), now_ms) {
+            *need.entry((a.chart.symbol.clone(), BARS, a.tf)).or_default() |= a.intrabar;
         }
     }
     b.wanted.retain(|_, t| now_ms.saturating_sub(*t) < WANT_FRESH_MS);
@@ -298,6 +303,11 @@ pub fn test_guard() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ws::studies::ChartRef;
+
+    fn route(chart: &str, symbol: &str, tf: u64, intrabar: bool) -> AlertRoute {
+        AlertRoute { chart: ChartRef::new(chart, symbol), tf, intrabar }
+    }
 
     const M: u64 = 60_000;
 
@@ -325,7 +335,7 @@ mod tests {
         let _g = guard();
         reset();
         let now = 100 * M + 10_000;
-        let alerts = vec![("Binance Linear:BTCUSDT".to_string(), M, false)];
+        let alerts = vec![route("图A", "Binance Linear:BTCUSDT", M, false)];
         let j = due(now, &alerts);
         assert_eq!(j, vec![Job { symbol: "Binance Linear:BTCUSDT".into(), kind: BARS, tf: M, since: None }]);
         // 取回来之前不重复派
@@ -347,10 +357,14 @@ mod tests {
         let _g = guard();
         reset();
         let now = 100 * M;
-        mark_chart("Binance Linear:BTCUSDT", M, now - 5_000);
-        assert!(due(now, &[("Binance Linear:BTCUSDT".into(), M, false)]).is_empty());
+        mark_chart("图A", M, now - 5_000);
+        assert!(due(now, &[route("图A", "Binance Linear:BTCUSDT", M, false)]).is_empty());
+        // 同品种的另一张图在算不算数：它的指标是另一组
+        assert_eq!(due(now + 1_500, &[route("图B", "Binance Linear:BTCUSDT", M, false)]).len(), 1);
+        reset();
+        mark_chart("图A", M, now - 5_000);
         // 图 30 秒没算了（切走了 / 关了）→ 后台接手
-        assert_eq!(due(now + 40_000, &[("Binance Linear:BTCUSDT".into(), M, false)]).len(), 1);
+        assert_eq!(due(now + 40_000, &[route("图A", "Binance Linear:BTCUSDT", M, false)]).len(), 1);
     }
 
     #[test]
@@ -396,7 +410,7 @@ mod tests {
     fn errors_retry_later() {
         let _g = guard();
         reset();
-        let a = vec![("Binance Linear:XUSDT".to_string(), M, false)];
+        let a = vec![route("图X", "Binance Linear:XUSDT", M, false)];
         assert_eq!(due(M, &a).len(), 1);
         ingest("Binance Linear:XUSDT", M, Err("找不到".into()), M);
         assert!(due(M + 10_000, &a).is_empty());

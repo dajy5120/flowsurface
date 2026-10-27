@@ -269,6 +269,10 @@ pub struct Settings {
     /// 有值时面板只显示这一个视图、不画自己的视图切换；`None` = 面板自己切换（原来的行为）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub view: Option<String>,
+    /// K 线图的身份（docs/63 §12.2）：图上指标按它存（每张图各自一组）。没有就由 Cockpit 发一个；
+    /// 两个面板撞了同一个（复制本页、模板再打开）后出现的那个换新的
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]

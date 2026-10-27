@@ -188,9 +188,14 @@ pub fn view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
         }),
         // 图表：画线（docs/46 G1）——选中对象的属性与这个品种的对象树
         // K 线图另有「指标」（docs/63 I3）与「市场状态」（docs/62 R2）两节
-        Content::Kline { .. } => drawing_target(content).map(|(sym, dec, mult)| {
+        Content::Kline { chart, .. } => drawing_target(content).map(|(sym, dec, mult)| {
+            // 指标按图（docs/63 §12.2）：图的身份由面板每帧给到图上
+            let studies: Element<'a, Event> = match chart.as_ref().and_then(|c| c.studies_chart()) {
+                Some(id) => super::studies_view::inspector(id).map(Event::Studies),
+                None => column![].into(),
+            };
             column![
-                super::studies_view::inspector(&sym).map(Event::Studies),
+                studies,
                 super::regime_view::inspector(&sym).map(Event::Regime),
                 super::drawing_view::inspector(&sym, dec, mult).map(Event::Drawing),
             ]

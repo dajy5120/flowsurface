@@ -82,6 +82,11 @@ pub trait Chart: PlotConstants + canvas::Program<Message> {
 
     fn autoscaled_coords(&self) -> Vector;
 
+    /// 双击命中图上的指标线（docs/63 §12.3 T3）：（图 id, 指标 uid）。只有挂着图上指标的 K 线图有。
+    fn study_hit(&self, _p: Point, _size: Size) -> Option<(String, u64)> {
+        None
+    }
+
     fn supports_fit_autoscaling(&self) -> bool;
 
     fn is_empty(&self) -> bool;
@@ -165,6 +170,17 @@ fn canvas_interaction<T: Chart>(
                             *interaction = if crate::ws::drawing::dragging() { Interaction::DrawDrag } else { Interaction::None };
                             return Some(canvas::Action::request_redraw().and_capture());
                         }
+                    }
+                    // 双击图上的指标线 = 打开它的设置（docs/63 §12.3 T3）；画线优先（上面先判）
+                    if let mouse::Button::Left = button
+                        && let Some(p) = local
+                        && !matches!(interaction, Interaction::Ruler { .. })
+                        && is_double_click(p)
+                        && let Some((cid, uid)) = chart.study_hit(p, bounds.size())
+                    {
+                        crate::ws::studies::handle(crate::ws::studies::StudyMsg::Edit(Some((cid, uid))));
+                        *interaction = Interaction::None;
+                        return Some(canvas::Action::request_redraw().and_capture());
                     }
                     let cursor_in_bounds = cursor_position?;
 
@@ -747,6 +763,15 @@ pub trait PlotConstants {
     fn max_cell_height(&self) -> f32;
     fn min_cell_height(&self) -> f32;
     fn default_cell_width(&self) -> f32;
+}
+
+/// 画布上的双击：这一下与上一下隔不到 400 毫秒、相距不到 6 像素（画布的按下事件不带双击）。
+fn is_double_click(p: Point) -> bool {
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, Point)>> = std::sync::Mutex::new(None);
+    let mut g = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let hit = g.is_some_and(|(t, q)| t.elapsed() < std::time::Duration::from_millis(400) && q.distance(p) < 6.0);
+    *g = if hit { None } else { Some((std::time::Instant::now(), p)) };
+    hit
 }
 
 #[derive(Default)]

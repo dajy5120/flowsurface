@@ -1652,6 +1652,11 @@ impl State {
                         let base = chart::view(chart, indicators, timezone).map(move |message| {
                             Message::PaneEvent(id, Event::ChartInteraction(message))
                         });
+                        // 图例（docs/63 §12.1 T2）：每个指标一行，可开关、点开设置——界面组件叠在图上
+                        let base = match chart.studies_chart().and_then(crate::ws::studies_view::legend) {
+                            Some(l) => iced::widget::stack![base, l.map(move |m| Message::PaneEvent(id, Event::Studies(m)))].into(),
+                            None => base,
+                        };
                         // 画线（docs/46 G1）：选中对象旁的小操作条叠在图上
                         match chart::drawing_overlay(chart, is_focused) {
                             Some(bar) => iced::widget::stack![base, bar.map(move |m| Message::PaneEvent(id, Event::Drawing(m)))].into(),
