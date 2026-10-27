@@ -630,7 +630,7 @@ pub fn legend<'a>(chart: &str) -> Option<Element<'a, StudyMsg>> {
         ));
     } else {
         for r in rows.iter().filter(|r| !r.sub) {
-            main = main.push(legend_row(chart, r, hover == Some(r.uid)));
+            main = main.push(legend_row(chart, r, hover == Some(r.uid), false));
         }
         main = main.push(
             button(text("▴").size(t::s_meta()).color(pal::dim()))
@@ -639,6 +639,8 @@ pub fn legend<'a>(chart: &str) -> Option<Element<'a, StudyMsg>> {
                 .on_press(StudyMsg::Legend { chart: c.clone(), collapsed: true }),
         );
     }
+    // 整块图例一个悬停区：行与行之间的空隙里移动不收图标，离开整块才收
+    let main = iced::widget::mouse_area(main).on_exit(StudyMsg::HoverClear(c.clone()));
     let mut layers: Vec<Element<'a, StudyMsg>> =
         // 各层铺满（Stack 按第一层定大小）；空白处不接鼠标，图照常拖、照常十字线
         vec![container(main).padding(iced::Padding { top: info.top, left: 6.0, ..iced::Padding::ZERO }).width(Length::Fill).height(Length::Fill).into()];
@@ -646,7 +648,7 @@ pub fn legend<'a>(chart: &str) -> Option<Element<'a, StudyMsg>> {
     let subs: Vec<&st::LegendRow> = rows.iter().filter(|r| r.sub).collect();
     for (r, (top, _)) in subs.iter().zip(st::sub_slots(subs.len(), info.sub_bottom)) {
         layers.push(
-            container(legend_row(chart, r, hover == Some(r.uid)))
+            container(legend_row(chart, r, hover == Some(r.uid), true))
                 .padding(iced::Padding { top: top + 1.0, left: 4.0, ..iced::Padding::ZERO })
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -668,7 +670,8 @@ fn pill<'a>(e: Element<'a, StudyMsg>) -> Element<'a, StudyMsg> {
         .into()
 }
 
-fn legend_row<'a>(chart: &str, r: &st::LegendRow, hovered: bool) -> Element<'a, StudyMsg> {
+/// `own_exit`：离开这一行就收图标（副图的名字行各自独立；主图那块由整块的悬停区收）。
+fn legend_row<'a>(chart: &str, r: &st::LegendRow, hovered: bool, own_exit: bool) -> Element<'a, StudyMsg> {
     let c = chart.to_string();
     let uid = r.uid;
     let name_c = if r.shown { r.color } else { pal::alpha(pal::dim(), 0.7) };
@@ -704,8 +707,6 @@ fn legend_row<'a>(chart: &str, r: &st::LegendRow, hovered: bool) -> Element<'a, 
         line = line.push(icon("⚙", "设置", StudyMsg::Edit(Some((c.clone(), uid)))));
         line = line.push(icon("✕", "删除", StudyMsg::Remove { chart: c.clone(), uid }));
     }
-    iced::widget::mouse_area(pill(line.into()))
-        .on_enter(StudyMsg::Hover { chart: c.clone(), uid, on: true })
-        .on_exit(StudyMsg::Hover { chart: c, uid, on: false })
-        .into()
+    let area = iced::widget::mouse_area(pill(line.into())).on_enter(StudyMsg::Hover { chart: c.clone(), uid, on: true });
+    if own_exit { area.on_exit(StudyMsg::Hover { chart: c, uid, on: false }).into() } else { area.into() }
 }

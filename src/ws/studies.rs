@@ -482,6 +482,8 @@ pub enum StudyMsg {
     DragEnd,
     /// 鼠标进 / 出图例的一行（出只清自己：从一行移到另一行时，进新行与出旧行的先后不定）
     Hover { chart: String, uid: u64, on: bool },
+    /// 鼠标离开整块图例：收起悬停图标（在块里的行间空隙移动不收，不然移向图标时一滑出行就没了）
+    HoverClear(String),
     Search(String),
     Category(Option<String>),
     TemplateName(String),
@@ -629,6 +631,12 @@ pub fn handle(m: StudyMsg) {
             }
             // 没在拖、拖的不是这张图、拖到自己身上：不动
             StudyMsg::DragOver { chart, uid } if u.drag.as_ref().is_none_or(|d| d.0 != *chart || d.1 == *uid) => return,
+            StudyMsg::HoverClear(chart) => {
+                if u.hover.as_ref().is_some_and(|h| h.0 == *chart) {
+                    u.hover = None;
+                }
+                return;
+            }
             StudyMsg::Hover { chart, uid, on } => {
                 let me = (chart.clone(), *uid);
                 if *on {
@@ -924,7 +932,7 @@ pub fn handle(m: StudyMsg) {
         }
         StudyMsg::Search(_) | StudyMsg::Category(_) | StudyMsg::TemplateName(_) | StudyMsg::Expand(_) | StudyMsg::SymbolDraft { .. } | StudyMsg::AuxDraft { .. }
         | StudyMsg::FeatQuery { .. } | StudyMsg::Menu(_) | StudyMsg::MenuTab(_) | StudyMsg::Edit(_) | StudyMsg::EditTab(_) | StudyMsg::EditCancel
-        | StudyMsg::Legend { .. } | StudyMsg::Hover { .. } | StudyMsg::DragStart { .. } | StudyMsg::DragEnd => {}
+        | StudyMsg::Legend { .. } | StudyMsg::Hover { .. } | StudyMsg::HoverClear(_) | StudyMsg::DragStart { .. } | StudyMsg::DragEnd => {}
     }
     save(&s);
     ui().lock().unwrap_or_else(std::sync::PoisonError::into_inner).note = note;

@@ -221,6 +221,9 @@ pub struct KlineChart {
     sub_scales: std::sync::Mutex<Vec<(u64, u64)>>,
     /// 这张图的身份（面板设置里的 `chart_id`，docs/63 §12.2）：图上指标按它取。面板每帧对一次，没有时不画指标
     studies_chart: Option<String>,
+    /// 图例的上沿只增不减（docs/63 §12.1）：读数块的行数随十字线那根变（市场状态的切换原因有的根有、有的根没有），
+    /// 跟着它上下跳，鼠标移向图例的图标时那一行就从光标下跑掉了
+    legend_top: std::sync::Mutex<f32>,
 }
 
 impl KlineChart {
@@ -319,6 +322,7 @@ impl KlineChart {
                     last_tick: Instant::now(),
                     sub_scales: Default::default(),
                     studies_chart: None,
+                    legend_top: std::sync::Mutex::new(0.0),
                 }
             }
             Basis::Tick(interval) => {
@@ -378,6 +382,7 @@ impl KlineChart {
                     last_tick: Instant::now(),
                     sub_scales: Default::default(),
                     studies_chart: None,
+                    legend_top: std::sync::Mutex::new(0.0),
                 }
             }
         }
@@ -1507,6 +1512,11 @@ impl canvas::Program<Message> for KlineChart {
             if let (Some(id), PlotData::TimeBased(ts)) = (self.studies_chart.as_deref(), &self.data_source) {
                 // 十字线落在最后一根右边（还没有的 K 线）：读最后一根
                 let at = legend_at.filter(|t| ts.datapoints.contains_key(&UnixMs::new(*t)));
+                let legend_top = {
+                    let mut m = self.legend_top.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *m = m.max(legend_top);
+                    *m
+                };
                 let strips = crate::ws::regime::bottom_reserved(&regime_symbol, iv, chart.scaling) * chart.scaling;
                 crate::ws::studies::set_legend_info(id, crate::ws::studies::LegendInfo { top: legend_top, at, sub_bottom: bounds.height - strips, tf: iv });
             }
