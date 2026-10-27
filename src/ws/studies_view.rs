@@ -16,9 +16,9 @@ use super::studies::{self as st, AlertOp, EditTab, MenuTab, StudyMsg, StudySrc};
 use crate::ui::widgets::{self as w, Kind};
 use crate::ui::{metrics, pal, text as t};
 
-const CATEGORIES: [(&str, &str); 10] = [("trend", "趋势"), ("momentum", "动量"), ("volatility", "波动"), ("volume", "成交量"),
+const CATEGORIES: [(&str, &str); 11] = [("trend", "趋势"), ("momentum", "动量"), ("volatility", "波动"), ("volume", "成交量"),
                                        ("vwap", "VWAP"), ("structure", "结构"), ("statistics", "统计"), ("derivatives", "衍生品"), ("breadth", "广度"),
-                                       ("custom", "自定义")];
+                                       ("factory", "因子池"), ("custom", "自定义")];
 
 /// 画法（样式页）：（值, 名字）。
 const PLOTS: [(&str, &str); 4] = [("line", "线"), ("step", "阶梯"), ("histogram", "柱"), ("dots", "点")];

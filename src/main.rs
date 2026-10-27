@@ -543,12 +543,15 @@ impl Flowsurface {
                 return Task::none();
             }
             Message::WsSignals(s) => {
-                // F4c：combo 总分进进程级旁路曲线（kline 画布叠加主图）。接收时戳与实时主图时间轴对齐。
+                // F4c：combo 总分记进历史 →「因子池合成分」指标（docs/63 §13）。接收时戳与实时主图时间轴对齐。
+                // 池里一个 alpha 都还没就绪（覆盖 0）时发布器给的 0 不是真的 0，不记
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                ws::signals::push_combo(now_ms, s.combo);
+                if s.n_combo > 0 {
+                    ws::signals::push_combo(now_ms, s.combo);
+                }
                 self.ws_signals = Some(s); // 引擎信号：吸收/撤补/冰山（view() 叠加显示）
                 return Task::none();
             }
@@ -1899,7 +1902,7 @@ impl Flowsurface {
         let ws_factory = ws::factory::subscription(ws_redis_url.clone()).map(Message::WsFactory);
         // 始终读 ws:signals:{symbol} → 引擎吸收/撤补/冰山（ws_signals 发布器，F4b–d 精确版）。
         let ws_signals =
-            ws::signals::subscription(ws_redis_url, "BTCUSDT".to_string()).map(Message::WsSignals);
+            ws::signals::subscription(ws_redis_url, ws::signals::COMBO_SYMBOL.to_string()).map(Message::WsSignals);
 
         // **与官方一致**（docs/35 §16.10）：`unconditional-rendering` + 逐帧 Tick。图表按时钟刷新——
         // 行情只进缓冲，各面板到了自己的刷新间隔（K 线 1s、Ladder / 逐笔 100ms、热图按基础周期、

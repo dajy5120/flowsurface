@@ -59,32 +59,33 @@ pub struct Signals {
     pub n_pool: u64,
 }
 
-// ── F4c combo 实时曲线：进程级旁路（main.rs 的 WsSignals 写入，kline.rs canvas 读取叠加主图）──
-// 同 ws::orders::CHART_FILLS 模式：不侵入 FS 的 ContentKind/数据源，App↔图表轻量旁路。
-const COMBO_CAP: usize = 4096; // ~4Hz × ≈17 分钟滚动窗
-static CHART_COMBO: OnceLock<Mutex<VecDeque<(u64, f64)>>> = OnceLock::new();
+// ── F4c combo：进程级旁路（main.rs 的 WsSignals 写入）→「因子池合成分」指标（docs/63 §13）──
+/// combo 跟的品种（`ws-signals` 发布器只算这一个，见下面 `subscription` 的调用处）。
+pub const COMBO_SYMBOL: &str = "BTCUSDT";
+
+/// 「因子池合成分」指标（docs/63 §13）用的历史：每秒一个点（这一秒最后收到的值），留 24 小时。
+const COMBO_KEEP_MS: u64 = 24 * 3_600_000;
+static COMBO_HIST: OnceLock<Mutex<VecDeque<(u64, f64)>>> = OnceLock::new();
 
 /// 追加一笔 combo 采样 `(ts_ms, combo)`（接收时本机时戳，与实时主图时间轴对齐）。
 pub fn push_combo(ts_ms: u64, combo: f64) {
-    let lock = CHART_COMBO.get_or_init(|| Mutex::new(VecDeque::new()));
-    if let Ok(mut g) = lock.lock() {
-        // 单调时戳去重（同毫秒/回拨时覆盖末点，避免横线堆叠）
-        if g.back().map(|(t, _)| *t >= ts_ms).unwrap_or(false) {
-            g.pop_back();
+    if combo.is_finite()
+        && let Ok(mut h) = COMBO_HIST.get_or_init(Default::default).lock()
+    {
+        // 同一秒只留最后一个
+        if h.back().is_some_and(|(t, _)| *t / 1_000 >= ts_ms / 1_000) {
+            h.pop_back();
         }
-        g.push_back((ts_ms, combo));
-        while g.len() > COMBO_CAP {
-            g.pop_front();
+        h.push_back((ts_ms, combo));
+        while h.front().is_some_and(|(t, _)| t + COMBO_KEEP_MS < ts_ms) {
+            h.pop_front();
         }
     }
 }
 
-/// 读 combo 曲线快照（每帧调用，≤COMBO_CAP，clone 成本可忽略）。
-pub fn combo_snapshot() -> Vec<(u64, f64)> {
-    CHART_COMBO
-        .get()
-        .and_then(|m| m.lock().ok().map(|g| g.iter().copied().collect()))
-        .unwrap_or_default()
+/// 「因子池合成分」指标的历史（收到时刻毫秒, 值），每秒一个、最多 24 小时。
+pub fn combo_history() -> Vec<(u64, f64)> {
+    COMBO_HIST.get().and_then(|m| m.lock().ok().map(|g| g.iter().copied().collect())).unwrap_or_default()
 }
 
 /// 轮询 `ws:signals:{symbol}`（250ms）→ 变化时发出引擎信号快照。

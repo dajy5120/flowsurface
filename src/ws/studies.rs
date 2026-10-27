@@ -1235,6 +1235,32 @@ fn max_age(field: &str, tf: u64) -> Option<i64> {
     }
 }
 
+/// 因子池合成分的对照序列（docs/63 §13）：`pts` = （收到时刻, combo），每秒一个。
+/// `mean = false`：每根收盘时能知道的最后一个值（不前视；未收盘那根 = 最新的）；`true`：这根里的均值。没点的根为 NaN。
+fn combo_aux(sym: &str, e: u64, ts: &[u64], mean: bool, pts: &[(u64, f64)]) -> Result<Vec<f64>, String> {
+    let code = sym.rsplit(':').next().unwrap_or(sym);
+    if !code.eq_ignore_ascii_case(super::signals::COMBO_SYMBOL) {
+        return Err(format!("因子池合成分只算 {}（ws-signals 跟的品种），这张图是 {code}", super::signals::COMBO_SYMBOL));
+    }
+    if pts.is_empty() {
+        return Err("还没收到 combo（守护 ws-signals 没跑、Redis 连不上，或池子里还没有 alpha 就绪）；收到起每秒记一个，最多留 24 小时".into());
+    }
+    if mean {
+        return Ok(ts
+            .iter()
+            .map(|&t| {
+                let (a, b) = (pts.partition_point(|p| p.0 < t), pts.partition_point(|p| p.0 < t + e));
+                if b > a { pts[a..b].iter().map(|p| p.1).sum::<f64>() / (b - a) as f64 } else { f64::NAN }
+            })
+            .collect());
+    }
+    let at: Vec<i64> = ts.iter().map(|t| (t + e) as i64).collect();
+    let avail: Vec<i64> = pts.iter().map(|p| p.0 as i64).collect();
+    let vals: Vec<f64> = pts.iter().map(|p| p.1).collect();
+    // 一根里一个点都没有（ws-signals 断了）就算缺，不拿老值顶
+    Ok(wealthspring_indicators::engine::align_asof(&at, &avail, &vals, Some(e.max(10_000) as i64)))
+}
+
 /// 一组 K 线（`ts` 开盘时刻、周期 `e`）要的 K 线之外的列，与取不到的原因（字段, 说明）。
 #[allow(clippy::too_many_arguments)]
 fn extras_for(sym: &str, e: u64, ts: &[u64], buy: Option<&[f64]>, needs: &std::collections::BTreeSet<&'static str>, aux: &str, now_ms: u64)
@@ -1266,6 +1292,13 @@ fn extras_for(sym: &str, e: u64, ts: &[u64], buy: Option<&[f64]>, needs: &std::c
                     }
                 }
             }
+            "aux" if aux.starts_with("@combo:") => match combo_aux(sym, e, ts, aux.trim_start_matches("@combo:") == "mean", &super::signals::combo_history()) {
+                Ok(v) => v,
+                Err(m) => {
+                    errs.push((f, m));
+                    nan()
+                }
+            },
             "aux" if aux.starts_with("@breadth:") => match breadth_aux(aux, e, &at, now_ms) {
                 Ok(v) => v,
                 Err(m) => {
@@ -1361,6 +1394,10 @@ fn compute_inner(chart: &ChartRef, tf: u64, klines: &[Ohlcv], buy: Option<&[f64]
             let p = s.def().and_then(|d| ind::resolve(&d, &s.params).ok());
             let (k, n) = p.map_or(("above_ema".to_string(), 50), |p| (p.str("kind").to_string(), p.int("n")));
             format!("@breadth:{k}:{n}")
+        } else if s.id == "combo" {
+            // 因子池合成分（docs/63 §13）：ws-signals 推来的 combo，按 agg 取
+            let agg = s.def().and_then(|d| ind::resolve(&d, &s.params).ok()).map_or("last".to_string(), |p| p.str("agg").to_string());
+            format!("@combo:{agg}")
         } else {
             s.aux_symbol.clone()
         }
@@ -2483,6 +2520,27 @@ mod tests {
         let y = slot.0 + SUB_H - ((rsi - lo) / (hi - lo)) as f32 * SUB_H;
         assert_eq!(hit("测试图命中", tf, t, y + 2.0, &py, 900.0, e, l), Some(9402));
         drop_chart("测试图命中");
+    }
+
+    #[test]
+    fn 因子池合成分_按收盘对齐_均值_只算btc() {
+        let m = 60_000u64;
+        // 第 0 根 [0, 60s) 里 10s / 50s 各一个点，第 1 根没有点（ws-signals 断了），第 2 根 130s 一个点
+        let pts = vec![(10_000, 1.0), (50_000, 3.0), (130_000, -2.0)];
+        let ts = vec![0, m, 2 * m];
+        let last = combo_aux("Binance Linear:BTCUSDT", m, &ts, false, &pts).unwrap();
+        assert_eq!(last[0], 3.0, "收盘时能知道的最后一个");
+        assert!(last[1].is_nan(), "这根里一个点都没有：缺，不拿上一根的老值顶");
+        assert_eq!(last[2], -2.0);
+        let mean = combo_aux("Binance Linear:BTCUSDT", m, &ts, true, &pts).unwrap();
+        assert_eq!(mean[0], 2.0);
+        assert!(mean[1].is_nan());
+        assert!(combo_aux("Binance Linear:ETHUSDT", m, &ts, false, &pts).unwrap_err().contains("只算 BTCUSDT"));
+        assert!(combo_aux("Binance Linear:BTCUSDT", m, &ts, false, &[]).is_err());
+        // 指标本身：值 = 对照序列，均值 / Z 照外部序列
+        let d = ind::def("combo").unwrap();
+        assert_eq!(d.pane, "new");
+        assert!(d.data.contains(&"aux"));
     }
 
     #[test]
