@@ -83,6 +83,8 @@ pub mod analysis_state;
 pub mod replay_cond;
 pub mod timeline;
 pub mod feature_lab_readout;
+pub mod data_float;
+pub mod kline_hist;
 pub mod data_picker;
 pub mod data_picker_view;
 pub mod feature_source;

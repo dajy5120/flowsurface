@@ -430,12 +430,18 @@ fn editor<'a>(m: &Matrix, d: &cp::Draft) -> Element<'a, Msg> {
         .into()
 }
 
-/// 口径设置块：正在编辑 → 编辑器；否则一个「✎ 口径设置」按钮。面板内联与检查器共用。
-pub fn edit_block<'a>(m: &Matrix) -> Element<'a, Msg> {
+/// 口径设置入口：一个「✎ 口径设置」按钮；编辑器在浮窗里（docs/64 §6：浮窗不挡 12 张卡，改的时候看得到读数变）。
+/// 面板内联与检查器共用。
+pub fn edit_block<'a>(_m: &Matrix) -> Element<'a, Msg> {
     match cp::draft() {
-        Some(d) => editor(m, &d),
+        Some(_) => btn("✎ 口径设置（浮窗开着）", edit_msg(ChartEditMsg::Close), true),
         None => btn("✎ 口径设置", edit_msg(ChartEditMsg::Open), false),
     }
+}
+
+/// 「口径设置」浮窗的内容：正在编辑才有（docs/64 §6）。
+pub fn caliber_float<'a>(m: &Matrix) -> Option<Element<'a, Msg>> {
+    cp::draft().map(|d| editor(m, &d))
 }
 
 /// 视图本体（放在特征面板的 scrollable 里）。

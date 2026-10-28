@@ -26,10 +26,10 @@ const LANES: [(u8, &str, f32); 7] = [
     (6, "L6–L10 策略", 0.8),
 ];
 
-/// 检查器「数据」页（docs/42 第 3 期）：数据选择 + 生成 / 实时 + 实时窗口长度。
+/// 检查器「数据」页（docs/42 第 3 期）：选了什么（选择器在工具栏「数据 ▾」，docs/64）+ 生成 / 实时 + 实时窗口长度。
 pub fn inspector_data<'a>(pane: uuid::Uuid) -> Element<'a, OfMsg> {
     let v = ol::view(pane);
-    let mut col = column![super::data_picker_view::view(&v.pick, &ol::opts()).map(OfMsg::Pick), run_row(&v)].spacing(space(2));
+    let mut col = column![super::data_picker_view::summary(&v.pick, &ol::opts()), run_row(&v)].spacing(space(2));
     if !v.note.is_empty() {
         col = col.push(t::metadata(v.note.clone()).color(pal::dim()));
     }
@@ -91,7 +91,7 @@ fn timeline_tab<'a>(v: &View, hosted: bool) -> Element<'a, OfMsg> {
     let mut top = column![].spacing(space(1));
     if !hosted {
         let actions = lane_toggles(v, run_row(v));
-        top = top.push(super::data_picker_view::view(&v.pick, &ol::opts()).map(OfMsg::Pick)).push(actions.wrap());
+        top = top.push(super::data_picker_view::summary(&v.pick, &ol::opts())).push(actions.wrap());
         if !v.note.is_empty() {
             top = top.push(t::metadata(v.note.clone()).color(pal::dim()));
         }

@@ -671,16 +671,14 @@ impl State {
             }
             Content::OfmsLab => {
                 let v = crate::ws::ofms_lab::view(self.unique_id());
-                spec.source = Some(if v.live {
-                    "● 实时 · 常驻引擎".to_string()
+                // 选的数据在工具栏「数据 ▾」（docs/64 §4）；这里只补它说不出的：实时，或没选但已读出一个窗口（打开时自动读上次的）
+                spec.source = if v.live {
+                    Some("● 实时 · 常驻引擎".to_string())
+                } else if v.pick.selection(&crate::ws::ofms_lab::opts()).is_none() {
+                    v.data.as_ref().map(|d| format!("已读出：{}", d.title))
                 } else {
-                    v.pick
-                        .selection(&crate::ws::ofms_lab::opts())
-                        .map(|s| s.describe())
-                        // 选择器里没选、但已读出一个窗口（打开时自动读上次的）：显示那个窗口
-                        .or_else(|| v.data.as_ref().map(|d| d.title.clone()))
-                        .unwrap_or_else(|| "未选数据（在检查器「数据」页选）".into())
-                });
+                    None
+                };
                 spec.actions.push((
                     if v.running { "生成中…".into() } else { "▶ 生成 / 读取".into() },
                     v.running,
@@ -693,19 +691,13 @@ impl State {
                 ));
             }
             Content::TardisBoard(tb) => {
-                spec.source = Some(
-                    tb.pick
-                        .selection(&crate::ws::tardis_board::pick_opts())
-                        .map(|s| s.describe())
-                        // 选择器没选完、但面板上有已加载的图：显示那一份（与面板里「上次加载的结果」一句同口径）
-                        .or_else(|| {
-                            let p = crate::ws::tardis_board_readout::panel();
-                            p.loaded.then(|| {
-                                format!("{} · {} {} {} +{}min（已加载）", p.source_label, p.symbol, p.date, p.start, p.minutes)
-                            })
-                        })
-                        .unwrap_or_else(|| "未选数据".into()),
-                );
+                // 选的数据在工具栏「数据 ▾」（docs/64 §4）；没选完、但面板上有已加载的图：显示那一份（与面板里「上次加载的结果」一句同口径）
+                spec.source = if tb.pick.selection(&crate::ws::tardis_board::pick_opts()).is_none() {
+                    let p = crate::ws::tardis_board_readout::panel();
+                    p.loaded.then(|| format!("已加载：{} · {} {} {} +{}min", p.source_label, p.symbol, p.date, p.start, p.minutes))
+                } else {
+                    None
+                };
                 spec.actions.push((
                     "加载".into(),
                     false,
@@ -717,10 +709,10 @@ impl State {
                 use crate::ws::backtest_launch::{self as bl, LaunchMsg};
                 let v = bl::view();
                 let sel = v.pick.selection(&bl::pick_opts());
-                spec.source = Some(match (&v.strategy, &sel) {
-                    (Some(st), Some(d)) => format!("{} · {}", st.rsplit('/').next().unwrap_or(st), d.describe()),
-                    (Some(st), None) => format!("{} · 未选数据", st.rsplit('/').next().unwrap_or(st)),
-                    (None, _) => "未选策略（在检查器里选）".into(),
+                // 数据在工具栏「数据 ▾」（docs/64 §4），这里只写策略
+                spec.source = Some(match &v.strategy {
+                    Some(st) => format!("策略：{}", st.rsplit('/').next().unwrap_or(st)),
+                    None => "未选策略（点「▶ 发起回测…」选）".into(),
                 });
                 if v.running {
                     spec.actions.push(("■ 停止".into(), true, Event::BacktestLaunchInteraction(LaunchMsg::Stop)));
@@ -792,7 +784,30 @@ impl State {
             })]
         };
 
-        if let Some(kind) = self.stream_pair_kind() {
+        if let Some(h) = self.kline_hist() {
+            // K 线读本地历史文件（docs/64 §5）：写清是哪份文件，别让人当成交易所实时
+            let state = crate::ws::kline_hist::status(self.unique_id()).unwrap_or_default();
+            top_left_buttons = top_left_buttons.push(
+                text(format!("{} · 历史", h.symbol)).size(crate::style::text_size::SECTION).align_y(Alignment::Center).line_height(1.4),
+            );
+            top_left_buttons = top_left_buttons.push(iced::widget::tooltip(
+                container(
+                    text(format!("{} · {}", crate::ws::kline_hist::source_label(h), crate::ws::kline_hist::span_label(h)))
+                        .size(style::text_size::BODY)
+                        .color(crate::ui::color(crate::ui::domain().env_backtest)),
+                )
+                .padding(padding::left(6).right(6))
+                .height(widget::PANE_CONTROL_BTN_HEIGHT)
+                .align_y(Alignment::Center),
+                container(text(format!("本地历史文件，不连交易所 · {state}\n在顶部工具栏「数据 ▾」里换回交易所或换文件")).size(style::text_size::BODY))
+                    .style(style::tooltip)
+                    .padding(crate::ui::metrics::space(3)),
+                tooltip::Position::Bottom,
+            ));
+            if !state.is_empty() {
+                top_left_buttons = top_left_buttons.push(text(state).size(style::text_size::BODY).color(crate::ui::pal::dim()).align_y(Alignment::Center));
+            }
+        } else if let Some(kind) = self.stream_pair_kind() {
             let (base_ti, extra) = match kind {
                 StreamPairKind::MultiSource(list) => (list[0], list.len().saturating_sub(1)),
                 StreamPairKind::SingleSource(ti) => (ti, 0),
@@ -2627,6 +2642,10 @@ impl State {
     }
 
     pub fn matches_stream(&self, stream: &StreamKind) -> bool {
+        // 读本地历史文件的 K 线图（docs/64 §5）不收任何实时数据：别的图开着同一个交易对时，行情会按流分发过来
+        if self.kline_hist().is_some() {
+            return false;
+        }
         self.streams.matches_stream(stream) || self.live_extra().as_ref() == Some(stream)
     }
 
@@ -2644,6 +2663,10 @@ impl State {
 
     /// 实际要订阅的流：面板自己的 + [`Self::live_extra`]。
     pub fn subscribed_streams(&self) -> Vec<StreamKind> {
+        // 读本地历史文件的 K 线图（docs/64 §5）不连交易所
+        if self.kline_hist().is_some() {
+            return Vec::new();
+        }
         let mut v: Vec<StreamKind> = self.streams.ready_iter().into_iter().flatten().copied().collect();
         if let Some(x) = self.live_extra()
             && !v.contains(&x)
@@ -2797,6 +2820,11 @@ impl State {
 
     pub fn unique_id(&self) -> uuid::Uuid {
         self.id
+    }
+
+    /// 这张 K 线图读的本地历史文件（docs/64 §5）；不是 K 线图或没选 = `None`。
+    pub fn kline_hist(&self) -> Option<&data::layout::pane::KlineHist> {
+        self.settings.kline_hist.as_ref().filter(|_| matches!(self.content, Content::Kline { .. }))
     }
 }
 

@@ -46,7 +46,7 @@ pub fn pane_body(app: &TardisReplayState, hosted: bool) -> Element<'_, TardisRep
     // 数据管线 / 市场 / 标的 / 日期：共用数据选择组件（只列 Tardis）；时段 / 时长 / 倍速另起一行。
     let mut picks = column![].spacing(8);
     if !hosted {
-        picks = picks.push(super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisReplayMsg::Data));
+        picks = picks.push(super::data_picker_view::summary(&app.pick, &pick_opts()));
     }
     let picks = picks.push(
         row![

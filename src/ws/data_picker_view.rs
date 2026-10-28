@@ -456,3 +456,36 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
     }
     b.into()
 }
+
+/// 工具栏「数据 ▾」按钮上的字（docs/64 §4）：选完了是一行说明（去掉类型数），没选完说选到了哪一级。
+#[must_use]
+pub fn short(p: &DataPick, opts: &PickOpts) -> String {
+    if let Some(s) = p.selection(opts) {
+        let d = s.describe();
+        return match d.rsplit_once(" · ") {
+            Some((head, tail)) if tail.ends_with("类数据") => head.to_string(),
+            _ => d,
+        };
+    }
+    let mut parts: Vec<String> = Vec::new();
+    match p.pipeline {
+        Some(Pipeline::A) => parts.push("A".into()),
+        Some(Pipeline::B) => parts.push(p.source.map_or_else(|| "B".to_string(), |s| s.label().split(' ').next().unwrap_or("B").to_string())),
+        None => {}
+    }
+    if let Some(k) = p.local_key() {
+        parts.push(dp::source_label(k));
+    } else if let Some(v) = p.venue.as_ref().or(p.vendor.as_ref()) {
+        parts.push(v.clone());
+    }
+    parts.extend(p.symbol.clone());
+    if parts.is_empty() { "未选".into() } else { format!("{} · 未选完", parts.join(" · ")) }
+}
+
+/// 面板里原来摆选择器的地方：一行说明 + 去哪改（docs/64 §4：选择器只在工具栏「数据 ▾」浮窗里）。
+pub fn summary<'a, M: 'a>(p: &DataPick, opts: &PickOpts) -> Element<'a, M> {
+    text(format!("数据：{}　（在顶部工具栏「数据 ▾」里改）", short(p, opts)))
+        .size(crate::ui::text::s_meta())
+        .color(crate::ui::pal::dim())
+        .into()
+}

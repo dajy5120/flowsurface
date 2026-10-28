@@ -159,16 +159,8 @@ pub fn analysis_toolbar<'a>(symbol: &str) -> Element<'a, DrawMsg> {
 /// 下面新建 / 另存为。
 pub fn analysis_menu<'a>(symbol: &str, note: Option<(&str, &'a iced::widget::text_editor::Content)>) -> Element<'a, DrawMsg> {
     let sym = symbol.to_string();
-    let code = symbol.rsplit(':').next().unwrap_or(symbol).to_string();
     let mut col = column![
-        row![
-            t::label(format!("分析 · {code}")),
-            t::metadata("● 当前：新画的线归它、能改；☑ 叠加：一起显示（淡色、只读）。画线随改随存；回放时自动记下数据段、播放头、筛选、条件与视野，设为当前就回到那里").color(pal::dim()),
-            Space::new().width(Length::Fill),
-            w::btn("收起", Btn::Ghost, Some(DrawMsg::AnaClose)),
-        ]
-        .spacing(space(2))
-        .align_y(Alignment::Center)
+        t::metadata("● 当前：新画的线归它、能改；☑ 叠加：一起显示（淡色、只读）。画线随改随存；回放时自动记下数据段、播放头、筛选、条件与视野，设为当前就回到那里").color(pal::dim()),
     ]
     .spacing(space(1));
     for r in dw::ana_rows(symbol) {

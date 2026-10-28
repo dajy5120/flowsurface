@@ -71,13 +71,10 @@ pub fn menu_card<'a>(chart: &str, symbol: &str) -> Element<'a, StudyMsg> {
     let n = st::studies_of(chart).len();
     let code = symbol.rsplit(':').next().unwrap_or(symbol).to_string();
     let head = row![
-        t::section("指标"),
         t::metadata(format!("{code} · 这张图")).color(pal::dim()),
         Space::new().width(Length::Fixed(metrics::space(4))),
         w::tabs(&[("添加", MenuTab::Add), ("已加载", MenuTab::Loaded)], &ui.menu_tab, StudyMsg::MenuTab),
         t::metadata(format!("{n} 个")).color(pal::dim()),
-        Space::new().width(Length::Fill),
-        w::btn("关闭", Kind::Ghost, Some(StudyMsg::Menu(None))),
     ]
     .spacing(metrics::space(2))
     .align_y(Alignment::Center);
@@ -89,7 +86,7 @@ pub fn menu_card<'a>(chart: &str, symbol: &str) -> Element<'a, StudyMsg> {
     if !ui.note.is_empty() {
         col = col.push(text(ui.note).size(t::s_meta()).color(pal::warn()));
     }
-    container(col).padding(metrics::space(3)).width(Length::Fill).into()
+    col.width(Length::Fill).into()
 }
 
 fn add_tab<'a>(chart: &str, ui: &st::UiState) -> Element<'a, StudyMsg> {
@@ -267,9 +264,9 @@ pub fn inspector<'a>(chart: &str) -> Element<'a, StudyMsg> {
 
 // ── 设置弹窗 ───────────────────────────────────────────────────────────────
 
-/// 单个指标的设置弹窗（开着时；盖在内容上方，图照常看得到——改了立刻生效）。按住标题栏拖到任意位置
-/// （这次运行里记住；拖不出 `area`，标题栏总留在里面）。`area` = 弹窗能摆的区域大小。
-pub fn editor<'a>(area: iced::Size) -> Option<Element<'a, StudyMsg>> {
+/// 单个指标的设置弹窗（开着时）：（标题, 内容）。外壳、拖动与位置归公共浮窗（`ui::float_win`，docs/64）；
+/// 图照常看得到——改了立刻生效。
+pub fn editor<'a>() -> Option<(String, Element<'a, StudyMsg>)> {
     let ui = st::ui_state();
     let (chart, uid, _) = ui.editing.clone()?;
     let list = st::studies_of(&chart);
@@ -277,19 +274,6 @@ pub fn editor<'a>(area: iced::Size) -> Option<Element<'a, StudyMsg>> {
     let s = &list[i];
     let d = s.def()?;
     let symbol = st::chart_symbol(&chart);
-    // 标题栏：按住拖动弹窗（✕ 是按钮，先接住点击）
-    let head = iced::widget::mouse_area(
-        row![
-            t::section(format!("{} · 设置", s.label())),
-            t::metadata("按住这里拖动").color(pal::dim()),
-            Space::new().width(Length::Fill),
-            w::btn("✕", Kind::Ghost, Some(StudyMsg::EditCancel)),
-        ]
-        .spacing(metrics::space(2))
-        .align_y(Alignment::Center),
-    )
-    .on_press(StudyMsg::DlgDragStart)
-    .interaction(if matches!(ui.pointer, Some(st::Pointer::Dialog { .. })) { iced::mouse::Interaction::Grabbing } else { iced::mouse::Interaction::Grab });
     let tabs = w::tabs(
         &[("参数", EditTab::Params), ("样式", EditTab::Style), ("可见性", EditTab::Visibility), ("提醒", EditTab::Alert)],
         &ui.edit_tab,
@@ -302,7 +286,6 @@ pub fn editor<'a>(area: iced::Size) -> Option<Element<'a, StudyMsg>> {
         EditTab::Alert => alert_rows(&chart, s, &d),
     };
     let mut col = column![
-        head,
         text(d.description).size(t::s_meta()).color(pal::dim()),
         tabs,
         scrollable(container(body).padding(metrics::pad2(2, 0))).height(Length::Fixed(360.0)),
@@ -322,13 +305,7 @@ pub fn editor<'a>(area: iced::Size) -> Option<Element<'a, StudyMsg>> {
         .spacing(metrics::space(2))
         .align_y(Alignment::Center),
     );
-    // 位置 = 水平居中、离顶 DLG_TOP，再加拖动的偏移；整张卡夹在区域里（窗口变小了也拉得回来）
-    st::set_dialog_area(area.width, area.height);
-    let (dx, dy) = st::clamp_dialog_offset(ui.dlg_offset);
-    let x = ((area.width - st::DLG_W) / 2.0).max(0.0) + dx;
-    let y = st::DLG_TOP + dy;
-    let card = iced::widget::opaque(container(col).padding(metrics::space(5)).width(Length::Fixed(st::DLG_W)).style(w::float_card));
-    Some(iced::widget::pin(card).x(x).y(y).into())
+    Some((format!("{} · 设置", s.label()), col.into()))
 }
 
 /// 参数页：计算参数、数据源、计算周期、品种、对照品种、锚点。
@@ -694,7 +671,7 @@ fn legend_row<'a>(chart: &str, r: &st::LegendRow, hovered: bool, own_exit: bool)
     let name_c = if r.shown { r.color } else { pal::alpha(pal::dim(), 0.7) };
     let mut line = row![
         button(text(r.label.clone()).size(t::s_small()).color(name_c))
-            .padding(0)
+            .padding(metrics::pad2(0, 0))
             .style(|th, s| crate::style::button::modifier(th, s, false))
             .on_press(StudyMsg::Edit(Some((c.clone(), uid)))),
     ]

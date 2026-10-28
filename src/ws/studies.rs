@@ -486,8 +486,6 @@ pub enum StudyMsg {
     Hover { chart: String, uid: u64, on: bool },
     /// 按住副图的上边沿（开始改副图高）
     ResizeStart { chart: String, uid: u64 },
-    /// 按住设置弹窗的标题栏（开始拖动弹窗）
-    DlgDragStart,
     /// 拖动中鼠标的位置（窗口坐标；整窗接住鼠标的那层发）/ 松开
     PointerMove { x: f32, y: f32 },
     PointerUp,
@@ -505,39 +503,16 @@ pub enum StudyMsg {
 }
 
 /// 正在拖的东西（整窗接住鼠标，见 `main.rs`）。起点等第一次移动时记（按下时拿不到窗口坐标）。
+/// 设置弹窗的拖动归公共浮窗（`ui::float_win`，docs/64）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pointer {
-    /// 设置弹窗：（起点, 按下时的偏移）
-    Dialog { start: Option<(f32, f32)>, base: (f32, f32) },
     /// 副图高：（图, 指标, 起点 y, 按下时的高）
     Resize { chart: String, uid: u64, start_y: Option<f32>, base_h: f32 },
 }
 
-/// 设置弹窗的宽、估计的高（整张卡留在区域里按它夹）、没拖过时离顶的距离。
+/// 设置弹窗的宽、封顶高（docs/64：外壳是公共浮窗）。
 pub const DLG_W: f32 = 560.0;
-pub const DLG_H: f32 = 540.0;
-pub const DLG_TOP: f32 = 72.0;
-
-/// 弹窗能摆的区域（宽, 高）：画弹窗时记下，拖动时按它夹（拖出边界后往回拖不会有一段没反应）。
-static DLG_AREA: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
-
-pub fn set_dialog_area(w: f32, h: f32) {
-    if let Ok(mut a) = DLG_AREA.lock() {
-        *a = (w, h);
-    }
-}
-
-/// 偏移（相对「水平居中、离顶 [`DLG_TOP`]」）夹到整张卡都在区域里；区域还不知道时不夹。
-pub fn clamp_dialog_offset(off: (f32, f32)) -> (f32, f32) {
-    let (w, h) = DLG_AREA.lock().map(|a| *a).unwrap_or_default();
-    if w <= 0.0 || h <= 0.0 {
-        return off;
-    }
-    let cx = ((w - DLG_W) / 2.0).max(0.0);
-    let x = (cx + off.0).clamp(0.0, (w - DLG_W).max(0.0));
-    let y = (DLG_TOP + off.1).clamp(0.0, (h - DLG_H).max(0.0));
-    (x - cx, y - DLG_TOP)
-}
+pub const DLG_H: f32 = 600.0;
 
 /// 浏览器卡片的页签。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -570,10 +545,8 @@ pub struct UiState {
     pub hover: Option<(String, u64)>,
     /// 正在拖的（图, 指标）
     pub drag: Option<(String, u64)>,
-    /// 正在拖弹窗 / 副图边沿
+    /// 正在拖副图边沿
     pub pointer: Option<Pointer>,
-    /// 设置弹窗相对居中位置的偏移（像素；这次运行里记住）
-    pub dlg_offset: (f32, f32),
     /// 这次打开浏览器以来加过的指标 id（加几次记几次）：浏览器里提示「已加」
     pub just_added: Vec<String>,
     /// 打开浏览器那一刻的「最近用过」：开着期间按它排，加了指标列表也不跳（不然鼠标下面换了一个）
@@ -684,17 +657,8 @@ pub fn handle(m: StudyMsg) {
                 u.pointer = Some(Pointer::Resize { chart: chart.clone(), uid: *uid, start_y: None, base_h });
                 return;
             }
-            StudyMsg::DlgDragStart => {
-                u.pointer = Some(Pointer::Dialog { start: None, base: u.dlg_offset });
-                return;
-            }
-            StudyMsg::PointerMove { x, y } => {
+            StudyMsg::PointerMove { y, .. } => {
                 match u.pointer.as_mut() {
-                    Some(Pointer::Dialog { start: Some((sx, sy)), base }) => {
-                        let off = clamp_dialog_offset((base.0 + x - *sx, base.1 + y - *sy));
-                        u.dlg_offset = off;
-                    }
-                    Some(Pointer::Dialog { start, .. }) => *start = Some((*x, *y)),
                     Some(Pointer::Resize { chart, uid, start_y: Some(sy), base_h }) => {
                         // 往上拖 = 变高；拖动中只改内存、让图重画，松开再存盘
                         let h = (*base_h - (y - *sy)).clamp(SUB_H_MIN, SUB_H_MAX).round() as u32;
@@ -1020,7 +984,7 @@ pub fn handle(m: StudyMsg) {
         StudyMsg::Search(_) | StudyMsg::Category(_) | StudyMsg::TemplateName(_) | StudyMsg::Expand(_) | StudyMsg::SymbolDraft { .. } | StudyMsg::AuxDraft { .. }
         | StudyMsg::FeatQuery { .. } | StudyMsg::Menu(_) | StudyMsg::MenuTab(_) | StudyMsg::Edit(_) | StudyMsg::EditTab(_) | StudyMsg::EditCancel
         | StudyMsg::Legend { .. } | StudyMsg::Hover { .. } | StudyMsg::HoverClear(_) | StudyMsg::DragStart { .. } | StudyMsg::DragEnd
-        | StudyMsg::ResizeStart { .. } | StudyMsg::DlgDragStart | StudyMsg::PointerMove { .. } | StudyMsg::PointerUp => {}
+        | StudyMsg::ResizeStart { .. } | StudyMsg::PointerMove { .. } | StudyMsg::PointerUp => {}
     }
     save(&s);
     ui().lock().unwrap_or_else(std::sync::PoisonError::into_inner).note = note;
@@ -2671,19 +2635,6 @@ mod tests {
         assert!(ui_state().pointer.is_none());
         assert_eq!(pane_h(&studies_of("测试图副图高")[0]), SUB_H_MIN);
         drop_chart("测试图副图高");
-    }
-
-    #[test]
-    fn 设置弹窗_偏移夹在区域里() {
-        let _g = super::super::studies_bg::test_guard();
-        set_dialog_area(1600.0, 1000.0);
-        assert_eq!(clamp_dialog_offset((0.0, 0.0)), (0.0, 0.0));
-        // 往右下拖过头：整张卡停在右下角
-        assert_eq!(clamp_dialog_offset((5000.0, 5000.0)), ((1600.0 - DLG_W) / 2.0, 1000.0 - DLG_H - DLG_TOP));
-        assert_eq!(clamp_dialog_offset((-5000.0, -5000.0)), (-(1600.0 - DLG_W) / 2.0, -DLG_TOP));
-        // 窗口比卡还小：贴左上
-        set_dialog_area(400.0, 300.0);
-        assert_eq!(clamp_dialog_offset((100.0, 100.0)), (0.0, -DLG_TOP));
     }
 
     #[test]

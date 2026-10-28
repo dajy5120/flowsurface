@@ -273,6 +273,25 @@ pub struct Settings {
     /// 两个面板撞了同一个（复制本页、模板再打开）后出现的那个换新的
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chart_id: Option<String>,
+    /// K 线图读管线 B 的历史文件（docs/64 §5）：有值时这张图不连交易所、不补拉，蜡烛由后台从本地文件聚合
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kline_hist: Option<KlineHist>,
+}
+
+/// K 线图选的本地历史文件（共用数据选择组件 `Selection::Local` 里画 K 线用得到的那几项）。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct KlineHist {
+    /// `tardis` / `databento` / `recorder` / `own`
+    pub source: String,
+    pub root: String,
+    pub market: String,
+    pub symbol: String,
+    /// 起止日（含）
+    pub date: String,
+    pub end: String,
+    /// B5 自有数据的渠道
+    pub channel: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]

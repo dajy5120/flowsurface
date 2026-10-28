@@ -20,6 +20,8 @@ use crate::ui::widgets::Tone;
 
 #[derive(Debug, Clone)]
 pub enum CalMsg {
+    /// 「Telegram」浮窗开 / 关（docs/64 §6）
+    TelegramPanel(bool),
     SetView(View),
     /// 选中一天。
     Select(NaiveDate),
@@ -1220,8 +1222,36 @@ fn alerts_view<'a>(snap: &CalReadout) -> Element<'a, CalMsg> {
         .wrap()
         .into(),
     ));
-    col = col.push(telegram_section(&tg));
+    // Telegram 的令牌 / 会话 / 测试在浮窗里（docs/64 §6），这里一行现状 + 入口
+    let open = TG_OPEN.load(std::sync::atomic::Ordering::Relaxed);
+    col = col.push(kv(
+        "Telegram",
+        row![
+            meta(
+                if !tg.configured() {
+                    "未配置".to_string()
+                } else if tg.enabled {
+                    format!("已启用 · 只发 ≤ {}", ro::importance_label(tg.min_importance))
+                } else {
+                    "已配置、没启用".to_string()
+                },
+                crate::ui::pal::dim()
+            ),
+            crate::ui::widgets::btn(if open { "设置（浮窗开着）" } else { "设置…" }, crate::ui::widgets::Kind::Standard, Some(CalMsg::TelegramPanel(!open))),
+        ]
+        .spacing(crate::ui::metrics::space(2))
+        .align_y(Alignment::Center)
+        .into(),
+    ));
     crate::ui::scroll(col).width(Length::Fill).height(Length::Fill).into()
+}
+
+/// 「Telegram」浮窗开着（docs/64 §6）。
+pub static TG_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 「Telegram」浮窗的内容：开着才有。
+pub fn telegram_float<'a>() -> Option<Element<'a, CalMsg>> {
+    TG_OPEN.load(std::sync::atomic::Ordering::Relaxed).then(|| telegram_section(&super::calendar_alerts::telegram()))
 }
 
 

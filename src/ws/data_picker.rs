@@ -556,6 +556,9 @@ pub enum DataPickMsg {
     /// 勾 / 取消某数据类型。
     ToggleType(String),
     Search(String),
+    /// 整份换掉（数据浮窗点「应用」，docs/64 §4）：浮窗里改的是草稿，应用时经宿主原来的数据消息整份交过去，
+    /// 宿主选完数据后该做的事（同步、停回放……）照常发生。
+    Replace(Box<DataPick>),
 }
 
 /// 选定的结果。
@@ -675,6 +678,10 @@ impl DataPick {
 
     /// 处理一条消息：上一级变了，下一级全部清掉（重选），不留下与新上级对不上的旧选择。
     pub fn update(&mut self, m: DataPickMsg) {
+        if let DataPickMsg::Replace(p) = m {
+            *self = *p;
+            return;
+        }
         self.note.clear();
         if let Some(d) = take_picked_dir() {
             self.root = d;
@@ -769,6 +776,7 @@ impl DataPick {
                 }
             }
             DataPickMsg::Search(q) => self.search = q,
+            DataPickMsg::Replace(_) => {} // 上面已处理
         }
     }
 

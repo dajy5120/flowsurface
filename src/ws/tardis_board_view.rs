@@ -701,7 +701,7 @@ fn label<'a>(s: &str) -> Element<'a, TardisBoardMsg> {
 fn data_block(app: &TardisBoardState, cat: &ro::Catalog, picker: bool, wrap: usize) -> Element<'static, TardisBoardMsg> {
     let mut src_col = column![label("① 数据")].spacing(4);
     if picker {
-        src_col = src_col.push(super::data_picker_view::view(&app.pick, &pick_opts()).map(TardisBoardMsg::Data));
+        src_col = src_col.push(super::data_picker_view::summary(&app.pick, &pick_opts()));
     }
     if app.pick.local_key() == Some("tardis") {
         let mut r = row![label("读法")].spacing(6).align_y(Alignment::Center);
@@ -905,7 +905,7 @@ pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoar
     }
     if !p.loaded {
         body = body.push(
-            text("尚未加载 —— 在检查器「数据」页选好数据与类型，再点工具栏的「加载」").size(crate::ui::text::s_body()).color(crate::ui::pal::dim()),
+            text("尚未加载 —— 在顶部工具栏「数据 ▾」里选好数据、检查器「数据」页选类型，再点工具栏的「加载」").size(crate::ui::text::s_body()).color(crate::ui::pal::dim()),
         );
     } else if let Some(e) = p.error.clone() {
         body = body.push(text(format!("· {e}")).size(crate::ui::text::s_body()).color(crate::ui::pal::down()));

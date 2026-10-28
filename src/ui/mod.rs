@@ -14,6 +14,7 @@
 
 pub mod chart;
 pub mod command;
+pub mod float_win;
 pub mod fmt;
 pub mod gallery;
 pub mod grid;

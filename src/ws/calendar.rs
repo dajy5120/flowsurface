@@ -10,6 +10,7 @@ use super::calendar_view::CalMsg;
 pub fn handle(m: CalMsg) {
     match m {
         CalMsg::SetView(v) => ro::set_view(v),
+        CalMsg::TelegramPanel(on) => super::calendar_view::TG_OPEN.store(on, std::sync::atomic::Ordering::Relaxed),
         CalMsg::Select(d) => ro::select(d),
         CalMsg::PrevMonth => ro::shift_month(&ro::snapshot(), -1),
         CalMsg::NextMonth => ro::shift_month(&ro::snapshot(), 1),

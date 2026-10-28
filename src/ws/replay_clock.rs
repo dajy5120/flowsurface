@@ -1088,7 +1088,6 @@ pub fn event_menu<'a>() -> Element<'a, Cmd> {
             crate::ui::text::label("事件：勾了的类参与「⏮ ⏭」（快捷键 [ ]），也标在 K 线、Footprint 与热图上；播放头落在事件前 2 秒"),
             btn("全选", Kind::Ghost, Some(Cmd::AllKinds(true))),
             btn("全不选", Kind::Ghost, Some(Cmd::AllKinds(false))),
-            btn("收起", Kind::Ghost, Some(Cmd::EventMenu)),
         ]
         .spacing(sp(2))
         .align_y(Alignment::Center),

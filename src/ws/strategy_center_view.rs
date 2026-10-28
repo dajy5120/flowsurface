@@ -712,9 +712,7 @@ fn ai_box<'a>(v: &View) -> Element<'a, ScMsg> {
         super::ai_providers::picker().map(ScMsg::Ai),
     ]
     .spacing(space(2));
-    if super::ai_providers::manager_open() {
-        col = col.push(super::ai_providers::manager().map(ScMsg::Ai));
-    }
+    // 「AI 接口」管理卡在浮窗里（docs/64 §6）
     if v.ai_loading {
         col = col.push(t::metadata(format!("AI（{}）在看策略的参数表、历史优化与试验数…（半分钟左右）", super::ai_providers::current())).color(pal::dim()));
     }

@@ -2274,9 +2274,7 @@ fn ai_panel<'a>(v: &View, content: &'a iced::widget::text_editor::Content) -> El
         super::ai_providers::picker().map(FlMsg::AiProv),
     ]
     .spacing(space(2));
-    if super::ai_providers::manager_open() {
-        col = col.push(super::ai_providers::manager().map(FlMsg::AiProv));
-    }
+    // 「AI 接口」管理卡在浮窗里（docs/64 §6）
     // 改当前图 / 起草新图（AI2）：缺省看画布——有图就改它
     let editing = a.editing(&v.graph);
     col = col.push(

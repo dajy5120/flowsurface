@@ -49,7 +49,7 @@ fn form<'a>(v: &bl::View, picker: bool) -> iced::widget::Column<'a, LaunchMsg> {
         b = b.push(text(s.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()));
     }
     if picker {
-        b = b.push(super::data_picker_view::view(&v.pick, &bl::pick_opts()).map(LaunchMsg::Data));
+        b = b.push(super::data_picker_view::summary(&v.pick, &bl::pick_opts()));
     }
     b.push(
         row![
@@ -79,14 +79,30 @@ fn form<'a>(v: &bl::View, picker: bool) -> iced::widget::Column<'a, LaunchMsg> {
     )
 }
 
-/// 检查器「属性」页（docs/42 第 3 期）：选策略 + 运行；数据选择在「数据」页。
+/// 检查器「属性」页（docs/42 第 3 期）：入口 + 停止；表单在「发起回测」浮窗里（docs/64 §6）。
 pub fn inspector_form<'a>() -> Element<'a, LaunchMsg> {
     let v = bl::view();
-    let mut b = column![crate::ui::text::metadata("发起回测"), form(&v, false)].spacing(crate::ui::metrics::space(2));
+    let mut b = row![btn(if v.open { "▴ 发起回测（浮窗开着）" } else { "▶ 发起回测…" }, Some(LaunchMsg::Toggle))].spacing(8);
     if v.running {
         b = b.push(btn("■ 停止", Some(LaunchMsg::Stop)));
     }
-    b.into()
+    column![crate::ui::text::metadata("发起回测"), b].spacing(crate::ui::metrics::space(2)).into()
+}
+
+/// 「发起回测」浮窗的内容（docs/64 §6）：开着才有。策略、数据（选择在工具栏「数据 ▾」）、▶ 运行 / ■ 停止。
+pub fn float_body<'a>() -> Option<Element<'a, LaunchMsg>> {
+    let v = bl::view();
+    if !v.open {
+        return None;
+    }
+    let mut b = column![form(&v, true)].spacing(crate::ui::metrics::space(2));
+    if v.running {
+        b = b.push(btn("■ 停止", Some(LaunchMsg::Stop)));
+    }
+    if !v.note.is_empty() {
+        b = b.push(text(v.note.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
+    }
+    Some(b.into())
 }
 
 /// `hosted` = 检查器正托管这个面板：发起回测的表单在检查器里，面板顶上只留状态行（docs/42 第 3 期）。
@@ -96,7 +112,7 @@ pub fn view<'a>(hosted: bool) -> Element<'a, LaunchMsg> {
     if !hosted {
         let mut head = row![
             text("发起回测").size(crate::ui::text::s_body()).color(crate::ui::pal::head()),
-            btn(if v.open { "▴ 收起" } else { "▾ 选策略与数据" }, Some(LaunchMsg::Toggle)),
+            btn(if v.open { "▴ 发起回测（浮窗开着）" } else { "▶ 发起回测…" }, Some(LaunchMsg::Toggle)),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -107,9 +123,6 @@ pub fn view<'a>(hosted: bool) -> Element<'a, LaunchMsg> {
     }
     if !v.status.is_empty() {
         b = b.push(text(v.status.clone()).size(crate::ui::text::s_meta()).color(if v.running { crate::ui::pal::ok() } else { crate::ui::pal::dim() }));
-    }
-    if v.open && !hosted {
-        b = b.push(form(&v, true));
     }
     if !v.note.is_empty() {
         b = b.push(text(v.note.clone()).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));

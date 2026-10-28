@@ -1550,7 +1550,7 @@ fn source_bar<'a>(s: &super::feature_source::View, inspector: bool) -> Element<'
     }
     if s.open || inspector {
         let opts = super::feature_source::pick_opts();
-        b = b.push(super::data_picker_view::view(&s.pick, &opts).map(|m| Msg::Source(SourceMsg::Data(m))));
+        b = b.push(super::data_picker_view::summary(&s.pick, &opts));
         if s.pick.local_key().is_some() {
             let mut pr = row![text("回放速度").size(crate::ui::text::s_small()).color(crate::ui::pal::dim())].spacing(4).align_y(iced::Alignment::Center);
             for p in Pace::ALL {
@@ -1704,7 +1704,7 @@ pub fn pane_body<'a>(hosted: bool, lock: Option<&str>) -> Element<'a, Msg> {
                     "暂无快照（{}）。生成：\n  \
                      cargo run --release -p wealthspring-features --example replay_events_csv -- <目录>\n\
                      引擎常驻时由 sidecar::SidecarWriter 每 500ms 写一次。面板只读，不连交易所。\n\
-                     选了本地数据：在检查器「数据」页点「▶ 开始回放」，回放跑起来后这里就有快照。",
+                     在顶部工具栏「数据 ▾」里选本地数据，再在检查器「数据」页点「▶ 开始回放」，回放跑起来后这里就有快照。",
                     ro::board_path().display()
                 ))
                 .size(crate::ui::text::s_small())

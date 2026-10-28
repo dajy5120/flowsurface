@@ -281,6 +281,15 @@ enum Message {
     Studies(ws::studies::StudyMsg),
     /// 统一回放时钟（docs/51 P2）：播放控件与快捷键
     Replay(ws::replay_clock::Cmd),
+    /// 浮窗（docs/64）：拖动、到最上层、✕
+    Float(ui::float_win::FloatMsg),
+    /// 工具栏「数据 ▾」浮窗（docs/64 §4）
+    DataFloat(ws::data_float::DataFloatMsg),
+    /// 深层设置浮窗（docs/64 §6）：发起回测 / 口径设置 / AI 接口与密钥 / Telegram，消息直接交给各自模块
+    Backtest(ws::backtest_launch::LaunchMsg),
+    Caliber(ws::feature_matrix::FeatureMatrixMsg),
+    Ai(ws::ai_providers::AiMsg),
+    Calendar(ws::calendar_view::CalMsg),
     /// 数据目录提醒与设置（docs/47）
     DataDirs(ws::data_dirs::DataDirsMsg),
     Sidebar(dashboard::sidebar::Message),
@@ -637,15 +646,11 @@ impl Flowsurface {
                     }
                 }
             }
-            // Esc 被输入框之类接住时只发「关命令面板」：命令面板没开着，就用来取消指标设置 / 收起指标浏览器（docs/63 §12.1）
-            Message::Shell(ui::shell::ShellEvent::PaletteClose)
-                if self.shell.palette.is_none() && (ws::studies::ui_state().editing.is_some() || ws::studies::ui_state().menu.is_some()) =>
-            {
-                ws::studies::handle(if ws::studies::ui_state().editing.is_some() {
-                    ws::studies::StudyMsg::EditCancel
-                } else {
-                    ws::studies::StudyMsg::Menu(None)
-                });
+            // Esc 被输入框之类接住时只发「关命令面板」：命令面板没开着，就用来关最上面的浮窗（docs/64）
+            Message::Shell(ui::shell::ShellEvent::PaletteClose) if self.shell.palette.is_none() && self.float_open() => {
+                if let Some(k) = ui::float_win::top() {
+                    self.close_float(k);
+                }
             }
             Message::Shell(ev) => {
                 if let Some(cmd) = self.shell.update(ev, &self.palette_entries) {
@@ -687,6 +692,9 @@ impl Flowsurface {
             Message::Tick(now) => {
                 // 每张 K 线图的身份与它的指标（docs/63 §12.2）：每帧对一遍（几十个面板，微秒级）
                 self.sync_chart_ids();
+                // 读本地历史文件的 K 线图（docs/64 §5）：按周期要聚合，好了交给图
+                let main = self.main_window.id;
+                self.active_dashboard_mut().drive_kline_hist(main);
                 // 被指标引用的订单流特征 / 图表参数：快照前进就记一个点（每秒最多一次，docs/63 §10）
                 ws::studies_feat::tick(chrono::Utc::now().timestamp_millis().max(0) as u64);
                 // 后台指标（没开图的提醒、跨品种指标）：到点就取 K 线（每秒最多扫一次；出口总闸关着不取）
@@ -912,6 +920,35 @@ impl Flowsurface {
             },
             Message::AnaThumbShot(k, id, shot) => ws::analysis_state::store_thumb(k, id, &shot),
             Message::Replay(m) => ws::replay_clock::handle(m),
+            Message::Float(m) => {
+                if let Some(k) = ui::float_win::update(m) {
+                    self.close_float(k);
+                }
+            }
+            Message::Backtest(m) => ws::backtest_launch::handle(m),
+            Message::Caliber(m) => {
+                ws::feature_matrix::handle(m);
+            }
+            Message::Ai(m) => ws::ai_providers::handle(m),
+            Message::Calendar(m) => ws::calendar::handle(m),
+            Message::DataFloat(m) => {
+                // 应用：整份交给打开它的那个面板（经面板原来的数据消息，选完数据后该做的事照常发生）
+                if let Some((uid, pick)) = ws::data_float::handle(m)
+                    && let Some((w, p)) = self.toolbar_target()
+                    && let Some(st) = self.active_dashboard().get_pane(self.main_window.id, w, p)
+                    && st.unique_id() == uid
+                    && let Some(h) = ws::inspector_props::data_host(st)
+                {
+                    let Some(wrap) = h.wrap else {
+                        return self.apply_kline_pick(w, p, &pick, &h.opts);
+                    };
+                    let e = wrap(ws::data_picker::DataPickMsg::Replace(Box::new(pick)));
+                    return self.update(Message::Dashboard {
+                        layout_id: None,
+                        event: dashboard::Message::Pane(w, dashboard::pane::Message::PaneEvent(p, e)),
+                    });
+                }
+            }
             Message::DataDirs(m) => ws::data_dirs::handle(m),
             Message::SpecimenShot(shot) => {
                 // 焦点顺序表（docs/35 §13.3「每个工作区一份焦点顺序表」）：F6 / Ctrl 1–9 走的面板次序
@@ -1000,11 +1037,9 @@ impl Flowsurface {
                     self.confirm_dialog = None;
                 } else if self.sidebar.active_menu().is_some() {
                     self.sidebar.set_menu(None);
-                } else if ws::studies::ui_state().editing.is_some() {
-                    // 指标设置弹窗：Esc = 取消（docs/63 §12.1）
-                    ws::studies::handle(ws::studies::StudyMsg::EditCancel);
-                } else if ws::studies::ui_state().menu.is_some() {
-                    ws::studies::handle(ws::studies::StudyMsg::Menu(None));
+                } else if let Some(k) = ui::float_win::top().filter(|_| self.float_open()) {
+                    // 浮窗：Esc 只关最上面那个（docs/64；指标设置弹窗 = 取消）
+                    self.close_float(k);
                 } else {
                     let dashboard = self.active_dashboard_mut();
 
@@ -1521,58 +1556,12 @@ impl Flowsurface {
                 } else {
                     dashboard_view
                 };
-                // 分析（docs/52）：点工具栏「分析 ▾」后盖在内容上方
-                let dashboard_view: Element<'_, Message> = if let Some(sym) = ws::drawing::ana_menu() {
-                    let note = self.ana_note.as_ref().filter(|(s, _, _)| *s == sym).map(|(_, i, c)| (i.as_str(), c));
-                    let card = container(ws::drawing_view::analysis_menu(&sym, note).map(Message::Draw)).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
-                        background: Some(iced::Background::Color(t.extended_palette().background.weak.color)),
-                        border: iced::Border { color: ui::pal::accent(), width: 1.0, radius: 4.0.into() },
-                        ..Default::default()
+                // 浮窗（docs/64）：指标浏览器 / 指标设置 / 分析 / 事件 / 页面，可同时开多个、各自拖动；浮窗以外照常可拖可画
+                let body: Element<'_, Message> = if self.float_open() {
+                    let layer = iced::widget::responsive(move |size| {
+                        ui::float_win::layer(size, self.float_wins(), Message::Float)
                     });
-                    iced::widget::stack![dashboard_view, column![card]].into()
-                } else {
-                    dashboard_view
-                };
-                // 指标浏览器（docs/63 §12）：点工具栏「指标 ▾」后盖在内容上方；只跟着工具栏当前那张图
-                let target_chart = self.toolbar_chart_id();
-                let dashboard_view: Element<'_, Message> = match ws::studies::ui_state().menu.filter(|c| Some(c) == target_chart.as_ref()) {
-                    Some(c) => {
-                        let sym = ws::studies::chart_symbol(&c);
-                        let card = container(ws::studies_view::menu_card(&c, &sym).map(Message::Studies)).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
-                            background: Some(iced::Background::Color(t.extended_palette().background.weak.color)),
-                            border: iced::Border { color: ui::pal::accent(), width: 1.0, radius: 4.0.into() },
-                            ..Default::default()
-                        });
-                        iced::widget::stack![dashboard_view, column![card]].into()
-                    }
-                    None => dashboard_view,
-                };
-                // 指标设置弹窗：居中盖在内容上方，图照常看得到（改了立刻生效）
-                let dashboard_view: Element<'_, Message> = if ws::studies::ui_state().editing.is_some() {
-                    let e = iced::widget::responsive(|size| ws::studies_view::editor(size).map_or_else(|| column![].into(), |e| e.map(Message::Studies)));
-                    iced::widget::stack![dashboard_view, e].into()
-                } else {
-                    dashboard_view
-                };
-                // 事件筛选（docs/51 P4）：点工具栏「事件 ▾」后盖在内容上方
-                let dashboard_view: Element<'_, Message> = if ws::replay_clock::event_menu_open() {
-                    let card = container(ws::replay_clock::event_menu().map(Message::Replay)).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
-                        background: Some(iced::Background::Color(t.extended_palette().background.weak.color)),
-                        border: iced::Border { color: ui::pal::accent(), width: 1.0, radius: 4.0.into() },
-                        ..Default::default()
-                    });
-                    iced::widget::stack![dashboard_view, column![card]].into()
-                } else {
-                    dashboard_view
-                };
-                let body: Element<'_, Message> = if self.page_menu {
-                    // 页面菜单：盖在内容上方的下拉卡片（不透明），点「⋯ 页面」收起
-                    let card = container(self.page_toolbar()).width(iced::Length::Fill).style(|t: &iced::Theme| container::Style {
-                        background: Some(iced::Background::Color(t.extended_palette().background.weak.color)),
-                        border: iced::Border { color: ui::pal::accent(), width: 1.0, radius: 4.0.into() },
-                        ..Default::default()
-                    });
-                    iced::widget::stack![dashboard_view, column![card]].into()
+                    iced::widget::stack![dashboard_view, layer].into()
                 } else {
                     dashboard_view
                 };
@@ -1699,17 +1688,27 @@ impl Flowsurface {
             } else {
                 base
             };
-            // 拖指标设置弹窗 / 副图的上边沿时（docs/63 §14）：整窗接住鼠标，光标离开拖动的地方也照样跟，松开结束
+            // 拖浮窗时（docs/64）：整窗接住鼠标，光标离开标题栏也照样跟，松开结束
+            let base: Element<'_, Message> = if ui::float_win::dragging() {
+                iced::widget::stack![
+                    base,
+                    iced::widget::mouse_area(iced::widget::Space::new().width(iced::Length::Fill).height(iced::Length::Fill))
+                        .on_move(|p| Message::Float(ui::float_win::FloatMsg::Move(p.x, p.y)))
+                        .on_release(Message::Float(ui::float_win::FloatMsg::Up))
+                        .interaction(iced::mouse::Interaction::Grabbing)
+                ]
+                .into()
+            } else {
+                base
+            };
+            // 拖副图的上边沿时（docs/63 §14）：整窗接住鼠标，光标离开拖动的地方也照样跟，松开结束
             let base: Element<'_, Message> = if ws::studies::ui_state().pointer.is_some() {
                 iced::widget::stack![
                     base,
                     iced::widget::mouse_area(iced::widget::Space::new().width(iced::Length::Fill).height(iced::Length::Fill))
                         .on_move(|p| Message::Studies(ws::studies::StudyMsg::PointerMove { x: p.x, y: p.y }))
                         .on_release(Message::Studies(ws::studies::StudyMsg::PointerUp))
-                        .interaction(match ws::studies::ui_state().pointer {
-                            Some(ws::studies::Pointer::Resize { .. }) => iced::mouse::Interaction::ResizingVertically,
-                            _ => iced::mouse::Interaction::Grabbing,
-                        })
+                        .interaction(iced::mouse::Interaction::ResizingVertically)
                 ]
                 .into()
             } else {
@@ -2107,7 +2106,11 @@ impl Flowsurface {
                     }
                 };
                 seen.insert(id.clone());
-                let sym = st.stream_pair().map(|ti| ws::drawing::symbol_key(&ti.ticker)).unwrap_or_default();
+                // 读本地历史文件的图（docs/64 §5）：品种是那份文件的标的（与交给图的替身品种同一个键）
+                let sym = match st.kline_hist() {
+                    Some(h) => ws::drawing::symbol_key(&ws::kline_hist::stand_in(h, 0.01).ticker),
+                    None => st.stream_pair().map(|ti| ws::drawing::symbol_key(&ti.ticker)).unwrap_or_default(),
+                };
                 if let dashboard::pane::Content::Kline { chart: Some(c), .. } = &mut st.content {
                     c.set_studies_chart(&id);
                 }
@@ -2145,10 +2148,21 @@ impl Flowsurface {
                     iced::widget::container(ui::text::caption(dot_tip)).padding(ui::metrics::space(2)).style(style::tooltip),
                     iced::widget::tooltip::Position::Bottom,
                 ));
-                if let Some(src) = spec.source {
-                    r = r.push(tool_pick("数据", src, None::<Message>, false));
+                // 数据（docs/64 §4）：用共用数据选择组件的面板，「管线 → 来源 → 市场 → 标的 → 时间」整个在浮窗里
+                if let Some(h) = ws::inspector_props::data_host(st) {
+                    let open = ws::data_float::open_for() == Some(st.unique_id());
+                    r = r.push(tool_pick(
+                        "数据",
+                        format!("{} {}", ws::data_picker_view::short(&h.pick, &h.opts), if open { "▴" } else { "▾" }),
+                        Some(Message::DataFloat(ws::data_float::DataFloatMsg::Open(st.unique_id(), Box::new(h.pick)))),
+                        open,
+                    ));
                 }
-                if let Some((v, e)) = spec.symbol {
+                if let Some(src) = spec.source {
+                    r = r.push(tool_pick("", src, None::<Message>, false));
+                }
+                // K 线的品种在「数据 ▾」里选（docs/64 §4 W4），不再另给「标的」
+                if let Some((v, e)) = spec.symbol.filter(|_| !matches!(st.content, dashboard::pane::Content::Kline { .. })) {
                     r = r.push(tool_pick("标的", v, Some(ev(e)), false));
                 }
                 if let Some((v, e)) = spec.basis {
@@ -2210,7 +2224,156 @@ impl Flowsurface {
         r.into()
     }
 
-    /// 页签栏下面的页面工具条（docs/41 B 期）。
+    /// 有没有浮窗开着（docs/64）。指标浏览器只跟着工具栏当前那张图。
+    fn float_open(&self) -> bool {
+        let u = ws::studies::ui_state();
+        let target = self.toolbar_chart_id();
+        self.page_menu
+            || u.editing.is_some()
+            || u.menu.is_some_and(|c| Some(c) == target)
+            || ws::drawing::ana_menu().is_some()
+            || ws::replay_clock::event_menu_open()
+            || self.data_float_target().is_some()
+            || ws::backtest_launch::view().open
+            || ws::chart_params::draft().is_some()
+            || ws::ai_providers::manager_open()
+            || ws::calendar_view::TG_OPEN.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 数据浮窗开给的正是工具栏当前那个面板时：（面板名, 它的数据宿主）。
+    fn data_float_target(&self) -> Option<(String, ws::inspector_props::DataHost)> {
+        let uid = ws::data_float::open_for()?;
+        let (w, p) = self.toolbar_target()?;
+        let st = self.active_dashboard().get_pane(self.main_window.id, w, p)?;
+        if st.unique_id() != uid {
+            return None;
+        }
+        let name = st.settings.view.clone().unwrap_or_else(|| st.content.to_string());
+        Some((name, ws::inspector_props::data_host(st)?))
+    }
+
+    /// 开着的浮窗（docs/64），顺序无关——叠放次序由 `ui::float_win` 记。
+    fn float_wins(&self) -> Vec<ui::float_win::Win<'_, Message>> {
+        use ui::float_win::{Win, WinKey};
+        let mut v = Vec::new();
+        let target = self.toolbar_chart_id();
+        if let Some(c) = ws::studies::ui_state().menu.filter(|c| Some(c) == target.as_ref()) {
+            let sym = ws::studies::chart_symbol(&c);
+            v.push(Win { key: WinKey::StudyMenu, title: "指标".into(), body: ws::studies_view::menu_card(&c, &sym).map(Message::Studies), w: 760.0, h: 620.0 });
+        }
+        if let Some((title, body)) = ws::studies_view::editor() {
+            v.push(Win { key: WinKey::StudyEdit, title, body: body.map(Message::Studies), w: ws::studies::DLG_W, h: ws::studies::DLG_H });
+        }
+        if let Some(sym) = ws::drawing::ana_menu() {
+            let note = self.ana_note.as_ref().filter(|(s, _, _)| *s == sym).map(|(_, i, c)| (i.as_str(), c));
+            let code = sym.rsplit(':').next().unwrap_or(&sym).to_string();
+            v.push(Win { key: WinKey::Analysis, title: format!("分析 · {code}"), body: ws::drawing_view::analysis_menu(&sym, note).map(Message::Draw), w: 900.0, h: 560.0 });
+        }
+        if ws::replay_clock::event_menu_open() {
+            v.push(Win { key: WinKey::Events, title: "事件".into(), body: ws::replay_clock::event_menu().map(Message::Replay), w: 860.0, h: 480.0 });
+        }
+        if let Some((name, h)) = self.data_float_target()
+            && let Some(body) = ws::data_float::view(&h.opts, &h.pick)
+        {
+            v.push(Win { key: WinKey::Data, title: format!("数据 · {name}"), body: body.map(Message::DataFloat), w: 820.0, h: 680.0 });
+        }
+        if let Some(body) = ws::backtest_launch_view::float_body() {
+            v.push(Win { key: WinKey::Backtest, title: "发起回测".into(), body: body.map(Message::Backtest), w: 760.0, h: 460.0 });
+        }
+        if let Some(body) = ws::chart_params_view::caliber_float(&ws::feature_matrix_readout::snapshot()) {
+            v.push(Win { key: WinKey::Caliber, title: "图表参数 · 口径设置".into(), body: body.map(Message::Caliber), w: 720.0, h: 620.0 });
+        }
+        if ws::ai_providers::manager_open() {
+            v.push(Win { key: WinKey::AiKeys, title: "AI 接口与密钥".into(), body: ws::ai_providers::manager().map(Message::Ai), w: 780.0, h: 640.0 });
+        }
+        if let Some(body) = ws::calendar_view::telegram_float() {
+            v.push(Win { key: WinKey::Telegram, title: "Telegram".into(), body: body.map(Message::Calendar), w: 700.0, h: 560.0 });
+        }
+        if self.page_menu {
+            v.push(Win { key: WinKey::Page, title: format!("页面 · {}", self.active_name()), body: self.page_toolbar(), w: 980.0, h: 640.0 });
+        }
+        v
+    }
+
+    /// K 线图在数据浮窗里点了「应用」（docs/64 §4–5）：管线 A = 切到那个交易对（走原生的切换，联动组一起换）；
+    /// 管线 B 的本地文件 = 这张图改读那份文件（不连交易所，后台聚合）。
+    fn apply_kline_pick(
+        &mut self,
+        w: iced::window::Id,
+        p: iced::widget::pane_grid::Pane,
+        pick: &ws::data_picker::DataPick,
+        opts: &ws::data_picker::PickOpts,
+    ) -> Task<Message> {
+        use ws::data_picker::Selection;
+        match pick.selection(opts) {
+            Some(Selection::Local { source, root, market, symbol, date, end, channel, .. }) => {
+                let h = data::layout::pane::KlineHist { source, root, market, symbol, date, end, channel };
+                let main = self.main_window.id;
+                self.active_dashboard_mut().set_kline_hist(main, w, p, Some(h)).map(|m| Message::Dashboard { layout_id: None, event: m })
+            }
+            Some(Selection::Native { venue, market, symbol }) => {
+                let found = self.sidebar.tickers_info().iter().find_map(|(t, info)| {
+                    let (sym, kind) = t.to_full_symbol_and_type();
+                    let mk = match kind {
+                        exchange::adapter::MarketKind::Spot => "spot",
+                        exchange::adapter::MarketKind::LinearPerps => "linear",
+                        exchange::adapter::MarketKind::InversePerps => "inverse",
+                    };
+                    (t.exchange.venue().to_string() == venue && mk == market && sym == symbol).then_some(*info).flatten()
+                });
+                let Some(ti) = found else {
+                    self.notifications.push(Toast::warn(format!(
+                        "{venue} {symbol} 的交易对信息还没拉到：先打开任一行情面板的标的列表（它会向交易所拉取）再选"
+                    )));
+                    return Task::none();
+                };
+                let handles = self.handles.clone();
+                let main = self.main_window.id;
+                let d = self.active_dashboard_mut();
+                // 先换回交易所（之前若在读历史文件），再走原生的切换（它会重建图、向交易所补拉）
+                let back = d.set_kline_hist(main, w, p, None);
+                d.focus = Some((w, p));
+                Task::batch([back, d.switch_tickers_in_group(&handles, main, ti)]).map(|m| Message::Dashboard { layout_id: None, event: m })
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// 关一个浮窗：交给它自己的模块（docs/64）。
+    fn close_float(&mut self, k: ui::float_win::WinKey) {
+        use ui::float_win::WinKey;
+        match k {
+            WinKey::StudyMenu => ws::studies::handle(ws::studies::StudyMsg::Menu(None)),
+            WinKey::StudyEdit => ws::studies::handle(ws::studies::StudyMsg::EditCancel),
+            WinKey::Analysis => ws::drawing::handle(ws::drawing::DrawMsg::AnaClose),
+            WinKey::Events => {
+                if ws::replay_clock::event_menu_open() {
+                    ws::replay_clock::handle(ws::replay_clock::Cmd::EventMenu);
+                }
+            }
+            WinKey::Page => self.page_menu = false,
+            WinKey::Data => {
+                ws::data_float::handle(ws::data_float::DataFloatMsg::Cancel);
+            }
+            WinKey::Backtest => {
+                if ws::backtest_launch::view().open {
+                    ws::backtest_launch::handle(ws::backtest_launch::LaunchMsg::Toggle);
+                }
+            }
+            WinKey::Caliber => {
+                ws::feature_matrix::handle(ws::feature_matrix::FeatureMatrixMsg::ChartEdit(ws::chart_params::ChartEditMsg::Close));
+            }
+            WinKey::AiKeys => {
+                if ws::ai_providers::manager_open() {
+                    ws::ai_providers::handle(ws::ai_providers::AiMsg::Manage);
+                }
+            }
+            WinKey::Telegram => ws::calendar_view::TG_OPEN.store(false, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// 「⋯ 页面」浮窗的内容（docs/41 B 期；docs/64 W2 由一长排改成分组）：页 / 模板 / 联动 / 浮动层 /
+    /// 从模板新建 / 添加面板（按分类一行一类）。
     fn page_toolbar(&self) -> Element<'_, Message> {
         use ui::widgets::{self as w, Kind};
         use ws::pages::PageMsg as P;
@@ -2220,7 +2383,18 @@ impl Flowsurface {
         let is_template = ws::workspace::all_layouts().contains(&name);
         let locked = self.pages.locked.contains(&name);
         let pm = |m: P| Some(Message::Page(m));
-        let mut r1 = row![
+        let sp = ui::metrics::space;
+        // 一组 = 左边一列组名 + 右边可折行的按钮
+        fn group<'a>(title: &str, r: iced::widget::Row<'a, Message>) -> Element<'a, Message> {
+            row![
+                container(ui::text::metadata(title.to_string()).color(ui::pal::dim())).width(iced::Length::Fixed(84.0)),
+                r.spacing(ui::metrics::space(1)).align_y(Alignment::Center).wrap(),
+            ]
+            .spacing(ui::metrics::space(2))
+            .align_y(Alignment::Center)
+            .into()
+        }
+        let mut page = row![
             w::btn("＋ 新建空白页", Kind::Standard, pm(P::NewBlank)),
             w::btn("复制本页", Kind::Ghost, pm(P::Duplicate)),
             iced::widget::text_input("页名", &self.page_rename)
@@ -2232,6 +2406,11 @@ impl Flowsurface {
             w::btn("◀ 左移", Kind::Ghost, (!first).then_some(Message::Page(P::Move(-1)))),
             w::btn("右移 ▶", Kind::Ghost, (!first).then_some(Message::Page(P::Move(1)))),
             w::btn("关闭本页", Kind::Ghost, (!first).then_some(Message::Page(P::Close))),
+        ];
+        if !self.closed_pages.is_empty() {
+            page = page.push(w::btn(format!("找回刚关的页（{}）", self.closed_pages.len()), Kind::Ghost, pm(P::Undo)));
+        }
+        let tpl = row![
             w::btn(
                 if self.outdated.contains(&name) { "恢复默认（模板有更新）" } else { "恢复默认" },
                 Kind::Ghost,
@@ -2239,88 +2418,93 @@ impl Flowsurface {
             ),
             w::btn("存为模板", Kind::Ghost, pm(P::SaveTemplate)),
             w::btn(if locked { "🔒 已锁定（点击解锁）" } else { "锁定布局" }, if locked { Kind::Standard } else { Kind::Ghost }, pm(P::ToggleLock)),
-        ]
-        .spacing(ui::metrics::space(1))
-        .align_y(Alignment::Center);
-        if !self.closed_pages.is_empty() {
-            r1 = r1.push(w::btn(format!("找回刚关的页（{}）", self.closed_pages.len()), Kind::Ghost, pm(P::Undo)));
-        }
+        ];
         // 联动（docs/41 §4.3，E 期）：品种走现有联动组；时间十字线同页按时间轴的图自动联动
         let linked = self.active_dashboard().page_linked(self.main_window.id);
-        r1 = r1.push(w::btn(
-            if linked { "⛓ 联动品种：开" } else { "联动品种：关" },
-            if linked { Kind::Standard } else { Kind::Ghost },
-            pm(P::LinkSymbols(!linked)),
-        ));
+        let link = row![
+            w::btn(
+                if linked { "⛓ 联动品种：开" } else { "联动品种：关" },
+                if linked { Kind::Standard } else { Kind::Ghost },
+                pm(P::LinkSymbols(!linked)),
+            ),
+            ui::text::metadata("时间十字线：同页按时间轴的图自动联动").color(ui::pal::dim()),
+        ];
         // 浮动层（docs/41 §4.2）：图表浮窗自由组合；面板标题栏的「◰」把图表浮起来
         let (n_float, hidden) = {
             let d = self.active_dashboard();
             (d.floating.len(), d.floats_hidden)
         };
         let fl = |m: dashboard::floating::FloatMsg| Some(Message::Dashboard { layout_id: None, event: dashboard::Message::Float(m) });
-        r1 = r1.push(ui::text::metadata("│ 浮动层").color(ui::pal::dim()));
-        r1 = r1.push(w::btn("＋ 浮动窗口", Kind::Ghost, (!locked).then(|| fl(dashboard::floating::FloatMsg::NewBlank)).flatten()));
+        let mut float = row![w::btn("＋ 浮动窗口", Kind::Ghost, (!locked).then(|| fl(dashboard::floating::FloatMsg::NewBlank)).flatten())];
         if n_float > 0 {
-            r1 = r1.push(w::btn("一键整理", Kind::Ghost, (!locked).then(|| fl(dashboard::floating::FloatMsg::Tidy)).flatten()));
-            r1 = r1.push(w::btn(
+            float = float.push(w::btn("一键整理", Kind::Ghost, (!locked).then(|| fl(dashboard::floating::FloatMsg::Tidy)).flatten()));
+            float = float.push(w::btn(
                 if hidden { format!("展开浮动层（{n_float}）") } else { format!("收起浮动层（{n_float}）") },
                 if hidden { Kind::Standard } else { Kind::Ghost },
                 fl(dashboard::floating::FloatMsg::ToggleHidden),
             ));
         }
-        // 第二行：关掉的模板页 + 模板库
-        let mut r2 = row![ui::text::metadata("从模板新建：").color(ui::pal::dim())].spacing(ui::metrics::space(1)).align_y(Alignment::Center);
+        // 从模板新建：关掉的模板页 + 模板库
+        let mut from = row![];
         let mut any = false;
         for n in ws::workspace::page_layouts(&wsn).into_iter().filter(|n| self.pages.closed.contains(n)) {
             any = true;
-            r2 = r2.push(w::btn(format!("↺ {}", ws::workspace::page_title(&n)), Kind::Ghost, pm(P::Reopen(n))));
+            from = from.push(w::btn(format!("↺ {}", ws::workspace::page_title(&n)), Kind::Ghost, pm(P::Reopen(n))));
         }
         for (p, t) in ws::pages::templates() {
             any = true;
             let label = if t.workspace == wsn { t.title.clone() } else { format!("{} · {}", t.workspace, t.title) };
-            r2 = r2.push(w::btn(label, Kind::Ghost, pm(P::FromFile(p))));
+            from = from.push(w::btn(label, Kind::Ghost, pm(P::FromFile(p))));
         }
         if !any {
-            r2 = r2.push(
+            from = from.push(
                 ui::text::metadata(format!("还没有模板——「存为模板」会存到 {}；别的机器拷进同名目录即导入", ws::pages::template_dir().display()))
                     .color(ui::pal::dim()),
             );
         }
-        // 第三行：面板库（docs/41 D 期）——搜索 + 按分类列出；单实例的标「单」，能浮动的在「浮窗」开关下才放浮动层
+        // 添加面板（docs/41 D 期）：搜索 + 按分类一行一类；单实例的标「单」，能浮动的在「浮窗」开关下才放浮动层
         let q = self.lib_search.trim().to_lowercase();
-        let mut r3 = row![
-            ui::text::metadata("添加面板：").color(ui::pal::dim()),
+        let lib_head = row![
             iced::widget::text_input("搜索面板…", &self.lib_search)
                 .on_input(|t| Message::Page(P::LibrarySearch(t)))
-                .width(iced::Length::Fixed(140.0))
+                .width(iced::Length::Fixed(160.0))
                 .size(ui::text::s_small()),
             w::btn(
                 if self.lib_float { "加到：浮动层（图表）" } else { "加到：平铺层" },
                 if self.lib_float { Kind::Standard } else { Kind::Ghost },
                 pm(P::LibraryFloat(!self.lib_float)),
             ),
-        ]
-        .spacing(ui::metrics::space(1))
-        .align_y(Alignment::Center);
-        let mut last_cat = "";
-        let mut kinds: Vec<_> = data::layout::pane::ContentKind::ALL
-            .iter()
-            .copied()
-            .filter(|k| *k != data::layout::pane::ContentKind::Starter)
-            .filter(|k| !self.lib_float || ws::pages::floatable(*k))
-            .filter(|k| q.is_empty() || k.to_string().to_lowercase().contains(&q) || ws::pages::category(*k).contains(&q))
-            .collect();
-        kinds.sort_by_key(|k| ["行情", "订单流", "研究", "策略", "数据与资讯", "系统", "其他"].iter().position(|c| *c == ws::pages::category(*k)));
-        for k in kinds {
-            let cat = ws::pages::category(k);
-            if cat != last_cat {
-                r3 = r3.push(ui::text::metadata(format!("│ {cat}")).color(ui::pal::dim()));
-                last_cat = cat;
+        ];
+        let mut lib = column![group("添加面板", lib_head)].spacing(sp(1));
+        for cat in ["行情", "订单流", "研究", "策略", "数据与资讯", "系统", "其他"] {
+            let kinds: Vec<_> = data::layout::pane::ContentKind::ALL
+                .iter()
+                .copied()
+                .filter(|k| *k != data::layout::pane::ContentKind::Starter && ws::pages::category(*k) == cat)
+                .filter(|k| !self.lib_float || ws::pages::floatable(*k))
+                .filter(|k| q.is_empty() || k.to_string().to_lowercase().contains(&q) || cat.contains(&q))
+                .collect();
+            if kinds.is_empty() {
+                continue;
             }
-            let label = if ws::pages::single_instance(k) { format!("{k} ·单") } else { k.to_string() };
-            r3 = r3.push(w::btn(label, Kind::Ghost, (!locked).then(|| Message::Page(P::AddPanel(k)))));
+            let mut r = row![];
+            for k in kinds {
+                let label = if ws::pages::single_instance(k) { format!("{k} ·单") } else { k.to_string() };
+                r = r.push(w::btn(label, Kind::Ghost, (!locked).then(|| Message::Page(P::AddPanel(k)))));
+            }
+            lib = lib.push(group(&format!("　{cat}"), r));
         }
-        column![r1.wrap(), r2.wrap(), r3.wrap()].spacing(ui::metrics::space(1)).padding(ui::metrics::pad2(1, 3)).into()
+        column![
+            group("页", page),
+            group("模板", tpl),
+            group("联动", link),
+            group("浮动层", float),
+            group("从模板新建", from),
+            iced::widget::rule::horizontal(1.0),
+            lib,
+        ]
+        .spacing(sp(2))
+        .into()
     }
 
     /// 页面操作（docs/41 B 期）。

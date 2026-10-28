@@ -72,7 +72,8 @@ fn cell() -> &'static Mutex<St> {
         for m in [DataPickMsg::Pipeline(Pipeline::B), DataPickMsg::Source(BSource::Purchased)] {
             pick.update(m);
         }
-        Mutex::new(St { open: true, pick, strategy: None, run: None, note: String::new() })
+        // open = 「发起回测」浮窗开着（docs/64 §6），缺省关
+        Mutex::new(St { open: false, pick, strategy: None, run: None, note: String::new() })
     })
 }
 

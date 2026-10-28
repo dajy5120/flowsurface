@@ -494,6 +494,8 @@ impl Dashboard {
 
                         let task = match effect {
                             pane::Effect::RefreshStreams => self.refresh_streams(main_window.id),
+                            // 读本地历史文件的 K 线图（docs/64 §5）不向交易所补拉
+                            pane::Effect::RequestFetch(_) if state.kline_hist().is_some() => Task::none(),
                             pane::Effect::RequestFetch(reqs) => {
                                 let pane_id = state.unique_id();
                                 let ready_streams = state
@@ -1518,7 +1520,8 @@ impl Dashboard {
                 chart::Action::RequestFetch(reqs) => {
                     // 回放/回测工作区不补拉交易所历史：拉回来的是真实市场 K 线，
                     // 与本次回测毫无关系，却和回测蜡烛混在一起分不出来（docs/27 §12）。
-                    if crate::ws::workspace::replay_mode() {
+                    // 读本地历史文件的 K 线图（docs/64 §5）同理：蜡烛只来自那份文件
+                    if crate::ws::workspace::replay_mode() || state.kline_hist().is_some() {
                         return;
                     }
                     let pane_id = state.unique_id();
@@ -1877,6 +1880,38 @@ impl Dashboard {
             }
         }
         self.refresh_streams(main_window)
+    }
+
+    /// K 线图改读本地历史文件 / 换回交易所（docs/64 §5）：`None` = 换回。换了就重算订阅（读历史的图不连交易所）。
+    pub fn set_kline_hist(
+        &mut self,
+        main_window: window::Id,
+        window: window::Id,
+        pane: pane_grid::Pane,
+        hist: Option<data::layout::pane::KlineHist>,
+    ) -> Task<Message> {
+        if let Some(state) = self.get_mut_pane(main_window, window, pane) {
+            crate::ws::kline_hist::forget(state.unique_id());
+            state.settings.kline_hist = hist;
+        }
+        self.refresh_streams(main_window)
+    }
+
+    /// 每帧：读本地历史文件的 K 线图按（文件, 当前周期）要聚合，聚合好了整份交给图（docs/64 §5）。
+    pub fn drive_kline_hist(&mut self, main_window: window::Id) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            let Some(h) = state.kline_hist().cloned() else { continue };
+            let pane::Content::Kline { chart: Some(c), .. } = &state.content else { continue };
+            // 只支持按时间的周期（按笔数 / 跳数的 K 线没法从「按周期聚合」得到）
+            let data::chart::Basis::Time(tf) = c.basis() else { continue };
+            let uid = state.unique_id();
+            crate::ws::kline_hist::ensure(uid, &h, tf.to_milliseconds() / 1000);
+            if let Some(b) = crate::ws::kline_hist::take_ready(uid) {
+                let ti = crate::ws::kline_hist::stand_in(&h, b.tick);
+                let klines = crate::ws::kline_hist::to_klines(&b, &ti);
+                state.insert_hist_klines(None, tf, ti, &klines);
+            }
+        }
     }
 
     fn refresh_streams(&mut self, main_window: window::Id) -> Task<Message> {

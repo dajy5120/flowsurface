@@ -221,26 +221,110 @@ mod tests {
     }
 }
 
+/// 用共用数据选择组件的面板（docs/64 §4 W3）：它现在的选择、它的要求、怎么把新选择交给它。
+/// 选择器只在工具栏「数据 ▾」浮窗里，面板正文与检查器只留一行说明。
+pub struct DataHost {
+    pub pick: super::data_picker::DataPick,
+    pub opts: super::data_picker::PickOpts,
+    /// 怎么把新选择交给面板：`None` = K 线图（宿主自己切品种 / 读历史文件，见 `main.rs`）
+    pub wrap: Option<fn(super::data_picker::DataPickMsg) -> Event>,
+}
+
+#[must_use]
+pub fn data_host(st: &State) -> Option<DataHost> {
+    use super::feature_matrix::FeatureMatrixMsg;
+    match &st.content {
+        Content::BacktestResult => Some(DataHost {
+            pick: super::backtest_launch::view().pick,
+            opts: super::backtest_launch::pick_opts(),
+            wrap: Some(|m| Event::BacktestLaunchInteraction(super::backtest_launch::LaunchMsg::Data(m))),
+        }),
+        Content::TardisReplay(tr) => Some(DataHost {
+            pick: tr.pick.clone(),
+            opts: super::tardis_replay::pick_opts(),
+            wrap: Some(|m| Event::TardisReplayInteraction(super::tardis_replay::TardisReplayMsg::Data(m))),
+        }),
+        Content::TardisBoard(tb) => Some(DataHost {
+            pick: tb.pick.clone(),
+            opts: super::tardis_board::pick_opts(),
+            wrap: Some(|m| Event::TardisBoardInteraction(super::tardis_board::TardisBoardMsg::Data(m))),
+        }),
+        Content::FeatureMatrix => Some(DataHost {
+            pick: super::feature_source::view().pick,
+            opts: super::feature_source::pick_opts(),
+            wrap: Some(|m| Event::FeatureMatrixInteraction(FeatureMatrixMsg::Source(super::feature_source::SourceMsg::Data(m)))),
+        }),
+        Content::OfmsLab => Some(DataHost {
+            pick: super::ofms_lab::view(st.unique_id()).pick,
+            opts: super::ofms_lab::opts(),
+            wrap: Some(|m| Event::OfmsLabInteraction(super::ofms_lab::OfMsg::Pick(m))),
+        }),
+        // K 线（docs/64 §4 W4）：管线 A 选交易对 = 切品种（走原生的切换，联动组一起换）
+        Content::Kline { .. } => Some(DataHost { pick: kline_pick(st), opts: kline_opts(), wrap: None }),
+        _ => None,
+    }
+}
+
+/// K 线图对数据浮窗的要求：图表用（两条管线都可选），管线 B 只列本地历史文件（docs/64 §5），按日期选一段。
+#[must_use]
+pub fn kline_opts() -> super::data_picker::PickOpts {
+    use super::data_picker::{BSource, PickOpts, Purpose, TimeMode};
+    PickOpts {
+        purpose: Purpose::Chart,
+        sources: Some(vec![BSource::Purchased, BSource::Recorded, BSource::Own]),
+        vendors: None,
+        time: TimeMode::Date,
+        local_only: false,
+        hide_types: true,
+        range: true,
+        require: None,
+    }
+}
+
+/// K 线图现在的选择：读的本地历史文件（管线 B），或交易所直连的品种（管线 A）。
+fn kline_pick(st: &State) -> super::data_picker::DataPick {
+    use super::data_picker::{BSource, DataPick, Pipeline};
+    let mut p = DataPick::default();
+    if let Some(h) = st.kline_hist() {
+        p.pipeline = Some(Pipeline::B);
+        p.source = Some(match h.source.as_str() {
+            "recorder" => BSource::Recorded,
+            "own" => BSource::Own,
+            _ => BSource::Purchased,
+        });
+        if p.source == Some(BSource::Purchased) {
+            p.vendor = Some(h.source.clone());
+        }
+        p.root = h.root.clone();
+        p.market = Some(h.market.clone());
+        p.symbol = Some(h.symbol.clone());
+        p.date = Some(h.date.clone());
+        p.end = (!h.end.is_empty()).then(|| h.end.clone());
+    } else if let Some(ti) = st.stream_pair() {
+        let (sym, kind) = ti.ticker.to_full_symbol_and_type();
+        p.pipeline = Some(Pipeline::A);
+        p.venue = Some(ti.ticker.exchange.venue().to_string());
+        p.market = Some(
+            match kind {
+                exchange::adapter::MarketKind::Spot => "spot",
+                exchange::adapter::MarketKind::LinearPerps => "linear",
+                exchange::adapter::MarketKind::InversePerps => "inverse",
+            }
+            .into(),
+        );
+        p.symbol = Some(sym);
+    }
+    p
+}
+
 /// 检查器「数据」页（docs/42 第 3 期）：选中面板的数据选择——共用数据选择组件等。
 pub fn data_view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
-    let section = |title: &str| crate::ui::text::metadata(title.to_string());
     match &st.content {
         Content::FeatureMatrix => Some(
             super::feature_matrix_view::inspector_source().map(Event::FeatureMatrixInteraction),
         ),
         Content::OfmsLab => Some(super::ofms_lab_view::inspector_data(st.unique_id()).map(Event::OfmsLabInteraction)),
-        Content::BacktestResult => {
-            let v = super::backtest_launch::view();
-            Some(
-                column![
-                    section("回测数据"),
-                    super::data_picker_view::view(&v.pick, &super::backtest_launch::pick_opts())
-                        .map(|m| Event::BacktestLaunchInteraction(super::backtest_launch::LaunchMsg::Data(m))),
-                ]
-                .spacing(crate::ui::metrics::space(2))
-                .into(),
-            )
-        }
+        // 回测结果 / Tardis 回放的「数据」页原来只有数据选择：已挪到工具栏「数据 ▾」浮窗（docs/64 §4）
         Content::TardisBoard(tb) => Some(super::tardis_board_view::inspector_data(tb).map(Event::TardisBoardInteraction)),
         Content::MarketMap => Some(
             with_part(Part::Data, || super::radar_view::pane_body(st.settings.view.as_deref())).map(Event::RadarInteraction),
@@ -257,15 +341,6 @@ pub fn data_view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
             Some(super::customchart::inspector().map(Event::SelfChartInteraction))
         }
         Content::PmReplay(pr) => Some(with_part(Part::Data, || super::pm_replay_view::pane_body(pr)).map(Event::PmReplayInteraction)),
-        Content::TardisReplay(tr) => Some(
-            column![
-                section("数据"),
-                super::data_picker_view::view(&tr.pick, &super::tardis_replay::pick_opts())
-                    .map(|m| Event::TardisReplayInteraction(super::tardis_replay::TardisReplayMsg::Data(m))),
-            ]
-            .spacing(crate::ui::metrics::space(2))
-            .into(),
-        ),
         _ => None,
     }
 }
