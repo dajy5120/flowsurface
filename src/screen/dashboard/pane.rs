@@ -934,7 +934,12 @@ impl State {
 
         if self.frozen {
             top_left_buttons = top_left_buttons.push(
-                text("❄ 已冻结").size(crate::ui::text::s_meta()).color(crate::ui::pal::info()).align_y(Alignment::Center).line_height(1.4),
+                row![
+                    crate::ui::widgets::glyph(Icon::UiSnowflake, crate::ui::text::s_meta()).color(crate::ui::pal::info()),
+                    text("已冻结").size(crate::ui::text::s_meta()).color(crate::ui::pal::info()).line_height(1.4),
+                ]
+                .spacing(crate::ui::metrics::space(1))
+                .align_y(Alignment::Center),
             );
         }
 
@@ -2459,7 +2464,7 @@ impl State {
         // 冻结（docs/35 §8）：行情图表、盘口、逐笔、订单表
         if !treat_as_starter && (self.stream_pair_kind().is_some() || matches!(&self.content, Content::Orders)) {
             primary.push(button_with_tooltip(
-                text(if self.frozen { "▶" } else { "❄" }).size(crate::ui::text::s_small()),
+                icon_text(if self.frozen { Icon::UiPlay } else { Icon::UiSnowflake }, 12),
                 Message::PaneEvent(pane, Event::ToggleFreeze),
                 Some(if self.frozen { "解冻（追上最新数据）" } else { "冻结：停止刷新，便于阅读和截图" }),
                 tooltip_pos,
@@ -2481,7 +2486,7 @@ impl State {
             // 图表类面板可以浮到浮动层上自由组合（docs/41 §4.2）
             if self.is_chart_kind() {
                 buttons.push(button_with_tooltip(
-                    text("◰").size(crate::ui::text::s_small()),
+                    icon_text(Icon::UiFloat, 12),
                     Message::FloatPane(pane),
                     Some("浮动：放到浮动层上，自由摆放（多图组合）"),
                     tooltip_pos,
@@ -2532,7 +2537,7 @@ impl State {
         }
         if crowded {
             bar = bar.push(button_with_tooltip(
-                text("⋯").size(crate::ui::text::s_small()),
+                icon_text(Icon::DrMore, 12),
                 Message::PaneEvent(pane, Event::ToggleOverflow),
                 Some(if self.overflow { "收起" } else { "更多：设置、指标、弹出窗口" }),
                 tooltip_pos,

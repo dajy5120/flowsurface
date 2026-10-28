@@ -110,8 +110,8 @@ pub fn pane_body<'a>() -> Element<'a, C4Msg> {
         let ctl = row![
             button(text("▶ 启动").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 3)).on_press(C4Msg::StartShadow),
             button(text("■ 停止").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 3)).on_press(C4Msg::StopShadow),
-            button(text("↻ 重启").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 3)).on_press(C4Msg::RestartShadow),
-            button(text("⟳ 刷新").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 3)).on_press(C4Msg::Refresh),
+            button(crate::ui::widgets::sym_label("↻ 重启", crate::ui::text::s_small(), None)).padding(crate::ui::metrics::pad2(0, 3)).on_press(C4Msg::RestartShadow),
+            button(crate::ui::widgets::sym_label("⟳ 刷新", crate::ui::text::s_small(), None)).padding(crate::ui::metrics::pad2(0, 3)).on_press(C4Msg::Refresh),
             text(format!("  刷新于 {}", st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(6)

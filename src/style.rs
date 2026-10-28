@@ -112,6 +112,27 @@ pub enum Icon {
     DrEye = 59688,
     DrEyeOff = 59689,
     DrMore = 59690,
+    // 界面通用（docs/66：替换 emoji 与杂用符号；同一脚本，接着 DrMore 往后排）
+    UiBell = 59691,
+    UiAlert = 59692,
+    UiPin = 59693,
+    UiSendOff = 59694,
+    UiPanelRight = 59695,
+    UiPanelBottom = 59696,
+    UiSnowflake = 59697,
+    UiSidebar = 59698,
+    UiPlay = 59699,
+    UiPause = 59700,
+    UiPrev = 59701,
+    UiNext = 59702,
+    UiRefresh = 59703,
+    UiDownload = 59704,
+    UiCamera = 59705,
+    UiBolt = 59706,
+    UiSliders = 59707,
+    UiSparkle = 59708,
+    UiKey = 59709,
+    UiFloat = 59710,
 }
 
 impl From<Icon> for char {

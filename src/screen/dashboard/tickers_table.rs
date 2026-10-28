@@ -878,7 +878,7 @@ impl TickersTable {
                 .padding(crate::ui::metrics::space(2)),
             // 手动刷新 24h 统计（只拉选中的交易所；13 秒内重复点会被挡住）
             iced::widget::tooltip(
-                button(text("⟳").align_x(Horizontal::Center).align_y(Vertical::Center))
+                button(crate::ui::widgets::glyph(style::Icon::UiRefresh, crate::ui::text::s_body() + 2.0).align_x(Horizontal::Center).align_y(Vertical::Center))
                     .height(28)
                     .width(28)
                     .on_press(Message::FetchStats)
@@ -888,7 +888,7 @@ impl TickersTable {
             ),
             // 手动重新拉交易对清单（平时用本地缓存，见 ws::ticker_cache）
             iced::widget::tooltip(
-                button(text("⇩").align_x(Horizontal::Center).align_y(Vertical::Center))
+                button(crate::ui::widgets::glyph(style::Icon::UiDownload, crate::ui::text::s_body() + 2.0).align_x(Horizontal::Center).align_y(Vertical::Center))
                     .height(28)
                     .width(28)
                     .on_press_maybe(

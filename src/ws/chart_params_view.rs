@@ -339,7 +339,7 @@ fn card_view<'a>(
 }
 
 fn btn<'a>(label: &str, msg: Msg, active: bool) -> Element<'a, Msg> {
-    button(text(label.to_string()).size(crate::ui::text::s_small()))
+    button(crate::ui::widgets::sym_label(label, crate::ui::text::s_small(), None))
         .padding(crate::ui::metrics::pad2(0, 3))
         .style(move |t, st| crate::style::button::modifier(t, st, active))
         .on_press(msg)

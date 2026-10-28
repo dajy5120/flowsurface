@@ -63,13 +63,10 @@ fn lag_text(ms: i64) -> String {
 
 // ── 顶栏的铃铛 ────────────────────────────────────────────────────────
 
-/// 🔔 的文字与是否醒目：（「🔔 12」, 「⚠ 1」或空, 渠道异常提示或空）。
+/// 渠道异常的一句（铃铛旁「发送失败」图标的悬停说明）；没有异常为空。
 #[must_use]
-pub fn bell_parts(b: &ib::Badge) -> (String, String, String) {
-    let bell = if b.unread > 0 { format!("🔔 {}", b.unread.min(999)) } else { "🔔".into() };
-    let urgent = if b.urgent > 0 { format!("⚠ {}", b.urgent) } else { String::new() };
-    let chan = if b.chan_failed > 0 { format!("Telegram 最近 24 小时有 {} 条没发出去", b.chan_failed) } else { String::new() };
-    (bell, urgent, chan)
+pub fn chan_note(b: &ib::Badge) -> String {
+    if b.chan_failed > 0 { format!("Telegram 最近 24 小时有 {} 条没发出去", b.chan_failed) } else { String::new() }
 }
 
 // ── 消息中心 ──────────────────────────────────────────────────────────
@@ -88,7 +85,13 @@ fn content<'a>(wide: bool) -> Element<'a, InboxMsg> {
 
     // 第一行：搜索、品种、时间段、全部已读、导出、分类开关
     let top = row![
-        w::btn(if u.cats_hidden { "☰ 分类" } else { "☰" }, w::Kind::Ghost, Some(InboxMsg::ToggleCats)),
+        w::ibtn_tip(
+            crate::style::Icon::UiSidebar,
+            if u.cats_hidden { "分类" } else { "" },
+            w::Kind::Ghost,
+            Some(InboxMsg::ToggleCats),
+            if u.cats_hidden { "显示左侧分类" } else { "收起左侧分类" }
+        ),
         text_input("搜索标题 / 正文 / 来源", &u.text).on_input(InboxMsg::Text).size(t::s_small()).padding(metrics::pad2(1, 2)).width(Length::Fixed(220.0)),
         text_input("品种", &u.symbol).on_input(InboxMsg::Symbol).size(t::s_small()).padding(metrics::pad2(1, 2)).width(Length::Fixed(110.0)),
         w::segmented(&Range::ALL.map(|r| (r.label(), r)), &u.range, InboxMsg::Range),
@@ -252,7 +255,13 @@ fn line<'a>(m: &ib::Msg, u: &super::inbox::Ui, n: usize, by_source: bool, expand
         let label = if by_source { format!("{n} 个来源 {}", if expanded { "▴" } else { "▾" }) } else { format!("×{n} {}", if expanded { "▴" } else { "▾" }) };
         out = out.push(w::btn(label, w::Kind::Ghost, Some(InboxMsg::Expand(id))));
     }
-    out = out.push(w::btn(if m.starred { "★" } else { "☆" }, w::Kind::Ghost, Some(InboxMsg::Star(id, !m.starred))));
+    out = out.push(w::ibtn_tip(
+        if m.starred { crate::style::Icon::StarFilled } else { crate::style::Icon::Star },
+        "",
+        w::Kind::Ghost,
+        Some(InboxMsg::Star(id, !m.starred)),
+        if m.starred { "去掉星标" } else { "加星标（永不过期）" },
+    ));
     out.into()
 }
 

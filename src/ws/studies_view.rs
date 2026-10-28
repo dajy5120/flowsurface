@@ -7,6 +7,7 @@
 //!
 //! 每张图各自一组（`chart` = 面板设置里的 `chart_id`）；`symbol` = 图现在的品种键（只用来解析「别的品种」与锚点）。
 
+use crate::style::Icon;
 use iced::widget::{button, column, container, row, scrollable, text, text_input, tooltip, Space};
 use iced::{Alignment, Element, Length};
 
@@ -36,7 +37,17 @@ fn small<'a>(label: impl Into<String>, msg: StudyMsg) -> Element<'a, StudyMsg> {
     button(text(label.into()).size(t::s_meta())).padding(metrics::pad2(0, 1)).style(|th, s| crate::style::button::modifier(th, s, false)).on_press(msg).into()
 }
 
-/// 小图标按钮 + 悬停说明。
+/// 图标字体的小图标按钮 + 悬停说明（docs/66：不用 emoji）。
+fn icon_g<'a>(g: Icon, tip: &'static str, msg: StudyMsg) -> Element<'a, StudyMsg> {
+    tooltip(
+        button(crate::ui::widgets::glyph(g, t::s_small() + 1.0)).padding(metrics::pad2(0, 1)).style(|th, s| crate::style::button::modifier(th, s, false)).on_press(msg),
+        container(t::caption(tip)).padding(metrics::space(2)).style(crate::style::tooltip),
+        tooltip::Position::Top,
+    )
+    .into()
+}
+
+/// 小文字符号按钮（↑ ↓ 这类）+ 悬停说明。
 fn icon<'a>(glyph: &'static str, tip: &'static str, msg: StudyMsg) -> Element<'a, StudyMsg> {
     tooltip(
         button(text(glyph).size(t::s_small())).padding(metrics::pad2(0, 1)).style(|th, s| crate::style::button::modifier(th, s, false)).on_press(msg),
@@ -131,7 +142,11 @@ fn add_tab<'a>(chart: &str, ui: &st::UiState) -> Element<'a, StudyMsg> {
             container(t::caption(d.description)).padding(metrics::space(2)).max_width(420.0).style(crate::style::tooltip),
             tooltip::Position::Bottom,
         );
-        let mut r = row![small(if fav { "★" } else { "☆" }, StudyMsg::Favorite(d.id.to_string())), add].spacing(metrics::space(1)).align_y(Alignment::Center);
+        let star = button(crate::ui::widgets::glyph(if fav { Icon::StarFilled } else { Icon::Star }, t::s_small()).color(if fav { pal::warn() } else { pal::dim() }))
+            .padding(metrics::pad2(0, 1))
+            .style(|th, s| crate::style::button::modifier(th, s, false))
+            .on_press(StudyMsg::Favorite(d.id.to_string()));
+        let mut r = row![star, add].spacing(metrics::space(1)).align_y(Alignment::Center);
         if added > 0 {
             r = r.push(text(if added == 1 { "已加".to_string() } else { format!("已加 ×{added}") }).size(t::s_meta()).color(pal::ok()));
         }
@@ -172,7 +187,7 @@ fn loaded_list<'a>(chart: &str, templates: bool) -> Element<'a, StudyMsg> {
         let dragging = ui.drag.as_ref().is_some_and(|d| d.0 == chart && d.1 == uid);
         // 拖动排序（T3）：按住把手，拖过别的行就挪到那里，松开结束
         let grip = tooltip(
-            iced::widget::mouse_area(text("⠿").size(t::s_small()).color(pal::dim()))
+            iced::widget::mouse_area(crate::ui::widgets::glyph(Icon::DragHandle, t::s_small()).color(pal::dim()))
                 .on_press(StudyMsg::DragStart { chart: c.clone(), uid })
                 .interaction(iced::mouse::Interaction::Grab),
             container(t::caption("按住拖动排序")).padding(metrics::space(2)).style(crate::style::tooltip),
@@ -180,7 +195,7 @@ fn loaded_list<'a>(chart: &str, templates: bool) -> Element<'a, StudyMsg> {
         );
         let mut r = row![
             grip,
-            icon(if s.visible { "👁" } else { "◌" }, if s.visible { "隐藏" } else { "显示" }, StudyMsg::Visible { chart: c.clone(), uid, on: !s.visible }),
+            icon_g(if s.visible { Icon::DrEye } else { Icon::DrEyeOff }, if s.visible { "隐藏" } else { "显示" }, StudyMsg::Visible { chart: c.clone(), uid, on: !s.visible }),
             button(text(s.label()).size(t::s_small()).color(name_c))
                 .padding(metrics::pad2(0, 1))
                 .style(|th, st_| crate::style::button::modifier(th, st_, false))
@@ -190,14 +205,14 @@ fn loaded_list<'a>(chart: &str, templates: bool) -> Element<'a, StudyMsg> {
         .spacing(metrics::space(1))
         .align_y(Alignment::Center);
         if s.alert.as_ref().is_some_and(|a| a.armed) {
-            r = r.push(text("🔔").size(t::s_meta()));
+            r = r.push(crate::ui::widgets::glyph(Icon::UiBell, t::s_meta()).color(pal::dim()));
         }
         r = r.push(Space::new().width(Length::Fill));
-        r = r.push(icon("⚙", "设置", StudyMsg::Edit(Some((c.clone(), uid)))));
-        r = r.push(icon("⧉", "复制一个", StudyMsg::Duplicate { chart: c.clone(), uid }));
+        r = r.push(icon_g(Icon::Cog, "设置", StudyMsg::Edit(Some((c.clone(), uid)))));
+        r = r.push(icon_g(Icon::Clone, "复制一个", StudyMsg::Duplicate { chart: c.clone(), uid }));
         r = r.push(icon("↑", "上移", StudyMsg::Move { chart: c.clone(), uid, up: true }));
         r = r.push(icon("↓", "下移", StudyMsg::Move { chart: c.clone(), uid, up: false }));
-        r = r.push(icon("✕", "删除", StudyMsg::Remove { chart: c.clone(), uid }));
+        r = r.push(icon_g(Icon::Close, "删除", StudyMsg::Remove { chart: c.clone(), uid }));
         let r = container(r).style(move |_| container::Style {
             background: dragging.then(|| iced::Background::Color(pal::alpha(pal::accent(), 0.18))),
             ..Default::default()
@@ -686,7 +701,7 @@ fn legend_row<'a>(chart: &str, r: &st::LegendRow, hovered: bool, own_exit: bool)
         line = line.push(text("这个周期不显示").size(t::s_meta()).color(pal::dim()));
     }
     if r.alert {
-        line = line.push(text("🔔").size(t::s_meta()));
+        line = line.push(crate::ui::widgets::glyph(Icon::UiBell, t::s_meta()).color(pal::dim()));
     }
     if let Some(e) = &r.error {
         line = line.push(tooltip(
@@ -697,9 +712,9 @@ fn legend_row<'a>(chart: &str, r: &st::LegendRow, hovered: bool, own_exit: bool)
     }
     // 悬停才出现的三个图标（平时只有文字，主区减负）
     if hovered {
-        line = line.push(icon(if r.visible { "👁" } else { "◌" }, if r.visible { "隐藏" } else { "显示" }, StudyMsg::Visible { chart: c.clone(), uid, on: !r.visible }));
-        line = line.push(icon("⚙", "设置", StudyMsg::Edit(Some((c.clone(), uid)))));
-        line = line.push(icon("✕", "删除", StudyMsg::Remove { chart: c.clone(), uid }));
+        line = line.push(icon_g(if r.visible { Icon::DrEye } else { Icon::DrEyeOff }, if r.visible { "隐藏" } else { "显示" }, StudyMsg::Visible { chart: c.clone(), uid, on: !r.visible }));
+        line = line.push(icon_g(Icon::Cog, "设置", StudyMsg::Edit(Some((c.clone(), uid)))));
+        line = line.push(icon_g(Icon::Close, "删除", StudyMsg::Remove { chart: c.clone(), uid }));
     }
     let area = iced::widget::mouse_area(pill(line.into())).on_enter(StudyMsg::Hover { chart: c.clone(), uid, on: true });
     if own_exit { area.on_exit(StudyMsg::Hover { chart: c, uid, on: false }).into() } else { area.into() }

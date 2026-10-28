@@ -126,7 +126,13 @@ fn tokens_disabled() -> f32 {
 /// 一个按钮：高度 = 控件高度，文字用标签角色。`msg = None` 即禁用。
 pub fn btn<'a, M: Clone + 'a>(label: impl Into<String>, kind: Kind, msg: Option<M>) -> Element<'a, M> {
     let h = metrics::control_height();
-    let mut b = button(container(t::label(label)).height(Length::Fill).align_y(Alignment::Center))
+    let label: String = label.into();
+    // 开头的 ⟳ ⇩ ⏸ ✎ 这类画成图标字体的字形（docs/66）
+    let face: Element<'a, M> = match lead_icon(&label) {
+        Some((icon, rest)) => ilabel(icon, rest.to_string(), t::size(super::Role::Label)),
+        None => t::label(label).into(),
+    };
+    let mut b = button(container(face).height(Length::Fill).align_y(Alignment::Center))
         .height(Length::Fixed(h))
         .padding(Padding::from([0.0, metrics::space(4)]))
         .style(move |th, st| button_style(kind, th, st));
@@ -425,6 +431,104 @@ pub fn time_range<'a, M: Clone + 'a>(date: Option<&str>, start: &str, minutes: u
     column![presets.wrap(), t::caption(resolved)].spacing(metrics::space(1)).into()
 }
 
+// ── 图标（docs/66）────────────────────────────────────────────────────
+//
+// 图标一律用图标字体（`assets/fonts/icons.ttf`，`scripts/ws_icons.py` 画的线性图标），不用 emoji：
+// emoji 走彩色后备字体，自带颜色、不跟主题、与文字对不齐。
+
+/// 一个图标字形，与 `size` 号文字同高；颜色跟随所在控件（按钮文字色）或自己 `.color()`。
+pub fn glyph<'a>(icon: crate::style::Icon, size: f32) -> iced::widget::Text<'a, Theme, iced::Renderer> {
+    text(char::from(icon).to_string()).font(crate::style::ICONS_FONT).size(size).line_height(1.0)
+}
+
+/// 图标 + 文字（按钮内容、标签）。文字为空时只有图标。
+pub fn ilabel<'a, M: 'a>(icon: crate::style::Icon, label: impl Into<String>, size: f32) -> Element<'a, M> {
+    let label: String = label.into();
+    let mut r = row![glyph(icon, size + 1.0)].spacing(metrics::space(1)).align_y(Alignment::Center);
+    if !label.is_empty() {
+        r = r.push(text(label).size(size));
+    }
+    r.into()
+}
+
+/// 按钮文字开头的符号 → 图标字体的字形（docs/66）：`⟳ 刷新` 画成「刷新图标 + 刷新」。
+/// 只认按钮上当图标用的几个；▶ ● ▲ 这类文字符号不动（docs/35「文字 + 符号」）。
+#[must_use]
+pub fn lead_icon(label: &str) -> Option<(crate::style::Icon, &str)> {
+    use crate::style::Icon;
+    let mut it = label.chars();
+    let c = it.next()?;
+    let icon = match c {
+        '⟳' | '↻' => Icon::UiRefresh,
+        '⇩' => Icon::UiDownload,
+        '⏸' => Icon::UiPause,
+        '⏮' => Icon::UiPrev,
+        '⏭' => Icon::UiNext,
+        '✎' => Icon::Edit,
+        '⚙' => Icon::Cog,
+        _ => return None,
+    };
+    Some((icon, it.as_str().trim_start()))
+}
+
+/// 按钮 / 标签的内容：开头是 [`lead_icon`] 认得的符号就画成图标 + 文字，否则就是文字。`color`：文字与图标的颜色（空 = 跟按钮）。
+pub fn sym_label<'a, M: 'a>(label: &str, size: f32, color: Option<Color>) -> Element<'a, M> {
+    match lead_icon(label) {
+        Some((icon, rest)) => {
+            let mut g = glyph(icon, size + 1.0);
+            let mut tx = text(rest.to_string()).size(size);
+            if let Some(c) = color {
+                g = g.color(c);
+                tx = tx.color(c);
+            }
+            let mut r = row![g].spacing(metrics::space(1)).align_y(Alignment::Center);
+            if !rest.is_empty() {
+                r = r.push(tx);
+            }
+            r.into()
+        }
+        None => {
+            let mut tx = text(label.to_string()).size(size);
+            if let Some(c) = color {
+                tx = tx.color(c);
+            }
+            tx.into()
+        }
+    }
+}
+
+/// 图标按钮（与 [`btn`] 同五种样式、同高）。`label` 为空 = 只有图标。
+pub fn ibtn<'a, M: Clone + 'a>(icon: crate::style::Icon, label: impl Into<String>, kind: Kind, msg: Option<M>) -> Element<'a, M> {
+    let h = metrics::control_height();
+    let mut b = button(container(ilabel(icon, label, t::size(super::Role::Label))).height(Length::Fill).align_y(Alignment::Center))
+        .height(Length::Fixed(h))
+        .padding(Padding::from([0.0, metrics::space(3)]))
+        .style(move |th, st| button_style(kind, th, st));
+    if let Some(m) = msg {
+        b = b.on_press(m);
+    }
+    b.into()
+}
+
+/// [`ibtn`] + 悬停提示（纯图标按钮必须给，说明它是什么）。
+pub fn ibtn_tip<'a, M: Clone + 'a>(icon: crate::style::Icon, label: impl Into<String>, kind: Kind, msg: Option<M>, tip: impl Into<String>) -> Element<'a, M> {
+    iced::widget::tooltip(ibtn(icon, label, kind, msg), container(t::caption(tip)).padding(metrics::space(2)).style(crate::style::tooltip), iced::widget::tooltip::Position::Bottom)
+        .delay(std::time::Duration::from_millis(300))
+        .into()
+}
+
+/// [`ibtn`]；`msg = None` 时禁用，并在悬停提示里说清为什么（同 [`btn_why`]）。
+pub fn ibtn_why<'a, M: Clone + 'a>(icon: crate::style::Icon, label: impl Into<String>, kind: Kind, msg: Option<M>, why: impl Into<String>) -> Element<'a, M> {
+    let disabled = msg.is_none();
+    let b = ibtn(icon, label, kind, msg);
+    if !disabled {
+        return b;
+    }
+    iced::widget::tooltip(b, container(t::caption(why)).padding(metrics::space(2)).style(crate::style::tooltip), iced::widget::tooltip::Position::Top)
+        .delay(std::time::Duration::from_millis(450))
+        .into()
+}
+
 // ── 带原因的禁用 / 加载中（UPDS V3 §13 交互状态，docs/35 §6.2）────────────
 
 /// 按钮；`msg = None` 时禁用，并在悬停提示里说清**为什么**不能点（不给一个点了没反应的按钮）。
@@ -445,8 +549,13 @@ pub fn btn_busy<'a, M: Clone + 'a>(label: impl Into<String>, kind: Kind, msg: Op
     let units: f32 = label.chars().map(|c| if c.is_ascii() { 0.62 } else { 1.0 }).sum();
     // 预留「◌ 」的宽度（符号约 1em + 空格），两种状态同宽，切换时版面不跳
     let w = (units + 1.8) * t::size(super::Role::Label) + metrics::space(4) * 2.0;
-    let shown = if busy { format!("◌ {label}") } else { label };
-    let b = button(container(t::label(shown).wrapping(iced::widget::text::Wrapping::None)).height(Length::Fill).align_y(Alignment::Center).align_x(Alignment::Center).width(Length::Fill))
+    // 开头的 ⇩ ⟳ 这类画成图标（docs/66）；转圈时换成 ◌
+    let face: Element<'a, M> = match (busy, lead_icon(&label)) {
+        (true, l) => t::label(format!("◌ {}", l.map_or(label.as_str(), |x| x.1))).wrapping(iced::widget::text::Wrapping::None).into(),
+        (false, Some((icon, rest))) => ilabel(icon, rest.to_string(), t::size(super::Role::Label)),
+        (false, None) => t::label(label).wrapping(iced::widget::text::Wrapping::None).into(),
+    };
+    let b = button(container(face).height(Length::Fill).align_y(Alignment::Center).align_x(Alignment::Center).width(Length::Fill))
         .height(Length::Fixed(metrics::control_height()))
         .width(Length::Fixed(w))
         .padding(Padding::from([0.0, metrics::space(4)]))

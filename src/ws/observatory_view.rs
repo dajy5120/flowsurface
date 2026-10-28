@@ -80,6 +80,17 @@ pub enum ObsMsg {
     HistDelete(usize),
 }
 
+/// 密钥相关的警示一行：钥匙图标 + 文字（docs/66：不用 emoji）。
+fn key_note<'a, M: 'a>(msg: String) -> Element<'a, M> {
+    row![
+        crate::ui::widgets::glyph(crate::style::Icon::UiKey, crate::ui::text::s_meta()).color(crate::ui::pal::warn()),
+        text(msg).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()),
+    ]
+    .spacing(crate::ui::metrics::space(1))
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
 fn cell<'a>(s: String, w: f32, c: Color, numeric: bool) -> Element<'a, ObsMsg> {
     container(text(s).size(crate::ui::text::s_small()).color(c))
         .width(Length::Fixed(w))
@@ -211,7 +222,7 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
     if !st.secret_warn.is_empty() {
         // 明文密钥不阻止连接，但静默接受等于假装没这回事：请求文件是
         // tmpfs 上的普通文件，同一用户的任何进程都读得到
-        top = top.push(text(format!("🔑 {}", clip(&st.secret_warn, 56))).size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
+        top = top.push(key_note(clip(&st.secret_warn, 56)));
     }
     // 模式切换。**同一个会话上的三种界面**，不是三个程序
     let mode = ro::mode();
@@ -368,7 +379,7 @@ pub fn pane_body<'a>() -> Element<'a, ObsMsg> {
             .spacing(6)
             .align_y(iced::Alignment::Center);
             if e.needs_secret {
-                meta = meta.push(text("🔑 要重填密钥").size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()));
+                meta = meta.push(key_note("要重填密钥".to_string()));
             }
             meta = meta.push(chip("×", ObsMsg::HistDelete(i)));
             let r = row![
@@ -774,7 +785,7 @@ fn api_block<'a>(st: &ro::ObsReadout, sess: &ro::SessionView) -> Element<'a, Obs
         // 存之前说，别等它躺在那儿
         if lib::looks_like_a_secret(&ro::send_body()) {
             sr = sr.push(
-                text("🔑 请求体里像有明文密钥——改成 ${环境变量名}").size(crate::ui::text::s_meta()).color(crate::ui::pal::warn()),
+                key_note("请求体里像有明文密钥——改成 ${环境变量名}".to_string()),
             );
         }
         col = col.push(sr);

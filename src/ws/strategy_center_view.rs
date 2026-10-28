@@ -3,6 +3,7 @@
 //! 只读 [`super::strategy_center::view`] 的快照，不做 IO。完整 tearsheet 在同工作区右侧的
 //! 「回测结果」面板（点一条运行记录会把它钉在那次运行上）。
 
+use crate::style::Icon;
 use iced::widget::{Space, button, column, container, pick_list, row, text_input};
 use iced::{Alignment, Element, Length};
 
@@ -235,7 +236,7 @@ fn library_item<'a>(e: &Entry, v: &View) -> Element<'a, ScMsg> {
                 && s.is_bp()
             {
                 let (per, c) = signed(s.net_bp_mean, 2);
-                sub = sub.push(row![t::metadata("最近 ⚡").color(pal::dim()), t::numeric(format!("{per} bp/笔")).color(c)].spacing(space(2)));
+                sub = sub.push(row![t::metadata("最近快速").color(pal::dim()), t::numeric(format!("{per} bp/笔")).color(c)].spacing(space(2)));
             } else if let Some(r) = v.latest.get(&e.id)
                 && let Some(s) = &r.summary
             {
@@ -465,9 +466,9 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
     col = col.push(
         row![
             if quick_ok {
-                w::btn("⚡ 快速回测", Kind::Standard, Some(ScMsg::RunQuick))
+                w::ibtn(Icon::UiBolt, "快速回测", Kind::Standard, Some(ScMsg::RunQuick))
             } else {
-                w::btn_why("⚡ 快速回测", Kind::Standard, None::<ScMsg>,
+                w::ibtn_why(Icon::UiBolt, "快速回测", Kind::Standard, None::<ScMsg>,
                            if !can_quick { "这个策略没有快速回测引擎" } else if v.sending { "正在发送…" } else { "先改正标红的参数" })
             },
             if ok {
@@ -489,9 +490,9 @@ fn detail<'a>(v: &View) -> Element<'a, ScMsg> {
     col = col.push(t::metadata("完整回测走 ws-control → factory.lab：入口体检、真实撮合、记进研究库。进度看底部进度条与 K 线，结果在右侧「回测结果」。").color(pal::dim()));
     if can_quick {
         col = col.push(t::metadata(if m.quick.as_deref() == Some("bars") {
-            "⚡ 快速回测 = 大师日线七层引擎：组合级、逐根推进、下一根成交、真实合约乘数与费用、逐日盯市；日线看不到盘中先后，当根进出多的策略会自动并列最坏情况。"
+            "快速回测 = 大师日线七层引擎：组合级、逐根推进、下一根成交、真实合约乘数与费用、逐日盯市；日线看不到盘中先后，当根进出多的策略会自动并列最坏情况。"
         } else {
-            "⚡ 快速回测 = 100ms 特征帧向量回测，秒级、按「每笔 1 倍名义」的 bp 计，不建模排队与延迟——只用来筛，结论以完整回测为准。"
+            "快速回测 = 100ms 特征帧向量回测，秒级、按「每笔 1 倍名义」的 bp 计，不建模排队与延迟——只用来筛，结论以完整回测为准。"
         }).color(pal::dim()));
     }
     if can_full || can_quick {
@@ -510,7 +511,7 @@ fn run_item<'a>(r: &RunRow, picked: bool, in_basket: bool, is_workflow: bool) ->
     if let Some(s) = &r.summary {
         if s.is_bp() {
             let (per, c) = signed(s.net_bp_mean, 2);
-            head = head.push(w::badge("⚡ 快速", Tone::Neutral));
+            head = head.push(w::badge("快速", Tone::Neutral));
             head = head.push(t::numeric(format!("{per} bp/笔")).color(c));
         } else {
             let (pnl, c) = signed(s.pnl, 2);
@@ -557,7 +558,7 @@ fn summary_card<'a>(r: &RunRow, s: &Summary) -> Element<'a, ScMsg> {
         let (tot, c) = signed(s.pnl, 1);
         let (per, c2) = signed(s.net_bp_mean, 3);
         return column![
-            w::section(format!("概况 · {} · ⚡ 快速回测", r.run_id)),
+            w::section(format!("概况 · {} · 快速回测", r.run_id)),
             w::kv("每笔净值", row![t::numeric(per).color(c2), t::metadata("bp").color(pal::dim())].spacing(space(1)).into(), KW),
             w::kv("毛 / 成本", t::numeric(format!("{} / {} bp", opt(s.gross_bp_mean, 3, Rounding::Measurement), opt(s.cost_bp_mean, 3, Rounding::Measurement))).into(), KW),
             w::kv("累计 / 回撤", row![t::numeric(tot).color(c), t::metadata(format!("bp · 回撤 {} bp", opt(s.max_dd_bp, 1, Rounding::Measurement))).color(pal::dim())].spacing(space(1)).into(), KW),
@@ -699,7 +700,7 @@ pub fn pane_body<'a>() -> Element<'a, ScMsg> {
 /// AI 研究助理：一句话 → 草稿（只起草；填进下面的表单后仍由人点「开始优化」）。
 fn ai_box<'a>(v: &View) -> Element<'a, ScMsg> {
     let mut col = column![
-        w::section("🤖 AI 研究助理（只起草，不发起）"),
+        w::section("AI 研究助理（只起草，不发起）"),
         row![
             text_input("一句话说想怎么调，例如：用快速回测在 6 月前 20 天扫入场阈值和最长持仓", &v.ai_text)
                 .on_input(ScMsg::AiText)
@@ -850,8 +851,8 @@ fn opt_section<'a>(v: &View, e: &Entry) -> Element<'a, ScMsg> {
     // 能不能发：与真正发送走同一个校验（study_from_form）；不能发就把原因写在按钮正下方
     let why = if v.sending { Some("正在发送…".to_string()) } else { v.opt_error.clone() };
     col = col.push(match &why {
-        None => w::btn("🔬 开始优化", Kind::Standard, Some(ScMsg::StartStudy)),
-        Some(r) => w::btn_why("🔬 开始优化", Kind::Standard, None::<ScMsg>, r.clone()),
+        None => w::ibtn(Icon::UiSliders, "开始优化", Kind::Standard, Some(ScMsg::StartStudy)),
+        Some(r) => w::ibtn_why(Icon::UiSliders, "开始优化", Kind::Standard, None::<ScMsg>, r.clone()),
     });
     if let Some(r) = &v.opt_error {
         col = col.push(t::caption(format!("还不能开始：{r}")).color(pal::warn()));
@@ -1037,7 +1038,7 @@ fn studies<'a>(v: &View) -> Element<'a, ScMsg> {
         col = col.push(t::caption(v.msg.clone()).color(if v.msg.contains("失败") { pal::bad() } else { pal::ok() }));
     }
     if v.studies.is_empty() && !v.msg.contains("发起优化") {
-        return w::empty("这个策略还没做过优化", "在中栏「参数优化」里勾参数、点「🔬 开始优化」");
+        return w::empty("这个策略还没做过优化", "在中栏「参数优化」里勾参数、点「开始优化」");
     }
     let mut list = column![].spacing(space(1));
     for s in &v.studies {

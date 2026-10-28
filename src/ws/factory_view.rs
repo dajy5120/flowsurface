@@ -301,7 +301,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
                     Cell::Text(format!("{:+.1}", a.ic_t)),
                     Cell::Text(format!("{}/{}", a.folds_same, a.n_folds)),
                     Cell::Text(fmt_bp(a.net_bp)),
-                    Cell::Text(format!("{}{}", a.expr, if a.leakage { " 🚨" } else { "" })),
+                    Cell::Text(format!("{}{}", a.expr, if a.leakage { " ▲ 泄漏" } else { "" })),
                     Cell::Text(a.hypothesis.clone()),
                 ]
             })
@@ -490,7 +490,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
                 .padding(crate::ui::metrics::pad2(0, 3))
                 .on_press_maybe(st.timer_enabled.then_some(FactoryMsg::SetTimer(false))),
             text("　").size(crate::ui::text::s_small()),
-            button(text("⟳ 刷新").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 3)).on_press(FactoryMsg::Refresh),
+            button(crate::ui::widgets::sym_label("⟳ 刷新", crate::ui::text::s_small(), None)).padding(crate::ui::metrics::pad2(0, 3)).on_press(FactoryMsg::Refresh),
             text(format!("  刷新于 {}", st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(4)
@@ -520,7 +520,7 @@ pub fn pane_body<'a>() -> Element<'a, super::factory::FactoryMsg> {
         nightly = nightly.push(text(format!("{} · {}", lv.date, lv.header)).size(crate::ui::text::s_small()).color(hc));
         let start = lv.steps.len().saturating_sub(10);
         for (step, rc, secs) in &lv.steps[start..] {
-            let mark = if *rc == 0 { "✅" } else { "❌" };
+            let mark = if *rc == 0 { "✓" } else { "✗" };
             let c = if *rc == 0 { crate::ui::pal::dim() } else { crate::ui::pal::bad() };
             nightly = nightly.push(
                 text(format!("{mark} {} · {secs:.0}s", trunc(step, 38))).size(crate::ui::text::s_meta()).color(c),

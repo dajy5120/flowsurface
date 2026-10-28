@@ -933,7 +933,7 @@ impl Dashboard {
                 .unwrap_or_default();
             let fm = |m: floating::FloatMsg| Some(Message::Float(m));
             let mut bar = row![
-                text("⠿").size(crate::ui::text::s_small()).color(pal::dim()),
+                crate::ui::widgets::glyph(crate::style::Icon::DragHandle, crate::ui::text::s_small()).color(pal::dim()),
                 text(title).size(crate::ui::text::s_small()).color(pal::head()),
                 Space::new().width(Length::Fill),
             ]

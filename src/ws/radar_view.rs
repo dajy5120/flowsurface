@@ -1221,7 +1221,7 @@ fn filter_bar<'a>(v: ViewState, cat: &Catalog) -> Element<'a, RadarMsg> {
 }
 
 fn chip<'a>(label: &str, active: bool, msg: RadarMsg) -> Element<'a, RadarMsg> {
-    button(text(label.to_string()).size(crate::ui::text::s_small()))
+    button(crate::ui::widgets::sym_label(label, crate::ui::text::s_small(), None))
         .padding(crate::ui::metrics::pad2(0, 2))
         .style(move |t, st| crate::style::button::modifier(t, st, active))
         .on_press(msg)
@@ -3013,9 +3013,9 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
                 .size(crate::ui::text::s_small())
                 .color(if running { crate::ui::pal::ok() } else { crate::ui::pal::dim() }),
             text("　").size(crate::ui::text::s_small()),
-            button(text("⟳ 立即获取").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 2)).on_press(RadarMsg::Refresh),
+            button(crate::ui::widgets::sym_label("⟳ 立即获取", crate::ui::text::s_small(), None)).padding(crate::ui::metrics::pad2(0, 2)).on_press(RadarMsg::Refresh),
             // 不常驻也能看一眼最新数据：抓一轮（含回填，约 5–15 分钟）就退出
-            button(text("⇩ 抓取一次").size(crate::ui::text::s_small()))
+            button(crate::ui::widgets::sym_label("⇩ 抓取一次", crate::ui::text::s_small(), None))
                 .padding(crate::ui::metrics::pad2(0, 2))
                 .on_press_maybe((!running && !super::once::RADAR.running()).then_some(RadarMsg::FetchOnce)),
             text(super::once::RADAR.status()).size(crate::ui::text::s_meta()).color(crate::ui::pal::info()),
@@ -3139,9 +3139,9 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
     } else if warm == 0 && part.main() {
         body = body.push(
             text(if bf.finished {
-                "⏳ 回填已完成但仍无可信 z——检查 K 线端点（journalctl --user -u ws-radar）"
+                "◌ 回填已完成但仍无可信 z——检查 K 线端点（journalctl --user -u ws-radar）"
             } else {
-                "⏳ 尚未热身，z 值不可信（等待表见 docs/22 §8.1）"
+                "◌ 尚未热身，z 值不可信（等待表见 docs/22 §8.1）"
             })
             .size(crate::ui::text::s_meta())
             .color(crate::ui::pal::warn()),
@@ -3335,7 +3335,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
     // 旁边，让「我要现在就看」有个明确的入口，而不是干等。
     ar = ar.push(text(" ").size(crate::ui::text::s_small()));
     ar = ar.push(
-        button(text("⟳ 立即获取").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 2)).on_press(RadarMsg::Refresh),
+        button(crate::ui::widgets::sym_label("⟳ 立即获取", crate::ui::text::s_small(), None)).padding(crate::ui::metrics::pad2(0, 2)).on_press(RadarMsg::Refresh),
     );
     ar = ar.push(
         text(format!("　{} / {} 行", vis.len(), st.rows.len()))
@@ -3650,7 +3650,7 @@ pub fn pane_body<'a>(lock: Option<&str>) -> Element<'a, RadarMsg> {
     // 排序仍走雷达自己的 SortBy——格子文字带单位（如 1.2 M），按文字解析会排错。
     let grid = screener_grid(&cols, ev, &idx, &st);
     let src = text(format!(
-        "源 {} · 快照 {}{} · ⏳=未热身 ≈=借横截面基线（均不可当结论）",
+        "源 {} · 快照 {}{} · ◌=未热身 ≈=借横截面基线（均不可当结论）",
         st.source,
         st.stamp,
         super::staleness::suffix(&st.stamp),
@@ -3722,7 +3722,7 @@ fn screener_grid<'a>(cols: &[Col], ev: ViewState, idx: &[usize], st: &super::rad
                 let flag = if !r.sigma_ok && r.z_provisional {
                     "≈"
                 } else if !r.sigma_ok {
-                    "⏳"
+                    "◌"
                 } else {
                     ""
                 };

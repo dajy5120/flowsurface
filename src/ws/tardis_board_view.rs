@@ -867,11 +867,11 @@ pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoar
     let export_row = row![
         label("⑤ 导出"),
         {
-            let b = button(text("⬇ CSV").size(crate::ui::text::s_body())).padding(crate::ui::metrics::pad2(0, 3));
+            let b = button(crate::ui::widgets::ilabel(crate::style::Icon::UiDownload, "CSV", crate::ui::text::s_body())).padding(crate::ui::metrics::pad2(0, 3));
             if loading.is_none() && p.loaded { b.on_press(TardisBoardMsg::ExportCsv) } else { b }
         },
         {
-            let b = button(text("📷 存图").size(crate::ui::text::s_body())).padding(crate::ui::metrics::pad2(0, 3));
+            let b = button(crate::ui::widgets::ilabel(crate::style::Icon::UiCamera, "存图", crate::ui::text::s_body())).padding(crate::ui::metrics::pad2(0, 3));
             if loading.is_none() && p.loaded { b.on_press(TardisBoardMsg::ExportPng) } else { b }
         },
         text(format!("→ {}", super::paths::hot_dir().join("cockpit/export").display())).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
@@ -885,7 +885,7 @@ pub fn pane_body(app: &TardisBoardState, hosted: bool) -> Element<'_, TardisBoar
     }
 
     let hint_text = match &loading {
-        Some(d) => format!("⏳ 后台加载中 {d}…（界面不冻结，可继续操作）"),
+        Some(d) => format!("◌ 后台加载中 {d}…（界面不冻结，可继续操作）"),
         None => {
             let m = load_message();
             if m.is_empty() { app.hint.clone() } else { m }

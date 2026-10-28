@@ -2224,7 +2224,7 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
     };
     let idle = !v.busy;
     row![
-        w::btn(if v.ai.open { "🤖 AI ▸" } else { "🤖 AI" }, if v.ai.open { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::AiToggle)),
+        w::ibtn(crate::style::Icon::UiSparkle, if v.ai.open { "AI ▸" } else { "AI" }, if v.ai.open { Kind::Standard } else { Kind::Ghost }, Some(FlMsg::AiToggle)),
         w::btn("新建", Kind::Ghost, Some(FlMsg::New)),
         pick_list(v.palette.as_ref().map(|p| p.templates.clone()).unwrap_or_default(), None::<sf::Template>, FlMsg::NewFrom).placeholder("从模板…").text_size(t::s_small()),
         pick_list(v.files.clone(), None::<sf::FileItem>, FlMsg::Open).placeholder("打开 / 导入…").text_size(t::s_small()),
@@ -2240,7 +2240,7 @@ fn toolbar<'a>(v: &View) -> Element<'a, FlMsg> {
         if v.quick_running {
             w::btn("■ 停止快速回测", Kind::Standard, Some(FlMsg::QuickStop))
         } else {
-            w::btn_why("⚡ 快速回测", Kind::Standard, idle.then_some(FlMsg::QuickRun), "走特征仓库（Tardis），估算成交；逐笔看「回测｜交易核对」")
+            w::ibtn_why(crate::style::Icon::UiBolt, "快速回测", Kind::Standard, idle.then_some(FlMsg::QuickRun), "走特征仓库（Tardis），估算成交；逐笔看「回测｜交易核对」")
         },
         w::segmented(&[("列式", false), ("网格宿主", true)], &v.quick_grid, FlMsg::QuickGrid),
         w::segmented(&[("仓库全部日子", true), ("所选日期", false)], &v.quick_all, FlMsg::QuickAll),
@@ -2270,7 +2270,7 @@ const AI_W: f32 = 400.0;
 fn ai_panel<'a>(v: &View, content: &'a iced::widget::text_editor::Content) -> Element<'a, FlMsg> {
     let a = &v.ai;
     let mut col = column![
-        row![w::section("🤖 AI 起草（只起草，你来保存）"), Space::new().width(Length::Fill), w::btn("收起", Kind::Ghost, Some(FlMsg::AiToggle))].align_y(Alignment::Center),
+        row![w::section("AI 起草（只起草，你来保存）"), Space::new().width(Length::Fill), w::btn("收起", Kind::Ghost, Some(FlMsg::AiToggle))].align_y(Alignment::Center),
         super::ai_providers::picker().map(FlMsg::AiProv),
     ]
     .spacing(space(2));

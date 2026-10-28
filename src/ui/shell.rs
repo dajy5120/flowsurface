@@ -41,6 +41,10 @@ pub fn group_shortcut(name: &str) -> Option<&'static str> {
 /// 页签栏上的一页。
 pub struct PageTab<V> {
     pub label: String,
+    /// 页锁定了布局（页名后一个锁）
+    pub locked: bool,
+    /// 模板有更新（页名后一个刷新号）
+    pub outdated: bool,
     /// 状态角标（`page_status::Badge::glyph`）：● 后台在跑、⚠ 有问题
     pub badge: Option<&'static str>,
     pub value: V,
@@ -66,6 +70,12 @@ pub fn page_bar<'a, M: Clone + 'a, V: PartialEq + Clone + 'a>(
             ..Default::default()
         });
         let mut label = row![t::label(p.label).color(fg)].spacing(metrics::space(1)).align_y(Alignment::Center);
+        if p.locked {
+            label = label.push(super::widgets::glyph(crate::style::Icon::Locked, t::s_meta()).color(color(c.text_tertiary)));
+        }
+        if p.outdated {
+            label = label.push(super::widgets::glyph(crate::style::Icon::UiRefresh, t::s_meta()).color(color(c.text_tertiary)));
+        }
         if let Some(g) = p.badge {
             let tone = if g == "⚠" { Tone::Warning } else { Tone::Info };
             label = label.push(t::metadata(g).color(tone.color()));
@@ -566,18 +576,23 @@ pub fn command_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
 /// 由调用方按面板的 `ToolbarSpec` 拼好）；右 = 命令搜索、检查器、底部面板。高度同原命令栏，不多占一行。
 pub fn toolbar<'a, M: Clone + 'a>(info: &Info, on: fn(ShellEvent) -> M, ctx: Element<'a, M>) -> Element<'a, M> {
     let c = core();
-    let search = button(
-        row![
-            t::label("⌕  搜索或运行命令").color(color(c.text_tertiary)),
-            space::horizontal(),
-            t::metadata("Ctrl K"),
-        ]
-        .align_y(Alignment::Center)
-        .width(Length::Fixed(220.0)),
+    // 紧凑：放大镜 + 快捷键，悬停看说明（docs/66：给中间的面板控件多留宽度）
+    let search: Element<'a, ShellEvent> = iced::widget::tooltip(
+        button(
+            row![
+                super::widgets::glyph(crate::style::Icon::Search, t::s_body()).color(color(c.text_secondary)),
+                t::metadata("Ctrl K"),
+            ]
+            .spacing(metrics::space(2))
+            .align_y(Alignment::Center),
+        )
+        .padding([3, 8])
+        .on_press(ShellEvent::Run(Cmd::TogglePalette))
+        .style(|th, st| crate::style::button::modifier(th, st, false)),
+        container(t::caption("搜索或运行命令")).padding(6).style(crate::style::tooltip),
+        iced::widget::tooltip::Position::Bottom,
     )
-    .padding([3, 8])
-    .on_press(ShellEvent::Run(Cmd::TogglePalette))
-    .style(|th, st| crate::style::button::modifier(th, st, false));
+    .into();
 
     let mut left = row![
         t::section(info.workspace.clone()).color(color(c.text_primary)),
@@ -602,13 +617,26 @@ pub fn toolbar<'a, M: Clone + 'a>(info: &Info, on: fn(ShellEvent) -> M, ctx: Ele
     }
     let left: Element<'a, ShellEvent> = left.into();
     // 消息中心（docs/65）：🔔 未读（普通颜色）+ ⚠ 待确认的 P0/P1（只有它醒目）+ 渠道异常的小标记
-    let (bell, urgent, chan) = crate::ws::inbox_view::bell_parts(&info.inbox);
-    let mut bell_row = row![t::label(bell).color(color(c.text_primary))].spacing(metrics::space(2)).align_y(Alignment::Center);
-    if !urgent.is_empty() {
-        bell_row = bell_row.push(t::label(urgent).color(color(c.status_warning)));
+    // 图标走图标字体（docs/66），不用 emoji
+    let ib = &info.inbox;
+    let chan = crate::ws::inbox_view::chan_note(ib);
+    let gs = t::s_body() + 2.0;
+    let mut bell_row = row![super::widgets::glyph(crate::style::Icon::UiBell, gs).color(color(c.text_primary))]
+        .spacing(metrics::space(1))
+        .align_y(Alignment::Center);
+    if ib.unread > 0 {
+        bell_row = bell_row.push(t::label(ib.unread.min(999).to_string()).color(color(c.text_primary)));
+    }
+    if ib.urgent > 0 {
+        bell_row = bell_row
+            .push(Space::new().width(Length::Fixed(metrics::space(1))))
+            .push(super::widgets::glyph(crate::style::Icon::UiAlert, gs).color(color(c.status_warning)))
+            .push(t::label(ib.urgent.to_string()).color(color(c.status_warning)));
     }
     if !chan.is_empty() {
-        bell_row = bell_row.push(t::metadata("✉✗").color(color(c.status_danger)));
+        bell_row = bell_row
+            .push(Space::new().width(Length::Fixed(metrics::space(1))))
+            .push(super::widgets::glyph(crate::style::Icon::UiSendOff, gs).color(color(c.status_danger)));
     }
     let bell_tip = {
         let mut s = format!("消息中心：未读 {} 条（P0–P2）", info.inbox.unread);
@@ -633,15 +661,16 @@ pub fn toolbar<'a, M: Clone + 'a>(info: &Info, on: fn(ShellEvent) -> M, ctx: Ele
     let right: Element<'a, ShellEvent> = row![
         bell_btn,
         search,
-        toggle_btn("检查器", "Ctrl I", Cmd::ToggleInspector),
-        toggle_btn("底部面板", "Ctrl J", Cmd::ToggleBottom)
+        toggle_btn(crate::style::Icon::UiPanelRight, "检查器 · Ctrl I", Cmd::ToggleInspector),
+        toggle_btn(crate::style::Icon::UiPanelBottom, "底部面板 · Ctrl J", Cmd::ToggleBottom)
     ]
     .spacing(metrics::space(3))
     .align_y(Alignment::Center)
     .into();
 
     container(
-        row![left.map(on), ctx, space::horizontal(), right.map(on)]
+        // 中间（选中面板的控件）占剩下的宽度、放不下时裁掉尾巴：右端的铃铛、搜索、检查器 / 底部面板开关总在
+        row![left.map(on), container(ctx).width(Length::Fill).clip(true), right.map(on)]
             .spacing(metrics::space(3))
             .align_y(Alignment::Center),
     )
@@ -670,10 +699,33 @@ pub fn tool_pick<'a, M: Clone + 'a>(label: &str, value: String, msg: Option<M>, 
     }
 }
 
-fn toggle_btn<'a>(label: &'static str, key: &'static str, cmd: Cmd) -> Element<'a, ShellEvent> {
+/// 顶栏右端的纯图标开关（用户定：检查器 / 底部面板只放图标，悬停看名字与快捷键，docs/66）。
+/// 工具栏上的图标 + 短文字按钮（设置 / 联动 / 页面，docs/66：状态要一眼看清，所以带文字）。有消息时后面带 ▾。
+pub fn tool_pick_icon<'a, M: Clone + 'a>(icon: crate::style::Icon, value: String, msg: Option<M>, active: bool) -> Element<'a, M> {
+    let c = core();
+    let mut r = row![
+        super::widgets::glyph(icon, t::s_small() + 1.0).color(color(c.text_secondary)),
+        t::label(value).color(color(c.text_primary)).wrapping(iced::widget::text::Wrapping::None)
+    ]
+        .spacing(metrics::space(1))
+        .align_y(Alignment::Center);
+    if msg.is_some() {
+        r = r.push(t::metadata("▾").color(color(c.text_tertiary)));
+    }
+    let b = button(r).padding([2, 6]).style(move |th, st| crate::style::button::modifier(th, st, active));
+    match msg {
+        Some(m) => b.on_press(m).into(),
+        None => b.into(),
+    }
+}
+
+fn toggle_btn<'a>(icon: crate::style::Icon, tip: &'static str, cmd: Cmd) -> Element<'a, ShellEvent> {
     iced::widget::tooltip(
-        button(t::label(label)).padding([3, 8]).on_press(ShellEvent::Run(cmd)).style(|th, st| crate::style::button::transparent(th, st, false)),
-        container(t::caption(key)).padding(6).style(crate::style::tooltip),
+        button(super::widgets::glyph(icon, t::s_body() + 2.0))
+            .padding([3, 8])
+            .on_press(ShellEvent::Run(cmd))
+            .style(|th, st| crate::style::button::transparent(th, st, false)),
+        container(t::caption(tip)).padding(6).style(crate::style::tooltip),
         iced::widget::tooltip::Position::Bottom,
     )
     .into()
@@ -848,7 +900,7 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
         }
         BottomTab::Notices => {
             // 并进消息中心了（docs/65）：弹出过的提示都入库（「系统」类），关了程序也查得到；这里只留本次运行的
-            let to_inbox = button(t::label("打开消息中心（🔔）"))
+            let to_inbox = button(t::label("打开消息中心"))
                 .padding([3, 8])
                 .on_press(ShellEvent::Run(Cmd::Inbox))
                 .style(|th, st| crate::style::button::modifier(th, st, false));
@@ -959,7 +1011,7 @@ pub fn inspector<'a, M: Clone + 'a>(
     data: Option<Element<'a, M>>,
     on: fn(ShellEvent) -> M,
 ) -> Element<'a, M> {
-    use super::widgets::{Kind, btn};
+    use super::widgets::Kind;
     let c = core();
     let section = |title: &'a str| t::metadata(title);
     let kv = |k: &'a str, val: String| -> Element<'a, M> {
@@ -972,7 +1024,12 @@ pub fn inspector<'a, M: Clone + 'a>(
     let head = row![
         t::section("检查器"),
         space::horizontal(),
-        btn(if v.pinned { "📌 已钉住" } else { "📌 钉住" }, if v.pinned { Kind::Standard } else { Kind::Ghost }, Some(on(ShellEvent::InspPin))),
+        super::widgets::ibtn(
+            crate::style::Icon::UiPin,
+            if v.pinned { "已钉住" } else { "钉住" },
+            if v.pinned { Kind::Standard } else { Kind::Ghost },
+            Some(on(ShellEvent::InspPin))
+        ),
         button(t::label("✕")).padding([2, 8]).on_press(on(ShellEvent::InspClose)).style(|th, st| crate::style::button::transparent(th, st, false)),
     ]
     .spacing(metrics::space(1))

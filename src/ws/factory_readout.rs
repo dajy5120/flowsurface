@@ -492,15 +492,15 @@ fn build_live(events: &[std::collections::HashMap<String, String>]) -> Option<Ni
     if let Some((done, total, failed_at, secs)) = finish {
         live.running = false;
         live.header = if failed_at.is_empty() {
-            format!("✅ 完成 {done}/{total} · {secs:.0}s")
+            format!("✓ 完成 {done}/{total} · {secs:.0}s")
         } else {
-            format!("❌ 停机于 {failed_at}（{done}/{total} · {secs:.0}s）")
+            format!("✗ 停机于 {failed_at}（{done}/{total} · {secs:.0}s）")
         };
     } else {
         live.running = started || !live.steps.is_empty();
         let n = live.steps.len();
         let tot: f64 = live.steps.iter().map(|s| s.2).sum();
-        live.header = format!("🟢 运行中 · 已 {n} 步 · {tot:.0}s");
+        live.header = format!("● 运行中 · 已 {n} 步 · {tot:.0}s");
     }
     Some(live)
 }
@@ -704,7 +704,7 @@ mod tests {
         ];
         let live = build_live(&events).unwrap();
         assert!(!live.running);
-        assert!(live.header.starts_with("✅ 完成 13/13"));
+        assert!(live.header.starts_with("✓ 完成 13/13"));
     }
 
     #[test]
@@ -715,7 +715,7 @@ mod tests {
         ];
         let live = build_live(&events).unwrap();
         assert!(!live.running);
-        assert!(live.header.starts_with("❌ 停机于 labels:BTCUSDT"));
+        assert!(live.header.starts_with("✗ 停机于 labels:BTCUSDT"));
     }
 
     /// 真机集成（需 WS_REDIS_URL 指向活的 redis，流里已有 nightly.py 发的事件）：

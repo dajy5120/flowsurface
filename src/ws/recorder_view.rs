@@ -473,8 +473,8 @@ pub fn pane_body<'a>(app: &'a RecorderPaneState, lock: Option<&str>) -> Element<
         row![
             button(text("▶ 启动").size(crate::ui::text::s_section())).on_press(RecorderMsg::Start),
             button(text("■ 停止").size(crate::ui::text::s_section())).on_press(RecorderMsg::Stop),
-            button(text("↻ 重启").size(crate::ui::text::s_section())).on_press(RecorderMsg::Restart),
-            button(text("⟳ 刷新").size(crate::ui::text::s_section())).on_press(RecorderMsg::Refresh),
+            button(crate::ui::widgets::sym_label("↻ 重启", crate::ui::text::s_section(), None)).on_press(RecorderMsg::Restart),
+            button(crate::ui::widgets::sym_label("⟳ 刷新", crate::ui::text::s_section(), None)).on_press(RecorderMsg::Refresh),
             text(format!("  刷新于 {}", st.refreshed))
                 .size(crate::ui::text::s_small())
                 .color(crate::ui::pal::pend()),

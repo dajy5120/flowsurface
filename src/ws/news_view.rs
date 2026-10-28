@@ -101,7 +101,7 @@ const SRC_COL_PROBE: usize = 10;
 const SRC_COL_DELETE: usize = 11;
 
 fn chip<'a>(label: &str, msg: NewsMsg) -> Element<'a, NewsMsg> {
-    button(text(label.to_string()).size(crate::ui::text::s_small()))
+    button(crate::ui::widgets::sym_label(label, crate::ui::text::s_small(), None))
         .padding(crate::ui::metrics::pad2(0, 2))
         .style(|t, st| crate::style::button::modifier(t, st, false))
         .on_press(msg)

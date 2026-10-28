@@ -61,9 +61,9 @@ fn calib_block<'a, M: 'a>(c: &CalibrationView) -> Element<'a, M> {
     }
 
     let verdict = if c.ai_beats_market {
-        ("✅ AI 胜过市场", crate::ui::pal::up())
+        ("✓ AI 胜过市场", crate::ui::pal::up())
     } else {
-        ("❌ AI 未胜市场（分歧=噪声·勿据以下注）", crate::ui::pal::down())
+        ("✗ AI 未胜市场（分歧=噪声·勿据以下注）", crate::ui::pal::down())
     };
     col = col.push(
         row![
@@ -228,7 +228,7 @@ pub fn pane_body<'a>() -> Element<'a, PredictionMsg> {
                 .padding(crate::ui::metrics::pad2(0, 3))
                 .on_press_maybe(st.timer_enabled.then_some(PredictionMsg::SetTimer(false))),
             text("　").size(crate::ui::text::s_small()),
-            button(text("⟳ 刷新").size(crate::ui::text::s_small())).padding(crate::ui::metrics::pad2(0, 3)).on_press(PredictionMsg::Refresh),
+            button(crate::ui::widgets::sym_label("⟳ 刷新", crate::ui::text::s_small(), None)).padding(crate::ui::metrics::pad2(0, 3)).on_press(PredictionMsg::Refresh),
             text(format!("  刷新于 {}", st.refreshed)).size(crate::ui::text::s_meta()).color(crate::ui::pal::dim()),
         ]
         .spacing(4)

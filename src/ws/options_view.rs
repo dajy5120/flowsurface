@@ -64,7 +64,7 @@ fn strategy_row(r: &StrategyRow) -> Vec<Cell> {
         Cell::Colored(r.code.clone(), crate::ui::pal::warn()),
         Cell::Text(r.role.clone()),
         Cell::Colored(format!("{:+.3}", r.net), sign_c(r.net)),
-        Cell::Colored(if r.gate_ok { "✅ 净>0".into() } else { "❌ 净≤0".into() }, if r.gate_ok { crate::ui::pal::up() } else { crate::ui::pal::down() }),
+        Cell::Colored(if r.gate_ok { "✓ 净>0".into() } else { "✗ 净≤0".into() }, if r.gate_ok { crate::ui::pal::up() } else { crate::ui::pal::down() }),
         Cell::num(r.n_fills as f64, r.n_fills.to_string()),
         money(r.premium, crate::ui::pal::txt()),
         money(r.fees, down),

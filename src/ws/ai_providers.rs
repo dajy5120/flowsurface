@@ -528,7 +528,7 @@ pub fn picker<'a>() -> Element<'a, AiMsg> {
     let mut r = row![
         t::metadata("接口").color(pal::dim()),
         pick_list(names, Some(cur), AiMsg::Pick).text_size(t::s_small()),
-        w::btn(if open { "AI 接口 ▴" } else { "AI 接口 ⚙" }, if open { Kind::Standard } else { Kind::Ghost }, Some(AiMsg::Manage)),
+        w::ibtn(crate::style::Icon::Cog, if open { "AI 接口 ▴" } else { "AI 接口" }, if open { Kind::Standard } else { Kind::Ghost }, Some(AiMsg::Manage)),
     ]
     .spacing(space(2))
     .align_y(Alignment::Center);

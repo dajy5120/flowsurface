@@ -12,7 +12,7 @@ use super::pm_replay_readout as ro;
 use super::tardis_board_view::{ChartCanvas, cache_for, clip_to};
 
 fn chip<'a>(label: String, active: bool, c: Color, msg: PmReplayMsg) -> Element<'a, PmReplayMsg> {
-    button(text(label).size(crate::ui::text::s_body()).color(if active { crate::ui::pal::txt() } else { c }))
+    button(crate::ui::widgets::sym_label(&label, crate::ui::text::s_body(), Some(if active { crate::ui::pal::txt() } else { c })))
         .padding(crate::ui::metrics::pad2(0, 3))
         .style(move |t, s| crate::style::button::modifier(t, s, active))
         .on_press(msg)

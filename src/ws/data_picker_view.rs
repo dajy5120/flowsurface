@@ -36,7 +36,7 @@ fn dim<'a>(t: String) -> El<'a> {
 }
 
 fn chip<'a>(t: String, active: bool, msg: Option<DataPickMsg>) -> El<'a> {
-    let b = button(text(t).size(crate::ui::text::s_small()))
+    let b = button(crate::ui::widgets::sym_label(&t, crate::ui::text::s_small(), None))
         .padding(crate::ui::metrics::pad2(0, 3))
         .style(move |th, st| crate::style::button::modifier(th, st, active));
     match msg {

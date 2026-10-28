@@ -1533,14 +1533,10 @@ impl Flowsurface {
                 let tabs: Vec<ui::shell::PageTab<uuid::Uuid>> = pages
                     .into_iter()
                     .map(|(uid, n)| {
-                        let mut label = ws::workspace::page_title(&n);
-                        if self.pages.locked.contains(&n) {
-                            label.push_str(" 🔒");
-                        }
-                        if self.outdated.contains(&n) {
-                            label.push_str(" ↻");
-                        }
+                        let label = ws::workspace::page_title(&n);
                         ui::shell::PageTab {
+                            locked: self.pages.locked.contains(&n),
+                            outdated: self.outdated.contains(&n),
                             label,
                             badge: self
                                 .layout_manager
@@ -2203,9 +2199,9 @@ impl Flowsurface {
                     let has_props = has_props || ws::inspector_props::supports_drawing(&st.content);
                     if has_props || has_data || changed > 0 {
                         let tab = if has_props { ui::shell::InspTab::Props } else { ui::shell::InspTab::Data };
-                        r = r.push(tool_pick(
-                            "",
-                            if changed > 0 { format!("⚙ 已改 {changed} 项") } else { "⚙ 设置".into() },
+                        r = r.push(ui::shell::tool_pick_icon(
+                            style::Icon::Cog,
+                            if changed > 0 { format!("已改 {changed} 项") } else { "设置".into() },
                             Some(Message::RunCommand(ui::command::Cmd::InspectorOpen(tab))),
                             changed > 0,
                         ));
@@ -2220,17 +2216,14 @@ impl Flowsurface {
             r = r.push(ui::text::metadata("│").color(ui::pal::dim())).push(t.map(Message::Replay));
         }
         let linked = d.page_linked(main);
-        r = r.push(tool_pick(
-            "",
-            if linked { "⛓ 联动：开".into() } else { "⛓ 联动：关".into() },
+        r = r.push(ui::shell::tool_pick_icon(
+            style::Icon::Link,
+            if linked { "联动：开".into() } else { "联动：关".into() },
             Some(Message::Page(ws::pages::PageMsg::LinkSymbols(!linked))),
             linked,
         ));
-        let mut more = String::from("⋯ 页面");
-        if self.page_menu {
-            more.push_str(" ▴");
-        }
-        r = r.push(tool_pick("", more, Some(Message::Page(ws::pages::PageMsg::ToggleMenu)), self.page_menu));
+        let more = if self.page_menu { "页面 ▴" } else { "页面" };
+        r = r.push(ui::shell::tool_pick_icon(style::Icon::DrMore, more.into(), Some(Message::Page(ws::pages::PageMsg::ToggleMenu)), self.page_menu));
         r.into()
     }
 
@@ -2441,13 +2434,19 @@ impl Flowsurface {
                 is_template.then_some(Message::Page(P::ResetDefault)),
             ),
             w::btn("存为模板", Kind::Ghost, pm(P::SaveTemplate)),
-            w::btn(if locked { "🔒 已锁定（点击解锁）" } else { "锁定布局" }, if locked { Kind::Standard } else { Kind::Ghost }, pm(P::ToggleLock)),
+            w::ibtn(
+                if locked { style::Icon::Locked } else { style::Icon::Unlocked },
+                if locked { "已锁定（点击解锁）" } else { "锁定布局" },
+                if locked { Kind::Standard } else { Kind::Ghost },
+                pm(P::ToggleLock)
+            ),
         ];
         // 联动（docs/41 §4.3，E 期）：品种走现有联动组；时间十字线同页按时间轴的图自动联动
         let linked = self.active_dashboard().page_linked(self.main_window.id);
         let link = row![
-            w::btn(
-                if linked { "⛓ 联动品种：开" } else { "联动品种：关" },
+            w::ibtn(
+                style::Icon::Link,
+                if linked { "联动品种：开" } else { "联动品种：关" },
                 if linked { Kind::Standard } else { Kind::Ghost },
                 pm(P::LinkSymbols(!linked)),
             ),

@@ -501,6 +501,167 @@ def dr_more():
     return i
 
 
+# ── 界面通用图标（docs/66：替换 emoji 与杂用符号，接着 dr-more 往后排）────────
+
+
+def ui_bell():
+    i = Icon()
+    i.line((12, 3.5), (12, 5.5))
+    i.line((6.5, 17), (6.5, 11))
+    i.arc(12, 11, 5.5, 180, 360)
+    i.line((17.5, 11), (17.5, 17))
+    i.line((4, 17), (20, 17))
+    i.arc(12, 18.5, 2.3, 20, 160)
+    return i
+
+
+def ui_alert():
+    i = Icon()
+    i.line((12, 3.5), (21, 19.5), (3, 19.5), closed=True)
+    i.line((12, 9.5), (12, 13.5))
+    i.dot(12, 16.5, 1.4)
+    return i
+
+
+def ui_pin():
+    i = Icon()
+    i.line((8.5, 3.5), (15.5, 3.5))
+    i.line((10, 3.5), (10, 9.5), (6.5, 13.5), (17.5, 13.5), (14, 9.5), (14, 3.5))
+    i.line((12, 13.5), (12, 21))
+    return i
+
+
+def ui_send_off():
+    i = Icon()
+    i.rect(3, 6, 21, 18, 1.5)
+    i.line((3.5, 7), (12, 13), (20.5, 7))
+    i.line((3.5, 3), (20.5, 21))
+    return i
+
+
+def ui_panel_right():
+    i = Icon()
+    i.rect(3, 4, 21, 20, 2)
+    i.line((14.5, 4), (14.5, 20))
+    return i
+
+
+def ui_panel_bottom():
+    i = Icon()
+    i.rect(3, 4, 21, 20, 2)
+    i.line((3, 14.5), (21, 14.5))
+    return i
+
+
+def ui_snowflake():
+    i = Icon()
+    for a in (90, 30, 150):
+        r = math.radians(a)
+        dx, dy = 9 * math.cos(r), 9 * math.sin(r)
+        i.line((12 - dx, 12 - dy), (12 + dx, 12 + dy))
+        for sgn in (1, -1):
+            ex, ey = 12 + sgn * dx * 0.62, 12 + sgn * dy * 0.62
+            for side in (35, -35):
+                b = r + math.radians(side) + (0 if sgn > 0 else math.pi)
+                i.line((ex, ey), (ex + 3 * math.cos(b), ey + 3 * math.sin(b)))
+    return i
+
+
+def ui_sidebar():
+    i = Icon()
+    i.rect(3, 4, 21, 20, 2)
+    i.line((9.5, 4), (9.5, 20))
+    return i
+
+
+def ui_play():
+    i = Icon()
+    i.line((7, 4.5), (19, 12), (7, 19.5), closed=True)
+    return i
+
+
+def ui_pause():
+    i = Icon()
+    i.line((8.5, 5), (8.5, 19))
+    i.line((15.5, 5), (15.5, 19))
+    return i
+
+
+def ui_prev():
+    i = Icon()
+    i.line((6, 5), (6, 19))
+    i.line((18, 5), (9.5, 12), (18, 19), closed=True)
+    return i
+
+
+def ui_next():
+    i = Icon()
+    i.line((18, 5), (18, 19))
+    i.line((6, 5), (14.5, 12), (6, 19), closed=True)
+    return i
+
+
+def ui_refresh():
+    i = Icon()
+    i.arc(12, 12.5, 7.5, -20, 270)
+    i.line((9.8, 2.4), (12.6, 5), (9.8, 7.6))
+    return i
+
+
+def ui_download():
+    i = Icon()
+    i.line((12, 3.5), (12, 14.5))
+    i.line((7.5, 10), (12, 14.5), (16.5, 10))
+    i.line((4, 16), (4, 20), (20, 20), (20, 16))
+    return i
+
+
+def ui_camera():
+    i = Icon()
+    i.rect(3, 7, 21, 19.5, 2)
+    i.line((8, 7), (9.5, 4.5), (14.5, 4.5), (16, 7))
+    i.ring(12, 13, 3.3)
+    return i
+
+
+def ui_bolt():
+    i = Icon()
+    i.line((13.5, 3), (6, 13.5), (11.5, 13.5), (10.5, 21), (18, 10.5), (12.5, 10.5), closed=True)
+    return i
+
+
+def ui_sliders():
+    i = Icon()
+    for y, x in ((6, 9), (12, 15.5), (18, 7.5)):
+        i.line((3.5, y), (20.5, y))
+        i.solid(x - 2, y - 2.6, x + 2, y + 2.6, 1)
+    return i
+
+
+def ui_sparkle():
+    i = Icon()
+    i.line((11, 4), (12.6, 10.4), (19, 12), (12.6, 13.6), (11, 20), (9.4, 13.6), (3, 12), (9.4, 10.4), closed=True)
+    i.line((18.5, 3), (18.5, 7))
+    i.line((16.5, 5), (20.5, 5))
+    return i
+
+
+def ui_key():
+    i = Icon()
+    i.ring(7.5, 16, 4)
+    i.line((10.5, 13), (20, 3.5))
+    i.line((17, 6.5), (19.8, 9.3))
+    i.line((14.3, 9.2), (16.5, 11.4))
+    return i
+
+
+def ui_float():  # 浮动层：两张错开叠放的卡
+    i = Icon()
+    i.rect(3, 9, 14, 20, 1.5)
+    i.line((9, 9), (9, 4), (21, 4), (21, 15), (14, 15))
+    return i
+
+
 # 顺序 = 码位顺序（WS_BASE + 下标），与 style.rs 的 Icon 枚举一致
 ICONS = [
     ("ws-candles", candles),
@@ -547,6 +708,27 @@ ICONS = [
     ("dr-eye", dr_eye),
     ("dr-eye-off", dr_eye_off),
     ("dr-more", dr_more),
+    # 界面通用（docs/66）
+    ("ui-bell", ui_bell),
+    ("ui-alert", ui_alert),
+    ("ui-pin", ui_pin),
+    ("ui-send-off", ui_send_off),
+    ("ui-panel-right", ui_panel_right),
+    ("ui-panel-bottom", ui_panel_bottom),
+    ("ui-snowflake", ui_snowflake),
+    ("ui-sidebar", ui_sidebar),
+    ("ui-play", ui_play),
+    ("ui-pause", ui_pause),
+    ("ui-prev", ui_prev),
+    ("ui-next", ui_next),
+    ("ui-refresh", ui_refresh),
+    ("ui-download", ui_download),
+    ("ui-camera", ui_camera),
+    ("ui-bolt", ui_bolt),
+    ("ui-sliders", ui_sliders),
+    ("ui-sparkle", ui_sparkle),
+    ("ui-key", ui_key),
+    ("ui-float", ui_float),
 ]
 
 

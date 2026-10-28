@@ -51,7 +51,7 @@ fn pipeline<'a>(v: &View) -> Element<'a, LyMsg> {
         return w::empty("这个策略没有按七层拆分", "七层轨迹只来自大师日线引擎（masters.*）的快速回测；订单流 / 做市等策略走 Nautilus，没有分层").into();
     }
     if tg.dir.is_none() {
-        return w::empty("这个策略还没有完成的运行", "在策略中心点「⚡ 快速回测」，跑完这里就会显示七层轨迹").into();
+        return w::empty("这个策略还没有完成的运行", "在策略中心点「快速回测」，跑完这里就会显示七层轨迹").into();
     }
     if v.loading {
         return w::loading("七层轨迹").into();

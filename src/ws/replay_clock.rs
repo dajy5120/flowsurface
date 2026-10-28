@@ -950,7 +950,7 @@ impl View {
             // 时间线还没打开 / 还没算出第一行
             "准备中（回放在读数据）".to_string()
         } else if self.waiting {
-            format!("⏳ 等计算（已算到 {:.0}%）", self.computed() * 100.0)
+            format!("◌ 等计算（已算到 {:.0}%）", self.computed() * 100.0)
         } else if self.playing {
             format!("▶ {}", self.pace.short())
         } else {
@@ -989,16 +989,17 @@ pub fn key_cmd(key: &iced::keyboard::Key, shift: bool) -> Option<Cmd> {
 #[must_use]
 pub fn toolbar<'a>() -> Option<Element<'a, Cmd>> {
     use crate::ui::shell::tool_pick;
-    use crate::ui::widgets::{Kind, btn};
+    use crate::style::Icon;
+    use crate::ui::widgets::{Kind, btn, ibtn_tip};
     let v = view()?;
     let span = ((v.t1 - v.t0).max(1) as f64) / 1e9;
     let pos = v.drag.unwrap_or(((v.head - v.t0) as f64 / 1e9).clamp(0.0, span));
     let r = row![
         btn("◀", Kind::Ghost, Some(Cmd::Step(-1))),
-        btn(if v.playing { "⏸" } else { "▶" }, Kind::Standard, Some(Cmd::TogglePlay)),
+        ibtn_tip(if v.playing { Icon::UiPause } else { Icon::UiPlay }, "", Kind::Standard, Some(Cmd::TogglePlay), if v.playing { "暂停（空格）" } else { "播放（空格）" }),
         btn("▶︎|", Kind::Ghost, Some(Cmd::Step(1))),
-        btn("⏮", Kind::Ghost, Some(Cmd::PrevEvent)),
-        btn("⏭", Kind::Ghost, Some(Cmd::NextEvent)),
+        ibtn_tip(Icon::UiPrev, "", Kind::Ghost, Some(Cmd::PrevEvent), "上一个事件（[）"),
+        ibtn_tip(Icon::UiNext, "", Kind::Ghost, Some(Cmd::NextEvent), "下一个事件（]）"),
         tool_pick(
             "跳转",
             match &v.focus {
@@ -1049,8 +1050,8 @@ pub fn event_menu<'a>() -> Element<'a, Cmd> {
     let mut cond_row = row![
         crate::ui::text::label("条件"),
         text_input("例如 obi_l5@0 > 0.3 and spread_bps@0 < 1", &cond_text).on_input(Cmd::CondInput).on_submit(Cmd::CondNext).width(iced::Length::Fixed(520.0)),
-        btn("⏮ 上一处", Kind::Ghost, Some(Cmd::CondPrev)),
-        btn("⏭ 下一处", Kind::Standard, Some(Cmd::CondNext)),
+        crate::ui::widgets::ibtn(crate::style::Icon::UiPrev, "上一处", Kind::Ghost, Some(Cmd::CondPrev)),
+        crate::ui::widgets::ibtn(crate::style::Icon::UiNext, "下一处", Kind::Standard, Some(Cmd::CondNext)),
     ]
     .spacing(sp(2))
     .align_y(Alignment::Center);
@@ -1085,7 +1086,7 @@ pub fn event_menu<'a>() -> Element<'a, Cmd> {
     }
     column![
         row![
-            crate::ui::text::label("事件：勾了的类参与「⏮ ⏭」（快捷键 [ ]），也标在 K 线、Footprint 与热图上；播放头落在事件前 2 秒"),
+            crate::ui::text::label("事件：勾了的类参与「上一个 / 下一个事件」（快捷键 [ ]），也标在 K 线、Footprint 与热图上；播放头落在事件前 2 秒"),
             btn("全选", Kind::Ghost, Some(Cmd::AllKinds(true))),
             btn("全不选", Kind::Ghost, Some(Cmd::AllKinds(false))),
         ]
