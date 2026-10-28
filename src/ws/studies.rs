@@ -70,12 +70,14 @@ pub struct Study {
     pub symbol: String,
     /// 对照品种（docs/63 §10 J2：相关 / 价差这类双输入统计的另一条序列 = 它已收盘的收盘价，按收盘时刻对齐）
     pub aux_symbol: String,
+    /// 副图高（屏幕像素；0 = 缺省 64）。拖副图的上边沿改（docs/63 §14）
+    pub sub_h: u32,
 }
 
 impl Default for Study {
     fn default() -> Self {
         Self { uid: 0, id: String::new(), params: BTreeMap::new(), source: None, visible: true, pane: "overlay".into(),
-               styles: BTreeMap::new(), min_tf_ms: 0, max_tf_ms: 0, tf_ms: 0, alert: None, symbol: String::new(), aux_symbol: String::new() }
+               styles: BTreeMap::new(), min_tf_ms: 0, max_tf_ms: 0, tf_ms: 0, alert: None, symbol: String::new(), aux_symbol: String::new(), sub_h: 0 }
     }
 }
 
@@ -482,6 +484,13 @@ pub enum StudyMsg {
     DragEnd,
     /// 鼠标进 / 出图例的一行（出只清自己：从一行移到另一行时，进新行与出旧行的先后不定）
     Hover { chart: String, uid: u64, on: bool },
+    /// 按住副图的上边沿（开始改副图高）
+    ResizeStart { chart: String, uid: u64 },
+    /// 按住设置弹窗的标题栏（开始拖动弹窗）
+    DlgDragStart,
+    /// 拖动中鼠标的位置（窗口坐标；整窗接住鼠标的那层发）/ 松开
+    PointerMove { x: f32, y: f32 },
+    PointerUp,
     /// 鼠标离开整块图例：收起悬停图标（在块里的行间空隙移动不收，不然移向图标时一滑出行就没了）
     HoverClear(String),
     Search(String),
@@ -493,6 +502,41 @@ pub enum StudyMsg {
     AuxDraft { uid: u64, text: String },
     /// 「对照序列」里搜特征 / 图表参数的字（不存盘）
     FeatQuery { uid: u64, text: String },
+}
+
+/// 正在拖的东西（整窗接住鼠标，见 `main.rs`）。起点等第一次移动时记（按下时拿不到窗口坐标）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pointer {
+    /// 设置弹窗：（起点, 按下时的偏移）
+    Dialog { start: Option<(f32, f32)>, base: (f32, f32) },
+    /// 副图高：（图, 指标, 起点 y, 按下时的高）
+    Resize { chart: String, uid: u64, start_y: Option<f32>, base_h: f32 },
+}
+
+/// 设置弹窗的宽、估计的高（整张卡留在区域里按它夹）、没拖过时离顶的距离。
+pub const DLG_W: f32 = 560.0;
+pub const DLG_H: f32 = 540.0;
+pub const DLG_TOP: f32 = 72.0;
+
+/// 弹窗能摆的区域（宽, 高）：画弹窗时记下，拖动时按它夹（拖出边界后往回拖不会有一段没反应）。
+static DLG_AREA: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
+
+pub fn set_dialog_area(w: f32, h: f32) {
+    if let Ok(mut a) = DLG_AREA.lock() {
+        *a = (w, h);
+    }
+}
+
+/// 偏移（相对「水平居中、离顶 [`DLG_TOP`]」）夹到整张卡都在区域里；区域还不知道时不夹。
+pub fn clamp_dialog_offset(off: (f32, f32)) -> (f32, f32) {
+    let (w, h) = DLG_AREA.lock().map(|a| *a).unwrap_or_default();
+    if w <= 0.0 || h <= 0.0 {
+        return off;
+    }
+    let cx = ((w - DLG_W) / 2.0).max(0.0);
+    let x = (cx + off.0).clamp(0.0, (w - DLG_W).max(0.0));
+    let y = (DLG_TOP + off.1).clamp(0.0, (h - DLG_H).max(0.0));
+    (x - cx, y - DLG_TOP)
 }
 
 /// 浏览器卡片的页签。
@@ -526,6 +570,10 @@ pub struct UiState {
     pub hover: Option<(String, u64)>,
     /// 正在拖的（图, 指标）
     pub drag: Option<(String, u64)>,
+    /// 正在拖弹窗 / 副图边沿
+    pub pointer: Option<Pointer>,
+    /// 设置弹窗相对居中位置的偏移（像素；这次运行里记住）
+    pub dlg_offset: (f32, f32),
     /// 这次打开浏览器以来加过的指标 id（加几次记几次）：浏览器里提示「已加」
     pub just_added: Vec<String>,
     /// 打开浏览器那一刻的「最近用过」：开着期间按它排，加了指标列表也不跳（不然鼠标下面换了一个）
@@ -631,6 +679,45 @@ pub fn handle(m: StudyMsg) {
             }
             // 没在拖、拖的不是这张图、拖到自己身上：不动
             StudyMsg::DragOver { chart, uid } if u.drag.as_ref().is_none_or(|d| d.0 != *chart || d.1 == *uid) => return,
+            StudyMsg::ResizeStart { chart, uid } => {
+                let base_h = store().lock().ok().and_then(|s| s.by_chart.get(chart)?.list.iter().find(|x| x.uid == *uid).map(pane_h)).unwrap_or(SUB_H);
+                u.pointer = Some(Pointer::Resize { chart: chart.clone(), uid: *uid, start_y: None, base_h });
+                return;
+            }
+            StudyMsg::DlgDragStart => {
+                u.pointer = Some(Pointer::Dialog { start: None, base: u.dlg_offset });
+                return;
+            }
+            StudyMsg::PointerMove { x, y } => {
+                match u.pointer.as_mut() {
+                    Some(Pointer::Dialog { start: Some((sx, sy)), base }) => {
+                        let off = clamp_dialog_offset((base.0 + x - *sx, base.1 + y - *sy));
+                        u.dlg_offset = off;
+                    }
+                    Some(Pointer::Dialog { start, .. }) => *start = Some((*x, *y)),
+                    Some(Pointer::Resize { chart, uid, start_y: Some(sy), base_h }) => {
+                        // 往上拖 = 变高；拖动中只改内存、让图重画，松开再存盘
+                        let h = (*base_h - (y - *sy)).clamp(SUB_H_MIN, SUB_H_MAX).round() as u32;
+                        let mut st = store().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(x) = st.by_chart.get_mut(chart.as_str()).and_then(|c| c.list.iter_mut().find(|x| x.uid == *uid))
+                            && x.sub_h != h
+                        {
+                            x.sub_h = h;
+                            VERSION.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Some(Pointer::Resize { start_y, .. }) => *start_y = Some(*y),
+                    None => {}
+                }
+                return;
+            }
+            StudyMsg::PointerUp => {
+                if matches!(u.pointer.take(), Some(Pointer::Resize { .. })) {
+                    drop(u);
+                    save(&store().lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+                }
+                return;
+            }
             StudyMsg::HoverClear(chart) => {
                 if u.hover.as_ref().is_some_and(|h| h.0 == *chart) {
                     u.hover = None;
@@ -932,7 +1019,8 @@ pub fn handle(m: StudyMsg) {
         }
         StudyMsg::Search(_) | StudyMsg::Category(_) | StudyMsg::TemplateName(_) | StudyMsg::Expand(_) | StudyMsg::SymbolDraft { .. } | StudyMsg::AuxDraft { .. }
         | StudyMsg::FeatQuery { .. } | StudyMsg::Menu(_) | StudyMsg::MenuTab(_) | StudyMsg::Edit(_) | StudyMsg::EditTab(_) | StudyMsg::EditCancel
-        | StudyMsg::Legend { .. } | StudyMsg::Hover { .. } | StudyMsg::HoverClear(_) | StudyMsg::DragStart { .. } | StudyMsg::DragEnd => {}
+        | StudyMsg::Legend { .. } | StudyMsg::Hover { .. } | StudyMsg::HoverClear(_) | StudyMsg::DragStart { .. } | StudyMsg::DragEnd
+        | StudyMsg::ResizeStart { .. } | StudyMsg::DlgDragStart | StudyMsg::PointerMove { .. } | StudyMsg::PointerUp => {}
     }
     save(&s);
     ui().lock().unwrap_or_else(std::sync::PoisonError::into_inner).note = note;
@@ -1766,6 +1854,19 @@ fn deliver(title: String, body: String, telegram: bool) {
 
 const SUB_H: f32 = 64.0;
 const SUB_GAP: f32 = 4.0;
+/// 拖副图高时的上下限（像素）。
+pub const SUB_H_MIN: f32 = 32.0;
+pub const SUB_H_MAX: f32 = 600.0;
+
+/// 这个指标的副图高（像素）。
+pub fn pane_h(s: &Study) -> f32 {
+    if s.sub_h == 0 { SUB_H } else { (s.sub_h as f32).clamp(SUB_H_MIN, SUB_H_MAX) }
+}
+
+/// 这张图在这个周期上显示着的副图指标（与 [`draw`] 的摆法同一份：只数有结果的）的下标。
+fn shown_subs(studies: &[Study], tf: u64, comp: &Computed) -> Vec<usize> {
+    studies.iter().enumerate().filter(|(i, s)| s.shown_on(tf) && s.pane == "sub" && comp.cols.get(*i).is_some_and(Option::is_some)).map(|(i, _)| i).collect()
+}
 
 /// 一条输出的颜色（图上的线、图例、设置弹窗里的色块同一个）。
 pub fn color_of(s: &Study, out_idx: usize, key: &str) -> Color {
@@ -1808,7 +1909,7 @@ pub fn draw(
         _ => (b, b, b),
     };
     let w = 1.0 / scaling;
-    let subs: Vec<usize> = studies.iter().enumerate().filter(|(i, s)| s.shown_on(tf) && s.pane == "sub" && comp.cols.get(*i).is_some_and(Option::is_some)).map(|(i, _)| i).collect();
+    let subs = shown_subs(&studies, tf, comp);
     for (i, s) in studies.iter().enumerate() {
         if !s.shown_on(tf) || s.pane == "sub" || sa >= sb || layer == Layer::LiveSub {
             continue;
@@ -1819,13 +1920,13 @@ pub fn draw(
     if layer == Layer::LiveOverlay {
         return;
     }
-    // 副图：自下而上摞在状态条带上面
-    let n = subs.len() as f32;
+    // 副图：自下而上摞在状态条带上面；各自的高（像素）÷ scaling 换成图坐标
+    let slots = sub_slots(&subs.iter().map(|&i| pane_h(&studies[i])).collect::<Vec<_>>(), 0.0);
     for (k, &i) in subs.iter().enumerate() {
         let s = &studies[i];
         let (Some(Some(cols)), Some(d)) = (comp.cols.get(i), s.def()) else { continue };
-        let top = region.y + region.height - reserved_bottom - (n - k as f32) * (SUB_H + SUB_GAP) / scaling;
-        let h = SUB_H / scaling;
+        let top = region.y + region.height - reserved_bottom + slots[k].0 / scaling;
+        let h = (slots[k].1 - slots[k].0) / scaling;
         if !live {
             frame.fill_rectangle(Point::new(region.x, top), Size::new(region.width, h), pal::alpha(pal::card_bg(), 0.97)); // 基本不透明：主图的 K 线与叠加线不透过来
             frame.fill_rectangle(Point::new(region.x, top), Size::new(region.width, w), pal::alpha(pal::dim(), 0.25));
@@ -1868,16 +1969,20 @@ pub enum Layer {
 /// 副图（自上而下）在屏幕上的 [上沿, 下沿)（像素，`bottom_px` = 主图底边减去状态条带后的位置）。
 /// 与 [`draw`] 里的摆法同一份：只数有结果的副图。
 pub fn sub_panes_px(chart: &str, tf: u64, comp: &Computed, bottom_px: f32) -> Vec<(f32, f32)> {
-    let n = studies_of(chart).iter().enumerate().filter(|(i, s)| s.shown_on(tf) && s.pane == "sub" && comp.cols.get(*i).is_some_and(Option::is_some)).count();
-    sub_slots(n, bottom_px)
+    let studies = studies_of(chart);
+    sub_slots(&shown_subs(&studies, tf, comp).iter().map(|&i| pane_h(&studies[i])).collect::<Vec<_>>(), bottom_px)
 }
 
-/// n 个副图（自上而下）的 [上沿, 下沿)（屏幕像素）。
-pub fn sub_slots(n: usize, bottom_px: f32) -> Vec<(f32, f32)> {
-    (0..n).map(|k| {
-        let top = bottom_px - (n - k) as f32 * (SUB_H + SUB_GAP);
-        (top, top + SUB_H)
-    }).collect()
+/// 各副图（自上而下，高 `heights` 像素）的 [上沿, 下沿)（屏幕像素）：自下而上摞，每个下面留一道缝。
+pub fn sub_slots(heights: &[f32], bottom_px: f32) -> Vec<(f32, f32)> {
+    let mut out = vec![(0.0, 0.0); heights.len()];
+    let mut cur = bottom_px;
+    for (k, h) in heights.iter().enumerate().rev() {
+        let top = cur - SUB_GAP - h;
+        out[k] = (top, top + h);
+        cur = top;
+    }
+    out
 }
 
 /// 可见的下标区间 [a, b)（左右各多算一根，线能连到边外）。
@@ -1941,8 +2046,8 @@ pub fn sub_scales(chart: &str, tf: u64, comp: &Computed, earliest: u64, latest: 
 
 /// 副图一共占多高（主图底部要让出来的；与状态条带一起算）。
 pub fn sub_height(chart: &str, tf: u64, scaling: f32) -> f32 {
-    let n = studies_of(chart).iter().filter(|s| s.shown_on(tf) && s.pane == "sub").count() as f32;
-    n * (SUB_H + SUB_GAP) / scaling.max(f32::EPSILON)
+    let px: f32 = studies_of(chart).iter().filter(|s| s.shown_on(tf) && s.pane == "sub").map(|s| pane_h(s) + SUB_GAP).sum();
+    px / scaling.max(f32::EPSILON)
 }
 
 fn fmt_val(v: f64) -> String {
@@ -2152,6 +2257,8 @@ pub struct LegendRow {
     pub provisional: bool,
     pub alert: bool,
     pub error: Option<String>,
+    /// 副图高（像素）
+    pub sub_h: f32,
 }
 
 /// 这张图的图例：每个指标一行，与 studies 同序。`at` = 十字线所在那根（None = 最后一根）。
@@ -2196,6 +2303,7 @@ pub fn legend_rows(chart: &str, tf: u64, at: Option<u64>) -> Vec<LegendRow> {
                 provisional: prov,
                 alert: s.alert.as_ref().is_some_and(|a| a.armed),
                 error: comp.as_ref().and_then(|c| c.errors.get(k).cloned().flatten()),
+                sub_h: pane_h(s),
             }
         })
         .collect()
@@ -2210,8 +2318,8 @@ pub fn hit(chart: &str, tf: u64, t: u64, y: f32, price_to_y: &dyn Fn(f64) -> f32
     let i = comp.ts.partition_point(|x| *x <= t).checked_sub(1)?;
     let studies = studies_of(chart);
     let (a, b) = visible_range(&comp, tf, earliest, latest);
-    let subs: Vec<usize> = studies.iter().enumerate().filter(|(k, s)| s.shown_on(tf) && s.pane == "sub" && comp.cols.get(*k).is_some_and(Option::is_some)).map(|(k, _)| k).collect();
-    let slots = sub_slots(subs.len(), sub_bottom);
+    let subs = shown_subs(&studies, tf, &comp);
+    let slots = sub_slots(&subs.iter().map(|&k| pane_h(&studies[k])).collect::<Vec<_>>(), sub_bottom);
     // 落在哪个副图里：只看那一个；都不在：看主图上的叠加指标
     let in_sub = slots.iter().position(|(top, bottom)| y >= *top && y < *bottom);
     type YMap<'f> = Box<dyn Fn(f64) -> f32 + 'f>;
@@ -2223,8 +2331,9 @@ pub fn hit(chart: &str, tf: u64, t: u64, y: f32, price_to_y: &dyn Fn(f64) -> f32
                 return None;
             }
             let (_, _, lo, hi) = sub_scale(&d, &studies[k], cols, a, b)?;
-            let (top, _) = slots[j];
-            vec![(k, Box::new(move |v: f64| top + SUB_H - ((v - lo) / (hi - lo)) as f32 * SUB_H))]
+            let (top, bottom) = slots[j];
+            let h = bottom - top;
+            vec![(k, Box::new(move |v: f64| top + h - ((v - lo) / (hi - lo)) as f32 * h))]
         }
         None => studies
             .iter()
@@ -2513,7 +2622,7 @@ mod tests {
         assert_eq!(hit("测试图命中", tf, t + 10_000, py(ema) + 4.0, &py, 900.0, e, l), Some(9401), "离线 4 像素：中");
         assert_eq!(hit("测试图命中", tf, t, py(ema) + 30.0, &py, 900.0, e, l), None, "30 像素：不中");
         // 副图：唯一一个副图在 [900 - 68, 900 - 4)；RSI 的纵轴按可见区间
-        let slot = sub_slots(1, 900.0)[0];
+        let slot = sub_slots(&[SUB_H], 900.0)[0];
         let rsi = comp.cols[1].as_ref().unwrap()[0][50];
         let d = studies_of("测试图命中")[1].def().unwrap();
         let (_, _, lo, hi) = sub_scale(&d, &studies_of("测试图命中")[1], comp.cols[1].as_ref().unwrap(), 0, 100).unwrap();
@@ -2541,6 +2650,40 @@ mod tests {
         let d = ind::def("combo").unwrap();
         assert_eq!(d.pane, "new");
         assert!(d.data.contains(&"aux"));
+    }
+
+    #[test]
+    fn 副图高_自下而上摞_拖上沿改高_松开存() {
+        let _g = super::super::studies_bg::test_guard();             // 共用界面状态：与别的走 handle 的测试串行
+        // 两个副图：上面 100 高、下面缺省 64；每个下面一道 4 像素的缝
+        // 下面那个：[900 − 4 − 64, 900 − 4)；上面那个再往上让一道缝：[832 − 4 − 100, 832 − 4)
+        assert_eq!(sub_slots(&[100.0, SUB_H], 900.0), vec![(728.0, 828.0), (832.0, 896.0)]);
+        put("测试图副图高", vec![Study { uid: 9501, id: "rsi".into(), pane: "sub".into(), ..Study::default() }]);
+        let c = || "测试图副图高".to_string();
+        handle(StudyMsg::ResizeStart { chart: c(), uid: 9501 });
+        handle(StudyMsg::PointerMove { x: 0.0, y: 500.0 });             // 第一次移动只记起点
+        assert_eq!(studies_of("测试图副图高")[0].sub_h, 0);
+        handle(StudyMsg::PointerMove { x: 0.0, y: 440.0 });             // 往上 60：64 → 124
+        assert_eq!(studies_of("测试图副图高")[0].sub_h, 124);
+        handle(StudyMsg::PointerMove { x: 0.0, y: 2000.0 });            // 往下拖过头：夹在最小高
+        assert_eq!(studies_of("测试图副图高")[0].sub_h, SUB_H_MIN as u32);
+        handle(StudyMsg::PointerUp);
+        assert!(ui_state().pointer.is_none());
+        assert_eq!(pane_h(&studies_of("测试图副图高")[0]), SUB_H_MIN);
+        drop_chart("测试图副图高");
+    }
+
+    #[test]
+    fn 设置弹窗_偏移夹在区域里() {
+        let _g = super::super::studies_bg::test_guard();
+        set_dialog_area(1600.0, 1000.0);
+        assert_eq!(clamp_dialog_offset((0.0, 0.0)), (0.0, 0.0));
+        // 往右下拖过头：整张卡停在右下角
+        assert_eq!(clamp_dialog_offset((5000.0, 5000.0)), ((1600.0 - DLG_W) / 2.0, 1000.0 - DLG_H - DLG_TOP));
+        assert_eq!(clamp_dialog_offset((-5000.0, -5000.0)), (-(1600.0 - DLG_W) / 2.0, -DLG_TOP));
+        // 窗口比卡还小：贴左上
+        set_dialog_area(400.0, 300.0);
+        assert_eq!(clamp_dialog_offset((100.0, 100.0)), (0.0, -DLG_TOP));
     }
 
     #[test]

@@ -1003,6 +1003,16 @@ impl KlineChart {
         if let Some(k) = last {
             crate::ws::drawing::on_price(&self.chart.drawing_symbol(), k.close.units, k.time.as_u64(), self.chart.decimals);
         }
+        // 副图与状态条带压在主图底部：自动适配价格时把它们占的高让出来，K 线排在它们上面（docs/63 §14）
+        let covered_px = match &self.data_source {
+            PlotData::TimeBased(ts) => {
+                let iv = ts.interval.to_milliseconds();
+                let sym = crate::ws::drawing::symbol_key(&self.chart.ticker_info.ticker);
+                let sc = self.chart.scaling;
+                (crate::ws::studies::sub_height(self.studies_chart.as_deref().unwrap_or(""), iv, sc) + crate::ws::regime::bottom_reserved(&sym, iv, sc)) * sc
+            }
+            PlotData::TickBased(_) => 0.0,
+        };
         let chart = &mut self.chart;
 
         if let Some(autoscale) = chart.layout.autoscale {
@@ -1109,8 +1119,10 @@ impl KlineChart {
                             }
 
                             let padded_span = visible_span + top_padding + bottom_padding;
+                            // 主图上没被副图 / 状态条带盖住的高（至少留一半，副图拖得太高时 K 线也不至于挤成一条）
+                            let usable = (chart_height - covered_px).max(chart_height * 0.5);
                             if padded_span > 0.0 {
-                                chart.cell_height = (chart_height * tick_size) / padded_span;
+                                chart.cell_height = (usable * tick_size) / padded_span;
                                 chart.base_price_y = Price::from_f32(fit_highest + top_padding);
                                 chart.translation.y = -chart_height / 2.0;
                             }

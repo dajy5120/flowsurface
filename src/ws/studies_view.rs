@@ -267,8 +267,9 @@ pub fn inspector<'a>(chart: &str) -> Element<'a, StudyMsg> {
 
 // ── 设置弹窗 ───────────────────────────────────────────────────────────────
 
-/// 单个指标的设置弹窗（开着时；居中盖在内容上方，图照常看得到——改了立刻生效）。
-pub fn editor<'a>() -> Option<Element<'a, StudyMsg>> {
+/// 单个指标的设置弹窗（开着时；盖在内容上方，图照常看得到——改了立刻生效）。按住标题栏拖到任意位置
+/// （这次运行里记住；拖不出 `area`，标题栏总留在里面）。`area` = 弹窗能摆的区域大小。
+pub fn editor<'a>(area: iced::Size) -> Option<Element<'a, StudyMsg>> {
     let ui = st::ui_state();
     let (chart, uid, _) = ui.editing.clone()?;
     let list = st::studies_of(&chart);
@@ -276,12 +277,19 @@ pub fn editor<'a>() -> Option<Element<'a, StudyMsg>> {
     let s = &list[i];
     let d = s.def()?;
     let symbol = st::chart_symbol(&chart);
-    let head = row![
-        t::section(format!("{} · 设置", s.label())),
-        Space::new().width(Length::Fill),
-        w::btn("✕", Kind::Ghost, Some(StudyMsg::EditCancel)),
-    ]
-    .align_y(Alignment::Center);
+    // 标题栏：按住拖动弹窗（✕ 是按钮，先接住点击）
+    let head = iced::widget::mouse_area(
+        row![
+            t::section(format!("{} · 设置", s.label())),
+            t::metadata("按住这里拖动").color(pal::dim()),
+            Space::new().width(Length::Fill),
+            w::btn("✕", Kind::Ghost, Some(StudyMsg::EditCancel)),
+        ]
+        .spacing(metrics::space(2))
+        .align_y(Alignment::Center),
+    )
+    .on_press(StudyMsg::DlgDragStart)
+    .interaction(if matches!(ui.pointer, Some(st::Pointer::Dialog { .. })) { iced::mouse::Interaction::Grabbing } else { iced::mouse::Interaction::Grab });
     let tabs = w::tabs(
         &[("参数", EditTab::Params), ("样式", EditTab::Style), ("可见性", EditTab::Visibility), ("提醒", EditTab::Alert)],
         &ui.edit_tab,
@@ -314,11 +322,13 @@ pub fn editor<'a>() -> Option<Element<'a, StudyMsg>> {
         .spacing(metrics::space(2))
         .align_y(Alignment::Center),
     );
-    let card = container(iced::widget::opaque(container(col).padding(metrics::space(5)).width(Length::Fixed(560.0)).style(w::float_card)))
-        .width(Length::Fill)
-        .align_x(Alignment::Center)
-        .padding(iced::Padding { top: 72.0, ..iced::Padding::ZERO });
-    Some(card.into())
+    // 位置 = 水平居中、离顶 DLG_TOP，再加拖动的偏移；整张卡夹在区域里（窗口变小了也拉得回来）
+    st::set_dialog_area(area.width, area.height);
+    let (dx, dy) = st::clamp_dialog_offset(ui.dlg_offset);
+    let x = ((area.width - st::DLG_W) / 2.0).max(0.0) + dx;
+    let y = st::DLG_TOP + dy;
+    let card = iced::widget::opaque(container(col).padding(metrics::space(5)).width(Length::Fixed(st::DLG_W)).style(w::float_card));
+    Some(iced::widget::pin(card).x(x).y(y).into())
 }
 
 /// 参数页：计算参数、数据源、计算周期、品种、对照品种、锚点。
@@ -644,9 +654,16 @@ pub fn legend<'a>(chart: &str) -> Option<Element<'a, StudyMsg>> {
     let mut layers: Vec<Element<'a, StudyMsg>> =
         // 各层铺满（Stack 按第一层定大小）；空白处不接鼠标，图照常拖、照常十字线
         vec![container(main).padding(iced::Padding { top: info.top, left: 6.0, ..iced::Padding::ZERO }).width(Length::Fill).height(Length::Fill).into()];
-    // 副图的名字行：各自副图的左上角
+    // 副图的名字行：各自副图的左上角；副图的上边沿是拖动条（上下拖改这个副图的高）
     let subs: Vec<&st::LegendRow> = rows.iter().filter(|r| r.sub).collect();
-    for (r, (top, _)) in subs.iter().zip(st::sub_slots(subs.len(), info.sub_bottom)) {
+    let slots = st::sub_slots(&subs.iter().map(|r| r.sub_h).collect::<Vec<_>>(), info.sub_bottom);
+    for (r, (top, _)) in subs.iter().zip(&slots) {
+        let grip = iced::widget::mouse_area(container(Space::new()).width(Length::Fill).height(Length::Fixed(9.0)))
+            .on_press(StudyMsg::ResizeStart { chart: c.clone(), uid: r.uid })
+            .interaction(iced::mouse::Interaction::ResizingVertically);
+        layers.push(container(grip).padding(iced::Padding { top: (top - 5.0).max(0.0), ..iced::Padding::ZERO }).width(Length::Fill).height(Length::Fill).into());
+    }
+    for (r, &(top, _)) in subs.iter().zip(&slots) {
         layers.push(
             container(legend_row(chart, r, hover == Some(r.uid), true))
                 .padding(iced::Padding { top: top + 1.0, left: 4.0, ..iced::Padding::ZERO })

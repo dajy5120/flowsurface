@@ -1548,9 +1548,11 @@ impl Flowsurface {
                     None => dashboard_view,
                 };
                 // 指标设置弹窗：居中盖在内容上方，图照常看得到（改了立刻生效）
-                let dashboard_view: Element<'_, Message> = match ws::studies_view::editor() {
-                    Some(e) => iced::widget::stack![dashboard_view, e.map(Message::Studies)].into(),
-                    None => dashboard_view,
+                let dashboard_view: Element<'_, Message> = if ws::studies::ui_state().editing.is_some() {
+                    let e = iced::widget::responsive(|size| ws::studies_view::editor(size).map_or_else(|| column![].into(), |e| e.map(Message::Studies)));
+                    iced::widget::stack![dashboard_view, e].into()
+                } else {
+                    dashboard_view
                 };
                 // 事件筛选（docs/51 P4）：点工具栏「事件 ▾」后盖在内容上方
                 let dashboard_view: Element<'_, Message> = if ws::replay_clock::event_menu_open() {
@@ -1692,6 +1694,22 @@ impl Flowsurface {
                         .on_move(|p| Message::Draw(ws::drawing::DrawMsg::BarDragMove(p.x, p.y)))
                         .on_release(Message::Draw(ws::drawing::DrawMsg::BarDragEnd))
                         .interaction(iced::mouse::Interaction::Grabbing)
+                ]
+                .into()
+            } else {
+                base
+            };
+            // 拖指标设置弹窗 / 副图的上边沿时（docs/63 §14）：整窗接住鼠标，光标离开拖动的地方也照样跟，松开结束
+            let base: Element<'_, Message> = if ws::studies::ui_state().pointer.is_some() {
+                iced::widget::stack![
+                    base,
+                    iced::widget::mouse_area(iced::widget::Space::new().width(iced::Length::Fill).height(iced::Length::Fill))
+                        .on_move(|p| Message::Studies(ws::studies::StudyMsg::PointerMove { x: p.x, y: p.y }))
+                        .on_release(Message::Studies(ws::studies::StudyMsg::PointerUp))
+                        .interaction(match ws::studies::ui_state().pointer {
+                            Some(ws::studies::Pointer::Resize { .. }) => iced::mouse::Interaction::ResizingVertically,
+                            _ => iced::mouse::Interaction::Grabbing,
+                        })
                 ]
                 .into()
             } else {
