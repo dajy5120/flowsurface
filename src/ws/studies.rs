@@ -1043,6 +1043,49 @@ pub fn armed_alerts() -> Vec<AlertRoute> {
     v
 }
 
+/// 提醒管理器（docs/65）的一行：一个挂了提醒的指标（开着、暂停的都算）。
+#[derive(Debug, Clone)]
+pub struct AlertRule {
+    pub chart: String,
+    pub symbol: String,
+    pub uid: u64,
+    pub label: String,
+    /// 条件的一句话：`RSI 上穿 70 · 收盘确认 · 5m`
+    pub cond: String,
+    pub alert: StudyAlert,
+    /// 这张图还在某个页面上（不在 = 不判）
+    pub live: bool,
+}
+
+/// 全部挂了提醒的指标。
+pub fn alert_rules() -> Vec<AlertRule> {
+    let live = live_charts().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    let s = store().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut v = Vec::new();
+    for (id, c) in &s.by_chart {
+        for x in &c.list {
+            let Some(a) = x.alert.as_ref() else { continue };
+            let oname = x.def().and_then(|d| d.outputs.iter().find(|o| o.key == a.out).map(|o| o.name.to_string())).unwrap_or_else(|| a.out.clone());
+            let cname = ALERT_CONDS.iter().find(|k| k.0 == a.cond).map_or("", |k| k.1);
+            v.push(AlertRule {
+                chart: id.clone(),
+                symbol: c.symbol.clone(),
+                uid: x.uid,
+                label: x.label(),
+                cond: format!(
+                    "{oname} {cname} {} · {} · {}",
+                    a.level_text.trim(),
+                    if a.intrabar { "盘中" } else { "收盘确认" },
+                    tf_label(a.tf_ms)
+                ),
+                alert: a.clone(),
+                live: live.contains(id),
+            });
+        }
+    }
+    v
+}
+
 /// 让图重画（跨品种的 K 线到了）。
 pub fn touch() {
     VERSION.fetch_add(1, Ordering::Relaxed);
@@ -1719,7 +1762,7 @@ pub fn fired_log() -> Vec<(String, String)> {
 fn check_alerts(chart: &ChartRef, tf: u64, studies: &[Study], out: &Computed, now_ms: u64) {
     let symbol = chart.symbol.as_str();
     let n_conf = out.ts.len() - usize::from(out.provisional_ts.is_some());
-    let mut hits: Vec<(u64, String, String, bool)> = Vec::new();
+    let mut hits: Vec<(u64, String, String, bool, super::calendar_alerts::Origin)> = Vec::new();
     {
         let mut stt = alert_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for (i, s) in studies.iter().enumerate() {
@@ -1758,13 +1801,27 @@ fn check_alerts(chart: &ChartRef, tf: u64, studies: &[Study], out: &Computed, no
                     if a.intrabar { "盘中" } else { "收盘确认" },
                     chrono::DateTime::from_timestamp_millis(bar_ts as i64).map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default()
                 );
-                hits.push((s.uid, title, body, a.telegram));
+                // 进消息中心的出处（docs/65）：哪张图、哪个指标、哪根 K 线、前值 → 现值，连同触发时这条指标的整份设置
+                let origin = super::calendar_alerts::Origin {
+                    level: 2,
+                    occurred_at: Some((if a.intrabar { now_ms } else { bar_ts + tf }) as i64),
+                    source: "指标提醒".into(),
+                    symbols: vec![code.to_string()],
+                    rule_ref: format!("indicator:{}:{}", chart.id, s.uid),
+                    refj: serde_json::json!({
+                        "chart": chart.id, "symbol": symbol, "tf_ms": tf, "bar_ts": bar_ts, "study": s.label(), "out": a.out,
+                        "out_name": oname, "cond": a.cond, "level": a.level, "prev": prev, "cur": cur, "intrabar": a.intrabar,
+                        "settings": serde_json::to_value(s).unwrap_or_default(),
+                    }),
+                };
+                hits.push((s.uid, title, body, a.telegram, origin));
             }
         }
     }
     if hits.is_empty() {
         return;
     }
+    let mut paused: Vec<String> = Vec::new();
     {
         let mut s = store().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         with_list(&mut s, &chart.id, |l| {
@@ -1774,14 +1831,42 @@ fn check_alerts(chart: &ChartRef, tf: u64, studies: &[Study], out: &Computed, no
                     if a.once {
                         a.armed = false;
                     }
+                    // 总闸（docs/65 §4 第 9 条）：1 分钟里响太多次 = 条件设得不对，自动暂停
+                    if burst((chart.id.clone(), x.uid), now_ms) {
+                        a.armed = false;
+                        paused.push(x.label());
+                    }
                 }
             }
         });
         save(&s);
     }
-    for (_, title, body, tg) in hits {
-        deliver(title, body, tg);
+    for (_, title, body, tg, origin) in hits {
+        deliver(title, body, tg, origin);
     }
+    for name in paused {
+        super::inbox::post_system(
+            2,
+            format!("指标提醒已自动暂停 · {}", symbol.rsplit(':').next().unwrap_or(symbol)),
+            format!("「{name}」1 分钟里触发超过 {BURST_MAX} 次，已暂停这条提醒；在提醒管理器或指标设置里看条件再恢复"),
+        );
+    }
+}
+
+/// 同一条提醒 1 分钟内最多响几次，超过就自动暂停。
+pub const BURST_MAX: usize = 10;
+
+/// 记一次触发；1 分钟内超过 [`BURST_MAX`] 次返回 true。
+fn burst(key: (String, u64), now_ms: u64) -> bool {
+    type Recent = HashMap<(String, u64), std::collections::VecDeque<u64>>;
+    static B: OnceLock<Mutex<Recent>> = OnceLock::new();
+    let mut g = B.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let q = g.entry(key).or_default();
+    q.push_back(now_ms);
+    while q.front().is_some_and(|t| now_ms.saturating_sub(*t) > 60_000) {
+        q.pop_front();
+    }
+    q.len() > BURST_MAX
 }
 
 fn tf_label(tf: u64) -> String {
@@ -1794,7 +1879,7 @@ fn tf_label(tf: u64) -> String {
 }
 
 /// 发出去：与画线提醒同一个通道。样张、隔离实例（`WS_ISOLATED`）与测试只记下来。
-fn deliver(title: String, body: String, telegram: bool) {
+fn deliver(title: String, body: String, telegram: bool, origin: super::calendar_alerts::Origin) {
     {
         let mut f = fired().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         f.push((title.clone(), body.clone()));
@@ -1807,7 +1892,7 @@ fn deliver(title: String, body: String, telegram: bool) {
     }
     super::spawn_named("ws-indicator-alert", move || {
         let r = super::calendar_alerts::open(&super::calendar_alerts::db_path())
-            .and_then(|c| super::calendar_alerts::queue_now(&c, chrono::Utc::now().timestamp_millis(), "indicator", &title, &body, telegram, false));
+            .and_then(|c| super::calendar_alerts::queue_with(&c, chrono::Utc::now().timestamp_millis(), "indicator", &title, &body, telegram, false, &origin));
         if let Err(e) = r {
             ui().lock().unwrap_or_else(std::sync::PoisonError::into_inner).note = format!("指标提醒没发出去：{e}");
         }

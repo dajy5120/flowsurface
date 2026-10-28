@@ -290,6 +290,10 @@ enum Message {
     Caliber(ws::feature_matrix::FeatureMatrixMsg),
     Ai(ws::ai_providers::AiMsg),
     Calendar(ws::calendar_view::CalMsg),
+    /// 消息中心（docs/65）
+    Inbox(ws::inbox::InboxMsg),
+    /// 提醒管理器（docs/65）
+    Rules(ws::alert_rules::RulesMsg),
     /// 数据目录提醒与设置（docs/47）
     DataDirs(ws::data_dirs::DataDirsMsg),
     Sidebar(dashboard::sidebar::Message),
@@ -449,6 +453,8 @@ impl Flowsurface {
             ws::bridge::start();
             // 金融日历的提醒（docs/43 K4）：随 Cockpit 常驻，不依赖日历面板开没开。样张实例不起（不弹真通知）
             ws::calendar_alerts::start();
+            // 消息中心（docs/65）：后台读库、算铃铛上的数；样张不起
+            ws::inbox::start();
         }
         if state.specimen.is_some() {
             ws::calendar_alerts::load_snapshot_only();
@@ -742,6 +748,8 @@ impl Flowsurface {
                 }
                 // 告警常读（状态栏要数新命中）：每 2 秒只看一次修改时间，变了才重读
                 self.shell.alerts.refresh();
+                // 提醒管理器开着：每 5 秒在后台重读规则（docs/65）
+                ws::alert_rules::tick();
                 if self.shell.bottom && self.shell.bottom_tab == ui::shell::BottomTab::Alerts {
                     self.shell.alerts.mark_seen();
                 }
@@ -931,6 +939,8 @@ impl Flowsurface {
             }
             Message::Ai(m) => ws::ai_providers::handle(m),
             Message::Calendar(m) => ws::calendar::handle(m),
+            Message::Inbox(m) => ws::inbox::handle(m),
+            Message::Rules(m) => ws::alert_rules::handle(m),
             Message::DataFloat(m) => {
                 // 应用：整份交给打开它的那个面板（经面板原来的数据消息，选完数据后该做的事照常发生）
                 if let Some((uid, pick)) = ws::data_float::handle(m)
@@ -2238,6 +2248,8 @@ impl Flowsurface {
             || ws::chart_params::draft().is_some()
             || ws::ai_providers::manager_open()
             || ws::calendar_view::TG_OPEN.load(std::sync::atomic::Ordering::Relaxed)
+            || ws::inbox::is_open()
+            || ws::alert_rules::is_open()
     }
 
     /// 数据浮窗开给的正是工具栏当前那个面板时：（面板名, 它的数据宿主）。
@@ -2288,6 +2300,12 @@ impl Flowsurface {
         }
         if let Some(body) = ws::calendar_view::telegram_float() {
             v.push(Win { key: WinKey::Telegram, title: "Telegram".into(), body: body.map(Message::Calendar), w: 700.0, h: 560.0 });
+        }
+        if ws::inbox::is_open() {
+            v.push(Win { key: WinKey::Inbox, title: "消息中心".into(), body: ws::inbox_view::body().map(Message::Inbox), w: 1180.0, h: 660.0 });
+        }
+        if ws::alert_rules::is_open() {
+            v.push(Win { key: WinKey::AlertRules, title: "提醒管理器".into(), body: ws::inbox_view::rules_body().map(Message::Rules), w: 900.0, h: 600.0 });
         }
         if self.page_menu {
             v.push(Win { key: WinKey::Page, title: format!("页面 · {}", self.active_name()), body: self.page_toolbar(), w: 980.0, h: 640.0 });
@@ -2369,6 +2387,12 @@ impl Flowsurface {
                 }
             }
             WinKey::Telegram => ws::calendar_view::TG_OPEN.store(false, std::sync::atomic::Ordering::Relaxed),
+            WinKey::Inbox => {
+                if ws::inbox::is_open() {
+                    ws::inbox::handle(ws::inbox::InboxMsg::Toggle);
+                }
+            }
+            WinKey::AlertRules => ws::alert_rules::handle(ws::alert_rules::RulesMsg::Close),
         }
     }
 
@@ -2944,6 +2968,8 @@ impl Flowsurface {
             Cmd::OpenLayouts => self.sidebar.set_menu(Some(sidebar::Menu::Layout)),
             Cmd::OpenDataFolder => return self.update(Message::DataFolderRequested),
             Cmd::DataDirs => ws::data_dirs::handle(ws::data_dirs::DataDirsMsg::Open),
+            Cmd::Inbox => ws::inbox::handle(ws::inbox::InboxMsg::Toggle),
+            Cmd::AlertRules => ws::alert_rules::handle(ws::alert_rules::RulesMsg::Toggle),
             Cmd::OpenInStudio => match ws::bridge::open_in_studio() {
                 Ok(m) => self.notifications.push(Toast::info(m)),
                 Err(m) => self.notifications.push(Toast::warn(m)),
@@ -3044,9 +3070,16 @@ impl Flowsurface {
             };
             (format!("⇢ {}", l.label), l.detail, tone)
         });
+        let data_dirs = ws::data_dirs::problem_summary();
+        // 行情断流 / 数据目录不可用持续 10 秒：记进消息中心（docs/65）
+        if self.specimen.is_none() {
+            ws::inbox::note_env(&streams_down, data_dirs.as_ref());
+        }
         ui::shell::Info {
             alerts_unseen: self.shell.alerts.unseen(),
-            data_dirs: ws::data_dirs::problem_summary(),
+            inbox: ws::inbox::snapshot().badge,
+            inbox_open: ws::inbox::is_open(),
+            data_dirs,
             link,
             workspace: self
                 .layout_manager

@@ -518,6 +518,9 @@ pub struct Info {
     pub streams_down: Vec<(String, String)>,
     /// 上次打开「告警」页之后新命中的告警条数
     pub alerts_unseen: usize,
+    /// 消息中心（docs/65）铃铛上的数
+    pub inbox: wealthspring_inbox::Badge,
+    pub inbox_open: bool,
     /// 数据目录有问题（docs/47）：（状态栏标签, 悬停说明）；`None` = 都好
     pub data_dirs: Option<(String, String)>,
     /// 整机网速（下行, 上行）字节/秒
@@ -598,7 +601,37 @@ pub fn toolbar<'a, M: Clone + 'a>(info: &Info, on: fn(ShellEvent) -> M, ctx: Ele
         ));
     }
     let left: Element<'a, ShellEvent> = left.into();
+    // 消息中心（docs/65）：🔔 未读（普通颜色）+ ⚠ 待确认的 P0/P1（只有它醒目）+ 渠道异常的小标记
+    let (bell, urgent, chan) = crate::ws::inbox_view::bell_parts(&info.inbox);
+    let mut bell_row = row![t::label(bell).color(color(c.text_primary))].spacing(metrics::space(2)).align_y(Alignment::Center);
+    if !urgent.is_empty() {
+        bell_row = bell_row.push(t::label(urgent).color(color(c.status_warning)));
+    }
+    if !chan.is_empty() {
+        bell_row = bell_row.push(t::metadata("✉✗").color(color(c.status_danger)));
+    }
+    let bell_tip = {
+        let mut s = format!("消息中心：未读 {} 条（P0–P2）", info.inbox.unread);
+        if info.inbox.urgent > 0 {
+            s.push_str(&format!("\n待确认 {} 条（P0 / P1，要点「知道了」）", info.inbox.urgent));
+        }
+        if !chan.is_empty() {
+            s.push_str(&format!("\n{chan}"));
+        }
+        s
+    };
+    let inbox_open = info.inbox_open;
+    let bell_btn: Element<'a, ShellEvent> = iced::widget::tooltip(
+        button(bell_row)
+            .padding([3, 8])
+            .on_press(ShellEvent::Run(Cmd::Inbox))
+            .style(move |th, st| crate::style::button::modifier(th, st, inbox_open)),
+        container(t::caption(bell_tip)).padding(6).style(crate::style::tooltip),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .into();
     let right: Element<'a, ShellEvent> = row![
+        bell_btn,
         search,
         toggle_btn("检查器", "Ctrl I", Cmd::ToggleInspector),
         toggle_btn("底部面板", "Ctrl J", Cmd::ToggleBottom)
@@ -814,15 +847,23 @@ pub fn bottom_panel<'a>(shell: &'a Shell, info: &Info) -> Element<'a, ShellEvent
             }
         }
         BottomTab::Notices => {
+            // 并进消息中心了（docs/65）：弹出过的提示都入库（「系统」类），关了程序也查得到；这里只留本次运行的
+            let to_inbox = button(t::label("打开消息中心（🔔）"))
+                .padding([3, 8])
+                .on_press(ShellEvent::Run(Cmd::Inbox))
+                .style(|th, st| crate::style::button::modifier(th, st, false));
+            let tip = row![t::caption("通知已并入顶部的消息中心（「系统」类，关了程序也查得到）；下面只列本次运行弹过的。"), to_inbox]
+                .spacing(metrics::space(3))
+                .align_y(Alignment::Center);
             if shell.notices.is_empty() {
-                empty("还没有通知", "弹出过的提示都会留在这里（最多 200 条）：同时最多显示 3 条，挤掉的和自动消失的在这里都能查到。")
+                column![tip, empty("本次运行还没有通知", "同时最多显示 3 条，挤掉的和自动消失的在这里和消息中心里都能查到。")].spacing(metrics::space(2)).into()
             } else {
                 let mut col = column![].spacing(1);
                 for (time, title, body, level) in shell.notices.iter().rev() {
                     let l = LogLine { time: time.clone(), level: *level, msg: if title.is_empty() { body.clone() } else { format!("{title}　{body}") } };
                     col = col.push(line(&l));
                 }
-                crate::ui::scroll(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill).into()
+                column![tip, crate::ui::scroll(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill)].spacing(metrics::space(2)).into()
             }
         }
         BottomTab::Alerts => {

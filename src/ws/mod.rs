@@ -54,6 +54,10 @@ pub mod observatory_table;
 pub mod observatory_view;
 pub mod calendar;
 pub mod calendar_alerts;
+// 消息中心与提醒管理器（docs/65）
+pub mod alert_rules;
+pub mod inbox;
+pub mod inbox_view;
 pub mod calendar_readout;
 pub mod calendar_relevance;
 pub mod calendar_study;

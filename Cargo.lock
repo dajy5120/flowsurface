@@ -1128,6 +1128,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "wealthspring-inbox",
  "wealthspring-indicators",
  "wealthspring-ui-tokens",
 ]
@@ -5390,6 +5391,14 @@ dependencies = [
  "log",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "wealthspring-inbox"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

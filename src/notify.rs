@@ -100,6 +100,8 @@ impl Notifications {
 
     /// 显示一条：记进通知中心；同时最多 3 条，超了挤掉最早的（历史里还在）。
     fn show(&mut self, toast: Toast) {
+        // 消息中心（docs/65）：弹过的提示都入库（「系统」类），关了程序也查得到
+        crate::ws::inbox::post_toast(toast.title(), toast.body(), matches!(toast.status(), Status::Danger));
         self.history.push_back((chrono::Local::now().format("%H:%M:%S").to_string(), toast.clone()));
         while self.history.len() > 200 {
             self.history.pop_front();

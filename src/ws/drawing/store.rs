@@ -293,6 +293,18 @@ impl Db {
         (v > FORMAT).then_some(v)
     }
 
+    /// 有对象挂着到价提醒的品种（提醒管理器用，docs/65）。
+    #[must_use]
+    pub fn symbols_with_alerts(&self) -> Vec<String> {
+        self.open()
+            .and_then(|c| {
+                let mut st = c.prepare("SELECT DISTINCT symbol FROM drawings WHERE body LIKE '%\"alert\"%' ORDER BY symbol")?;
+                let v = st.query_map([], |r| r.get(0))?.filter_map(Result::ok).collect();
+                Ok(v)
+            })
+            .unwrap_or_default()
+    }
+
     /// 一个品种的全部对象（按写入先后）。读不了 / 某条坏了：跳过并返回说明。
     pub fn load(&self, symbol: &str) -> (Vec<Drawing>, Vec<String>) {
         let mut errs = Vec::new();

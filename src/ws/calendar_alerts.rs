@@ -294,6 +294,8 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     c.pragma_update(None, "journal_mode", "WAL")?;
     c.busy_timeout(Duration::from_secs(5))?;
     c.execute_batch(SCHEMA)?;
+    // 消息中心（docs/65）的两张表与投递表同库：写提醒时消息与投递同一事务
+    wealthspring_inbox::init(&c)?;
     Ok(c)
 }
 
@@ -593,8 +595,56 @@ pub fn plan(c: &Connection, now: i64) -> rusqlite::Result<PlanReport> {
 }
 
 /// Cockpit 启动时：关着的那段时间到点的任务**不弹窗**，标「错过」。返回条数。
+/// 错过的也进消息中心（未读，docs/65）。
 pub fn mark_missed(c: &Connection, now: i64) -> rusqlite::Result<usize> {
-    c.execute("UPDATE alert_jobs SET state='missed' WHERE state='pending' AND fire_at < ?1", [now - 2 * 60_000])
+    let tx = c.unchecked_transaction()?;
+    #[allow(clippy::let_and_return)] // 迭代器借着 stmt
+    let ids: Vec<i64> = {
+        let mut st = tx.prepare("SELECT id FROM alert_jobs WHERE state='pending' AND fire_at < ?1")?;
+        let v = st.query_map([now - 2 * 60_000], |r| r.get(0))?.filter_map(|x| x.ok()).collect();
+        v
+    };
+    for id in &ids {
+        tx.execute("UPDATE alert_jobs SET state='missed' WHERE id=?1", [id])?;
+        post_job(&tx, *id, now, false)?;
+    }
+    tx.commit()?;
+    Ok(ids.len())
+}
+
+/// 日历提醒任务 → 消息中心的一条（去重键 `job:<id>`，与旧历史导入同一个）。`read`：入库即已读（免打扰挡掉的）。
+fn post_job(c: &Connection, id: i64, now: i64, read: bool) -> rusqlite::Result<()> {
+    #[allow(clippy::type_complexity)]
+    let row: Option<(String, i64, i64, String, String, i64, String, i64, String, Option<String>, Option<i64>)> = c
+        .query_row(
+            "SELECT j.what, j.importance, j.fire_at, j.title, j.body, j.rule_id, j.event_id, j.offset_min, j.state, j.note, e.scheduled_at
+             FROM alert_jobs j LEFT JOIN events e ON e.id = j.event_id WHERE j.id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?)),
+        )
+        .optional()?;
+    let Some((what, imp, fire_at, title, body, rule_id, event_id, offset_min, state, note, scheduled_at)) = row else { return Ok(()) };
+    wealthspring_inbox::post(
+        c,
+        &wealthspring_inbox::Post {
+            kind: wealthspring_inbox::CALENDAR.into(),
+            level: imp.clamp(0, 3) as u8,
+            occurred_at: fire_at,
+            received_at: now,
+            source: "金融日历".into(),
+            title,
+            body,
+            rule_ref: if rule_id > 0 { format!("calendar:{rule_id}") } else { String::new() },
+            refj: serde_json::json!({
+                "event_id": event_id, "what": what, "offset_min": offset_min, "state": state, "note": note, "scheduled_at": scheduled_at,
+            }),
+            job_id: Some(id),
+            dedup_key: format!("job:{id}"),
+            read,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
 }
 
 // ── 风控窗口（docs/43 §8 第 3 条、K5a）────────────────────────────────
@@ -982,6 +1032,23 @@ pub fn queue_test_message(c: &Connection) -> Result<String, String> {
         params![id, now + 120_000],
     )
     .map_err(|e| e.to_string())?;
+    // 消息中心（docs/65）：系统类、只入库；发没发出去在详情的「投递」里看
+    wealthspring_inbox::post(
+        c,
+        &wealthspring_inbox::Post {
+            kind: wealthspring_inbox::SYSTEM.into(),
+            level: 3,
+            occurred_at: now,
+            received_at: now,
+            source: "Telegram 测试".into(),
+            title: title.into(),
+            body: body.clone(),
+            job_id: Some(id),
+            dedup_key: format!("job:{id}"),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
     ensure_sender_running();
     Ok("✔ 测试消息已交给发送进程 ws-telegram（几秒内到；结果看下面通知中心的「渠道」列）".into())
 }
@@ -1065,20 +1132,78 @@ pub fn queue_drawing_alert(c: &Connection, now: i64, title: &str, body: &str, wa
     queue_now(c, now, "drawing", title, body, want_tg, dry)
 }
 
-/// 即时提醒的通用入口（画线 `drawing`、指标条件 `indicator` docs/63 I5）：写一条已发的任务 + 各渠道投递。
+/// 即时提醒的出处（docs/65）：进消息中心的那一条带上它。
+#[derive(Debug, Clone, Default)]
+pub struct Origin {
+    /// 0..3 = P0..P3
+    pub level: u8,
+    /// 事情发生的时刻（K 线收盘 / 价格穿线那一刻）；空 = 现在
+    pub occurred_at: Option<i64>,
+    pub source: String,
+    pub symbols: Vec<String>,
+    /// `indicator:<图id>:<uid>` / `drawing:<品种>:<线id>`
+    pub rule_ref: String,
+    /// 出处与触发时的设置快照
+    pub refj: serde_json::Value,
+}
+
+/// 没带出处的即时提醒（测试、旧调用）：画线 P1、其余 P2。
 pub fn queue_now(c: &Connection, now: i64, what: &str, title: &str, body: &str, want_tg: bool, dry: bool) -> rusqlite::Result<i64> {
+    let level = if what == "drawing" { 1 } else { 2 };
+    queue_with(c, now, what, title, body, want_tg, dry, &Origin { level, ..Default::default() })
+}
+
+/// 即时提醒的通用入口（画线 `drawing`、指标条件 `indicator` docs/63 I5）：写一条已发的任务 + 各渠道投递 + 消息中心的一条，
+/// **同一事务**（docs/65 §4 第 5 条）。免打扰挡掉的也入库（标已读）。
+#[allow(clippy::too_many_arguments)]
+pub fn queue_with(c: &Connection, now: i64, what: &str, title: &str, body: &str, want_tg: bool, dry: bool, o: &Origin) -> rusqlite::Result<i64> {
     let q = quiet(c);
     let local_now = Local.timestamp_millis_opt(now).single().map(|t| t.time()).unwrap_or_default();
     let suppressed = q.on() && q.covers(local_now);
-    c.execute(
+    let tx = c.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO alert_jobs (idem_key, event_id, rule_id, offset_min, what, version, fire_at, state, title, body, importance, created_at, fired_at, note)
-         VALUES (?1, '', 0, 0, ?7, 0, ?2, ?3, ?4, ?5, 1, ?2, ?2, ?6)",
-        params![format!("{what}|{now}|{title}|{body}"), now, if suppressed { "suppressed" } else { "fired" }, title, body, suppressed.then_some("免打扰时段"), what],
+         VALUES (?1, '', 0, 0, ?7, 0, ?2, ?3, ?4, ?5, ?8, ?2, ?2, ?6)",
+        params![
+            format!("{what}|{now}|{title}|{body}"),
+            now,
+            if suppressed { "suppressed" } else { "fired" },
+            title,
+            body,
+            suppressed.then_some("免打扰时段"),
+            what,
+            i64::from(o.level.min(3))
+        ],
     )?;
-    let id = c.last_insert_rowid();
+    let id = tx.last_insert_rowid();
+    let mut refj = if o.refj.is_object() { o.refj.clone() } else { serde_json::json!({}) };
     if suppressed {
+        refj["suppressed"] = serde_json::json!("免打扰时段");
+    }
+    wealthspring_inbox::post(
+        &tx,
+        &wealthspring_inbox::Post {
+            kind: what.into(),
+            level: o.level,
+            occurred_at: o.occurred_at.unwrap_or(now),
+            received_at: now,
+            source: if o.source.is_empty() { if what == "drawing" { "画线到价".into() } else { "指标提醒".into() } } else { o.source.clone() },
+            symbols: o.symbols.clone(),
+            title: title.into(),
+            body: body.into(),
+            rule_ref: o.rule_ref.clone(),
+            refj,
+            job_id: Some(id),
+            dedup_key: format!("job:{id}"),
+            read: suppressed,
+            ..Default::default()
+        },
+    )?;
+    if suppressed {
+        tx.commit()?;
         return Ok(id);
     }
+    let c = &*tx;
     let tg = telegram();
     let mut chans = vec![Channel::InApp, Channel::Desktop];
     if want_tg {
@@ -1102,6 +1227,7 @@ pub fn queue_now(c: &Connection, now: i64, what: &str, title: &str, body: &str, 
             params![id, ch.key(), state, (state != "pending" && state != "disabled") as i64, err, (state == "sent").then_some(now), now + 600_000],
         )?;
     }
+    tx.commit()?;
     if !dry && want_tg && tg.enabled && tg.configured() {
         ensure_sender_running();
     }
@@ -1133,9 +1259,13 @@ pub fn fire_due(c: &Connection, now: i64, dry: bool) -> rusqlite::Result<usize> 
     let tg = telegram();
     let local_now = Local.timestamp_millis_opt(now).single().map(|t| t.time()).unwrap_or_default();
     let mut n = 0;
+    // 任务、投递、消息中心的一条同一事务（docs/65）
+    let tx = c.unchecked_transaction()?;
+    let c = &*tx;
     for (id, rule_id, title, body, imp, event_at) in due {
         if q.on() && q.covers(local_now) && !(imp == 0 && q.p0_exempt) {
             c.execute("UPDATE alert_jobs SET state='suppressed', fired_at=?2, note='免打扰时段' WHERE id=?1", params![id, now])?;
+            post_job(c, id, now, true)?;
             continue;
         }
         let chans = rules.iter().find(|r| r.id == rule_id).map(|r| r.channels.clone()).unwrap_or_else(|| vec![Channel::InApp]);
@@ -1161,13 +1291,15 @@ pub fn fire_due(c: &Connection, now: i64, dry: bool) -> rusqlite::Result<usize> 
             )?;
         }
         c.execute("UPDATE alert_jobs SET state='fired', fired_at=?2 WHERE id=?1", params![id, now])?;
+        post_job(c, id, now, false)?;
         n += 1;
-    }
-    if !dry && n > 0 && tg.enabled && tg.configured() {
-        ensure_sender_running();
     }
     // 过期的 Telegram 待送
     c.execute("UPDATE alert_deliveries SET state='expired' WHERE state='pending' AND expires_at < ?1", [now])?;
+    tx.commit()?;
+    if !dry && n > 0 && tg.enabled && tg.configured() {
+        ensure_sender_running();
+    }
     Ok(n)
 }
 
@@ -1500,13 +1632,39 @@ mod tests {
         let names: Vec<&str> = chans.iter().map(|(c, _)| c.as_str()).collect();
         assert_eq!(names, ["desktop", "inapp", "telegram"], "勾了 Telegram 就多一路（发不发看配置）");
         assert!(chans.iter().all(|(c, s)| c == "telegram" || s == "sent"));
+        // 消息中心（docs/65）：同一事务里有一条，去重键 job:<id>，投递能联表查到
+        let m: (String, i64, Option<i64>) =
+            c.query_row("SELECT kind, level, job_id FROM messages WHERE dedup_key=?1", [format!("job:{id}")], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!(m, ("drawing".into(), 1, Some(id)));
+        assert_eq!(wealthspring_inbox::deliveries(&c, id).len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn indicator_alert_carries_its_origin_into_the_inbox() {
+        let c = db();
+        let o = Origin {
+            level: 2,
+            occurred_at: Some(900),
+            source: "指标提醒".into(),
+            symbols: vec!["BTCUSDT".into()],
+            rule_ref: "indicator:c1:7".into(),
+            refj: serde_json::json!({"prev": 69.0, "cur": 71.0, "settings": {"id": "rsi"}}),
+        };
+        let id = queue_with(&c, 1_000, "indicator", "指标提醒 · BTCUSDT · 5m", "RSI 上穿 70", false, true, &o).unwrap();
+        let v = wealthspring_inbox::query(&c, &wealthspring_inbox::Filter::default()).unwrap();
+        assert_eq!(v.len(), 1);
+        let m = &v[0];
+        assert_eq!((m.job_id, m.occurred_at, m.received_at, m.lag_ms()), (Some(id), 900, 1_000, 100));
+        assert_eq!((m.rule_ref.as_str(), m.symbols.clone()), ("indicator:c1:7", vec!["BTCUSDT".to_string()]));
+        assert_eq!(m.refj["settings"]["id"], "rsi", "触发时的设置快照跟着走");
     }
 
     /// 一个带事件表的内存库（事件表的形状与守护的一致；这里只建提醒要读的列）。
     fn db() -> Connection {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
+        wealthspring_inbox::init(&c).unwrap();
         c.execute_batch(
             "CREATE TABLE events (id TEXT PRIMARY KEY, series TEXT, kind TEXT, title TEXT, country TEXT, tz TEXT, date_local TEXT,
                 time_local TEXT, scheduled_at INTEGER, precision TEXT, status TEXT, importance INTEGER, version INTEGER);
@@ -1604,6 +1762,11 @@ mod tests {
         assert_eq!(mark_missed(&c, reopen).unwrap(), 1);
         assert_eq!(fire_due(&c, reopen, true).unwrap(), 0, "错过的不弹");
         assert_eq!(counts(&c), (0, 1));
+        // 消息中心（docs/65）：错过的也有一条，未读
+        let b = wealthspring_inbox::badge(&c, reopen);
+        assert_eq!(b.unread, 1);
+        let v = wealthspring_inbox::query(&c, &wealthspring_inbox::Filter::default()).unwrap();
+        assert_eq!((v[0].kind.as_str(), v[0].refj["state"].as_str()), ("calendar", Some("missed")));
     }
 
     #[test]

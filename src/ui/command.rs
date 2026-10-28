@@ -76,6 +76,10 @@ pub enum Cmd {
     OpenDataFolder,
     /// 数据目录设置（docs/47）
     DataDirs,
+    /// 消息中心（顶栏 🔔，docs/65）
+    Inbox,
+    /// 提醒管理器（docs/65）
+    AlertRules,
     /// 底部面板切到某一页并打开
     BottomTab(super::shell::BottomTab),
     /// 跨进程：把当前策略发给 Studio 打开（docs/35 §16.5 第 4 项）
@@ -178,6 +182,8 @@ pub fn registry(workspaces: &[&str]) -> Vec<Entry> {
         e(Cmd::OpenLayouts, "设置", "布局管理", ""),
         e(Cmd::OpenDataFolder, "设置", "打开数据文件夹", ""),
         e(Cmd::DataDirs, "设置", "数据目录（大数据 / 小文件 / 挂载点）", ""),
+        e(Cmd::Inbox, "视图", "消息中心（新闻与提醒的记录）", ""),
+        e(Cmd::AlertRules, "视图", "提醒管理器（全部提醒规则）", ""),
         e(Cmd::OpenInStudio, "运行", "在 Studio 中打开策略", ""),
     ]);
     v

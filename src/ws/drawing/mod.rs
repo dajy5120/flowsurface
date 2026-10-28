@@ -485,13 +485,26 @@ pub fn on_price(symbol: &str, price: i64, now: u64, decimals: usize) -> usize {
             body.push_str(&format!("（{t}）"));
         }
         body.push_str(" · 只是提醒，不会下单");
-        deliver(title, body, d.alert.as_ref().is_some_and(|a| a.telegram));
+        // 进消息中心的出处（docs/65）：哪个品种哪条线、前价 → 现价、穿的价位，连同这条线当时的整份设置
+        let origin = super::calendar_alerts::Origin {
+            level: 1,
+            occurred_at: Some(now as i64),
+            source: "画线到价".into(),
+            symbols: vec![code.to_string()],
+            rule_ref: format!("drawing:{symbol}:{}", d.id),
+            refj: serde_json::json!({
+                "symbol": symbol, "drawing": d.id, "kind": d.kind.label(), "when": when, "bar_ts": now,
+                "prev": model::price_text(*prev, decimals), "price": model::price_text(price, decimals),
+                "level": model::price_text(*level, decimals), "settings": serde_json::to_value(d).unwrap_or_default(),
+            }),
+        };
+        deliver(title, body, d.alert.as_ref().is_some_and(|a| a.telegram), origin);
     }
     fired.len()
 }
 
 /// 发出去：通知中心 + 桌面通知（+ Telegram），与金融日历同一个通道。样张、隔离实例（`WS_ISOLATED`）与测试只记下来。
-fn deliver(title: String, body: String, telegram: bool) {
+fn deliver(title: String, body: String, telegram: bool, origin: super::calendar_alerts::Origin) {
     with(|st| {
         st.fired.push((title.clone(), body.clone()));
         if st.fired.len() > 20 {
@@ -503,11 +516,35 @@ fn deliver(title: String, body: String, telegram: bool) {
     }
     super::spawn_named("ws-drawing-alert", move || {
         let r = super::calendar_alerts::open(&super::calendar_alerts::db_path())
-            .and_then(|c| super::calendar_alerts::queue_drawing_alert(&c, chrono::Utc::now().timestamp_millis(), &title, &body, telegram, false));
+            .and_then(|c| super::calendar_alerts::queue_with(&c, chrono::Utc::now().timestamp_millis(), "drawing", &title, &body, telegram, false, &origin));
         if let Err(e) = r {
             with(|st| st.note = format!("画线提醒没发出去：{e}"));
         }
     });
+}
+
+/// 提醒管理器（docs/65）：全部挂着到价提醒的线（品种, 对象）。读库，别在渲染线程里调。
+pub fn alert_lines() -> Vec<(String, Drawing)> {
+    let Some(d) = db() else { return Vec::new() };
+    let mut out = Vec::new();
+    for sym in d.symbols_with_alerts() {
+        let items: Vec<Drawing> = with(|st| book(st, &sym).items.iter().filter(|x| x.alert.is_some()).cloned().collect());
+        out.extend(items.into_iter().map(|x| (sym.clone(), x)));
+    }
+    out
+}
+
+/// 提醒管理器里暂停 / 恢复一条线的提醒（恢复时不清「上次响的时刻」，冷却照旧）。
+pub fn set_line_alert(symbol: &str, id: &str, on: bool) {
+    let fx = with(|st| {
+        let b = book(st, symbol);
+        let mut d = b.get(id)?.clone();
+        d.alert.as_mut()?.armed = on;
+        Some(b.replace_silently(d))
+    });
+    if let Some(fx) = fx {
+        persist(symbol, fx);
+    }
 }
 
 /// 最近响过的提醒（新的在后）。

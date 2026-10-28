@@ -42,6 +42,10 @@ pub enum WinKey {
     AiKeys,
     /// Telegram 配置
     Telegram,
+    /// 消息中心（顶栏 🔔，docs/65）
+    Inbox,
+    /// 提醒管理器（docs/65）
+    AlertRules,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
