@@ -5,8 +5,10 @@
 //! - 每种浮窗（[`WinKey`]）记自己的位置（本次运行内；重启回默认位置）；第一次打开时比已开着的
 //!   往右下错开 [`CASCADE`]，不正好叠住。
 //! - 可以同时开多个；叠放次序 = 出现的先后，按住标题栏或点卡片空白处就到最上层；Esc 只关最上面那个（[`top`]）。
-//! - 整张卡夹在区域里（拖过头停在边上、往回拖立刻跟手；窗口变小了也拉得回来）。卡的高度封顶在
-//!   每种浮窗的 `h`，内容更长就在卡里滚动——卡不会因为摆得靠下被压扁（docs/63 §14 踩过）。
+//! - 横向整张卡夹在区域里；竖向**只要标题栏留在区域里**，上下随便拖（拖过头停在边上、往回拖立刻跟手；
+//!   窗口变小了也拉得回来）。卡的高度封顶在每种浮窗的 `h`，再不超过它下面剩的空间——摆得靠下时卡变矮、
+//!   内容在卡里滚动，不会被压扁看不见（docs/63 §14 踩过）。
+//!   以前竖向按封顶高夹整张卡：封顶高往往比卡实际高、窗口又不够高，结果几乎只能横着拖（10-28 用户报）。
 //! - 浮窗以外的地方照常可拖可画。
 
 use std::collections::HashMap;
@@ -134,21 +136,23 @@ fn raise(s: &mut State, k: WinKey) {
     }
 }
 
-/// 卡的实际高：封顶高，区域更矮时按区域。
-fn card_h(area: (f32, f32), h: f32) -> f32 {
-    h.min((area.1 - 2.0 * MARGIN).max(0.0))
+/// 竖向至少留在区域里的高度（标题栏 + 一点内容）：拖到最低也抓得回来。
+const KEEP: f32 = 72.0;
+
+/// 卡最高多高：封顶高，再不超过左上角在 `y` 时下面剩的空间。
+fn card_h(area: (f32, f32), h: f32, y: f32) -> f32 {
+    h.min((area.1 - y - MARGIN).max(KEEP))
 }
 
-/// 左上角夹到整张卡都在区域里；区域还不知道时不夹。
+/// 左上角夹到区域里：横向整张卡在里面，竖向标题栏在里面（[`KEEP`]）；区域还不知道时不夹。
 fn clamp(s: &State, k: WinKey, p: (f32, f32)) -> (f32, f32) {
     let (aw, ah) = s.area;
     if aw <= 0.0 || ah <= 0.0 {
         return p;
     }
-    let (w, h) = s.size.get(&k).copied().unwrap_or((0.0, 0.0));
-    let h = card_h(s.area, h);
+    let w = s.size.get(&k).map_or(0.0, |x| x.0);
     let x = p.0.clamp(MARGIN.min(aw), (aw - w - MARGIN).max(MARGIN.min(aw)));
-    let y = p.1.clamp(MARGIN.min(ah), (ah - h - MARGIN).max(MARGIN.min(ah)));
+    let y = p.1.clamp(MARGIN.min(ah), (ah - KEEP - MARGIN).max(MARGIN.min(ah)));
     (x, y)
 }
 
@@ -218,7 +222,7 @@ pub fn layer<'a, M: Clone + 'a>(area: Size, wins: Vec<Win<'a, M>>, wrap: impl Fn
             container(card)
                 .padding(metrics::space(4))
                 .width(Length::Fixed(w))
-                .max_height(card_h(a, h))
+                .max_height(card_h(a, h, y))
                 .style(w::float_card),
         )
         .on_press(wrap(FloatMsg::Raise(*k)));
@@ -275,15 +279,22 @@ mod tests {
         update(FloatMsg::DragStart(WinKey::StudyEdit));
         assert!(dragging());
         update(FloatMsg::Move(100.0, 100.0)); // 第一次只记起点
-        update(FloatMsg::Move(5100.0, 5100.0)); // 拖过头：停在右下角
-        assert_eq!(state().pos[&WinKey::StudyEdit], (1600.0 - 560.0 - MARGIN, 1000.0 - 540.0 - MARGIN));
+        update(FloatMsg::Move(100.0, 400.0)); // 竖着拖：不受卡高限制
+        assert_eq!(state().pos[&WinKey::StudyEdit], (520.0, TOP + 300.0));
+        update(FloatMsg::Move(5100.0, 5100.0)); // 拖过头：横向整卡在里面，竖向标题栏留在里面
+        assert_eq!(state().pos[&WinKey::StudyEdit], (1600.0 - 560.0 - MARGIN, 1000.0 - KEEP - MARGIN));
+        assert_eq!(card_h((1600.0, 1000.0), 540.0, 1000.0 - KEEP - MARGIN), KEEP, "摆到最低：卡变矮、内容在卡里滚动");
         update(FloatMsg::Move(200.0, 200.0)); // 光标回到区域里：卡跟着光标（按下时的位置 + 位移）
         assert_eq!(state().pos[&WinKey::StudyEdit], (520.0 + 100.0, TOP + 100.0));
         update(FloatMsg::Up);
         assert!(!dragging());
-        // 窗口变小：拉回区域里；比卡还矮时卡按区域高、顶在上沿
+        // 窗口变小：横向拉回区域里；竖向标题栏还在里面就不动，变得更矮才往上拉
         sync((800.0, 300.0), &[(WinKey::StudyEdit, 560.0, 540.0)]);
         let s = state();
-        assert_eq!(clamp(&s, WinKey::StudyEdit, s.pos[&WinKey::StudyEdit]), (800.0 - 560.0 - MARGIN, MARGIN));
+        assert_eq!(clamp(&s, WinKey::StudyEdit, s.pos[&WinKey::StudyEdit]), (800.0 - 560.0 - MARGIN, TOP + 100.0));
+        drop(s);
+        sync((800.0, 150.0), &[(WinKey::StudyEdit, 560.0, 540.0)]);
+        let s = state();
+        assert_eq!(clamp(&s, WinKey::StudyEdit, s.pos[&WinKey::StudyEdit]).1, 150.0 - KEEP - MARGIN);
     }
 }
