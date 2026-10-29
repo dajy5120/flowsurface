@@ -658,6 +658,12 @@ impl Flowsurface {
                     self.close_float(k);
                 }
             }
+            Message::Shell(ui::shell::ShellEvent::CtxWheel(d)) => {
+                return iced::widget::operation::scroll_by(
+                    ui::shell::CTX_SCROLL,
+                    iced::widget::scrollable::AbsoluteOffset { x: ui::shell::ctx_wheel_dx(d), y: 0.0 },
+                );
+            }
             Message::Shell(ev) => {
                 if let Some(cmd) = self.shell.update(ev, &self.palette_entries) {
                     return self.run_command(cmd);
@@ -2137,6 +2143,13 @@ impl Flowsurface {
         }
         let main = self.main_window.id;
         let d = self.active_dashboard();
+        // 特征回放的播放控件（docs/51）：只在「订单流特征」里。放最前面——中段放不下时裁的是尾巴（docs/66），
+        // 放在选中面板的控件后面，K 线 / 画线那一长串会把它挤出去
+        if ws::workspace::workspace_of(&self.active_name()) == ws::workspace::WS_FEATURES
+            && let Some(t) = ws::replay_clock::toolbar()
+        {
+            r = r.push(ui::text::metadata("│").color(ui::pal::dim())).push(t.map(Message::Replay));
+        }
         if let Some((w, p)) = self.toolbar_target() {
             if let Some(st) = d.get_pane(main, w, p) {
                 let ev = move |e: dashboard::pane::Event| {
@@ -2208,12 +2221,6 @@ impl Flowsurface {
                     }
                 }
             }
-        }
-        // 特征回放的播放控件（docs/51）：只在「订单流特征」里
-        if ws::workspace::workspace_of(&self.active_name()) == ws::workspace::WS_FEATURES
-            && let Some(t) = ws::replay_clock::toolbar()
-        {
-            r = r.push(ui::text::metadata("│").color(ui::pal::dim())).push(t.map(Message::Replay));
         }
         let linked = d.page_linked(main);
         r = r.push(ui::shell::tool_pick_icon(

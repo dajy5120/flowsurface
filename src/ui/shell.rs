@@ -231,6 +231,20 @@ pub enum ShellEvent {
     PaletteMove(i32),
     PaletteSubmit,
     PaletteClose,
+    /// 顶部工具栏中段滚轮（竖向滚轮 → 横向滚动，像左侧栏那样滚着看放不下的控件）
+    CtxWheel(iced::mouse::ScrollDelta),
+}
+
+/// 顶部工具栏中段的横向滚动区。
+pub const CTX_SCROLL: &str = "ws-toolbar-ctx";
+
+/// 滚轮一下横移多少（与 iced 滚动区同一档：一行 60 像素）。竖向滚轮向下 = 往右看。
+#[must_use]
+pub fn ctx_wheel_dx(d: iced::mouse::ScrollDelta) -> f32 {
+    match d {
+        iced::mouse::ScrollDelta::Lines { x, y } => -(if x.abs() > y.abs() { x } else { y }) * 60.0,
+        iced::mouse::ScrollDelta::Pixels { x, y } => -(if x.abs() > y.abs() { x } else { y }),
+    }
 }
 
 pub struct Shell {
@@ -335,6 +349,8 @@ impl Shell {
                 return picked;
             }
             ShellEvent::PaletteClose => self.palette = None,
+            // main 里换成滚动操作（要回 Task）；走到这里说明没被接住，忽略
+            ShellEvent::CtxWheel(_) => {}
             ShellEvent::InspTab(t) => self.insp_tab = t,
             ShellEvent::InspPin => {
                 self.inspector = !self.inspector;
@@ -574,6 +590,16 @@ pub fn command_bar<'a>(info: &Info) -> Element<'a, ShellEvent> {
 
 /// 顶部工具栏（docs/42 §2）：左 = 位置与数据环境；中 = **选中面板**的上下文控件（数据源、标的、周期、主动作、联动、页面菜单，
 /// 由调用方按面板的 `ToolbarSpec` 拼好）；右 = 命令搜索、检查器、底部面板。高度同原命令栏，不多占一行。
+fn ctx_scroll<'a, M: Clone + 'a>(ctx: Element<'a, M>, on: fn(ShellEvent) -> M) -> Element<'a, M> {
+    use iced::widget::scrollable::{Direction, Scrollbar};
+    // 滚动条压在控件底边上、很细，不占工具栏高度（工具栏高度固定）；放得下时不出现
+    let s = iced::widget::scrollable(ctx)
+        .id(CTX_SCROLL)
+        .direction(Direction::Horizontal(Scrollbar::new().width(2).scroller_width(2)))
+        .width(Length::Fill);
+    iced::widget::mouse_area(s).on_scroll(move |d| on(ShellEvent::CtxWheel(d))).into()
+}
+
 pub fn toolbar<'a, M: Clone + 'a>(info: &Info, on: fn(ShellEvent) -> M, ctx: Element<'a, M>) -> Element<'a, M> {
     let c = core();
     // 紧凑：放大镜 + 快捷键，悬停看说明（docs/66：给中间的面板控件多留宽度）
@@ -669,8 +695,9 @@ pub fn toolbar<'a, M: Clone + 'a>(info: &Info, on: fn(ShellEvent) -> M, ctx: Ele
     .into();
 
     container(
-        // 中间（选中面板的控件）占剩下的宽度、放不下时裁掉尾巴：右端的铃铛、搜索、检查器 / 底部面板开关总在
-        row![left.map(on), container(ctx).width(Length::Fill).clip(true), right.map(on)]
+        // 中间（选中面板的控件）占剩下的宽度、放不下时横向滚动（滚轮 / Shift+滚轮 / 拖底下的细条），不裁掉：
+        // 右端的铃铛、搜索、检查器 / 底部面板开关总在
+        row![left.map(on), ctx_scroll(ctx, on), right.map(on)]
             .spacing(metrics::space(3))
             .align_y(Alignment::Center),
     )
