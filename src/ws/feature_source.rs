@@ -54,11 +54,16 @@ pub enum SourceMsg {
     Pause,
     /// 停止计算（已经算出来的那段照样能看）。
     Stop,
+    /// 不用缓存、重算正在看的这一段（原始数据换过时；docs/67 T1b）。
+    Recompute,
 }
 
 /// 一次回放。
 struct Run {
-    child: Child,
+    /// 回放进程；用缓存时没有（docs/67 T1b）
+    child: Option<Child>,
+    /// 这次写到 / 读的缓存目录（算完了才算数）
+    dir: PathBuf,
     desc: String,
     log: PathBuf,
     started: Instant,
@@ -155,6 +160,8 @@ pub struct View {
     pub replay_on: bool,
     /// 播放头停着。
     pub paused: bool,
+    /// 正在看的是缓存（没起回放程序；docs/67 T1b）
+    pub cached: bool,
     pub note: String,
 }
 
@@ -172,6 +179,7 @@ pub fn view() -> View {
             running: false,
             replay_on: false,
             paused: false,
+            cached: false,
             note: String::new(),
         };
     };
@@ -190,6 +198,7 @@ pub fn view() -> View {
         running: g.run.as_ref().is_some_and(|r| r.done.is_none()),
         replay_on: g.reading.is_some() && super::replay_clock::active(),
         paused: super::replay_clock::view().is_some_and(|v| !v.playing),
+        cached: g.reading.is_some() && g.run.as_ref().is_some_and(|r| r.child.is_none()),
         note: g.note.clone(),
     }
 }
@@ -197,11 +206,14 @@ pub fn view() -> View {
 /// 回放状态一行：计算进程（结束时从日志里取结论）+ 播放头。
 fn poll_run(r: &mut Run) -> String {
     if r.done.is_none()
-        && let Ok(Some(st)) = r.child.try_wait()
+        && let Some(Ok(Some(st))) = r.child.as_mut().map(Child::try_wait)
     {
         let log = std::fs::read_to_string(&r.log).unwrap_or_default();
         r.done = Some(if st.success() {
             let n = log.lines().find_map(|l| l.strip_prefix("重放 ")).unwrap_or("").trim();
+            // 算完的一段留作缓存；超了上限从最久没用的删起（正在看的这段不删）
+            let keep = r.dir.clone();
+            super::spawn_named("ws-replaycache", move || evict(&cache_dir(), cache_budget(), &keep));
             format!("✔ 计算完成：{n}（用时 {}）", fmt_s(r.started.elapsed().as_secs()))
         } else {
             let last = log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("（无输出）");
@@ -338,6 +350,13 @@ pub fn handle(m: SourceMsg) -> bool {
             g.note = "已停止计算；已经算出来的那段照样能前后看".into();
         }
         SourceMsg::Start => return start(&mut g),
+        SourceMsg::Recompute => {
+            let Some(sel) = g.run.as_ref().map(|r| r.sel.clone()) else {
+                g.note = "没有在看的回放".into();
+                return false;
+            };
+            return launch_with(&mut g, sel, true);
+        }
         SourceMsg::Pause => {
             if !super::replay_clock::active() {
                 g.note = "没有回放".into();
@@ -353,8 +372,10 @@ fn stop(g: &mut St) {
     if let Some(r) = g.run.as_mut()
         && r.done.is_none()
     {
-        let _ = r.child.kill();
-        let _ = r.child.wait();
+        if let Some(c) = r.child.as_mut() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
         r.done = Some("■ 已停止".into());
     }
 }
@@ -491,7 +512,15 @@ fn try_trade(g: &mut St) {
         let ok = launch(g, sel);
         if ok {
             super::replay_clock::set_trade(req.mark);
-            g.note = format!("回放 {} {} {} 起 {} 分钟：算到开仓那一刻就停在那里", req.symbol, req.date, req.hhmm, req.minutes);
+            let cached = g.run.as_ref().is_some_and(|r| r.child.is_none());
+            g.note = format!(
+                "回放 {} {} {} 起 {} 分钟：{}",
+                req.symbol,
+                req.date,
+                req.hhmm,
+                req.minutes,
+                if cached { "用上次算好的结果（不重算），停在开仓那一刻" } else { "算到开仓那一刻就停在那里" }
+            );
         }
         crate::ui::command::post(crate::ui::command::Cmd::Notice(
             if ok { g.note.clone() } else { format!("在回放里看这笔：{}", g.note) },
@@ -519,6 +548,106 @@ pub fn note() -> String {
 }
 
 fn launch(g: &mut St, sel: Selection) -> bool {
+    launch_with(g, sel, false)
+}
+
+// ── 回放结果缓存（docs/67 T1b）─────────────────────────────────────────────
+//
+// 同一段数据 + 同一份特征配置 + 同一个回放程序 = 同一个目录；算完了（`tl_meta.json` 的 done）下次直接读，
+// 不起回放程序。总量超过上限按最近使用从旧删起。
+
+/// 缓存目录。
+#[must_use]
+pub fn cache_dir() -> PathBuf {
+    replay_dir().join("cache")
+}
+
+/// 缓存总量上限（字节；`WS_REPLAY_CACHE_GB`，缺省 8 GB）。
+fn cache_budget() -> u64 {
+    let gb = std::env::var("WS_REPLAY_CACHE_GB").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|g| *g > 0.0).unwrap_or(8.0);
+    (gb * 1e9) as u64
+}
+
+/// FNV-1a 64：固定算法（`DefaultHasher` 不保证跨版本一致，缓存键要稳定）。
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// 缓存键的原文与目录名。根目录不算（同一段换个挂载点还是同一段）；数据类型排序后算。
+fn cache_key(source: &str, symbol: &str, date: &str, hhmm: &str, minutes: u32, types: &[String], config: &[u8], bin: &str) -> (String, String) {
+    let mut ty = types.to_vec();
+    ty.sort();
+    let text = format!("{source}|{symbol}|{date}|{hhmm}|{minutes}|{}|config {:016x}|bin {bin}", ty.join(","), fnv(config));
+    let safe: String = symbol.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
+    let name = format!("{safe}_{date}_{}_{minutes}m_{:016x}", hhmm.replace(':', ""), fnv(text.as_bytes()));
+    (text, name)
+}
+
+/// 回放程序的「版本」：大小 + 修改时间（重编了就变）。
+fn bin_stamp(bin: &std::path::Path) -> String {
+    std::fs::metadata(bin)
+        .map(|m| {
+            let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+            format!("{}@{t}", m.len())
+        })
+        .unwrap_or_default()
+}
+
+/// 这个目录是完整算完的一段吗。
+fn cache_done(dir: &std::path::Path) -> bool {
+    std::fs::read(dir.join("tl_meta.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .is_some_and(|v| v["done"].as_bool() == Some(true))
+}
+
+/// 用过一次：摸一下 `used`（按它的修改时间淘汰）。
+fn touch_used(dir: &std::path::Path) {
+    let _ = std::fs::write(dir.join("used"), b"");
+}
+
+fn dir_size(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir).map_or(0, |rd| {
+        rd.flatten()
+            .map(|e| match e.metadata() {
+                Ok(m) if m.is_dir() => dir_size(&e.path()),
+                Ok(m) => m.len(),
+                Err(_) => 0,
+            })
+            .sum()
+    })
+}
+
+/// 清缓存：没算完的（不是 `keep`）删掉；算完的总量超过 `budget` 就按最近使用从旧删起。`keep` 永远不删。
+fn evict(root: &std::path::Path, budget: u64, keep: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(root) else { return };
+    // (最近使用, 大小, 目录)；读不到时间 = None = 最旧
+    let mut done: Vec<(Option<std::time::SystemTime>, u64, PathBuf)> = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() || p == keep {
+            continue;
+        }
+        if !cache_done(&p) {
+            let _ = std::fs::remove_dir_all(&p);
+            continue;
+        }
+        let used = std::fs::metadata(p.join("used")).or_else(|_| std::fs::metadata(p.join("tl_meta.json"))).and_then(|m| m.modified()).ok();
+        done.push((used, dir_size(&p), p));
+    }
+    let mut total: u64 = done.iter().map(|d| d.1).sum::<u64>() + if keep.starts_with(root) { dir_size(keep) } else { 0 };
+    done.sort_by_key(|d| d.0);
+    for (_, size, p) in done {
+        if total <= budget {
+            break;
+        }
+        if std::fs::remove_dir_all(&p).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+fn launch_with(g: &mut St, sel: Selection, force: bool) -> bool {
     let Selection::Local { source, root, symbol, date, window, types, .. } = &sel else {
         g.note = "实时数据不用回放：选 B1 就是常驻引擎在算的那一份".into();
         return false;
@@ -543,11 +672,11 @@ fn launch(g: &mut St, sel: Selection) -> bool {
     stop(g);
 
     let dir = replay_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+    if let Err(e) = std::fs::create_dir_all(dir.join("cache")) {
         g.note = format!("建 {} 失败：{e}", dir.display());
         return false;
     }
-    // 每次回放一个新目录（时间线订阅按目录建）；旧的回放目录与旧版的那组文件删掉
+    // 旧版每次一个 `run_*` 目录、旧版的那组文件：删掉（迁移；缓存在 cache/ 里）
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
@@ -558,12 +687,29 @@ fn launch(g: &mut St, sel: Selection) -> bool {
             }
         }
     }
-    let tag = chrono::Local::now().format("%H%M%S").to_string();
-    let run_dir = dir.join(format!("run_{tag}"));
+    let config = std::fs::read(super::feature_matrix::config_path()).unwrap_or_default();
+    let (key_text, name) = cache_key(source, symbol, date, &hhmm, minutes, types, &config, &bin_stamp(&bin));
+    let run_dir = cache_dir().join(&name);
+    let desc = sel.describe();
+    let (t0, t1) = window_ns(date, &hhmm, minutes);
+    // 命中：算完的同一段，直接读，不起回放程序
+    if !force && cache_done(&run_dir) {
+        touch_used(&run_dir);
+        let log = dir.join("replay.log");
+        g.run = Some(Run { child: None, dir: run_dir.clone(), desc: desc.clone(), log, started: Instant::now(), done: Some("✔ 用缓存（不重算）".into()), sel: sel.clone(), engine_line: None });
+        g.reading = Some((run_dir.clone(), run_dir.join("tl_trades.bin"), desc));
+        super::replay_clock::begin(run_dir.clone(), t0, t1, g.pace);
+        watch_meta(run_dir);
+        return true;
+    }
+    // 没算完的（上次停了 / 崩了）与这段的旧结果：删掉重算；顺带按上限清一遍
+    let _ = std::fs::remove_dir_all(&run_dir);
+    evict(&cache_dir(), cache_budget(), &run_dir);
     if let Err(e) = std::fs::create_dir_all(&run_dir) {
         g.note = format!("建 {} 失败：{e}", run_dir.display());
         return false;
     }
+    let _ = std::fs::write(run_dir.join("key.txt"), &key_text);
     let log = dir.join("replay.log");
     let Ok(logf) = std::fs::File::create(&log) else {
         g.note = format!("建 {} 失败", log.display());
@@ -597,10 +743,9 @@ fn launch(g: &mut St, sel: Selection) -> bool {
         .stderr(Stdio::from(logf));
     match cmd.spawn() {
         Ok(child) => {
-            let desc = sel.describe();
-            g.run = Some(Run { child, desc: desc.clone(), log, started: Instant::now(), done: None, sel: sel.clone(), engine_line: None });
+            touch_used(&run_dir);
+            g.run = Some(Run { child: Some(child), dir: run_dir.clone(), desc: desc.clone(), log, started: Instant::now(), done: None, sel: sel.clone(), engine_line: None });
             g.reading = Some((run_dir.clone(), run_dir.join("tl_trades.bin"), desc));
-            let (t0, t1) = window_ns(date, &hhmm, minutes);
             super::replay_clock::begin(run_dir.clone(), t0, t1, g.pace);
             watch_meta(run_dir);
             true
@@ -636,6 +781,47 @@ pub fn shutdown() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn 缓存键_同一段同一配置同一程序才相同() {
+        let ty = |v: &[&str]| v.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
+        let (a, na) = super::cache_key("tardis", "BTCUSDT", "2026-06-01", "01:59", 9, &ty(&["trades", "l2"]), b"{}", "1@2");
+        let (b, nb) = super::cache_key("tardis", "BTCUSDT", "2026-06-01", "01:59", 9, &ty(&["l2", "trades"]), b"{}", "1@2");
+        assert_eq!((a.clone(), na.clone()), (b, nb), "数据类型的顺序不算");
+        assert!(na.starts_with("BTCUSDT_2026-06-01_0159_9m_"));
+        let (_, nc) = super::cache_key("tardis", "BTCUSDT", "2026-06-01", "01:59", 9, &ty(&["l2", "trades"]), b"{\"mode\":\"all\"}", "1@2");
+        let (_, nd) = super::cache_key("tardis", "BTCUSDT", "2026-06-01", "01:59", 9, &ty(&["l2", "trades"]), b"{}", "1@3");
+        let (_, ne) = super::cache_key("tardis", "BTCUSDT", "2026-06-01", "01:59", 10, &ty(&["l2", "trades"]), b"{}", "1@2");
+        assert!(na != nc && na != nd && na != ne, "配置、程序、时段变了都要重算");
+        assert_eq!(super::fnv(b"a"), 0xaf63_dc4c_8601_ec8c, "FNV-1a 固定算法");
+    }
+
+    #[test]
+    fn 缓存淘汰_没算完的删_超上限从最旧删_正在看的不删() {
+        let root = std::env::temp_dir().join(format!("ws_rcache_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |n: &str, done: bool, bytes: usize, age_s: u64| {
+            let d = root.join(n);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("tl_meta.json"), format!(r#"{{"done":{done}}}"#)).unwrap();
+            std::fs::write(d.join("tl_grid.bin"), vec![0u8; bytes]).unwrap();
+            let f = std::fs::File::create(d.join("used")).unwrap();
+            f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(age_s)).unwrap();
+            d
+        };
+        let old = mk("old", true, 1000, 300);
+        let mid = mk("mid", true, 1000, 200);
+        let new = mk("new", true, 1000, 100);
+        let partial = mk("partial", false, 1000, 50);
+        let keep = mk("keep", false, 1000, 400);
+        assert!(super::cache_done(&old) && !super::cache_done(&partial));
+        super::evict(&root, 2500, &keep); // 已完成 3 × ~1 KB + 正在看的 ~1 KB：删最旧两个才落到 2500 以下
+        assert!(!partial.exists(), "没算完的删掉");
+        assert!(keep.exists(), "正在算 / 看的不删");
+        assert!(!old.exists() && !mid.exists() && new.exists(), "超上限从最久没用的删起");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     use super::*;
 
     #[test]

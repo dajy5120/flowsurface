@@ -1561,6 +1561,10 @@ fn source_bar<'a>(s: &super::feature_source::View, inspector: bool) -> Element<'
                 false,
                 Msg::Source(SourceMsg::Start),
             ));
+            // 用的是缓存（docs/67 T1b）：原始数据换过时可以忽略缓存重算这一段
+            if s.cached {
+                pr = pr.push(chip("↻ 重新计算（不用缓存）".into(), false, Msg::Source(SourceMsg::Recompute)));
+            }
             // 暂停 / 继续：只在有回放在跑时可点
             pr = pr.push(if s.replay_on {
                 chip(
