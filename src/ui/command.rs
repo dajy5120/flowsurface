@@ -27,6 +27,8 @@ pub enum Cmd {
     Workspace(String),
     /// 当前工作区的第 n 页（0 起，Alt 1–9；docs/41 §3.4）
     Page(usize),
+    /// 面板投递的一条提示（右下角浮出；`true` = 警告色）。不进命令面板
+    Notice(String, bool),
     /// 当前工作区的下一页 / 上一页（Ctrl PgDn / Ctrl PgUp，循环）
     NextPage,
     PrevPage,

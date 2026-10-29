@@ -347,6 +347,13 @@ fn detail_card<'a>(v: &View, i: usize, x: &Trade, win: Option<&tr::Window>) -> E
         w::btn(if is("doubt") { "▲ 有疑问  2" } else { "有疑问  2" }, if is("doubt") { Kind::Destructive } else { Kind::Standard }, Some(TrMsg::Mark("doubt"))),
         w::btn("← 上一笔", Kind::Ghost, Some(TrMsg::Prev)),
         w::btn("下一笔 →", Kind::Ghost, Some(TrMsg::Next)),
+        w::ibtn_tip(
+            crate::style::Icon::UiPlay,
+            "在回放里看这笔",
+            Kind::Standard,
+            Some(TrMsg::Replay),
+            "开仓前 5 分钟到平仓后 3 分钟开一段特征回放，停在开仓那一刻；在「订单流特征｜图表」看 Footprint、热图、Ladder、Tape（docs/67）",
+        ),
     ]
     .spacing(space(2))
     .align_y(Alignment::Center)
@@ -433,7 +440,7 @@ fn right_column<'a>(v: &View) -> Element<'a, TrMsg> {
     let src = chart.as_ref().and_then(|c| c.quotes.clone()).map_or_else(String::new, |q| format!("，买一卖一来自{q}"));
     let ov_card = column![chart_head("全景 · 整段运行的 K 线与全部订单（点标记定位）", ov_note), ov].spacing(space(1));
     let sec_card = column![
-        row![t::label("秒级 K 线 · 开仓前 10 分钟到平仓后 5 分钟").color(pal::head()), Space::new().width(Length::Fill), legend].spacing(space(2)).align_y(Alignment::Center),
+        row![t::label(if win.as_ref().is_some_and(|w| w.micro.is_some()) { "秒级 K 线 + 微观曲线（特征仓库）· 开仓前 10 分钟到平仓后 5 分钟" } else { "秒级 K 线 · 开仓前 10 分钟到平仓后 5 分钟" }).color(pal::head()), Space::new().width(Length::Fill), legend].spacing(space(2)).align_y(Alignment::Center),
         sec,
     ]
     .spacing(space(1));
@@ -604,6 +611,8 @@ struct Geo {
     pw: f32,
     ph: f32,
     ph_all: f32,
+    /// 微观曲线区的高度（docs/67 T2；没有 = 0），在成交量下面、时间刻度上面
+    mh: f32,
     i0: usize,
     i1: usize,
 }
@@ -621,7 +630,9 @@ impl Candles {
     fn geo(&self, st: &CState, b: Rectangle) -> Geo {
         let (lo, hi) = self.eff(st);
         let pw = (b.width - ML - MR).max(1.0);
-        let ph_all = (b.height - MT - MB).max(1.0);
+        let avail = (b.height - MT - MB).max(1.0);
+        let mh = if self.micro().is_some() { (avail * 0.38).min(MICRO_ROWS.len() as f32 * 60.0) } else { 0.0 };
+        let ph_all = (avail - mh).max(1.0);
         let ph = ph_all - ph_all * 0.16 - 4.0;
         let bars = &self.bars;
         let i0 = bars.t.partition_point(|x| (*x as f64) + self.gran < lo);
@@ -652,7 +663,69 @@ impl Candles {
             (ylo, yhi) = (0.0, 1.0);
         }
         let pad = ((yhi - ylo) * 0.06).max(0.5);
-        Geo { lo, hi, ylo: ylo - pad, yhi: yhi + pad, pw, ph, ph_all, i0, i1 }
+        Geo { lo, hi, ylo: ylo - pad, yhi: yhi + pad, pw, ph, ph_all, mh, i0, i1 }
+    }
+
+    /// 微观曲线（秒级图、仓库里有才画）。
+    fn micro(&self) -> Option<&tr::Micro> {
+        if self.small {
+            return None;
+        }
+        self.win.as_ref()?.micro.as_ref().filter(|m| !m.t.is_empty())
+    }
+
+    /// 微观曲线区（docs/67 T2）：每条一行，同一横轴；失衡类按 −1…1、零线居中，价差与 CVD 按可见范围。
+    fn draw_micro(&self, f: &mut Frame, g: &Geo, grid: Stroke<'_>) {
+        let Some(m) = self.micro() else { return };
+        let top = MT + g.ph_all + 4.0;
+        let rh = (g.mh - 4.0) / MICRO_ROWS.len() as f32;
+        let k0 = m.t.partition_point(|x| (*x as f64) + 1.0 < g.lo);
+        let k1 = m.t.partition_point(|x| (*x as f64) <= g.hi);
+        for (r, (name, unit, sym)) in MICRO_ROWS.iter().enumerate() {
+            let vals = micro_col(m, r);
+            let (k0, k1) = (k0.min(vals.len()), k1.min(vals.len()));
+            let y0 = top + rh * r as f32;
+            f.stroke(&Path::line(Point::new(ML, y0.floor() + 0.5), Point::new(ML + g.pw, y0.floor() + 0.5)), grid);
+            let vis = || vals[k0..k1].iter().flatten().copied();
+            let (lo, hi) = if *sym {
+                (-1.0, 1.0)
+            } else {
+                let (a, z) = vis().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, z), v| (a.min(v), z.max(v)));
+                if !a.is_finite() {
+                    continue;
+                }
+                let pad = ((z - a) * 0.1).max(1e-6);
+                (a - pad, z + pad)
+            };
+            let sy = |v: f64| y0 + 3.0 + ((hi - v) / (hi - lo).max(1e-12)) as f32 * (rh - 6.0);
+            if lo < 0.0 && hi > 0.0 {
+                let z = sy(0.0);
+                f.stroke(&Path::line(Point::new(ML, z), Point::new(ML + g.pw, z)), Stroke { line_dash: LineDash { segments: &[2.0, 3.0], offset: 0 }, ..grid });
+            }
+            let mut pb = canvas::path::Builder::new();
+            let mut pen = false;
+            for (t, val) in m.t[k0..k1].iter().zip(&vals[k0..k1]) {
+                match *val {
+                    Some(v) => {
+                        let pt = Point::new(g.sx(*t as f64 + 0.5).clamp(ML, ML + g.pw), sy(v));
+                        if pen { pb.line_to(pt) } else { pb.move_to(pt) }
+                        pen = true;
+                    }
+                    // 没有有效值的那一秒断开，不连过去
+                    None => pen = false,
+                }
+            }
+            f.stroke(&pb.build(), Stroke::default().with_width(1.2).with_color(pal::accent()));
+            // 名字压在曲线上也读得出：垫一块半透明底
+            let label = format!("{name}{unit}");
+            f.fill_rectangle(Point::new(ML + 2.0, y0 + 1.0), Size::new(label.chars().count() as f32 * 6.4 + 6.0, 13.0), pal::alpha(pal::card_bg(), 0.8));
+            f.fill_text(mono(label, Point::new(ML + 4.0, y0 + 2.0), pal::dim(), 10.0));
+            f.fill_text(mono(fmt_micro(hi), Point::new(ML + g.pw + 4.0, y0 + 1.0), pal::axis(), 9.0));
+            // 行太矮时只标上限（上下两个刻度会叠在一起）
+            if rh >= 34.0 {
+                f.fill_text(mono(fmt_micro(lo), Point::new(ML + g.pw + 4.0, y0 + rh - 12.0), pal::axis(), 9.0));
+            }
+        }
     }
 
     /// 光标下的标记（9 像素以内最近的那个）。
@@ -665,6 +738,24 @@ impl Candles {
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(m, _)| m)
     }
+}
+
+/// 微观曲线的行：(名字, 单位, 是不是 −1…1 对称)。顺序与 [`micro_col`] 一致。
+const MICRO_ROWS: [(&str, &str, bool); 4] = [("价差", " bp", false), ("盘口失衡 5 档", "", true), ("成交失衡 5 秒", "", true), ("累计成交量差", "（窗口起点 = 0）", false)];
+
+fn micro_col(m: &tr::Micro, r: usize) -> &[Option<f64>] {
+    let v = match r {
+        0 => &m.spread,
+        1 => &m.obi,
+        2 => &m.timb,
+        _ => &m.cvd,
+    };
+    // 列比时间短（文件坏了）时按短的算，不越界
+    &v[..v.len().min(m.t.len())]
+}
+
+fn fmt_micro(v: f64) -> String {
+    if v.abs() >= 100.0 { format!("{v:.0}") } else if v.abs() >= 1.0 { format!("{v:.2}") } else { format!("{v:.3}") }
 }
 
 impl canvas::Program<TrMsg> for Candles {
@@ -748,6 +839,8 @@ impl canvas::Program<TrMsg> for Candles {
         let mut f = Frame::new(r, b.size());
         let g = self.geo(st, b);
         let (lo, hi, pw, ph, ph_all) = (g.lo, g.hi, g.pw, g.ph, g.ph_all);
+        // 竖向贯穿的东西（时间格栅、持仓底色、十字线）到微观曲线区底下
+        let full = ph_all + g.mh;
         let (i0, i1) = (g.i0, g.i1);
         let (w, h) = (b.width, b.height);
         let vol_h = ph_all * 0.16;
@@ -774,9 +867,9 @@ impl canvas::Program<TrMsg> for Candles {
         let fmt = if ts < 60.0 { "%H:%M:%S" } else if ts < 86400.0 { "%H:%M" } else { "%m-%d" };
         while tv <= hi {
             let x = g.sx(tv);
-            f.stroke(&Path::line(Point::new(crisp(x), MT), Point::new(crisp(x), MT + ph_all)), grid);
+            f.stroke(&Path::line(Point::new(crisp(x), MT), Point::new(crisp(x), MT + full)), grid);
             let s = fmt_utc((tv * 1e9) as i64, if (tv % 86400.0).abs() < 1e-6 && ts >= 60.0 { "%m-%d" } else { fmt });
-            f.fill_text(mono(s, Point::new(x - 22.0, MT + ph_all + 3.0), pal::axis(), 10.0));
+            f.fill_text(mono(s, Point::new(x - 22.0, MT + full + 3.0), pal::axis(), 10.0));
             tv += ts;
         }
 
@@ -786,7 +879,7 @@ impl canvas::Program<TrMsg> for Candles {
             let z = g.sx(((c.close_ns as f64 / 1e9 / self.gran).floor() + 1.0) * self.gran);
             if z > ML && a < ML + pw {
                 let (a, z) = (a.max(ML), z.min(ML + pw));
-                f.fill_rectangle(Point::new(a, MT), Size::new((z - a).max(2.0), ph_all), pal::alpha(pal::accent(), if self.small { 0.25 } else { 0.07 }));
+                f.fill_rectangle(Point::new(a, MT), Size::new((z - a).max(2.0), full), pal::alpha(pal::accent(), if self.small { 0.25 } else { 0.07 }));
             }
         }
 
@@ -923,8 +1016,9 @@ impl canvas::Program<TrMsg> for Candles {
             }
         }
 
+        self.draw_micro(&mut f, &g, grid);
         // 坐标轴分隔线
-        f.stroke(&Path::line(Point::new(ML + pw, MT), Point::new(ML + pw, MT + ph_all)), Stroke::default().with_width(1.0).with_color(pal::line()));
+        f.stroke(&Path::line(Point::new(ML + pw, MT), Point::new(ML + pw, MT + full)), Stroke::default().with_width(1.0).with_color(pal::line()));
         f.stroke(&Path::line(Point::new(ML, vtop - 2.0), Point::new(ML + pw, vtop - 2.0)), grid);
         if let Some(q) = &self.quotes_src {
             f.fill_text(mono(format!("买一卖一：{q}"), Point::new(ML + 4.0, MT + 2.0), pal::dim(), 10.0));
@@ -936,11 +1030,11 @@ impl canvas::Program<TrMsg> for Candles {
             && p.x >= ML
             && p.x <= ML + pw
             && p.y >= MT
-            && p.y <= MT + ph_all
+            && p.y <= MT + full
         {
             let mut hf = Frame::new(r, b.size());
             let line = Stroke::default().with_width(1.0).with_color(pal::alpha(pal::axis(), 0.8));
-            hf.stroke(&Path::line(Point::new(p.x, MT), Point::new(p.x, MT + ph_all)), line);
+            hf.stroke(&Path::line(Point::new(p.x, MT), Point::new(p.x, MT + full)), line);
             if p.y <= MT + ph {
                 hf.stroke(&Path::line(Point::new(ML, p.y), Point::new(ML + pw, p.y)), line);
                 let pv = g.yhi - f64::from((p.y - MT) / ph) * (g.yhi - g.ylo);
@@ -966,9 +1060,21 @@ impl canvas::Program<TrMsg> for Candles {
                     lines.push(format!("买一 {:.1} / 卖一 {:.1}", wn.qb[q - 1], wn.qa[q - 1]));
                 }
             }
+            if let Some(m) = self.micro() {
+                let k = m.t.partition_point(|x| (*x as f64) <= tt);
+                if k > 0 {
+                    let s: Vec<String> = MICRO_ROWS
+                        .iter()
+                        .enumerate()
+                        .map(|(r, (name, _, _))| format!("{} {}", name.split(' ').next().unwrap_or(name), micro_col(m, r).get(k - 1).copied().flatten().map_or_else(|| "—".into(), fmt_micro)))
+                        .collect();
+                    lines.push(s[..2].join(" · "));
+                    lines.push(s[2..].join(" · "));
+                }
+            }
             let wmax = lines.iter().map(|s| s.chars().count()).max().unwrap_or(0) as f32 * 6.2 + 10.0;
             let bx = if p.x + 14.0 + wmax > ML + pw { p.x - 14.0 - wmax } else { p.x + 14.0 };
-            let by = (p.y + 14.0).min(MT + ph_all - 14.0 * lines.len() as f32 - 4.0).max(MT);
+            let by = (p.y + 14.0).min(MT + full - 14.0 * lines.len() as f32 - 4.0).max(MT);
             hf.fill_rectangle(Point::new(bx, by), Size::new(wmax, 14.0 * lines.len() as f32 + 4.0), pal::alpha(pal::card_bg(), 0.94));
             for (j, s) in lines.into_iter().enumerate() {
                 hf.fill_text(mono(s, Point::new(bx + 5.0, by + 2.0 + 14.0 * j as f32), pal::txt(), 10.0));

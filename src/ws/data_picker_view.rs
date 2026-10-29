@@ -405,6 +405,10 @@ fn local_rows<'a>(p: &DataPick, opts: &PickOpts, warn: &mut Option<(String, Colo
         }));
     }
     b = b.push(line(v));
+    // 回放只读所选那一天的文件（docs/67 T0）：过了 UTC 24:00 的那段没有数据，说清楚
+    if window && let Some(over) = super::data_picker::past_midnight(&p.start, p.minutes) {
+        *warn = Some((format!("过了 UTC 24:00 {over} 分钟：只取所选那一天的数据（不跨天），后面那段是空的——改起始或时长"), crate::ui::pal::bad()));
+    }
     if let Some(cov) = p.coverage(opts) {
         if cov.days == 0 {
             *warn = Some(("所选日期里本地没有这个标的的数据".into(), crate::ui::pal::bad()));

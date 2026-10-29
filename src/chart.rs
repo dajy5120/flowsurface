@@ -1100,6 +1100,7 @@ impl ViewState {
             });
             frame.fill(&tri, color);
         }
+        self.draw_trade_mark(frame, bounds, earliest, span);
         // 书签（docs/51 P5）：底边一个小菱形
         for t in crate::ws::replay_clock::bookmark_marks(earliest, latest) {
             let x = ((t - earliest) as f64 / span) as f32 * bounds.width;
@@ -1113,6 +1114,44 @@ impl ViewState {
             });
             frame.fill(&dia, pal.primary.strong.color);
         }
+    }
+
+    /// 交易核对开过来的那笔（docs/67 T1）：开 / 平时刻竖线，开仓价 ▲▼、平仓价 ●，开平连线（赚涨色、亏跌色）。
+    fn draw_trade_mark(&self, frame: &mut canvas::Frame, bounds: Size, earliest: u64, span: f64) {
+        let Some(t) = crate::ws::replay_clock::trade_mark() else { return };
+        let region = self.visible_region(bounds);
+        if region.height <= 0.0 {
+            return;
+        }
+        let x_of = |ns: i64| ((((ns.max(0) / 1_000_000) as u64) as f64 - earliest as f64) / span) as f32 * bounds.width;
+        let y_of = |p: f64| (self.price_to_y(Price::from_f32_lossy(p as f32)) - region.y) / region.height * bounds.height;
+        let (xo, xc) = (x_of(t.open_ns), x_of(t.close_ns));
+        let side = if t.long { crate::ui::chart::up() } else { crate::ui::chart::down() };
+        let pnl = if t.won() { crate::ui::chart::up() } else { crate::ui::chart::down() };
+        let dash = |w: f32, c: iced::Color| canvas::Stroke {
+            width: w,
+            line_dash: canvas::LineDash { segments: &[4.0, 4.0], offset: 0 },
+            ..Default::default()
+        }
+        .with_color(c);
+        for (x, c) in [(xo, side), (xc, pnl)] {
+            if (0.0..=bounds.width).contains(&x) {
+                frame.stroke(&Path::line(Point::new(x, 0.0), Point::new(x, bounds.height)), dash(1.0, iced::Color { a: 0.7, ..c }));
+            }
+        }
+        let (Some(a), Some(b)) = (t.entry, t.exit) else { return };
+        let (yo, yc) = (y_of(a), y_of(b));
+        frame.stroke(&Path::line(Point::new(xo, yo), Point::new(xc, yc)), dash(1.5, pnl));
+        let r = 6.0;
+        let tri = Path::new(|p| {
+            let (tip, base) = if t.long { (yo - r, yo + r * 0.8) } else { (yo + r, yo - r * 0.8) };
+            p.move_to(Point::new(xo, tip));
+            p.line_to(Point::new(xo - r, base));
+            p.line_to(Point::new(xo + r, base));
+            p.close();
+        });
+        frame.fill(&tri, side);
+        frame.fill(&Path::circle(Point::new(xc, yc), r * 0.8), pnl);
     }
 
     /// 自己有光标：把指着的时间发出去（只有时间轴的图参与）。

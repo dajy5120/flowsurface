@@ -152,12 +152,40 @@ pub struct Window {
     pub open_touch: Option<[f64; 2]>,
     #[serde(default)]
     pub close_touch: Option<[f64; 2]>,
+    /// 微观曲线（docs/67 T2）：特征仓库里每秒最后一个值
+    #[serde(default)]
+    pub micro: Option<Micro>,
 }
+
+/// 订单详情的微观曲线（docs/67 T2）。`None` = 那一秒没有有效值。
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct Micro {
+    #[serde(default)]
+    pub t: Vec<i64>,
+    /// 价差（bp）
+    #[serde(default)]
+    pub spread: Vec<Option<f64>>,
+    /// 前 5 档盘口失衡（−1…1）
+    #[serde(default)]
+    pub obi: Vec<Option<f64>>,
+    /// 5 秒成交失衡（−1…1）
+    #[serde(default)]
+    pub timb: Vec<Option<f64>>,
+    /// 累计成交量差（窗口起点归零）
+    #[serde(default)]
+    pub cvd: Vec<Option<f64>>,
+}
+
+/// 图表数据的版本（与 `strategies/trade_journal.py` 的 `CHART_VER` 一致）：旧的笔数没变也要重生成。
+pub const CHART_VER: u32 = 2;
 
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct ChartDay {
     #[serde(default)]
     pub day: String,
+    /// 图表数据版本（旧文件没有 = 1）
+    #[serde(default = "ver1")]
+    pub ver: u32,
     #[serde(default)]
     pub n: usize,
     #[serde(default)]
@@ -168,6 +196,10 @@ pub struct ChartDay {
     pub minute: Bars,
     #[serde(default)]
     pub windows: Vec<Window>,
+}
+
+fn ver1() -> u32 {
+    1
 }
 
 impl ChartDay {
@@ -436,8 +468,8 @@ fn poll() {
                 }
             });
         }
-        let have = with(|g| g.charts.get(*day).map(|c| c.n));
-        if have != Some(*n) {
+        let have = with(|g| g.charts.get(*day).map(|c| (c.n, c.ver)));
+        if have.is_none_or(|(k, v)| k != *n || v < CHART_VER) {
             need = true;
         }
     }
@@ -627,6 +659,36 @@ pub enum TrMsg {
     Split(crate::ui::split::SplitMsg),
     /// 逐笔表（`crate::ui::grid` 命名表）的消息
     Table(crate::ui::grid::Named),
+    /// 在回放里看这笔（docs/67 T1）
+    Replay,
+}
+
+/// 开仓前、平仓后各看多久（秒）；回放最长几分钟（再长只看开仓后这么久）。
+const REPLAY_PRE_S: i64 = 5 * 60;
+const REPLAY_POST_S: i64 = 3 * 60;
+const REPLAY_MAX_MIN: i64 = 240;
+
+/// 看这一笔要回放的时段：`(日期, 起始 HH:MM, 分钟, 截短了的说明)`。按分钟取整、限在开仓那一天
+/// （回放只读一天的文件，docs/67 T0）。
+#[must_use]
+pub fn replay_window(open_ns: i64, close_ns: i64) -> (String, String, u32, Option<String>) {
+    const DAY: i64 = 86_400;
+    let (o, c) = (open_ns.div_euclid(1_000_000_000), close_ns.div_euclid(1_000_000_000).max(open_ns.div_euclid(1_000_000_000)));
+    let day0 = o.div_euclid(DAY) * DAY;
+    let a = ((o - REPLAY_PRE_S).max(day0) / 60) * 60;
+    let mut z = ((c + REPLAY_POST_S + 59) / 60) * 60;
+    let mut cut = None;
+    if z > day0 + DAY {
+        z = day0 + DAY;
+        cut = Some("平仓在第二天：只回放到开仓那天 UTC 24:00（回放不跨天）".to_string());
+    }
+    if z - a > REPLAY_MAX_MIN * 60 {
+        z = a + REPLAY_MAX_MIN * 60;
+        cut = Some(format!("持仓太长：只回放开仓前后 {} 小时", REPLAY_MAX_MIN / 60));
+    }
+    let date = chrono::DateTime::from_timestamp(day0, 0).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+    let hhmm = format!("{:02}:{:02}", (a - day0) / 3600, (a - day0) % 3600 / 60);
+    (date, hhmm, ((z - a) / 60).max(1) as u32, cut)
 }
 
 /// 逐笔表在 `crate::ui::grid` 里的名字。表的行 = 筛选后的笔（`shown` 的顺序），行下标 = 在 `shown` 里的位置。
@@ -752,6 +814,35 @@ pub fn handle(m: TrMsg) {
             let name = g.meta.as_ref().map(|m| m.name.clone()).unwrap_or_default();
             crate::ui::grid::post_clipboard(review_text(&g.trades, &g.review, &name));
         }),
+        TrMsg::Replay => {
+            let req = with(|g| {
+                let i = g.cur?;
+                let t = g.trades.get(i)?.clone();
+                let m = g.meta.as_ref()?;
+                Some((i, t, m.vendor.clone().unwrap_or_else(|| "tardis".into()), m.symbol.clone()?))
+            });
+            let Some((i, t, vendor, symbol)) = req else {
+                with(|g| g.note = "这份清单没写标的：开不了回放".into());
+                return;
+            };
+            let (date, hhmm, minutes, cut) = replay_window(t.open_ns, t.close_ns);
+            let mark = super::replay_clock::TradeMark {
+                open_ns: t.open_ns,
+                close_ns: t.close_ns,
+                entry: t.entry,
+                exit: t.exit,
+                long: t.long(),
+                gross: t.gross,
+                label: format!("#{} {}{}", i + 1, if t.long() { "多" } else { "空" }, t.reason.as_deref().map(|r| format!(" · {r}")).unwrap_or_default()),
+            };
+            let note = super::feature_source::open_trade(super::feature_source::TradeReq { vendor, symbol, date, hhmm, minutes, mark });
+            with(|g| g.note = cut.map_or_else(|| note.clone(), |c| format!("{note}；{c}")));
+            crate::ui::command::post(crate::ui::command::Cmd::Workspace(format!(
+                "{}{}图表",
+                super::workspace::WS_FEATURES,
+                super::workspace::PAGE_SEP
+            )));
+        }
         TrMsg::ImportPath(s) => with(|g| g.import_path = s),
         TrMsg::Import => start_import(),
         TrMsg::Split(m) => crate::ui::split::handle(m),
@@ -814,6 +905,25 @@ fn start_import() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn 回放时段按分钟取整且不跨天() {
+        let ns = |h: i64, m: i64, sec: i64| ((20_605 * 86_400) + h * 3600 + m * 60 + sec) * 1_000_000_000; // 2026-06-01
+        let (d, s, n, cut) = super::replay_window(ns(10, 7, 30), ns(10, 9, 10));
+        assert_eq!((d.as_str(), s.as_str(), n, cut), ("2026-06-01", "10:02", 11, None));
+        // 开在 00:02：起点不早于当天 00:00
+        let (_, s, _, _) = super::replay_window(ns(0, 2, 0), ns(0, 3, 0));
+        assert_eq!(s, "00:00");
+        // 平仓在第二天：截到 24:00
+        let (_, s, n, cut) = super::replay_window(ns(23, 50, 0), ns(24, 10, 0));
+        assert_eq!((s.as_str(), n), ("23:45", 15));
+        assert!(cut.is_some());
+        // 持仓 6 小时：只看 4 小时
+        let (_, _, n, cut) = super::replay_window(ns(1, 0, 0), ns(7, 0, 0));
+        assert_eq!(n, 240);
+        assert!(cut.is_some());
+    }
+
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {

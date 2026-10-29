@@ -134,6 +134,35 @@ pub enum Cmd {
     BookmarkNote(usize, String),
     BookmarkGo(usize),
     BookmarkDel(usize),
+    /// 交易核对开过来的那笔（docs/67 T1）：跳到开仓 / 平仓
+    TradeGo(bool),
+}
+
+/// 交易核对开过来的那一笔（docs/67 T1）：画在回放的图上，工具栏给开仓 / 平仓跳转。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradeMark {
+    /// 开 / 平时刻（纳秒）
+    pub open_ns: i64,
+    pub close_ns: i64,
+    pub entry: Option<f64>,
+    pub exit: Option<f64>,
+    pub long: bool,
+    /// 毛盈亏（定连线颜色，与交易核对秒级图的连线同色；没有 = 按开平价算方向）
+    pub gross: Option<f64>,
+    /// 一行说明（# 序号 · 方向 · 原因）
+    pub label: String,
+}
+
+impl TradeMark {
+    /// 赚了吗（毛盈亏优先；没有就按开平价与方向）。
+    #[must_use]
+    pub fn won(&self) -> bool {
+        match (self.gross, self.entry, self.exit) {
+            (Some(n), _, _) => n > 0.0,
+            (None, Some(a), Some(b)) => (b - a) * if self.long { 1.0 } else { -1.0 } > 0.0,
+            _ => false,
+        }
+    }
 }
 
 /// 一个书签（按「数据商 | 标的」存盘，下次回放同一段时还在）。
@@ -267,6 +296,10 @@ struct Clock {
     bm_scope: Option<String>,
     /// 打开分析时要回到的播放头：还没算到就等算到了再跳
     pending_head: Option<i64>,
+    /// 交易核对开过来的那笔（docs/67）
+    trade: Option<TradeMark>,
+    /// 播放头落到这一笔的开仓 / 平仓以后，把同页的时间轴图视野移过去（等图灌好了再移，纳秒）
+    center_req: Option<i64>,
 }
 
 static CLOCK: Mutex<Option<Clock>> = Mutex::new(None);
@@ -311,6 +344,8 @@ pub fn begin(dir: PathBuf, t0: i64, t1: i64, pace: Pace) {
             bookmarks: Vec::new(),
             bm_scope: None,
             pending_head: None,
+            trade: None,
+            center_req: None,
         });
     }
 }
@@ -593,6 +628,9 @@ impl Clock {
             self.pending_head = None;
             self.playing = false;
             self.seek(h);
+            if self.trade.is_some() {
+                self.center_req = Some(h);
+            }
             // 跳到一个已经灌过的地方以后：往前走的话不清图，往回的 seek 自己会请求清图
         }
         let dt = self.last_tick.map_or(0, |t| now.duration_since(t).as_nanos() as i64);
@@ -685,6 +723,19 @@ impl Clock {
                     self.save_bm();
                 }
             }
+            Cmd::TradeGo(open) => {
+                if let Some(t) = self.trade.as_ref().map(|m| if open { m.open_ns } else { m.close_ns }) {
+                    self.playing = false;
+                    self.focus = None;
+                    // 还没算到就等算到了再跳（与打开分析同一套）
+                    if self.done || self.limit() >= t {
+                        self.seek(t);
+                        self.center_req = Some(t);
+                    } else {
+                        self.pending_head = Some(t);
+                    }
+                }
+            }
             Cmd::CyclePace => self.pace = self.pace.next(),
             Cmd::CycleStep => self.step = self.step.next(),
         }
@@ -698,10 +749,18 @@ impl Clock {
 
 /// 主循环每帧调（`Message::Tick`）。
 pub fn tick(now: Instant) {
-    if let Ok(mut g) = CLOCK.lock()
+    let center = if let Ok(mut g) = CLOCK.lock()
         && let Some(c) = g.as_mut()
     {
         c.tick(now);
+        // 图灌好了（没有等着的清图）才移视野，不然清图重建会把视野冲回最新
+        if c.center_req.is_some() && c.epoch_live == c.epoch_req && c.reset_since.is_none() { c.center_req.take() } else { None }
+    } else {
+        None
+    };
+    // 视野同步要看 charts_on（会锁 CLOCK），放在锁外
+    if let Some(h) = center {
+        publish_view(0, ViewSync::Center((h.max(0) / 1_000_000) as u64));
     }
 }
 
@@ -850,6 +909,28 @@ pub fn restore(st: &State) {
     }
 }
 
+/// 刚开的回放是看这一笔的（docs/67 T1）：记下它、暂停、步长 1 秒、播放头去开仓那一刻（还没算到就等）。
+pub fn set_trade(m: TradeMark) {
+    if let Ok(mut g) = CLOCK.lock()
+        && let Some(c) = g.as_mut()
+    {
+        c.playing = false;
+        c.step = Step::S1;
+        c.pending_head = Some(m.open_ns);
+        c.trade = Some(m);
+        c.marks_ver += 1;
+    }
+}
+
+/// 图上要画的那笔（只在回放开着、看的是「订单流特征」时）。
+#[must_use]
+pub fn trade_mark() -> Option<TradeMark> {
+    if !charts_on() {
+        return None;
+    }
+    CLOCK.lock().ok()?.as_ref()?.trade.clone()
+}
+
 /// 书签跟着哪份画线分析（`None` = 默认画板）；变了就换一组书签。
 pub fn set_scope(scope: Option<String>) {
     if let Ok(mut g) = CLOCK.lock()
@@ -994,7 +1075,7 @@ pub fn toolbar<'a>() -> Option<Element<'a, Cmd>> {
     let v = view()?;
     let span = ((v.t1 - v.t0).max(1) as f64) / 1e9;
     let pos = v.drag.unwrap_or(((v.head - v.t0) as f64 / 1e9).clamp(0.0, span));
-    let r = row![
+    let mut r = row![
         btn("◀", Kind::Ghost, Some(Cmd::Step(-1))),
         ibtn_tip(if v.playing { Icon::UiPause } else { Icon::UiPlay }, "", Kind::Standard, Some(Cmd::TogglePlay), if v.playing { "暂停（空格）" } else { "播放（空格）" }),
         btn("▶︎|", Kind::Ghost, Some(Cmd::Step(1))),
@@ -1016,6 +1097,15 @@ pub fn toolbar<'a>() -> Option<Element<'a, Cmd>> {
     ]
     .spacing(crate::ui::metrics::space(1))
     .align_y(Alignment::Center);
+    // 交易核对开过来的那笔（docs/67 T1）：开仓 / 平仓跳转
+    if let Some(t) = CLOCK.lock().ok().and_then(|g| g.as_ref().and_then(|c| c.trade.clone())) {
+        let at = |ns: i64| v.head / 100_000_000 == ns / 100_000_000;
+        r = r
+            .push(crate::ui::text::metadata("│").color(crate::ui::pal::dim()))
+            .push(crate::ui::text::metadata(format!("这笔 {}", t.label)).color(if t.won() { crate::ui::pal::up() } else { crate::ui::pal::down() }))
+            .push(btn(format!("{} 开仓", if t.long { "▲" } else { "▼" }), if at(t.open_ns) { Kind::Standard } else { Kind::Ghost }, Some(Cmd::TradeGo(true))))
+            .push(btn("● 平仓", if at(t.close_ns) { Kind::Standard } else { Kind::Ghost }, Some(Cmd::TradeGo(false))));
+    }
     Some(r.into())
 }
 
@@ -1349,6 +1439,35 @@ mod tests {
         super::super::workspace::set_feature_feed(false);
         let _ = std::fs::remove_dir_all(d);
         let _ = std::fs::remove_file(bm);
+    }
+
+    #[test]
+    fn 交易核对开过来的那笔_停在开仓_开平跳转_视野移过去() {
+        let _l = test_lock();
+        let _w = super::super::workspace::replay_mode_test_lock();
+        super::super::workspace::set_feature_feed(true);
+        let d = tl_with_grid("trade", &[0.0; 10]);
+        begin(d.clone(), 0, 60 * S, Pace::X10);
+        tick(Instant::now());
+        let m = TradeMark { open_ns: 12 * S + 340_000_000, close_ns: 30 * S, entry: Some(10.0), exit: Some(9.0), long: false, gross: None, label: "#1 空".into() };
+        assert!(m.won(), "空单价格下跌 = 赚");
+        set_trade(m.clone());
+        let seen = VIEW.lock().unwrap().0;
+        tick(Instant::now());
+        let v = view().unwrap();
+        assert_eq!((v.head, v.playing, v.step), (12 * S + 300_000_000, false, Step::S1), "停在开仓（对齐到 100ms 格）");
+        assert_eq!(trade_mark(), Some(m));
+        assert!(VIEW.lock().unwrap().0 > seen, "落到开仓后把视野移过去");
+        handle(Cmd::TradeGo(false));
+        assert_eq!(view().unwrap().head, 30 * S);
+        handle(Cmd::TradeGo(true));
+        assert_eq!(view().unwrap().head, 12 * S + 300_000_000);
+        // 新开一段回放：这笔不跟过去
+        begin(d.clone(), 0, 60 * S, Pace::X10);
+        assert_eq!(trade_mark(), None);
+        end();
+        super::super::workspace::set_feature_feed(false);
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]

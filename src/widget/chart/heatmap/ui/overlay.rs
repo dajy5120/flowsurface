@@ -161,6 +161,8 @@ pub struct OverlayCanvas<'a> {
     pub marks: Vec<(f32, i8, bool)>,
     /// 书签（docs/51 P5）：屏幕 x
     pub bookmarks: Vec<f32>,
+    /// 交易核对开过来的那笔（docs/67 T1）：开 / 平时刻的屏幕 x 与颜色
+    pub trade: Vec<(f32, iced::Color)>,
 }
 
 impl<'a> canvas::Program<Message> for OverlayCanvas<'a> {
@@ -320,7 +322,7 @@ impl<'a> canvas::Program<Message> for OverlayCanvas<'a> {
             });
 
         // 事件标记不进缓存（每帧几条线）
-        let marks = (!self.marks.is_empty() || !self.bookmarks.is_empty()).then(|| {
+        let marks = (!self.marks.is_empty() || !self.bookmarks.is_empty() || !self.trade.is_empty()).then(|| {
             let mut f = canvas::Frame::new(renderer, bounds.size());
             let pal = theme.extended_palette();
             for &(x, dir, focused) in &self.marks {
@@ -348,6 +350,17 @@ impl<'a> canvas::Program<Message> for OverlayCanvas<'a> {
                     b.close();
                 });
                 f.fill(&tri, color);
+            }
+            for &(x, c) in &self.trade {
+                f.stroke(
+                    &canvas::Path::line(iced::Point::new(x, 0.0), iced::Point::new(x, bounds.height)),
+                    canvas::Stroke {
+                        width: 1.5,
+                        line_dash: canvas::LineDash { segments: &[4.0, 4.0], offset: 0 },
+                        ..Default::default()
+                    }
+                    .with_color(c),
+                );
             }
             for &x in &self.bookmarks {
                 let y = bounds.height - 7.0;

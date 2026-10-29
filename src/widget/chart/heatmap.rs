@@ -386,6 +386,7 @@ impl HeatmapShader {
             volume_profile_max_qty: self.instances.volume_profile_scale_max_qty,
             marks: self.replay_marks(),
             bookmarks: self.replay_bookmarks(),
+            trade: self.replay_trade(),
         };
 
         let chart = HeatmapShaderWidget::new(&self.scene, x_axis, y_axis, overlay)
@@ -948,6 +949,21 @@ impl HeatmapShader {
             .into_iter()
             .map(|t| self.scene.camera.world_to_screen_x(((t as f64 - zero as f64) / aggr * col) as f32, size.width))
             .collect()
+    }
+
+    /// 交易核对开过来的那笔（docs/67 T1）：开 / 平时刻，换成屏幕 x（开仓按方向配色、平仓按盈亏配色）。
+    fn replay_trade(&self) -> Vec<(f32, iced::Color)> {
+        let Some(t) = crate::ws::replay_clock::trade_mark() else { return Vec::new() };
+        let (Some(size), Some(zero)) = (self.viewport_size_px(), self.world_zero_ms()) else { return Vec::new() };
+        let col = f64::from(self.scene.cell.width_world());
+        let aggr = self.depth_history.aggr_time_ms() as f64;
+        if col <= 0.0 || aggr <= 0.0 {
+            return Vec::new();
+        }
+        let x = |ns: i64| self.scene.camera.world_to_screen_x((((ns.max(0) / 1_000_000) as f64 - zero as f64) / aggr * col) as f32, size.width);
+        let side = if t.long { crate::ui::chart::up() } else { crate::ui::chart::down() };
+        let pnl = if t.won() { crate::ui::chart::up() } else { crate::ui::chart::down() };
+        vec![(x(t.open_ns), side), (x(t.close_ns), pnl)]
     }
 
     fn sync_id(&self) -> u64 {

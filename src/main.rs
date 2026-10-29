@@ -2794,6 +2794,9 @@ impl Flowsurface {
         use ui::command::Cmd;
         let main = self.main_window.id;
         match cmd {
+            Cmd::Notice(text, warn) => {
+                self.notifications.push(if warn { Toast::warn(text) } else { Toast::info(text) });
+            }
             Cmd::Page(i) => {
                 let pages = self.current_pages();
                 if let Some((uid, _)) = pages.get(i) {

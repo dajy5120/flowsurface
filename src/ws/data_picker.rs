@@ -331,6 +331,14 @@ fn run_cli(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// 起始（UTC `HH:MM`）+ 时长过了当天 24:00 几分钟；没过 / 起始写错 = `None`（docs/67 T0：回放只读当天的文件）。
+#[must_use]
+pub fn past_midnight(start: &str, minutes: u32) -> Option<u32> {
+    let (h, m) = start.split_once(':')?;
+    let (h, m): (u32, u32) = (h.trim().parse().ok()?, m.trim().parse().ok()?);
+    (h * 60 + m + minutes).checked_sub(24 * 60).filter(|o| *o > 0)
+}
+
 /// 某来源的缺省根目录（与主仓 `Roots::default()` 同一组缺省；环境变量同名覆盖）。
 #[must_use]
 pub fn default_root(src: &str) -> String {
@@ -897,6 +905,14 @@ item\tfuture\tESU6\t2026-09-01\tmbo,trades\n\
 item\tfuture\tGCZ6\t2026-09-01\tmbo\n\
 item\tfuture\tGCZ6\t2026-09-02\tmbo,trades\n\
 junk\n";
+
+    #[test]
+    fn 过午夜几分钟() {
+        assert_eq!(past_midnight("23:00", 60), None);
+        assert_eq!(past_midnight("23:00", 120), Some(60));
+        assert_eq!(past_midnight("00:00", 1440), None);
+        assert_eq!(past_midnight("x", 10), None);
+    }
 
     #[test]
     fn 扫描解析与按市场标的日期类型取() {

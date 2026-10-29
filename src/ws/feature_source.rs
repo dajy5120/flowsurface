@@ -78,6 +78,19 @@ struct St {
     /// 面板正在读的回放：`(时间线目录, 链路徽标盯的输出文件, 说明)`；`None` = 常驻引擎那两份。
     reading: Option<(PathBuf, PathBuf, String)>,
     note: String,
+    /// 交易核对要开的那笔（docs/67 T1）：等本地目录扫描好（补市场与类型）再开
+    pending_trade: Option<(TradeReq, Instant)>,
+}
+
+/// 从交易核对开一段回放看一笔（docs/67 T1）。
+#[derive(Debug, Clone)]
+pub struct TradeReq {
+    pub vendor: String,
+    pub symbol: String,
+    pub date: String,
+    pub hhmm: String,
+    pub minutes: u32,
+    pub mark: super::replay_clock::TradeMark,
 }
 
 static ST: OnceLock<Mutex<St>> = OnceLock::new();
@@ -95,7 +108,7 @@ fn cell() -> &'static Mutex<St> {
         ] {
             pick.update(m);
         }
-        Mutex::new(St { pick, pace: Pace::X10, open: false, run: None, reading: None, note: String::new() })
+        Mutex::new(St { pick, pace: Pace::X10, open: false, run: None, reading: None, note: String::new(), pending_trade: None })
     })
 }
 
@@ -452,11 +465,57 @@ pub fn open_seg(seg: &DataSeg) -> bool {
     launch(&mut g, sel)
 }
 
-/// 主循环每帧调：处理 `WS_FEATURE_REPLAY`（只第一次有事）。
+/// 主循环每帧调：处理 `WS_FEATURE_REPLAY`（只第一次有事）与交易核对要开的那笔。
 pub fn tick() {
     if let Ok(mut g) = cell().lock() {
         auto_start(&mut g);
+        try_trade(&mut g);
     }
+}
+
+/// 开一段回放看这一笔（docs/67 T1）：数据选择器预置成 B2 · 这个数据商 · 标的 · 日期 · 时段，扫描好了就开，
+/// 开了以后播放头停在开仓那一刻。返回一行说明（给交易核对显示）。
+pub fn open_trade(req: TradeReq) -> String {
+    let Ok(mut g) = cell().lock() else { return "回放状态锁坏了".into() };
+    g.pick.preset_local(BSource::Purchased, Some(&req.vendor), &req.symbol, Some(&req.date), None, Some((&req.hhmm, req.minutes)));
+    g.note = format!("准备回放 {} {} {} 起 {} 分钟（扫描本地目录…）", req.symbol, req.date, req.hhmm, req.minutes);
+    g.pending_trade = Some((req, Instant::now()));
+    try_trade(&mut g);
+    g.note.clone()
+}
+
+fn try_trade(g: &mut St) {
+    let Some((req, since)) = g.pending_trade.clone() else { return };
+    if let Some(sel) = g.pick.selection(&pick_opts()) {
+        g.pending_trade = None;
+        let ok = launch(g, sel);
+        if ok {
+            super::replay_clock::set_trade(req.mark);
+            g.note = format!("回放 {} {} {} 起 {} 分钟：算到开仓那一刻就停在那里", req.symbol, req.date, req.hhmm, req.minutes);
+        }
+        crate::ui::command::post(crate::ui::command::Cmd::Notice(
+            if ok { g.note.clone() } else { format!("在回放里看这笔：{}", g.note) },
+            !ok,
+        ));
+        return;
+    }
+    let failed = match g.pick.local_scan() {
+        Some(super::data_picker::Load::Failed(e)) => Some(format!("扫描本地目录失败：{e}")),
+        Some(super::data_picker::Load::Ready(_)) => Some(format!("本地没有 {} {} 的数据（B2 · {}，缺省根目录）", req.symbol, req.date, req.vendor)),
+        _ if since.elapsed().as_secs() > 60 => Some("扫描本地目录超过 1 分钟还没好".into()),
+        _ => None,
+    };
+    if let Some(e) = failed {
+        g.pending_trade = None;
+        crate::ui::command::post(crate::ui::command::Cmd::Notice(format!("在回放里看这笔：{e}"), true));
+        g.note = e;
+    }
+}
+
+/// 回放面板的一行说明（交易核对开回放后显示进度 / 出错）。
+#[must_use]
+pub fn note() -> String {
+    cell().lock().map(|g| g.note.clone()).unwrap_or_default()
 }
 
 fn launch(g: &mut St, sel: Selection) -> bool {
@@ -467,6 +526,10 @@ fn launch(g: &mut St, sel: Selection) -> bool {
     let (hhmm, minutes) = window.clone().unwrap_or_else(|| ("00:00".into(), 30));
     if !valid_hhmm(&hhmm) || minutes == 0 {
         g.note = format!("起始时刻要写成 HH:MM（UTC），时长要 > 0——现在是 {hhmm} / {minutes} 分钟");
+        return false;
+    }
+    if let Some(over) = super::data_picker::past_midnight(&hhmm, minutes) {
+        g.note = format!("{hhmm} 起 {minutes} 分钟过了 UTC 24:00 {over} 分钟：回放只读 {date} 这一天的文件，后面那段没有数据——改起始或时长（docs/67）");
         return false;
     }
     let bin = replay_bin();
