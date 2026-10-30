@@ -61,6 +61,12 @@ pub struct RegimeFile {
     pub layer_names: HashMap<String, String>,
     /// 最后一根 K 线的收盘时刻（毫秒）；老文件没有，用各维度最后一段推
     pub last_ms: Option<u64>,
+    /// 数据来源（`binance` / `databento_futures` ……）；老文件没有 = 币安
+    pub source: String,
+    /// 算这份时套用的用户参数（docs/69，`params.json` 逐层覆盖的结果）
+    pub user_params: std::collections::BTreeMap<String, f64>,
+    /// 实际用的全部引擎参数（检查器显示「现在用的值」）
+    pub params: serde_json::Map<String, serde_json::Value>,
 }
 
 /// 文件里的一段：`[开始, 结束|null, 状态下标, 原因]`。
@@ -86,6 +92,12 @@ struct Raw {
     /// 最后一根 K 线的收盘时刻（毫秒）；老文件没有
     #[serde(default)]
     last_ms: Option<u64>,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    user_params: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    params: serde_json::Map<String, serde_json::Value>,
 }
 
 /// 解析一个时间线文件。坏文件返回说明。
@@ -119,6 +131,9 @@ pub fn parse(text: &str) -> Result<RegimeFile, String> {
         segs,
         layer_names: r.layer_names,
         last_ms: r.last_ms,
+        source: if r.source.is_empty() { "binance".into() } else { r.source },
+        user_params: r.user_params.iter().filter_map(|(k, v)| Some((k.clone(), v.as_f64()?))).collect(),
+        params: r.params,
     })
 }
 
@@ -127,8 +142,17 @@ impl RegimeFile {
         self.dims.iter().find(|d| d.key == key)
     }
 
-    /// 时刻 t 所在的段（段按开始时刻升序、首尾相接）。
+    /// 状态管到哪（docs/69 A）：最后确认的状态管到下一根收盘 = `last_ms + 周期`。老文件（没有 `last_ms`）不截。
+    #[must_use]
+    pub fn valid_until(&self) -> Option<u64> {
+        self.last_ms.map(|l| l + self.tf_ms)
+    }
+
+    /// 时刻 t 所在的段（段按开始时刻升序、首尾相接）。超过 [`Self::valid_until`] 的没有（还没算，不拿旧状态顶）。
     pub fn at(&self, key: &str, t: u64) -> Option<&Seg> {
+        if self.valid_until().is_some_and(|v| t >= v) {
+            return None;
+        }
         let v = self.segs.get(key)?;
         let k = v.partition_point(|s| s.t0 <= t);
         let s = v.get(k.checked_sub(1)?)?;
@@ -201,7 +225,8 @@ fn refresh() {
     let mut changed = false;
     for e in std::fs::read_dir(files_dir()).into_iter().flatten().flatten() {
         let p = e.path();
-        if p.extension().is_none_or(|x| x != "json") {
+        // 用户参数（docs/69 C）与时间线放同一目录，不是时间线
+        if p.extension().is_none_or(|x| x != "json") || p.file_name().is_some_and(|n| n == "params.json") {
             continue;
         }
         let Ok(mtime) = e.metadata().and_then(|m| m.modified()) else { continue };
@@ -291,6 +316,12 @@ pub fn once_status() -> (bool, String) {
     ONCE.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
+/// 毫秒 → 本地 `MM-DD HH:MM`。
+#[must_use]
+pub fn local_hm(ms: u64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms as i64).map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default()
+}
+
 /// 全部时间线文件，按 (品种, 周期长短) 排。
 #[must_use]
 pub fn all_files() -> Vec<Arc<RegimeFile>> {
@@ -356,6 +387,8 @@ pub struct Settings {
     pub board_days: u32,
     /// 面板转移矩阵看哪个维度；空 = 底色维度
     pub board_dim: Option<String>,
+    /// 跟随图表自动算（docs/69 B）：打开着的 K 线图按它的品种与周期，有新 K 线收盘 / 参数改了就重算
+    pub auto: bool,
 }
 
 impl Default for Settings {
@@ -369,6 +402,7 @@ impl Default for Settings {
             board: None,
             board_days: 90,
             board_dim: None,
+            auto: true,
         }
     }
 }
@@ -404,6 +438,36 @@ pub enum RegimeMsg {
     Hover(Option<u64>),
     /// 「刷新一次」（docs/62 F6）：子进程跑 `python -m factory.regime live --once`
     RefreshOnce,
+    /// 跟随图表自动算（docs/69 B）
+    Auto(bool),
+    /// 「现在算」：（图的品种键, 图的周期毫秒）
+    ComputeNow(String, u64),
+    /// 参数（docs/69 C）：改哪一层（检查器里的选择，不存盘）
+    ParamScope(u8),
+    /// 改一个参数（`None` = 去掉这一层的覆盖）
+    ParamSet(super::regime_params::Scope, String, Option<f64>),
+    /// 套预设（`regime_params::PRESETS` 的下标）
+    ParamPreset(super::regime_params::Scope, usize),
+}
+
+/// 检查器参数区的界面状态：（改哪一层 0 全部 / 1 市场 / 2 品种 / 3 品种 + 周期, 最近一句说明）。
+fn param_ui() -> &'static Mutex<(u8, String)> {
+    static P: OnceLock<Mutex<(u8, String)>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new((3, String::new())))
+}
+
+#[must_use]
+pub fn param_ui_state() -> (u8, String) {
+    param_ui().lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+fn note_param(r: Result<(), String>) {
+    if let Ok(mut g) = param_ui().lock() {
+        g.1 = match r {
+            Ok(()) => if settings().auto { "✔ 已存；开着的图会自动重算".into() } else { "✔ 已存；点「现在算」重算".into() },
+            Err(e) => format!("✗ 参数没存上：{e}"),
+        };
+    }
 }
 
 /// 面板时间轴的光标只发联动，不改设置、不存盘。
@@ -415,9 +479,30 @@ pub fn handle(m: RegimeMsg) {
         crate::chart::linked_cursor::publish(BOARD_CURSOR_SRC, t);
         return;
     }
-    if matches!(m, RegimeMsg::RefreshOnce) {
-        refresh_once();
-        return;
+    match m {
+        RegimeMsg::RefreshOnce => {
+            refresh_once();
+            return;
+        }
+        RegimeMsg::ComputeNow(sym, iv) => {
+            super::regime_auto::force(&sym, iv);
+            return;
+        }
+        RegimeMsg::ParamScope(k) => {
+            if let Ok(mut g) = param_ui().lock() {
+                g.0 = k;
+            }
+            return;
+        }
+        RegimeMsg::ParamSet(sc, k, v) => {
+            note_param(super::regime_params::edit(|f| super::regime_params::set(f, &sc, &k, v)));
+            return;
+        }
+        RegimeMsg::ParamPreset(sc, i) => {
+            note_param(super::regime_params::edit(|f| super::regime_params::apply_preset(f, &sc, i)));
+            return;
+        }
+        _ => {}
     }
     let mut s = settings_cell().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     apply(&mut s, m);
@@ -449,7 +534,13 @@ fn apply(s: &mut Settings, m: RegimeMsg) {
         RegimeMsg::Board(k) => s.board = Some(k),
         RegimeMsg::BoardDays(d) => s.board_days = d,
         RegimeMsg::BoardDim(k) => s.board_dim = Some(k),
-        RegimeMsg::Hover(_) | RegimeMsg::RefreshOnce => {}
+        RegimeMsg::Auto(v) => s.auto = v,
+        RegimeMsg::Hover(_)
+        | RegimeMsg::RefreshOnce
+        | RegimeMsg::ComputeNow(..)
+        | RegimeMsg::ParamScope(_)
+        | RegimeMsg::ParamSet(..)
+        | RegimeMsg::ParamPreset(..) => {}
     }
 }
 
@@ -538,11 +629,31 @@ pub fn draw_overlay(
     let half = (interval_to_x(earliest + chart_iv) - interval_to_x(earliest)) / 2.0;
     let (rx0, rx1) = (region.x, region.x + region.width);
     let hi = latest.saturating_add(chart_iv);
+    // 状态只画到算过的地方（docs/69 A）：最后一段是开放的，不截就会把旧状态一直涂到最新
+    let upto = f.valid_until().map_or(hi, |v| v.min(hi));
     let span = |seg: &Seg| -> Option<(f32, f32)> {
         let x0 = (interval_to_x(seg.t0) - half).clamp(rx0, rx1);
-        let x1 = (interval_to_x(seg.t1.unwrap_or(hi).min(hi)) - half).clamp(rx0, rx1);
+        let x1 = (interval_to_x(seg.t1.unwrap_or(upto).min(upto)) - half).clamp(rx0, rx1);
         (x1 > x0).then_some((x0, x1))
     };
+    // 没算到的那段：淡灰底 + 「状态停在 …」
+    if upto < hi {
+        let x0 = (interval_to_x(upto) - half).clamp(rx0, rx1);
+        let x1 = (interval_to_x(hi) - half).clamp(rx0, rx1);
+        if x0 < x1 {
+            frame.fill_rectangle(Point::new(x0, region.y), Size::new(x1 - x0, region.height), pal::alpha(pal::dim(), 0.05));
+            // 字写在灰底左边一点往左摆不下时贴着右端（灰底很窄时也看得全）
+            let tx = (x0 + 4.0 / scaling).min(rx1 - 110.0 / scaling).max(rx0);
+            frame.fill_text(canvas::Text {
+                content: format!("状态停在 {}", local_hm(upto)),
+                position: Point::new(tx, region.y + 22.0 / scaling),
+                size: iced::Pixels(10.0 / scaling),
+                color: pal::warn(),
+                font: crate::ui::text::ui_font(),
+                ..canvas::Text::default()
+            });
+        }
+    }
 
     // 底色带
     if let Some(d) = f.dim(&s.band) {
@@ -620,6 +731,12 @@ pub fn describe_at(symbol: &str, chart_iv: u64, t: u64) -> Option<(String, Vec<(
         return None;
     }
     let f = pick(&files_for(symbol), chart_iv, s.tf.as_deref())?;
+    // 超过算过的地方：一行「未算」，不显示旧状态（docs/69 A）
+    if let Some(v) = f.valid_until()
+        && t >= v
+    {
+        return Some((f.timeframe.clone(), vec![(String::new(), vec![("未算".into(), format!("（停在 {}）", local_hm(v)), Some(pal::warn()))])]));
+    }
     let rows = layer_rows(&f, &s.band, t);
     (!rows.is_empty()).then(|| (f.timeframe.clone(), rows))
 }
@@ -682,6 +799,21 @@ mod tests {
         assert_eq!(o, vec![2000, 5000]);
         assert!(f.overlapping("composite", 0, 500).is_empty());
         assert!(parse(&J.replace("\"format\": 1", "\"format\": 2")).is_err());
+    }
+
+    #[test]
+    fn 过了最后一根收盘就不算_不拿旧状态顶() {
+        let mut f = parse(J).unwrap();
+        assert_eq!((f.source.as_str(), f.valid_until()), ("binance", None), "老文件没有 last_ms：不截");
+        f.last_ms = Some(9_000);
+        // 最后确认的状态管到下一根收盘（+ 周期 900_000）
+        assert_eq!(f.valid_until(), Some(909_000));
+        assert_eq!(f.at("composite", 908_999).map(|s| s.s), Some(1));
+        assert!(f.at("composite", 909_000).is_none());
+        assert!(f.at("composite", 9_999_999).is_none(), "三天前的状态不再画到今天");
+        let g = parse(&J.replace("\"format\": 1,", "\"format\": 1, \"source\": \"databento_futures\", \"user_params\": {\"swing_k\": 1.2},")).unwrap();
+        assert_eq!(g.source, "databento_futures");
+        assert_eq!(g.user_params.get("swing_k"), Some(&1.2));
     }
 
     #[test]

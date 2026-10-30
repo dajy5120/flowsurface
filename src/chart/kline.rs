@@ -428,6 +428,14 @@ impl KlineChart {
         }
     }
 
+    /// 时间基的图的周期（毫秒）；按笔的图为 None。
+    pub fn time_interval_ms(&self) -> Option<u64> {
+        match &self.data_source {
+            PlotData::TimeBased(ts) => Some(ts.interval.to_milliseconds()),
+            PlotData::TickBased(_) => None,
+        }
+    }
+
     pub fn studies_chart(&self) -> Option<&str> {
         self.studies_chart.as_deref()
     }
@@ -1222,6 +1230,8 @@ impl canvas::Program<Message> for KlineChart {
             PlotData::TimeBased(ts) => ts.interval.to_milliseconds(),
             PlotData::TickBased(_) => 0,
         };
+        // 市场状态跟随图表自动算（docs/69 B）：报到「我在看这个品种这个周期」
+        crate::ws::regime_auto::note_chart(&regime_symbol, iv);
         // 图上指标：两层共用一次计算，哪层要重画才算
         let comp_cell = std::cell::OnceCell::new();
         let comp = || comp_cell.get_or_init(|| self.compute_studies(&regime_symbol)).clone();
@@ -1416,13 +1426,15 @@ impl canvas::Program<Message> for KlineChart {
             // 市场状态（docs/62 R2）：底色带 + 底部条带 + 切换标记，画在 K 线下面一层的颜色上（半透明）
             if let PlotData::TimeBased(ts) = &self.data_source {
                 let iv = ts.interval.to_milliseconds();
+                // 右端截在最后一根 K 线（视野右边的空白不画状态，「停在」的灰底也只盖真有 K 线的地方）
+                let last_bar = ts.datapoints.last_key_value().map_or(latest, |(t, _)| latest.min(t.as_u64()));
                 crate::ws::regime::draw_overlay(
                     frame,
                     region,
                     &interval_to_x,
                     chart.scaling,
                     earliest,
-                    latest,
+                    last_bar,
                     &regime_symbol,
                     iv,
                     crate::ws::studies::sub_height(sid, iv, chart.scaling),

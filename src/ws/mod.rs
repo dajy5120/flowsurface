@@ -122,6 +122,8 @@ pub mod staleness;
 pub mod svcctl;
 pub mod radar;
 pub mod regime;
+pub mod regime_auto;
+pub mod regime_params;
 pub mod regime_view;
 pub mod regime_board;
 pub mod regime_board_view;
