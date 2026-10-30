@@ -412,8 +412,7 @@ pub fn range_of(chart: &str) -> Option<(u64, u64)> {
 /// 这张图用哪份时间线（按图的显示设置、加载的时间段）。
 #[must_use]
 pub fn file_for(chart: &str, symbol: &str, chart_iv: u64) -> Option<Arc<RegimeFile>> {
-    let v = view(chart);
-    pick_in(&files_for(symbol), chart_iv, v.tf.as_deref(), range_of(chart))
+    pick_in(&files_for(symbol), chart_iv, pinned_tf(chart, chart_iv).as_deref(), range_of(chart))
 }
 
 /// 这个品种全部时间线的维度并集（docs/70 A：选项不因为当前那份少几个就消失）。`first` 的维度排在前面。
@@ -442,20 +441,31 @@ pub struct View {
     pub band: String,
     pub strips: Vec<String>,
     pub marks: bool,
+    /// 指定的周期（空 = 跟图）。只在选它时图的那个周期下有效（`tf_iv`）：图一换周期就回到跟图（docs/70 §6）
     pub tf: Option<String>,
+    /// 选「指定周期」时图的周期（毫秒）；0 = 旧设置（没记）→ 当作跟图
+    pub tf_iv: u64,
 }
 
 impl Default for View {
     fn default() -> Self {
         let s = Settings::default();
-        Self { on: s.on, listed: true, band: s.band, strips: s.strips, marks: s.marks, tf: s.tf }
+        Self { on: s.on, listed: true, band: s.band, strips: s.strips, marks: s.marks, tf: None, tf_iv: 0 }
     }
 }
 
 impl Settings {
     fn base_view(&self) -> View {
-        View { on: self.on, listed: true, band: self.band.clone(), strips: self.strips.clone(), marks: self.marks, tf: self.tf.clone() }
+        // 全局的「指定周期」不带到各图（docs/70 §6：周期跟图；要指定在那张图上选）
+        View { on: self.on, listed: true, band: self.band.clone(), strips: self.strips.clone(), marks: self.marks, tf: None, tf_iv: 0 }
     }
+}
+
+/// 这张图现在生效的「指定周期」：只在选它时的那个图周期下生效；图换了周期 = 跟图（docs/70 §6）。
+#[must_use]
+pub fn pinned_tf(chart: &str, chart_iv: u64) -> Option<String> {
+    let v = view(chart);
+    v.tf.filter(|_| chart_iv > 0 && v.tf_iv == chart_iv)
 }
 
 /// 这张图的显示设置。
@@ -474,7 +484,8 @@ pub enum ViewOp {
     Band(String),
     Strip(String, bool),
     Marks(bool),
-    Tf(Option<String>),
+    /// 指定周期（None = 跟图）+ 选的时候图的周期（毫秒）
+    Tf(Option<String>, u64),
 }
 
 fn apply_view(v: &mut View, op: ViewOp) {
@@ -492,7 +503,10 @@ fn apply_view(v: &mut View, op: ViewOp) {
             }
         }
         ViewOp::Marks(x) => v.marks = x,
-        ViewOp::Tf(t) => v.tf = t,
+        ViewOp::Tf(t, iv) => {
+            v.tf_iv = if t.is_some() { iv } else { 0 };
+            v.tf = t;
+        }
     }
 }
 
@@ -704,7 +718,6 @@ fn apply(s: &mut Settings, m: RegimeMsg) {
             s.band = v.band.clone();
             s.strips = v.strips.clone();
             s.marks = v.marks;
-            s.tf = v.tf.clone();
             s.charts.insert(chart, v);
         }
         RegimeMsg::Hover(_)
@@ -1028,7 +1041,22 @@ mod tests {
         assert!(s.on, "从一张图去掉不影响别的图的缺省");
         // 老设置文件（没有 charts）照样读
         let old: Settings = serde_json::from_str(r#"{"on": true, "band": "direction", "strips": ["vol_level"], "marks": false, "tf": "15m"}"#).unwrap();
-        assert_eq!((old.base_view().band.as_str(), old.base_view().tf.as_deref(), old.auto), ("direction", Some("15m"), true));
+        assert_eq!((old.base_view().band.as_str(), old.base_view().tf.as_deref(), old.auto), ("direction", None, true), "全局的指定周期不带到各图");
+    }
+
+    #[test]
+    fn 指定周期只在选它时的图周期下有效_换周期就跟图() {
+        let mut v = View::default();
+        apply_view(&mut v, ViewOp::Tf(Some("15m".into()), 60_000));
+        assert_eq!((v.tf.as_deref(), v.tf_iv), (Some("15m"), 60_000));
+        let eff = |v: &View, iv: u64| v.tf.clone().filter(|_| iv > 0 && v.tf_iv == iv);
+        assert_eq!(eff(&v, 60_000).as_deref(), Some("15m"), "还是 1 分钟图：用指定的 15m");
+        assert_eq!(eff(&v, 86_400_000), None, "图换成日线：跟图");
+        apply_view(&mut v, ViewOp::Tf(None, 60_000));
+        assert_eq!((v.tf, v.tf_iv), (None, 0));
+        // 旧设置里没记图周期的指定（tf_iv = 0）：当作跟图
+        let old: View = serde_json::from_str(r#"{"tf": "1d"}"#).unwrap();
+        assert_eq!(eff(&old, 86_400_000), None);
     }
 
     #[test]

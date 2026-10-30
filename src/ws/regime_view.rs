@@ -117,12 +117,13 @@ fn display<'a>(chart: &str, symbol: &str, iv: u64) -> Element<'a, RegimeMsg> {
     }
     tfs.sort();
     tfs.dedup_by(|a, b| a.1 == b.1);
-    let mut tr = row![chip("自动", v.tf.is_none(), vm(ViewOp::Tf(None)))].spacing(metrics::space(1));
+    let pin = rg::pinned_tf(chart, iv);
+    let mut tr = row![chip("跟图", pin.is_none(), vm(ViewOp::Tf(None, iv)))].spacing(metrics::space(1));
     for (_, x) in &tfs {
-        let on = v.tf.as_deref() == Some(x.as_str());
-        tr = tr.push(chip(x.clone(), on, vm(ViewOp::Tf(Some(x.clone())))));
+        let on = pin.as_deref() == Some(x.as_str());
+        tr = tr.push(chip(x.clone(), on, vm(ViewOp::Tf(Some(x.clone()), iv))));
     }
-    b = b.push(t::metadata("周期（自动 = 跟图的周期；挑盖得住图上这段的那份）").color(pal::dim())).push(tr.wrap());
+    b = b.push(t::metadata("周期（跟图 = 图换周期 / 换数据，状态跟着重算；指定的只在现在这个图周期下有效）").color(pal::dim())).push(tr.wrap());
 
     let dims = rg::dims_union(&files, f.as_deref());
     if dims.is_empty() {

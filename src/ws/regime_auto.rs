@@ -55,7 +55,7 @@ pub fn tf_str(iv: u64) -> Option<&'static str> {
 /// 这张图的叠加层实际用的周期：图的显示设置里指定了就是它，否则跟图（docs/69 B：算的就是图上画的那份）。
 #[must_use]
 pub fn target(chart: &str, chart_iv: u64) -> Option<(&'static str, u64)> {
-    if let Some(w) = super::regime::view(chart).tf
+    if let Some(w) = super::regime::pinned_tf(chart, chart_iv)
         && let Some((ms, s)) = TFS.iter().find(|(_, s)| *s == w)
     {
         return Some((s, *ms));
