@@ -61,7 +61,7 @@ rustc-hash.workspace = true
 enum-map.workspace = true
 url.workspace = true
 fern = "0.7.1"
-rodio = { version = "0.22.2", default-features = false, features = [ "playback", "wav" ]}
+rodio = { version = "0.22.2", default-features = false, features = [ "playback", "wav", "mp3", "flac", "vorbis", "mp4" ]}
 
 bytemuck = "1.25.0"
 png = "0.18" # 画线分析的缩略图编解码（docs/52 A3）

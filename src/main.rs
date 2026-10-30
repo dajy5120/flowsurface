@@ -2978,6 +2978,7 @@ impl Flowsurface {
             Cmd::OpenDataFolder => return self.update(Message::DataFolderRequested),
             Cmd::DataDirs => ws::data_dirs::handle(ws::data_dirs::DataDirsMsg::Open),
             Cmd::Inbox => ws::inbox::handle(ws::inbox::InboxMsg::Toggle),
+            Cmd::SoundMute => ws::alert_sound::handle(ws::alert_sound::SoundMsg::ToggleMute),
             Cmd::AlertRules => ws::alert_rules::handle(ws::alert_rules::RulesMsg::Toggle),
             Cmd::OpenInStudio => match ws::bridge::open_in_studio() {
                 Ok(m) => self.notifications.push(Toast::info(m)),

@@ -662,6 +662,26 @@ def ui_float():  # 浮动层：两张错开叠放的卡
     return i
 
 
+def _speaker(i):
+    i.line((3.5, 9.5), (7, 9.5), (12, 5), (12, 19), (7, 14.5), (3.5, 14.5), closed=True)
+
+
+def ui_volume():  # 提醒声音：喇叭 + 两道声波
+    i = Icon()
+    _speaker(i)
+    i.arc(13, 12, 3.5, -50, 50)
+    i.arc(13, 12, 7.5, -50, 50)
+    return i
+
+
+def ui_volume_off():  # 静音：喇叭 + 叉
+    i = Icon()
+    _speaker(i)
+    i.line((15.5, 9), (21, 15))
+    i.line((21, 9), (15.5, 15))
+    return i
+
+
 # 顺序 = 码位顺序（WS_BASE + 下标），与 style.rs 的 Icon 枚举一致
 ICONS = [
     ("ws-candles", candles),
@@ -729,6 +749,8 @@ ICONS = [
     ("ui-sparkle", ui_sparkle),
     ("ui-key", ui_key),
     ("ui-float", ui_float),
+    ("ui-volume", ui_volume),
+    ("ui-volume-off", ui_volume_off),
 ]
 
 

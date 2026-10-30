@@ -684,8 +684,32 @@ pub fn toolbar<'a, M: Clone + 'a>(info: &Info, on: fn(ShellEvent) -> M, ctx: Ele
         iced::widget::tooltip::Position::Bottom,
     )
     .into();
+    // 提醒声音（docs/68）：喇叭点一下静音 1 小时 / 恢复；P0 在响时用警示色
+    let sound_btn: Element<'a, ShellEvent> = {
+        let cfg = crate::ws::alert_sound::cfg();
+        let now = chrono::Utc::now().timestamp_millis();
+        let mute = crate::ws::alert_sound::mute_text(&cfg, now);
+        let ringing = crate::ws::alert_sound::status().playing == Some(0);
+        let (icon, col, tip) = if !mute.is_empty() {
+            (crate::style::Icon::UiVolumeOff, c.text_tertiary, format!("提醒声音：{mute}\n点一下恢复"))
+        } else if ringing {
+            (crate::style::Icon::UiVolume, c.status_warning, "P0 提醒在响：在消息中心点「知道了」就停\n点一下静音 1 小时".to_string())
+        } else {
+            (crate::style::Icon::UiVolume, c.text_tertiary, "提醒声音开着（消息中心 → 声音 里设各级别）\n点一下静音 1 小时".to_string())
+        };
+        iced::widget::tooltip(
+            button(super::widgets::glyph(icon, gs).color(color(col)))
+                .padding([3, 6])
+                .on_press(ShellEvent::Run(Cmd::SoundMute))
+                .style(move |th, st| crate::style::button::modifier(th, st, false)),
+            container(t::caption(tip)).padding(6).style(crate::style::tooltip),
+            iced::widget::tooltip::Position::Bottom,
+        )
+        .into()
+    };
     let right: Element<'a, ShellEvent> = row![
         bell_btn,
+        sound_btn,
         search,
         toggle_btn(crate::style::Icon::UiPanelRight, "检查器 · Ctrl I", Cmd::ToggleInspector),
         toggle_btn(crate::style::Icon::UiPanelBottom, "底部面板 · Ctrl J", Cmd::ToggleBottom)

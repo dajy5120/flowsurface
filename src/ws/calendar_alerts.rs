@@ -1115,8 +1115,14 @@ pub fn telegram_file_private() -> Option<bool> {
 
 fn desktop_notify(title: &str, body: &str, importance: u8) -> Result<(), String> {
     let urgency = if importance == 0 { "critical" } else { "normal" };
-    let out = std::process::Command::new("notify-send")
-        .args(["-a", "WealthSpring 金融日历", "-u", urgency, title, body])
+    let mut cmd = std::process::Command::new("notify-send");
+    cmd.args(["-a", "WealthSpring 金融日历", "-u", urgency]);
+    // Cockpit 自己放这一级的提醒声音时，别让系统通知再响一遍（docs/68）
+    if super::alert_sound::plays_level(importance) {
+        cmd.args(["-h", "boolean:suppress-sound:true"]);
+    }
+    let out = cmd
+        .args([title, body])
         .output()
         .map_err(|e| e.to_string())?;
     if out.status.success() {

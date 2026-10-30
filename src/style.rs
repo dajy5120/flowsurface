@@ -133,6 +133,8 @@ pub enum Icon {
     UiSparkle = 59708,
     UiKey = 59709,
     UiFloat = 59710,
+    UiVolume = 59711,
+    UiVolumeOff = 59712,
 }
 
 impl From<Icon> for char {

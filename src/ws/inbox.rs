@@ -77,6 +77,9 @@ pub enum InboxMsg {
     ToggleCats,
     /// 打开提醒管理器
     Rules,
+    /// 提醒声音设置页 ⇄ 列表（docs/68）
+    SoundPage,
+    Sound(super::alert_sound::SoundMsg),
 }
 
 /// 浮窗的界面状态（筛选、选中、勾选）。
@@ -92,6 +95,8 @@ pub struct Ui {
     pub checked: BTreeSet<i64>,
     pub expanded: HashSet<i64>,
     pub cats_hidden: bool,
+    /// 显示的是提醒声音设置（docs/68）
+    pub sound_page: bool,
     pub note: String,
     /// 筛选改了就加一：后台据此重查
     rev: u64,
@@ -279,6 +284,9 @@ fn run() {
         _ => {}
     }
     let mut last_max = -1;
+    // 提醒声音（docs/68）的游标：启动时库里已有的积压不响
+    super::alert_sound::init();
+    let mut sound_from = ib::max_id(&c);
     let mut last_rev = u64::MAX;
     let mut last_full = Instant::now();
     loop {
@@ -291,6 +299,15 @@ fn run() {
             }
         }
         let max = ib::max_id(&c);
+        if max > sound_from {
+            let v: Vec<super::alert_sound::Arrival> = ib::arrivals(&c, sound_from)
+                .into_iter()
+                .map(|(id, level, silent)| super::alert_sound::Arrival { id, level, silent })
+                .collect();
+            sound_from = v.last().map_or(max, |a| a.id);
+            super::alert_sound::on_arrivals(&c, &v);
+        }
+        super::alert_sound::tick(&c);
         let u = ui();
         if acted || max != last_max || u.rev != last_rev || last_full.elapsed() >= Duration::from_secs(30) {
             last_max = max;
@@ -447,6 +464,15 @@ pub fn handle(m: InboxMsg) {
         InboxMsg::ToggleCats => {
             refilter = false;
             u.cats_hidden = !u.cats_hidden;
+        }
+        InboxMsg::SoundPage => {
+            refilter = false;
+            u.sound_page = !u.sound_page;
+        }
+        InboxMsg::Sound(m) => {
+            drop(u);
+            super::alert_sound::handle(m);
+            return;
         }
         InboxMsg::Rules => {
             drop(u);
