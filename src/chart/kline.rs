@@ -115,7 +115,7 @@ impl Chart for KlineChart {
             size.height / 2.0 + chart.scaling * (y + chart.translation.y)
         };
         let symbol = crate::ws::drawing::symbol_key(&chart.ticker_info.ticker);
-        let sub_bottom = size.height - crate::ws::regime::bottom_reserved(&symbol, iv, chart.scaling) * chart.scaling;
+        let sub_bottom = size.height - crate::ws::regime::bottom_reserved(id, &symbol, iv, chart.scaling) * chart.scaling;
         crate::ws::studies::hit(id, iv, t, p.y, &price_to_y, sub_bottom, earliest, latest).map(|uid| (id.to_string(), uid))
     }
 
@@ -446,7 +446,11 @@ impl KlineChart {
     fn live_split(&self) -> bool {
         let PlotData::TimeBased(ts) = &self.data_source else { return false };
         matches!(self.kind, KlineChartKind::Candles)
-            && !crate::ws::regime::active(&crate::ws::drawing::symbol_key(&self.chart.ticker_info.ticker), ts.interval.to_milliseconds())
+            && !crate::ws::regime::active(
+                self.studies_chart.as_deref().unwrap_or(""),
+                &crate::ws::drawing::symbol_key(&self.chart.ticker_info.ticker),
+                ts.interval.to_milliseconds(),
+            )
     }
 
     /// 图上指标（docs/63 I3）的计算结果；没挂指标、不是时间周期的图为 None。按图增量（实时每跳只改最后一个值）
@@ -1017,7 +1021,8 @@ impl KlineChart {
                 let iv = ts.interval.to_milliseconds();
                 let sym = crate::ws::drawing::symbol_key(&self.chart.ticker_info.ticker);
                 let sc = self.chart.scaling;
-                (crate::ws::studies::sub_height(self.studies_chart.as_deref().unwrap_or(""), iv, sc) + crate::ws::regime::bottom_reserved(&sym, iv, sc)) * sc
+                let cid = self.studies_chart.as_deref().unwrap_or("");
+                (crate::ws::studies::sub_height(cid, iv, sc) + crate::ws::regime::bottom_reserved(cid, &sym, iv, sc)) * sc
             }
             PlotData::TickBased(_) => 0.0,
         };
@@ -1230,8 +1235,35 @@ impl canvas::Program<Message> for KlineChart {
             PlotData::TimeBased(ts) => ts.interval.to_milliseconds(),
             PlotData::TickBased(_) => 0,
         };
-        // 市场状态跟随图表自动算（docs/69 B）：报到「我在看这个品种这个周期」
-        crate::ws::regime_auto::note_chart(&regime_symbol, iv);
+        // 市场状态（docs/69 B / docs/70）：登记这张图加载的时间段（挑能盖住它的那份时间线），报到「我在看」（跟随图表自动算）
+        if let PlotData::TimeBased(ts) = &self.data_source {
+            let range = ts.datapoints.first_key_value().zip(ts.datapoints.last_key_value()).map(|((a, _), (b, _))| (a.as_u64(), b.as_u64() + iv));
+            crate::ws::regime::note_range(sid, range);
+            crate::ws::regime_auto::note_chart(sid, &regime_symbol, iv, range);
+            // 历史图（本地文件、回放）按图上加载的这段 K 线算（docs/70 B）：后台要了就写一次 CSV（在后台线程写）
+            if let Some((path, hi)) = crate::ws::regime_auto::export_request(sid) {
+                let p = |x: Price| x.units as f64 / 1e11;
+                let bars: Vec<crate::ws::studies::Ohlcv> = ts
+                    .datapoints
+                    .iter()
+                    .map(|(t, dp)| {
+                        let k = dp.kline;
+                        (t.as_u64(), p(k.open), p(k.high), p(k.low), p(k.close), k.volume.total().units as f64 / 1e8)
+                    })
+                    .collect();
+                let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                let bars = if hi > iv { crate::ws::studies::aggregate_closed(&bars, iv, hi, now_ms) } else { bars };
+                let chart_id = sid.to_string();
+                crate::ws::spawn_named("ws-regime-bars", move || {
+                    let span = bars.first().zip(bars.last()).map(|(a, b)| (a.0, b.0 + hi));
+                    match (crate::ws::regime_auto::write_bars(&path, &bars), span) {
+                        (Ok(()), Some(r)) => crate::ws::regime_auto::export_ready(&chart_id, path, r),
+                        (Err(e), _) => log::warn!("[regime-auto] 写图上的 K 线失败：{e}"),
+                        _ => {}
+                    }
+                });
+            }
+        }
         // 图上指标：两层共用一次计算，哪层要重画才算
         let comp_cell = std::cell::OnceCell::new();
         let comp = || comp_cell.get_or_init(|| self.compute_studies(&regime_symbol)).clone();
@@ -1435,6 +1467,7 @@ impl canvas::Program<Message> for KlineChart {
                     chart.scaling,
                     earliest,
                     last_bar,
+                    sid,
                     &regime_symbol,
                     iv,
                     crate::ws::studies::sub_height(sid, iv, chart.scaling),
@@ -1487,7 +1520,7 @@ impl canvas::Program<Message> for KlineChart {
 
             // 图例（docs/63 §12.1 T2）从读数块下面开始。读数块没显示时也按它（最后一根）的高度留位置：
             // 不然光标一进图读数块出来、图例往下跳一行，鼠标下面那一行就换了
-            let mut legend_top = draw_crosshair_tooltip(&self.data_source, &chart.ticker_info, frame, palette, chart.basis, None, visible_range, false) + 4.0;
+            let mut legend_top = draw_crosshair_tooltip(sid, &self.data_source, &chart.ticker_info, frame, palette, chart.basis, None, visible_range, false) + 4.0;
             let mut legend_at = None;
             if let Some(cursor_position) = cursor.position_in(bounds) {
                 let (_, rounded_aggregation) =
@@ -1496,6 +1529,7 @@ impl canvas::Program<Message> for KlineChart {
                 chart.publish_linked_cursor(Some(rounded_aggregation));
 
                 legend_top = legend_top.max(draw_crosshair_tooltip(
+                    sid,
                     &self.data_source,
                     &chart.ticker_info,
                     frame,
@@ -1512,6 +1546,7 @@ impl canvas::Program<Message> for KlineChart {
             }
             if cursor.position_in(bounds).is_none() && self.visual_config.data_labels_always_visible {
                 legend_top = legend_top.max(draw_crosshair_tooltip(
+                    sid,
                     &self.data_source,
                     &chart.ticker_info,
                     frame,
@@ -1530,7 +1565,7 @@ impl canvas::Program<Message> for KlineChart {
                     *m = m.max(legend_top);
                     *m
                 };
-                let strips = crate::ws::regime::bottom_reserved(&regime_symbol, iv, chart.scaling) * chart.scaling;
+                let strips = crate::ws::regime::bottom_reserved(id, &regime_symbol, iv, chart.scaling) * chart.scaling;
                 crate::ws::studies::set_legend_info(id, crate::ws::studies::LegendInfo { top: legend_top, at, sub_bottom: bounds.height - strips, tf: iv });
             }
         });
@@ -1597,7 +1632,7 @@ fn draw_studies(
         studies_chart,
         iv,
         comp,
-        crate::ws::regime::bottom_reserved(&symbol, iv, chart.scaling),
+        crate::ws::regime::bottom_reserved(studies_chart, &symbol, iv, chart.scaling),
         layer,
     );
 }
@@ -2445,6 +2480,7 @@ fn draw_gaps(
 }
 
 fn draw_crosshair_tooltip(
+    chart_id: &str,
     data: &PlotData<KlineDataPoint>,
     ticker_info: &TickerInfo,
     frame: &mut canvas::Frame,
@@ -2557,7 +2593,7 @@ fn draw_crosshair_tooltip(
         (PlotData::TimeBased(ts), Some(at)) => {
             let symbol = crate::ws::drawing::symbol_key(&ticker_info.ticker);
             let iv = ts.interval.to_milliseconds();
-            crate::ws::regime::describe_at(&symbol, iv, at).map(|(tf, layers)| {
+            crate::ws::regime::describe_at(chart_id, &symbol, iv, at).map(|(tf, layers)| {
                 // 每层一行（第一行写周期，其余用文件给的行名）；一行放不下就折到下一行，折出来的行不再写行名
                 let max_w = (frame.width() - 90.0).max(240.0);
                 let dim_c = palette.background.base.text.scale_alpha(0.6);
@@ -2579,7 +2615,7 @@ fn draw_crosshair_tooltip(
                     }
                     lines.push(cur);
                 }
-                (lines, crate::ws::regime::reason_at(&symbol, iv, at))
+                (lines, crate::ws::regime::reason_at(chart_id, &symbol, iv, at))
             })
         }
         _ => None,

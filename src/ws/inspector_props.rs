@@ -196,7 +196,12 @@ pub fn view<'a>(st: &'a State) -> Option<Element<'a, Event>> {
             };
             column![
                 studies,
-                super::regime_view::inspector(&sym, chart.as_ref().and_then(|c| c.time_interval_ms()).unwrap_or(0)).map(Event::Regime),
+                super::regime_view::inspector(
+                    chart.as_ref().and_then(|c| c.studies_chart()).unwrap_or(""),
+                    &sym,
+                    chart.as_ref().and_then(|c| c.time_interval_ms()).unwrap_or(0),
+                )
+                .map(Event::Regime),
                 super::drawing_view::inspector(&sym, dec, mult).map(Event::Drawing),
             ]
             .spacing(crate::ui::metrics::space(4))

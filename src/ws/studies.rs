@@ -500,6 +500,8 @@ pub enum StudyMsg {
     AuxDraft { uid: u64, text: String },
     /// 「对照序列」里搜特征 / 图表参数的字（不存盘）
     FeatQuery { uid: u64, text: String },
+    /// 市场状态（docs/70 C：在指标列表 / 图例里，设置归 `ws::regime`）
+    Regime(super::regime::RegimeMsg),
 }
 
 /// 正在拖的东西（整窗接住鼠标，见 `main.rs`）。起点等第一次移动时记（按下时拿不到窗口坐标）。
@@ -587,6 +589,10 @@ fn parse_param(def: &IndicatorDef, key: &str, text: &str) -> Result<Value, Strin
 }
 
 pub fn handle(m: StudyMsg) {
+    if let StudyMsg::Regime(r) = m {
+        super::regime::handle(r);
+        return;
+    }
     let mut note = String::new();
     {
         let mut u = ui().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -984,7 +990,7 @@ pub fn handle(m: StudyMsg) {
         StudyMsg::Search(_) | StudyMsg::Category(_) | StudyMsg::TemplateName(_) | StudyMsg::Expand(_) | StudyMsg::SymbolDraft { .. } | StudyMsg::AuxDraft { .. }
         | StudyMsg::FeatQuery { .. } | StudyMsg::Menu(_) | StudyMsg::MenuTab(_) | StudyMsg::Edit(_) | StudyMsg::EditTab(_) | StudyMsg::EditCancel
         | StudyMsg::Legend { .. } | StudyMsg::Hover { .. } | StudyMsg::HoverClear(_) | StudyMsg::DragStart { .. } | StudyMsg::DragEnd
-        | StudyMsg::ResizeStart { .. } | StudyMsg::PointerMove { .. } | StudyMsg::PointerUp => {}
+        | StudyMsg::ResizeStart { .. } | StudyMsg::PointerMove { .. } | StudyMsg::PointerUp | StudyMsg::Regime(_) => {}
     }
     save(&s);
     ui().lock().unwrap_or_else(std::sync::PoisonError::into_inner).note = note;

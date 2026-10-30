@@ -46,6 +46,8 @@ pub enum WinKey {
     Inbox,
     /// 提醒管理器（docs/65）
     AlertRules,
+    /// 市场状态设置（图例齿轮 / 工具栏「状态」，docs/70 C）
+    Regime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

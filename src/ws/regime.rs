@@ -6,7 +6,8 @@
 //!
 //! - **只用当时已知的状态**：段的开始时刻是确认那根 K 线的**收盘**（= 下一根开始），所以底色从确认后的下一根开始。
 //! - 颜色：多 / 空跟涨跌色（随涨跌约定与色弱开关），其余用中性色与状态色（docs/35：状态色 ≠ 涨跌色）。
-//! - 设置是全局的（所有 K 线图一份），存在 `<小文件目录>/cockpit/regime_overlay.json`；改在检查器「属性」页。
+//! - 显示设置按图（docs/70 C，`Settings.charts`；没单独设过的图用全局那份），存在 `<小文件目录>/cockpit/regime_overlay.json`；
+//!   改在检查器「属性」页、图例齿轮或工具栏「状态」打开的弹窗里。挑哪份时间线看图上加载的时间段（docs/70 A）。
 //! - 每两秒看一次目录，文件改了就重读并让各图重画（[`changed_since`]）。只画时间基的图。
 
 use std::collections::{BTreeMap, HashMap};
@@ -348,17 +349,37 @@ pub fn latest_snapshot() -> Option<(String, BTreeMap<String, String>)> {
     Some((f.key(), f.snapshot(hi.saturating_sub(1))))
 }
 
-/// 给一张周期为 `chart_iv` 的图挑时间线：设置里指定了周期就用它；否则周期最接近的（一样近取不小于图周期的）。
+/// 文件盖住图上加载那段的比例（0–1）；不知道图的时间段 = 1。
+#[must_use]
+pub fn coverage(f: &RegimeFile, range: Option<(u64, u64)>) -> f64 {
+    let Some((a, b)) = range.filter(|(a, b)| b > a) else { return 1.0 };
+    let Some((lo, hi)) = f.span() else { return 0.0 };
+    let hi = f.valid_until().map_or(hi, |v| v.max(hi));
+    let ov = hi.min(b).saturating_sub(lo.max(a));
+    ov as f64 / (b - a) as f64
+}
+
+/// 给一张周期为 `chart_iv`、加载了 `range` 这段的图挑时间线（docs/70 A）：
+/// 先看盖不盖得住图上那段（≥ 90%；都不到就取盖得最多的），盖得住的里挑周期最接近的（一样近取不小于图周期的）。
+/// 设置里指定了周期：那份盖得住一点就用它，一点都盖不住就退回自动。
 #[must_use]
 pub fn pick(files: &[Arc<RegimeFile>], chart_iv: u64, want: Option<&str>) -> Option<Arc<RegimeFile>> {
+    pick_in(files, chart_iv, want, None)
+}
+
+#[must_use]
+pub fn pick_in(files: &[Arc<RegimeFile>], chart_iv: u64, want: Option<&str>, range: Option<(u64, u64)>) -> Option<Arc<RegimeFile>> {
     if let Some(w) = want
-        && let Some(f) = files.iter().find(|f| f.timeframe == w)
+        && let Some(f) = files.iter().find(|f| f.timeframe == w && coverage(f, range) > 0.0)
     {
         return Some(f.clone());
     }
+    let best = files.iter().map(|f| coverage(f, range)).fold(0.0_f64, f64::max);
+    let bar = best.min(0.9) - 1e-9;
     let iv = chart_iv.max(1) as f64;
     files
         .iter()
+        .filter(|f| coverage(f, range) >= bar)
         .min_by(|a, b| {
             let da = (a.tf_ms.max(1) as f64 / iv).ln().abs();
             let db = (b.tf_ms.max(1) as f64 / iv).ln().abs();
@@ -367,7 +388,113 @@ pub fn pick(files: &[Arc<RegimeFile>], chart_iv: u64, want: Option<&str>) -> Opt
         .cloned()
 }
 
+// ── 每张图（docs/70）：加载的时间段 ────────────────────────────────────────────
+
+fn ranges() -> &'static Mutex<HashMap<String, (u64, u64)>> {
+    static R: OnceLock<Mutex<HashMap<String, (u64, u64)>>> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// K 线图每帧登记：图 id → 加载的 K 线时间段（第一根开盘, 最后一根收盘）。
+pub fn note_range(chart: &str, range: Option<(u64, u64)>) {
+    if let (Some(r), Ok(mut g)) = (range, ranges().lock())
+        && g.get(chart) != Some(&r)
+    {
+        g.insert(chart.to_string(), r);
+    }
+}
+
+#[must_use]
+pub fn range_of(chart: &str) -> Option<(u64, u64)> {
+    ranges().lock().ok()?.get(chart).copied()
+}
+
+/// 这张图用哪份时间线（按图的显示设置、加载的时间段）。
+#[must_use]
+pub fn file_for(chart: &str, symbol: &str, chart_iv: u64) -> Option<Arc<RegimeFile>> {
+    let v = view(chart);
+    pick_in(&files_for(symbol), chart_iv, v.tf.as_deref(), range_of(chart))
+}
+
+/// 这个品种全部时间线的维度并集（docs/70 A：选项不因为当前那份少几个就消失）。`first` 的维度排在前面。
+#[must_use]
+pub fn dims_union(files: &[Arc<RegimeFile>], first: Option<&RegimeFile>) -> Vec<DimDef> {
+    let mut out: Vec<DimDef> = Vec::new();
+    for f in first.into_iter().chain(files.iter().map(AsRef::as_ref)) {
+        for d in &f.dims {
+            if !out.iter().any(|x| x.key == d.key) {
+                out.push(d.clone());
+            }
+        }
+    }
+    out
+}
+
 // ── 设置 ─────────────────────────────────────────────────────────────────────
+
+/// 一张图的显示设置（docs/70 C）：没单独设过的图用全局那份（`Settings` 里的同名字段）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct View {
+    pub on: bool,
+    /// 在这张图的指标列表 / 图例里（✕ 去掉；「指标 ▾」里再加回来）
+    pub listed: bool,
+    pub band: String,
+    pub strips: Vec<String>,
+    pub marks: bool,
+    pub tf: Option<String>,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        let s = Settings::default();
+        Self { on: s.on, listed: true, band: s.band, strips: s.strips, marks: s.marks, tf: s.tf }
+    }
+}
+
+impl Settings {
+    fn base_view(&self) -> View {
+        View { on: self.on, listed: true, band: self.band.clone(), strips: self.strips.clone(), marks: self.marks, tf: self.tf.clone() }
+    }
+}
+
+/// 这张图的显示设置。
+#[must_use]
+pub fn view(chart: &str) -> View {
+    let s = settings_cell().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    s.charts.get(chart).cloned().unwrap_or_else(|| s.base_view())
+}
+
+/// 改一张图的显示设置的哪一项。
+#[derive(Debug, Clone)]
+pub enum ViewOp {
+    On(bool),
+    /// 加到 / 从指标列表去掉（去掉 = 同时不显示）
+    Listed(bool),
+    Band(String),
+    Strip(String, bool),
+    Marks(bool),
+    Tf(Option<String>),
+}
+
+fn apply_view(v: &mut View, op: ViewOp) {
+    match op {
+        ViewOp::On(x) => v.on = x,
+        ViewOp::Listed(x) => {
+            v.listed = x;
+            v.on = x;
+        }
+        ViewOp::Band(k) => v.band = k,
+        ViewOp::Strip(k, on) => {
+            v.strips.retain(|x| *x != k);
+            if on {
+                v.strips.push(k);
+            }
+        }
+        ViewOp::Marks(x) => v.marks = x,
+        ViewOp::Tf(t) => v.tf = t,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -389,6 +516,8 @@ pub struct Settings {
     pub board_dim: Option<String>,
     /// 跟随图表自动算（docs/69 B）：打开着的 K 线图按它的品种与周期，有新 K 线收盘 / 参数改了就重算
     pub auto: bool,
+    /// 每张图自己的显示设置（docs/70 C，图 id → 设置）；没有的图用上面的全局字段。在某张图上改，全局字段也跟着变（= 以后新图的缺省）
+    pub charts: BTreeMap<String, View>,
 }
 
 impl Default for Settings {
@@ -403,6 +532,7 @@ impl Default for Settings {
             board_days: 90,
             board_dim: None,
             auto: true,
+            charts: BTreeMap::new(),
         }
     }
 }
@@ -440,14 +570,33 @@ pub enum RegimeMsg {
     RefreshOnce,
     /// 跟随图表自动算（docs/69 B）
     Auto(bool),
-    /// 「现在算」：（图的品种键, 图的周期毫秒）
-    ComputeNow(String, u64),
+    /// 「现在算」：（图 id, 图的品种键, 图的周期毫秒）
+    ComputeNow(String, String, u64),
     /// 参数（docs/69 C）：改哪一层（检查器里的选择，不存盘）
     ParamScope(u8),
     /// 改一个参数（`None` = 去掉这一层的覆盖）
     ParamSet(super::regime_params::Scope, String, Option<f64>),
     /// 套预设（`regime_params::PRESETS` 的下标）
     ParamPreset(super::regime_params::Scope, usize),
+    /// 改一张图的显示设置（docs/70 C）
+    View(String, ViewOp),
+    /// 设置弹窗：开（图 id, 品种键, 图的周期）/ 关
+    Dialog(Option<DialogTarget>),
+    DialogTab(u8),
+}
+
+/// 设置弹窗开给哪张图：（图 id, 品种键, 图的周期毫秒）。
+pub type DialogTarget = (String, String, u64);
+
+/// 设置弹窗（docs/70 C）：（开着的图, 页签 0 显示 / 1 计算 / 2 参数）。
+fn dialog_cell() -> &'static Mutex<(Option<DialogTarget>, u8)> {
+    static D: OnceLock<Mutex<(Option<DialogTarget>, u8)>> = OnceLock::new();
+    D.get_or_init(|| Mutex::new((None, 0)))
+}
+
+#[must_use]
+pub fn dialog_state() -> (Option<DialogTarget>, u8) {
+    dialog_cell().lock().map(|g| g.clone()).unwrap_or_default()
 }
 
 /// 检查器参数区的界面状态：（改哪一层 0 全部 / 1 市场 / 2 品种 / 3 品种 + 周期, 最近一句说明）。
@@ -484,8 +633,8 @@ pub fn handle(m: RegimeMsg) {
             refresh_once();
             return;
         }
-        RegimeMsg::ComputeNow(sym, iv) => {
-            super::regime_auto::force(&sym, iv);
+        RegimeMsg::ComputeNow(chart, sym, iv) => {
+            super::regime_auto::force(&chart, &sym, iv);
             return;
         }
         RegimeMsg::ParamScope(k) => {
@@ -500,6 +649,18 @@ pub fn handle(m: RegimeMsg) {
         }
         RegimeMsg::ParamPreset(sc, i) => {
             note_param(super::regime_params::edit(|f| super::regime_params::apply_preset(f, &sc, i)));
+            return;
+        }
+        RegimeMsg::Dialog(d) => {
+            if let Ok(mut g) = dialog_cell().lock() {
+                g.0 = d;
+            }
+            return;
+        }
+        RegimeMsg::DialogTab(k) => {
+            if let Ok(mut g) = dialog_cell().lock() {
+                g.1 = k;
+            }
             return;
         }
         _ => {}
@@ -535,12 +696,25 @@ fn apply(s: &mut Settings, m: RegimeMsg) {
         RegimeMsg::BoardDays(d) => s.board_days = d,
         RegimeMsg::BoardDim(k) => s.board_dim = Some(k),
         RegimeMsg::Auto(v) => s.auto = v,
+        RegimeMsg::View(chart, op) => {
+            let mut v = s.charts.get(&chart).cloned().unwrap_or_else(|| s.base_view());
+            apply_view(&mut v, op);
+            // 也成为以后新图的缺省（「从列表去掉」只管这张图）
+            s.on = if v.listed { v.on } else { s.on };
+            s.band = v.band.clone();
+            s.strips = v.strips.clone();
+            s.marks = v.marks;
+            s.tf = v.tf.clone();
+            s.charts.insert(chart, v);
+        }
         RegimeMsg::Hover(_)
         | RegimeMsg::RefreshOnce
         | RegimeMsg::ComputeNow(..)
         | RegimeMsg::ParamScope(_)
         | RegimeMsg::ParamSet(..)
-        | RegimeMsg::ParamPreset(..) => {}
+        | RegimeMsg::ParamPreset(..)
+        | RegimeMsg::Dialog(_)
+        | RegimeMsg::DialogTab(_) => {}
     }
 }
 
@@ -593,16 +767,15 @@ const STRIP_GAP: f32 = 1.0;
 #[allow(clippy::too_many_arguments)]
 /// 这张图上有没有市场状态叠加层（底色、条带、切换标记）。
 #[must_use]
-pub fn active(symbol: &str, chart_iv: u64) -> bool {
-    let s = settings();
-    s.on && chart_iv > 0 && pick(&files_for(symbol), chart_iv, s.tf.as_deref()).is_some()
+pub fn active(chart: &str, symbol: &str, chart_iv: u64) -> bool {
+    view(chart).on && chart_iv > 0 && file_for(chart, symbol, chart_iv).is_some()
 }
 
 /// 底部状态条带占的高度（图上指标的副图摞在它上面，docs/63 I3）。
 #[must_use]
-pub fn bottom_reserved(symbol: &str, chart_iv: u64, scaling: f32) -> f32 {
-    let s = settings();
-    if !s.on || scaling <= f32::EPSILON || pick(&files_for(symbol), chart_iv, s.tf.as_deref()).is_none() {
+pub fn bottom_reserved(chart: &str, symbol: &str, chart_iv: u64, scaling: f32) -> f32 {
+    let s = view(chart);
+    if !s.on || scaling <= f32::EPSILON || file_for(chart, symbol, chart_iv).is_none() {
         return 0.0;
     }
     s.strips.len() as f32 * (STRIP_H + STRIP_GAP) / scaling
@@ -617,15 +790,16 @@ pub fn draw_overlay(
     scaling: f32,
     earliest: u64,
     latest: u64,
+    chart: &str,
     symbol: &str,
     chart_iv: u64,
     extra_bottom: f32,
 ) {
-    let s = settings();
+    let s = view(chart);
     if !s.on || scaling <= f32::EPSILON || chart_iv == 0 {
         return;
     }
-    let Some(f) = pick(&files_for(symbol), chart_iv, s.tf.as_deref()) else { return };
+    let Some(f) = file_for(chart, symbol, chart_iv) else { return };
     let half = (interval_to_x(earliest + chart_iv) - interval_to_x(earliest)) / 2.0;
     let (rx0, rx1) = (region.x, region.x + region.width);
     let hi = latest.saturating_add(chart_iv);
@@ -725,12 +899,12 @@ pub fn draw_overlay(
 /// 行名取文件的 `layer_names`，没有就是层号。
 /// 层按文件里第一次出现的先后（L2 在前、L1 在后），底色维度排在它那一行的第一个。
 #[must_use]
-pub fn describe_at(symbol: &str, chart_iv: u64, t: u64) -> Option<(String, Vec<(String, Vec<StateItem>)>)> {
-    let s = settings();
+pub fn describe_at(chart: &str, symbol: &str, chart_iv: u64, t: u64) -> Option<(String, Vec<(String, Vec<StateItem>)>)> {
+    let s = view(chart);
     if !s.on {
         return None;
     }
-    let f = pick(&files_for(symbol), chart_iv, s.tf.as_deref())?;
+    let f = file_for(chart, symbol, chart_iv)?;
     // 超过算过的地方：一行「未算」，不显示旧状态（docs/69 A）
     if let Some(v) = f.valid_until()
         && t >= v
@@ -770,9 +944,9 @@ fn layer_rows(f: &RegimeFile, band: &str, t: u64) -> Vec<(String, Vec<StateItem>
 
 /// 时刻 `t` 底色维度那一段的切换原因。
 #[must_use]
-pub fn reason_at(symbol: &str, chart_iv: u64, t: u64) -> Option<String> {
-    let s = settings();
-    let f = pick(&files_for(symbol), chart_iv, s.tf.as_deref())?;
+pub fn reason_at(chart: &str, symbol: &str, chart_iv: u64, t: u64) -> Option<String> {
+    let s = view(chart);
+    let f = file_for(chart, symbol, chart_iv)?;
     f.at(&s.band, t).map(|seg| seg.why.clone()).filter(|w| !w.is_empty())
 }
 
@@ -814,6 +988,47 @@ mod tests {
         let g = parse(&J.replace("\"format\": 1,", "\"format\": 1, \"source\": \"databento_futures\", \"user_params\": {\"swing_k\": 1.2},")).unwrap();
         assert_eq!(g.source, "databento_futures");
         assert_eq!(g.user_params.get("swing_k"), Some(&1.2));
+    }
+
+    #[test]
+    fn 按时间段挑_盖不住的同周期不用() {
+        // 15m 盖 2025-10 – 2026-10；1m 只盖最近两周；图是 6 月的 1 分钟
+        let mk = |tf: &str, ms: u64, t0: u64, last: u64| {
+            let mut f = parse(J).unwrap();
+            f.timeframe = tf.into();
+            f.tf_ms = ms;
+            f.segs.insert("composite".into(), vec![Seg { t0, t1: None, s: 0, why: String::new() }]);
+            f.last_ms = Some(last);
+            Arc::new(f)
+        };
+        let d = 86_400_000;
+        let v = vec![mk("1m", 60_000, 300 * d, 314 * d), mk("15m", 900_000, 0, 360 * d)];
+        let june = Some((150 * d, 180 * d));
+        assert_eq!(pick_in(&v, 60_000, None, june).unwrap().timeframe, "15m", "1m 那份盖不住 6 月：用盖得住的 15m");
+        assert_eq!(pick_in(&v, 60_000, None, Some((305 * d, 313 * d))).unwrap().timeframe, "1m", "都盖得住：周期最接近的");
+        assert_eq!(pick_in(&v, 60_000, Some("1m"), june).unwrap().timeframe, "15m", "指定的周期一点都盖不住：退回自动");
+        assert_eq!(pick_in(&v, 60_000, Some("15m"), Some((305 * d, 313 * d))).unwrap().timeframe, "15m");
+        assert!((coverage(&v[0], june) - 0.0).abs() < 1e-9);
+        assert!((coverage(&v[1], june) - 1.0).abs() < 1e-9);
+        let union = dims_union(&v, None);
+        assert_eq!(union.len(), v[0].dims.len());
+    }
+
+    #[test]
+    fn 按图的显示设置_沿用全局_改了成为新图缺省() {
+        let mut s = Settings::default();
+        assert_eq!(s.base_view().band, "composite");
+        apply(&mut s, RegimeMsg::View("图1".into(), ViewOp::Band("structure".into())));
+        apply(&mut s, RegimeMsg::View("图1".into(), ViewOp::Strip("funding_level".into(), true)));
+        assert_eq!(s.charts["图1"].band, "structure");
+        assert!(s.charts["图1"].strips.contains(&"funding_level".to_string()));
+        assert_eq!(s.band, "structure", "也成为以后新图的缺省");
+        apply(&mut s, RegimeMsg::View("图2".into(), ViewOp::Listed(false)));
+        assert!(!s.charts["图2"].listed && !s.charts["图2"].on);
+        assert!(s.on, "从一张图去掉不影响别的图的缺省");
+        // 老设置文件（没有 charts）照样读
+        let old: Settings = serde_json::from_str(r#"{"on": true, "band": "direction", "strips": ["vol_level"], "marks": false, "tf": "15m"}"#).unwrap();
+        assert_eq!((old.base_view().band.as_str(), old.base_view().tf.as_deref(), old.auto), ("direction", Some("15m"), true));
     }
 
     #[test]

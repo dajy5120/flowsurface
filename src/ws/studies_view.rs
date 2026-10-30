@@ -124,6 +124,29 @@ fn add_tab<'a>(chart: &str, ui: &st::UiState) -> Element<'a, StudyMsg> {
     let rank = |id: &str| if store.favorites.iter().any(|x| x == id) { 0 } else if ui.recent_at_open.iter().any(|x| x == id) { 1 } else { 2 };
     shown.sort_by_key(|d| rank(d.id));
     let mut lib = column![].spacing(1);
+    // 市场状态（docs/70 C）：内置，固定在最上面；点一下在这张图上加 / 去掉
+    if q.is_empty() || "市场状态 regime 趋势 区间 波动 底色".contains(q.as_str()) {
+        let on = super::regime::view(chart).listed;
+        let name = row![
+            text("市场状态").size(t::s_small()),
+            text("主图底色 + 底部条带").size(t::s_meta()).color(pal::dim()),
+            text("趋势、区间、波动、结构、资金费 · 持仓").size(t::s_meta()).color(pal::dim()),
+        ]
+        .spacing(metrics::space(2))
+        .align_y(Alignment::Center);
+        let add = tooltip(
+            button(name).width(Length::Fill).padding(metrics::pad2(1, 2)).style(|th, s| crate::style::button::modifier(th, s, false))
+                .on_press(StudyMsg::Regime(super::regime::RegimeMsg::View(chart.to_string(), super::regime::ViewOp::Listed(!on)))),
+            container(t::caption("多维市场状态识别（docs/62）：规则版，按图上的周期与数据算；设置在图例齿轮或工具栏「状态」。只作看盘描述，检验过没有择时价值"))
+                .padding(metrics::space(2))
+                .max_width(420.0)
+                .style(crate::style::tooltip),
+            tooltip::Position::Bottom,
+        );
+        let mut r = row![Space::new().width(Length::Fixed(18.0)), add].spacing(metrics::space(1)).align_y(Alignment::Center);
+        r = r.push(text(if on { "已在这张图（再点去掉）" } else { "" }).size(t::s_meta()).color(pal::ok()));
+        lib = lib.push(r);
+    }
     for d in &shown {
         let fav = store.favorites.iter().any(|x| x == d.id);
         let pane = if d.pane == "overlay" { "主图" } else { "副图" };
@@ -614,7 +637,9 @@ fn st_num(v: &serde_json::Value) -> String {
 pub fn legend<'a>(chart: &str) -> Option<Element<'a, StudyMsg>> {
     let info = st::legend_info(chart)?;
     let rows = st::legend_rows(chart, info.tf, info.at);
-    if rows.is_empty() {
+    // 市场状态（docs/70 C）：图例第一行，与指标同一套操作
+    let regime = super::regime_view::legend_line(chart, &st::chart_symbol(chart), info.tf, info.at);
+    if rows.is_empty() && regime.is_none() {
         return None;
     }
     let ui = st::ui_state();
@@ -631,6 +656,9 @@ pub fn legend<'a>(chart: &str) -> Option<Element<'a, StudyMsg>> {
                 .into(),
         ));
     } else {
+        if let Some((name, values, visible)) = regime {
+            main = main.push(regime_row(chart, info.tf, name, values, visible, hover == Some(REGIME_UID)));
+        }
         for r in rows.iter().filter(|r| !r.sub) {
             main = main.push(legend_row(chart, r, hover == Some(r.uid), false));
         }
@@ -665,6 +693,37 @@ pub fn legend<'a>(chart: &str) -> Option<Element<'a, StudyMsg>> {
         );
     }
     Some(iced::widget::Stack::with_children(layers).into())
+}
+
+/// 图例里市场状态那一行的悬停键（指标的 uid 从 1 起递增，撞不上）。
+const REGIME_UID: u64 = u64::MAX;
+
+/// 图例里市场状态那一行（docs/70 C）：名字 → 设置弹窗；悬停出现 眼睛 / 齿轮 / ✕（✕ = 从这张图的列表去掉，「指标 ▾」里再加回来）。
+fn regime_row<'a>(chart: &str, iv: u64, name: String, values: Vec<(String, iced::Color)>, visible: bool, hovered: bool) -> Element<'a, StudyMsg> {
+    use super::regime::{RegimeMsg, ViewOp};
+    let c = chart.to_string();
+    let sym = st::chart_symbol(chart);
+    let open = StudyMsg::Regime(RegimeMsg::Dialog(Some((c.clone(), sym, iv))));
+    let mut line = row![
+        button(text(name).size(t::s_small()).color(if visible { pal::txt() } else { pal::alpha(pal::dim(), 0.7) }))
+            .padding(metrics::pad2(0, 0))
+            .style(|th, s| crate::style::button::modifier(th, s, false))
+            .on_press(open.clone()),
+    ]
+    .spacing(metrics::space(2))
+    .align_y(Alignment::Center);
+    for (v, col) in values {
+        line = line.push(text(v).size(t::s_small()).color(col));
+    }
+    if !visible {
+        line = line.push(text("已隐藏").size(t::s_meta()).color(pal::dim()));
+    }
+    if hovered {
+        line = line.push(icon_g(if visible { Icon::DrEye } else { Icon::DrEyeOff }, if visible { "隐藏" } else { "显示" }, StudyMsg::Regime(RegimeMsg::View(c.clone(), ViewOp::On(!visible)))));
+        line = line.push(icon_g(Icon::Cog, "设置", open));
+        line = line.push(icon_g(Icon::Close, "从这张图去掉（「指标 ▾」里再加）", StudyMsg::Regime(RegimeMsg::View(c.clone(), ViewOp::Listed(false)))));
+    }
+    iced::widget::mouse_area(pill(line.into())).on_enter(StudyMsg::Hover { chart: c, uid: REGIME_UID, on: true }).into()
 }
 
 /// 半透明底板（读数压在 K 线上也看得清）。

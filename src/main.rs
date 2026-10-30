@@ -279,6 +279,8 @@ enum Message {
     Draw(ws::drawing::DrawMsg),
     /// 图上指标（docs/63 §12）：工具栏「指标 ▾」、浏览器卡片、设置弹窗、图例
     Studies(ws::studies::StudyMsg),
+    /// 市场状态设置弹窗 / 工具栏徽标（docs/70 C）
+    Regime(ws::regime::RegimeMsg),
     /// 统一回放时钟（docs/51 P2）：播放控件与快捷键
     Replay(ws::replay_clock::Cmd),
     /// 浮窗（docs/64）：拖动、到最上层、✕
@@ -701,6 +703,7 @@ impl Flowsurface {
                 }
             }
             Message::Studies(m) => ws::studies::handle(m),
+            Message::Regime(m) => ws::regime::handle(m),
             Message::Tick(now) => {
                 // 每张 K 线图的身份与它的指标（docs/63 §12.2）：每帧对一遍（几十个面板，微秒级）
                 self.sync_chart_ids();
@@ -2193,6 +2196,12 @@ impl Flowsurface {
                     // 指标（docs/63 §12）：紧跟「绘图」，这张图自己的一组
                     if let Some(id) = st.settings.chart_id.as_deref().filter(|_| matches!(st.content, dashboard::pane::Content::Kline { .. })) {
                         r = r.push(ws::studies_view::toolbar(id).map(Message::Studies));
+                        // 市场状态徽标（docs/70 C）：状态一眼看到，点开设置弹窗
+                        if let (dashboard::pane::Content::Kline { chart: Some(c), .. }, Some(ti)) = (&st.content, st.stream_pair())
+                            && let Some(iv) = c.time_interval_ms()
+                        {
+                            r = r.push(ws::regime_view::toolbar(id, &ws::drawing::symbol_key(&ti.ticker), iv).map(Message::Regime));
+                        }
                     }
                     // 分析（docs/52）：这张图的品种上的分析
                     if let Some(ti) = st.stream_pair() {
@@ -2250,6 +2259,7 @@ impl Flowsurface {
             || ws::calendar_view::TG_OPEN.load(std::sync::atomic::Ordering::Relaxed)
             || ws::inbox::is_open()
             || ws::alert_rules::is_open()
+            || ws::regime::dialog_state().0.is_some()
     }
 
     /// 数据浮窗开给的正是工具栏当前那个面板时：（面板名, 它的数据宿主）。
@@ -2303,6 +2313,10 @@ impl Flowsurface {
         }
         if ws::inbox::is_open() {
             v.push(Win { key: WinKey::Inbox, title: "消息中心".into(), body: ws::inbox_view::body().map(Message::Inbox), w: 1180.0, h: 660.0 });
+        }
+        if let (Some((c, sym, iv)), _) = ws::regime::dialog_state() {
+            let code = sym.rsplit(':').next().unwrap_or(&sym).to_string();
+            v.push(Win { key: WinKey::Regime, title: format!("市场状态 · {code}"), body: ws::regime_view::dialog(&c, &sym, iv).map(Message::Regime), w: 620.0, h: 640.0 });
         }
         if ws::alert_rules::is_open() {
             v.push(Win { key: WinKey::AlertRules, title: "提醒管理器".into(), body: ws::inbox_view::rules_body().map(Message::Rules), w: 900.0, h: 600.0 });
@@ -2393,6 +2407,7 @@ impl Flowsurface {
                 }
             }
             WinKey::AlertRules => ws::alert_rules::handle(ws::alert_rules::RulesMsg::Close),
+            WinKey::Regime => ws::regime::handle(ws::regime::RegimeMsg::Dialog(None)),
         }
     }
 
